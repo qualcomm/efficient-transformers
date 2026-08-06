@@ -24,6 +24,10 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxScatterCB,
     CtxScatterCB3D,
 )
+from QEfficient.customop.fp8_dequantize import (  # noqa: E402
+    FP8DequantizePerAxis,
+    FP8DequantizePerTensor,
+)
 from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
 from QEfficient.customop.rms_norm import CustomRMSNorm
 
@@ -411,6 +415,56 @@ def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> 
     return torch.empty_like(data)
 
 
+# ── FP8 DequantizeLinear custom ops ──────────────────────────────────────────
+# Three variants matching the three ONNX DequantizeLinear granularities.
+# Eager implementations dequantize in Python; ONNX translations live in
+# QEfficient/customop/fp8_dequantize.py and emit standard DequantizeLinear nodes.
+# Weights are NEVER cast — they stay in FP8 storage throughout.
+
+
+@torch.library.custom_op("qefficient::fp8_dequantize_per_tensor", mutates_args=())
+def fp8_dequantize_per_tensor_op(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Per-tensor FP8 dequantize: scale is a scalar (0-D tensor)."""
+    return weight.to(scale.dtype) * scale
+
+
+@fp8_dequantize_per_tensor_op.register_fake
+def _(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return torch.empty(weight.shape, dtype=scale.dtype, device=weight.device)
+
+
+@torch.library.custom_op("qefficient::fp8_dequantize_per_axis", mutates_args=())
+def fp8_dequantize_per_axis_op(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Per-axis (channel) FP8 dequantize: scale is (out_features,)."""
+    if scale.ndim == 1:
+        scale = scale.unsqueeze(-1)
+    return weight.to(scale.dtype) * scale
+
+
+@fp8_dequantize_per_axis_op.register_fake
+def _(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return torch.empty(weight.shape, dtype=scale.dtype, device=weight.device)
+
+
+@torch.library.custom_op("qefficient::fp8_dequantize_blocked", mutates_args=())
+def fp8_dequantize_blocked_op(
+    weight: torch.Tensor, scale: torch.Tensor, row_block_size: int, col_block_size: int
+) -> torch.Tensor:
+    """Blocked FP8 dequantize.
+    scale: compact (out_features // row_block_size, in_features // col_block_size).
+    Expands scale along both axes via repeat_interleave for eager correctness.
+    The ONNX symbolic emits Tile(scale,[row_bs,1]) + DequantizeLinear(axis=-1, block_size=col_bs).
+    """
+    scale_row = scale.repeat_interleave(row_block_size, dim=0)
+    scale_full = scale_row.repeat_interleave(col_block_size, dim=-1)
+    return weight.to(scale_full.dtype) * scale_full
+
+
+@fp8_dequantize_blocked_op.register_fake
+def _(weight: torch.Tensor, scale: torch.Tensor, row_block_size: int, col_block_size: int) -> torch.Tensor:
+    return torch.empty(weight.shape, dtype=scale.dtype, device=weight.device)
+
+
 # ---------------------------------------------------------------------------
 # Translation table: torch.ops.qefficient.* → ONNX export classes.
 # Used by _export_via_dynamo via custom_translation_table.
@@ -418,6 +472,11 @@ def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> 
 
 DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.rms_norm.default: get_dynamo_onnxscript_func(CustomRMSNorm),
+    torch.ops.qefficient.fp8_dequantize_per_tensor.default: get_dynamo_onnxscript_func(FP8DequantizePerTensor),
+    torch.ops.qefficient.fp8_dequantize_per_axis.default: get_dynamo_onnxscript_func(FP8DequantizePerAxis),
+    # NOTE: fp8_dequantize_blocked is NOT here — it is injected per-model at export time
+    # via _build_blocked_translation_table(model) in modeling_qeff.py because the
+    # onnxscript function is block-size-specific and cannot be a single static entry.
     torch.ops.qefficient.ctx_scatter.default: get_dynamo_onnxscript_func(CtxScatter),
     torch.ops.qefficient.ctx_scatter_3d.default: get_dynamo_onnxscript_func(CtxScatter3D),
     torch.ops.qefficient.ctx_scatter_cb.default: get_dynamo_onnxscript_func(CtxScatterCB),

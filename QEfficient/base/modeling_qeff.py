@@ -241,6 +241,23 @@ def _copy_model_compiler_input(
         return
 
 
+def _build_blocked_translation_table(model: "torch.nn.Module") -> dict:
+    """Build Dynamo translations for the blocked FP8 operators in *model*."""
+    from QEfficient.customop.fp8_dequantize import get_blocked_fn
+    from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8BlockWiseDequantLinear
+
+    table = {}
+    for module in model.modules():
+        if not isinstance(module, FP8BlockWiseDequantLinear):
+            continue
+        row_bs, col_bs = module.weight_block_size
+        try:
+            table[torch.ops.qefficient.fp8_dequantize_blocked.default] = get_blocked_fn(row_bs, col_bs)
+        except ValueError:
+            pass
+    return table
+
+
 def _rename_graph_value(graph: onnx.GraphProto, old_name: str, new_name: str) -> None:
     """Rename a graph value everywhere it can be referenced in an ONNX graph."""
     if old_name == new_name:

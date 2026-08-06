@@ -7,7 +7,7 @@
 
 import hashlib
 import json
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from typing import Dict
 
 from QEfficient.utils.constants import HASH_HEXDIGEST_STR_LEN
@@ -21,9 +21,6 @@ def json_serializable(obj):
     if isinstance(obj, set):
         # Convert set to a sorted list of strings for consistent hashing
         return sorted([cls.__name__ if isinstance(cls, type) else str(cls) for cls in obj])
-    if is_dataclass(obj):
-        # Convert dataclass to dict for serialization
-        return asdict(obj)
     if obj.__class__.__name__ == "Dim":
         return str(obj)
     if obj.__class__.__name__ == "_Dim":
@@ -32,10 +29,13 @@ def json_serializable(obj):
         return str(obj)
     if obj.__class__.__name__ == "_DimHint":
         return str(obj)
-    if obj.__class__.__name__ == "_DimHintType":
-        return str(obj)
     if hasattr(obj, "name") and hasattr(obj, "min") and hasattr(obj, "max"):
         return {"name": obj.name, "min": obj.min, "max": obj.max}
+    # torch.dtype (e.g. torch.bfloat16) — serialize as its string name
+    import torch
+
+    if isinstance(obj, torch.dtype):
+        return str(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
