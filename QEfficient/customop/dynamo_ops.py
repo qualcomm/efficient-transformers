@@ -24,10 +24,6 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxScatterCB,
     CtxScatterCB3D,
 )
-from QEfficient.customop.fp8_dequantize import (  # noqa: E402
-    FP8DequantizePerAxis,
-    FP8DequantizePerTensor,
-)
 from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
 from QEfficient.customop.rms_norm import CustomRMSNorm
 
@@ -472,11 +468,6 @@ def _(weight: torch.Tensor, scale: torch.Tensor, row_block_size: int, col_block_
 
 DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.rms_norm.default: get_dynamo_onnxscript_func(CustomRMSNorm),
-    torch.ops.qefficient.fp8_dequantize_per_tensor.default: get_dynamo_onnxscript_func(FP8DequantizePerTensor),
-    torch.ops.qefficient.fp8_dequantize_per_axis.default: get_dynamo_onnxscript_func(FP8DequantizePerAxis),
-    # NOTE: fp8_dequantize_blocked is NOT here — it is injected per-model at export time
-    # via _build_blocked_translation_table(model) in modeling_qeff.py because the
-    # onnxscript function is block-size-specific and cannot be a single static entry.
     torch.ops.qefficient.ctx_scatter.default: get_dynamo_onnxscript_func(CtxScatter),
     torch.ops.qefficient.ctx_scatter_3d.default: get_dynamo_onnxscript_func(CtxScatter3D),
     torch.ops.qefficient.ctx_scatter_cb.default: get_dynamo_onnxscript_func(CtxScatterCB),

@@ -48,13 +48,6 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxScatterFuncCB,
     CtxScatterFuncCB3D,
 )
-from QEfficient.customop.fp8_dequantize import (
-    FP8DequantizeBlockedFunc,
-    FP8DequantizePerAxis,
-    FP8DequantizePerAxisFunc,
-    FP8DequantizePerTensor,
-    FP8DequantizePerTensorFunc,
-)
 
 # from QEfficient.customop.quantization_ops import CastToUInt4, CastToUInt4Func
 from QEfficient.customop.onnxscript_utils import get_onnxscript_func

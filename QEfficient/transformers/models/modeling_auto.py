@@ -91,6 +91,8 @@ from QEfficient.transformers.moe.flavours import MoEFlavour
 from QEfficient.transformers.quantizers.auto import QEFF_AUTO_QUANTIZATION_CONFIG_MAPPING, with_replaced_quantizers
 from QEfficient.transformers.quantizers.quant_transforms import (
     AwqToMatmulNbitsTransform,
+    FP8BlockWiseDequantLinearToLinearTransform,
+    FP8DeQuantLinearToLinearTransform,
     GPTQToMatmulNbitsTransform,
     Mxfp4GptOssExpertDequantizeTransform,
     PackQuantizedInt4ToMatMulNBitsTransform,

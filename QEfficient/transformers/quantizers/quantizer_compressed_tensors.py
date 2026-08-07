@@ -89,40 +89,6 @@ class FP8DeQuantLinear(torch.nn.Module):
         else:
             self.bias = None
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        # Checkpoints saved with (N, 1) per-channel scale shape need to be squeezed
-        # to (N,) to match the current buffer shape.
-        scale_key = f"{prefix}weight_scale"
-        if scale_key in state_dict and "weight_scale" in self._buffers:
-            saved_scale = state_dict[scale_key]
-            current_scale = self._buffers["weight_scale"]
-            if (
-                saved_scale.ndim == 2
-                and current_scale is not None
-                and current_scale.ndim == 1
-                and saved_scale.shape[1] == 1
-                and saved_scale.shape[0] == current_scale.shape[0]
-            ):
-                state_dict[scale_key] = saved_scale.squeeze(-1)
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-
     @classmethod
     def for_compressed_tensors_fp8_layer(
         cls,
@@ -246,39 +212,6 @@ class FP8BlockWiseDequantLinear(torch.nn.Module):
             self.register_buffer("bias", torch.zeros((out_features,), dtype=scale_dtype))
         else:
             self.bias = None
-
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        # Checkpoints saved with (N, 1) scale shape need to be squeezed to (N,).
-        scale_key = f"{prefix}weight_scale"
-        if scale_key in state_dict and "weight_scale" in self._buffers:
-            saved_scale = state_dict[scale_key]
-            current_scale = self._buffers["weight_scale"]
-            if (
-                saved_scale.ndim == 2
-                and current_scale is not None
-                and current_scale.ndim == 1
-                and saved_scale.shape[1] == 1
-                and saved_scale.shape[0] == current_scale.shape[0]
-            ):
-                state_dict[scale_key] = saved_scale.squeeze(-1)
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
 
     @classmethod
     def for_fp8_layer_with_blocksize(
