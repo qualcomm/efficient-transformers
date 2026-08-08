@@ -401,6 +401,27 @@ def _filter_custom_io_for_onnx(custom_io: dict, onnx_path: str | Path | None) ->
     return filtered
 
 
+def _add_onnx_retained_state_custom_io(
+    custom_io: dict,
+    onnx_path: Optional[Union[str, Path]],
+    *,
+    dtype: str,
+) -> None:
+    """Add every retained-state input/output pair exposed by an ONNX graph."""
+    if onnx_path is None:
+        return
+    model = onnx.load(onnx_path, load_external_data=False)
+    input_names = {value.name for value in model.graph.input}
+    for output in model.graph.output:
+        if not output.name.endswith(("_RetainedState", "_InternalRetainedState")):
+            continue
+        input_name = _state_input_name(output.name)
+        if input_name not in input_names:
+            raise ValueError(f"Retained-state output '{output.name}' has no matching ONNX input '{input_name}'.")
+        custom_io[input_name] = dtype
+        custom_io[output.name] = dtype
+
+
 class QEFFTransformersBase(QEFFBaseModel):
     """
     Base class for QEfficient wrappers around HuggingFace transformer models.
@@ -4515,14 +4536,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         ##################################
 
+        is_deepseek_v4 = getattr(self.model.config, "model_type", None) == "deepseek_v4"
+        query_seq_len = 1 if is_deepseek_v4 else seq_len
         example_inputs = {
-            "input_ids": torch.zeros((bs, seq_len), dtype=torch.int64),
-            "position_ids": torch.arange(seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1),
+            "input_ids": torch.zeros((bs, query_seq_len), dtype=torch.int64),
+            "position_ids": torch.arange(query_seq_len, dtype=torch.int64).view(1, query_seq_len).repeat(bs, 1),
             "past_key_values": [[] for _ in range(self.num_layers)],
         }
         dynamic_axes = {
-            "input_ids": {0: "batch_size", 1: "seq_len"},
-            "position_ids": {0: "batch_size", 1: "seq_len"},
+            "input_ids": {0: "batch_size"} if is_deepseek_v4 else {0: "batch_size", 1: "seq_len"},
+            "position_ids": {0: "batch_size"} if is_deepseek_v4 else {0: "batch_size", 1: "seq_len"},
         }
 
         if getattr(self, "dflash_dlm", None):
@@ -4592,6 +4615,23 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             example_inputs["past_key_values"] = retained_state_specs["past_key_values"]
             dynamic_axes.update(retained_state_specs["dynamic_axes"])
             output_names.extend(retained_state_specs["output_names"])
+        elif is_deepseek_v4:
+            pkv_cache = self.model.get_dummy_pkv_cache(
+                self.model.config, fbs if self.continuous_batching else bs, seq_len
+            )
+            for layer_idx, layer_state in enumerate(pkv_cache):
+                state_names = self.model.get_onnx_past_key_value_names(layer_idx, layer_state)
+                for state_name, state in zip(state_names, layer_state):
+                    example_inputs["past_key_values"][layer_idx].append(state)
+                    state_axes = {
+                        0: "full_batch_size" if self.continuous_batching else "batch_size",
+                    }
+                    if "sliding_window_kv" in state_name:
+                        state_axes[2] = "ctx_len"
+                    elif "actual_" in state_name:
+                        state_axes[2] = f"compressed_ctx_len_{layer_idx}"
+                    dynamic_axes[state_name] = state_axes
+                    output_names.append(f"{state_name}_RetainedState")
         elif (
             hasattr(self.model.config, "model_type")
             and self.model.config.model_type in DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH
@@ -5301,7 +5341,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         # keys must match those names so the compiler pairs and retains them correctly.
         kv_cache_prefix = validate_kv_cache_prefix(kv_cache_prefix)
         custom_io = {}
-        if not cache_compressed:
+        is_deepseek_v4 = getattr(self.model.config, "model_type", None) == "deepseek_v4"
+        if is_deepseek_v4:
+            if mxint8_kv_cache:
+                raise ValueError("DeepSeek V4 retained-state caches must remain in float16; mxint8 is not supported.")
+            _add_onnx_retained_state_custom_io(custom_io, onnx_path, dtype="float16")
+        elif not cache_compressed:
             kv_infix = f"_{kv_cache_prefix}" if kv_cache_prefix else ""
             retained_state_names = (
                 self.model.get_retained_state_names()

@@ -866,7 +866,8 @@ class QEffTextGenerationBase:
             next_tokens_out_placeholder = np.zeros((batch_size, sequence_length, 1), dtype=np.int64)
             self._session.set_buffers({"next_tokens": next_tokens_out_placeholder})
         else:
-            logits_dtype = np.float16 if self._session.binding_is_bfloat16("logits") else np.float32
+            logits_binding_idx = self._session.binding_index_map["logits"]
+            logits_dtype = self._session.aic_to_np_dtype_mapping[self._session.bindings[logits_binding_idx].type]
             logits_out_placeholder = np.zeros((batch_size, sequence_length, self._vocab_size), dtype=logits_dtype)
             self._session.set_buffers({"logits": logits_out_placeholder})
 
@@ -1186,7 +1187,8 @@ class QEffTextGenerationBase:
             num_token (int): The number of tokens processed in the decoding process.
         """
         if self.is_tlm:
-            logits_dtype = np.float16 if self._session.binding_is_bfloat16("logits") else np.float32
+            logits_binding_idx = self._session.binding_index_map["logits"]
+            logits_dtype = self._session.aic_to_np_dtype_mapping[self._session.bindings[logits_binding_idx].type]
             logits_out_placeholder = np.zeros(
                 (self.batch_size, self._decode_seq_len, self._vocab_size), dtype=logits_dtype
             )
