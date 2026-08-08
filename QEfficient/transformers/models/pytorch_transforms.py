@@ -21,6 +21,18 @@ from transformers.models.codegen.modeling_codegen import (
 from transformers.models.deberta_v2.modeling_deberta_v2 import (
     DisentangledSelfAttention,
 )
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    DeepseekV4Attention,
+    DeepseekV4DecoderLayer,
+    DeepseekV4Experts,
+    DeepseekV4ForCausalLM,
+    DeepseekV4HashRouter,
+    DeepseekV4MLP,
+    DeepseekV4Model,
+    DeepseekV4RMSNorm,
+    DeepseekV4SparseMoeBlock,
+    DeepseekV4TopKRouter,
+)
 from transformers.models.falcon.modeling_falcon import (
     FalconAttention,
     FalconDecoderLayer,
@@ -343,6 +355,18 @@ from QEfficient.transformers.models.dflash_draft.modeling_dflash_draft import (
     QEffDFlashDecoderLayer,
     QEffDFlashForCausalLM,
     QEffDFlashModel,
+)
+from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    QEffDeepseekV4Attention,
+    QEffDeepseekV4DecoderLayer,
+    QEffDeepseekV4Experts,
+    QEffDeepseekV4ForCausalLM,
+    QEffDeepseekV4HashRouter,
+    QEffDeepseekV4MLP,
+    QEffDeepseekV4Model,
+    QEffDeepseekV4RMSNorm,
+    QEffDeepseekV4SparseMoeBlock,
+    QEffDeepseekV4TopKRouter,
 )
 from QEfficient.transformers.models.falcon.modeling_falcon import (
     QEffFalconAttention,
@@ -710,6 +734,7 @@ class CustomOpsTransform(ModuleMappingTransform):
         Qwen3VLMoeTextRMSNorm: CustomRMSNormAIC,
         Qwen3VLTextRMSNorm: CustomRMSNormAIC,
         Glm4MoeRMSNorm: CustomRMSNormAIC,
+        DeepseekV4RMSNorm: QEffDeepseekV4RMSNorm,
         Wav2Vec2Encoder: QEffWav2Vec2Encoder,
         Wav2Vec2EncoderStableLayerNorm: QEffWav2Vec2EncoderStableLayerNorm,
         # BERT-family: replace _create_attention_masks (uses create_bidirectional_mask,
@@ -731,6 +756,16 @@ class CustomOpsTransform(ModuleMappingTransform):
 
 class KVCacheTransform(ModuleMappingTransform):
     _module_mapping = {
+        # DeepSeek V4
+        DeepseekV4ForCausalLM: QEffDeepseekV4ForCausalLM,
+        DeepseekV4Model: QEffDeepseekV4Model,
+        DeepseekV4DecoderLayer: QEffDeepseekV4DecoderLayer,
+        DeepseekV4Attention: QEffDeepseekV4Attention,
+        DeepseekV4SparseMoeBlock: QEffDeepseekV4SparseMoeBlock,
+        DeepseekV4Experts: QEffDeepseekV4Experts,
+        DeepseekV4TopKRouter: QEffDeepseekV4TopKRouter,
+        DeepseekV4HashRouter: QEffDeepseekV4HashRouter,
+        DeepseekV4MLP: QEffDeepseekV4MLP,
         # GLMMoe
         Glm4MoeModel: QEffGlm4MoeModel,
         Glm4MoeForCausalLM: QEffGlm4MoeForCausalLM,
