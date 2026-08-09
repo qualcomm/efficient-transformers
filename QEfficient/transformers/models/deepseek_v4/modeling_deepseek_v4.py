@@ -5,9 +5,8 @@
 #
 # -----------------------------------------------------------------------------
 
-from typing import Any, Optional
+from typing import Any, Optional, Type
 
-import onnxscript
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -20,6 +19,8 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4Experts,
     DeepseekV4ForCausalLM,
     DeepseekV4HashRouter,
+    DeepseekV4HyperConnection,
+    DeepseekV4HyperHead,
     DeepseekV4MLP,
     DeepseekV4Model,
     DeepseekV4RotaryEmbedding,
@@ -27,86 +28,9 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4TopKRouter,
 )
 
+from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKV as CtxGatherBlockedKVFunc
+from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, CustomRMSNormFunc
-
-ONNX_EXPORT_OPSET = 18
-ops = getattr(onnxscript, f"opset{ONNX_EXPORT_OPSET}")
-
-
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
-def CtxScatter(
-    data: onnxscript.FLOAT,
-    position_ids: onnxscript.INT32,
-    updates: onnxscript.FLOAT,
-) -> onnxscript.FLOAT:
-    batch_size = ops.Gather(ops.Shape(data), [0])
-    num_heads = ops.Gather(ops.Shape(data), [1])
-    seq_len = ops.Gather(ops.Shape(position_ids), [1])
-    zero = ops.Constant(value_ints=[0])
-    one = ops.Constant(value_ints=[1])
-    expanded_shape = ops.Concat(batch_size, num_heads, seq_len, one, axis=0)
-    batch_indices = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2, 3]), expanded_shape)
-    head_indices = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_heads, one), [0, 2, 3]), expanded_shape)
-    context_indices = ops.Expand(ops.Unsqueeze(ops.Cast(position_ids, to=7), [1, 3]), expanded_shape)
-    indices = ops.Concat(batch_indices, head_indices, context_indices, axis=3)
-    return ops.ScatterND(data, indices, updates)
-
-
-class CtxScatterFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
-        output = data.clone()
-        batch_indices = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
-        head_indices = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
-        output[batch_indices, head_indices, position_ids.long().unsqueeze(1)] = updates
-        return output
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        pass
-
-    @staticmethod
-    def symbolic(
-        graph: torch.Graph,
-        data: torch.Value,
-        position_ids: torch.Value,
-        updates: torch.Value,
-    ) -> torch.Value:
-        return graph.onnxscript_op(CtxScatter, data, position_ids, updates).setTypeAs(data)
-
-
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
-def CtxGatherBlockedKV(
-    data: onnxscript.FLOAT,
-    context_indices: onnxscript.INT32,
-) -> onnxscript.FLOAT:
-    indices = ops.Cast(context_indices, to=7)
-    return ops.GatherND(data, ops.Unsqueeze(indices, [-1]), batch_dims=2)
-
-
-class CtxGatherBlockedKVFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(data: torch.Tensor, context_indices: torch.Tensor) -> torch.Tensor:
-        safe_indices = torch.where(
-            context_indices == torch.iinfo(torch.int32).max,
-            torch.zeros_like(context_indices),
-            context_indices,
-        )
-        batch_indices = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
-        head_indices = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
-        return data[batch_indices, head_indices, safe_indices.long()]
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        pass
-
-    @staticmethod
-    def symbolic(
-        graph: torch.Graph,
-        data: torch.Value,
-        context_indices: torch.Value,
-    ) -> torch.Value:
-        return graph.onnxscript_op(CtxGatherBlockedKV, data, context_indices).setTypeAs(data)
 
 
 class QEffSlidingCacheLayer(CacheLayerMixin):
@@ -191,7 +115,7 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
                 position_ids.min().item() < 0 or position_ids.max().item() >= self.max_cache_len
             ):
                 raise ValueError("position_ids exceed the allocated QEff sliding cache capacity.")
-        self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, position_ids.to(torch.int32), key_states)
+        self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, position_ids, key_states)
         self.cumulative_length += key_states.shape[2]
 
         context_length = (cache_kwargs or {}).get("context_length", self.max_cache_len)
@@ -358,7 +282,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
 
         self._previous_length = self.cumulative_length
         self._last_position_ids = position_ids
-        scatter_positions = position_ids.to(torch.int32)
+        scatter_positions = position_ids
         self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
@@ -370,7 +294,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
             expected_shape = (self.max_batch_size, 1, self.sliding_window_kv.shape[-1])
             if tuple(projected_kv.shape) != expected_shape or projected_gate.shape != projected_kv.shape:
                 raise ValueError(f"Decode-only compressor projections must both have shape {expected_shape}.")
-            buffer_positions = torch.remainder(position_ids, self.compression_size).to(torch.int32)
+            buffer_positions = torch.remainder(position_ids, self.compression_size)
             self.compressor_kv_buffer = CtxScatterFunc.apply(
                 self.compressor_kv_buffer,
                 buffer_positions,
@@ -429,7 +353,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
         remainder_length = remainder_kv.shape[1]
         if remainder_length:
             buffer_positions = (
-                torch.arange(remainder_length, device=kv.device, dtype=torch.int32)
+                torch.arange(remainder_length, device=kv.device, dtype=torch.int64)
                 .unsqueeze(0)
                 .expand(self.max_batch_size, -1)
             )
@@ -465,7 +389,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
                 raise ValueError("Decode-only compressed updates require a matching write_mask.")
             self.actual_compressed_kv = CtxScatterFunc.apply(
                 self.actual_compressed_kv,
-                entry_positions.to(torch.int32),
+                entry_positions,
                 compressed.unsqueeze(1),
             )
             if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
@@ -487,7 +411,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
                     self.compressor_entry_count,
                     new_count,
                     device=compressed.device,
-                    dtype=torch.int32,
+                    dtype=torch.int64,
                 )
                 .unsqueeze(0)
                 .expand(self.max_batch_size, -1)
@@ -659,11 +583,11 @@ class QEffCSACacheLayer(CacheLayerMixin):
             ):
                 raise ValueError("position_ids exceed the allocated QEff CSA cache capacity.")
 
-        scatter_positions = position_ids.to(torch.int32)
+        scatter_positions = position_ids
         self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
-        buffer_positions = torch.remainder(position_ids, self.compression_size).to(torch.int32)
+        buffer_positions = torch.remainder(position_ids, self.compression_size)
         for prefix, expected_dim in (
             ("compressor", self.compressor_kv_buffer.shape[-1]),
             ("indexer", self.indexer_kv_buffer.shape[-1]),
@@ -735,12 +659,12 @@ class QEffCSACacheLayer(CacheLayerMixin):
             compressed_attr,
             CtxScatterFunc.apply(
                 getattr(self, compressed_attr),
-                entry_positions.to(torch.int32),
+                entry_positions,
                 compressed.unsqueeze(1).unsqueeze(1),
             ),
         )
         overlap_positions = (
-            torch.arange(self.compression_size, device=self.device, dtype=torch.int32)
+            torch.arange(self.compression_size, device=self.device, dtype=torch.int64)
             .unsqueeze(0)
             .expand(self.max_batch_size, -1)
         )
@@ -902,11 +826,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         normalizer = torch.maximum(normalizer, sinks)
         exp_logits = torch.exp(attn_logits - normalizer)
         exp_sinks = torch.exp(sinks - normalizer)
-        denominator = exp_logits.sum(dim=-1, keepdim=True) + exp_sinks
+        denominator = torch.einsum("bhqk->bhq", exp_logits).unsqueeze(-1) + exp_sinks
         exp_compressed = None
         if compressed_logits is not None:
             exp_compressed = torch.exp(compressed_logits - normalizer)
-            denominator = denominator + exp_compressed.sum(dim=-1, keepdim=True)
+            denominator = denominator + torch.einsum("bhqk->bhq", exp_compressed).unsqueeze(-1)
         attn_weights = exp_logits / denominator
         attn_weights = F.dropout(
             attn_weights,
@@ -989,8 +913,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 1, 1, layer.compression_size, -1
             )
             compressed = self.compressor.kv_norm(
-                (layer.compressor_kv_buffer * weighted_gate.softmax(dim=2, dtype=torch.float32).to(layer.dtype)).sum(
-                    dim=2
+                torch.einsum(
+                    "bhrd->bhd",
+                    layer.compressor_kv_buffer
+                    * weighted_gate.softmax(dim=2, dtype=torch.float32).to(layer.dtype),
                 )
             ).to(layer.dtype)
             entry_positions = torch.div(position_ids, layer.compression_size, rounding_mode="floor")
@@ -1046,7 +972,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 new_kv[:, ratio:] = chunk_kv[..., head_dim:]
                 new_gate[:, ratio:] = chunk_gate[..., head_dim:]
                 compressed = norm(
-                    (new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)).sum(dim=1)
+                    torch.einsum(
+                        "brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)
+                    )
                 ).to(new_kv.dtype)
                 entry_positions = torch.div(position_ids, ratio, rounding_mode="floor")
                 rope_positions = entry_positions * ratio
@@ -1106,7 +1034,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 new_kv[:, ratio:] = current_kv[..., head_dim:]
                 new_gate[:, ratio:] = current_gate[..., head_dim:]
                 compressed = norm(
-                    (new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)).sum(dim=1)
+                    torch.einsum(
+                        "brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)
+                    )
                 ).to(new_kv.dtype)
                 rope_positions = entry_positions * ratio
                 comp_cos, comp_sin = rotary(
@@ -1365,6 +1295,13 @@ class QEffDeepseekV4Cache(Cache):
 class QEffDeepseekV4Experts(DeepseekV4Experts):
     """Gather routed expert weights and evaluate them as activations with BMM."""
 
+    def __qeff_init__(self):
+        self.expert_dim = getattr(self, "intermediate_dim")
+        self.gate_proj = nn.Parameter(self.gate_up_proj[:, : self.expert_dim, :].transpose(1, 2).detach().clone())
+        self.up_proj = nn.Parameter(self.gate_up_proj[:, self.expert_dim :, :].transpose(1, 2).detach().clone())
+        self.down_proj = nn.Parameter(self.down_proj.transpose(1, 2).detach().clone())
+        delattr(self, "gate_up_proj")
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1372,20 +1309,18 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
-        top_k = top_k_index.shape[-1]
-        flat_index = top_k_index.reshape(-1)
-        gate_up_proj = self.gate_up_proj[flat_index]
-        down_proj = self.down_proj[flat_index]
-        expert_in = hidden_states.unsqueeze(1).expand(-1, top_k, -1).contiguous().view(-1, 1, hidden_dim)
-        gate_up = torch.bmm(expert_in, gate_up_proj.transpose(1, 2))
-        gate, up = gate_up.chunk(2, dim=-1)
-        upper = gate.new_tensor(self.limit)
-        lower = gate.new_tensor(-self.limit)
-        gate = torch.minimum(gate, upper)
-        up = torch.minimum(torch.maximum(up, lower), upper)
+        gate_proj = self.gate_proj[top_k_index.flatten()]
+        up_proj = self.up_proj[top_k_index.flatten()]
+        down_proj = self.down_proj[top_k_index.flatten()]
+        expert_in = hidden_states.unsqueeze(1).expand(-1, self.top_k, -1).contiguous().view(-1, 1, hidden_dim)
+        gate = torch.bmm(expert_in, gate_proj)
+        up = torch.bmm(expert_in, up_proj)
+        gate = gate.float().clamp(max=self.limit).to(gate.dtype)
+        up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
         activated = self.act_fn(gate) * up
-        expert_out = torch.bmm(activated, down_proj.transpose(1, 2)).view(num_tokens, top_k, hidden_dim)
-        return torch.einsum("tkh,tk->th", expert_out, top_k_weights).to(hidden_states.dtype)
+        expert_out = torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
+        expert_out = expert_out * top_k_weights.unsqueeze(-1)
+        return torch.einsum("tkh->th", expert_out)
 
 
 class QEffDeepseekV4MLP(DeepseekV4MLP):
@@ -1394,10 +1329,8 @@ class QEffDeepseekV4MLP(DeepseekV4MLP):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate = self.gate_proj(hidden_states)
         up = self.up_proj(hidden_states)
-        upper = gate.new_tensor(self.limit)
-        lower = gate.new_tensor(-self.limit)
-        gate = torch.minimum(gate, upper)
-        up = torch.minimum(torch.maximum(up, lower), upper)
+        gate = gate.float().clamp(max=self.limit).to(gate.dtype)
+        up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
         return self.down_proj(self.act_fn(gate) * up)
 
 
@@ -1415,6 +1348,9 @@ class QEffDeepseekV4RMSNorm(CustomRMSNormAIC):
 
 
 class QEffDeepseekV4SparseMoeBlock(DeepseekV4SparseMoeBlock):
+    def __qeff_init__(self):
+        self.experts.top_k = self.gate.top_k
+
     def forward(self, hidden_states: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         batch, seq_len, hidden_dim = hidden_states.shape
         flat = hidden_states.view(-1, hidden_dim)
@@ -1444,10 +1380,38 @@ class QEffDeepseekV4HashRouter(DeepseekV4HashRouter):
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
         scores = self.score_fn(logits)
-        indices = self.tid2eid[input_ids.reshape(-1)].long()
+        indices = self.tid2eid[input_ids.reshape(-1)].reshape(-1, self.top_k).long()
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
         return logits, weights * self.routed_scaling_factor, indices
+
+
+class QEffDeepseekV4HyperConnection(DeepseekV4HyperConnection):
+    def forward(self, hidden_streams: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hc = self.hc_mult
+        flat = self.input_norm(hidden_streams.flatten(start_dim=2).float())
+        pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split([hc, hc, hc * hc], dim=-1)
+        pre_b, post_b, comb_b = self.base.split([hc, hc, hc * hc])
+        pre_scale, post_scale, comb_scale = self.scale.unbind(0)
+
+        pre = torch.sigmoid(pre_w * pre_scale + pre_b) + self.hc_eps
+        post = 2 * torch.sigmoid(post_w * post_scale + post_b)
+        comb_logits = comb_w.view(*comb_w.shape[:-1], hc, hc) * comb_scale + comb_b.view(hc, hc)
+        comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
+        comb = comb / (torch.einsum("bsij->bsj", comb).unsqueeze(-2) + self.hc_eps)
+        for _ in range(self.hc_sinkhorn_iters - 1):
+            comb = comb / (torch.einsum("bsij->bsi", comb).unsqueeze(-1) + self.hc_eps)
+            comb = comb / (torch.einsum("bsij->bsj", comb).unsqueeze(-2) + self.hc_eps)
+        collapsed = torch.einsum("bsh,bshd->bsd", pre, hidden_streams.float()).to(hidden_streams.dtype)
+        return post, comb, collapsed
+
+
+class QEffDeepseekV4HyperHead(DeepseekV4HyperHead):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = self.input_norm(x.flatten(2).float())
+        mixes = F.linear(flat, self.hc_fn.float())
+        pre = torch.sigmoid(mixes * self.hc_scale.float() + self.hc_base.float()) + self.eps
+        return torch.einsum("bsh,bshd->bsd", pre, x.float()).to(x.dtype)
 
 
 class QEffDeepseekV4DecoderLayer(DeepseekV4DecoderLayer):
@@ -1534,6 +1498,9 @@ class QEffDeepseekV4Model(DeepseekV4Model):
 
 
 class QEffDeepseekV4ForCausalLM(DeepseekV4ForCausalLM):
+    def get_submodules_for_export(self) -> Type[nn.Module]:
+        return {QEffDeepseekV4DecoderLayer}
+
     def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs: Any) -> list[dict]:
         del kwargs
         compressed_capacities = {

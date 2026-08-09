@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
 
@@ -34,7 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-root", type=Path, default=Path(DEFAULT_ARTIFACT_ROOT))
     parser.add_argument("--ctx-len", type=int, default=512)
     parser.add_argument("--generation-len", type=int, default=250)
-    parser.add_argument("--num-cores", type=int, default=16)
+    parser.add_argument("--num-hidden-layers", type=int, default=43)
+    parser.add_argument("--num-cores", type=int, default=12)
     parser.add_argument("--device-group", type=parse_device_group, default=[i for i in range(12)])
     parser.add_argument("--prefill-prompt", default=PREFILL_PROMPT)
     parser.add_argument("--local-files-only", action="store_true")
@@ -48,6 +49,8 @@ def main() -> None:
         raise ValueError("ctx_len must be at least 2.")
     if not 1 <= args.generation_len < args.ctx_len:
         raise ValueError("generation_len must be in [1, ctx_len).")
+    if args.num_hidden_layers < 1:
+        raise ValueError("num_hidden_layers must be at least 1.")
     if not args.device_group:
         raise ValueError("device_group must contain at least one QAIC device ID.")
 
@@ -66,9 +69,21 @@ def main() -> None:
         cache_dir=args.hf_cache,
         local_files_only=args.local_files_only,
     )
+    config = AutoConfig.from_pretrained(
+        args.model_id,
+        cache_dir=args.hf_cache,
+        local_files_only=args.local_files_only,
+    )
+    if args.num_hidden_layers > config.num_hidden_layers:
+        raise ValueError(f"num_hidden_layers cannot exceed the checkpoint's {config.num_hidden_layers} layers.")
+    config.num_hidden_layers = args.num_hidden_layers
+    config.layer_types = config.layer_types[: args.num_hidden_layers]
+    config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
+
     hf_model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         cache_dir=args.hf_cache,
+        config=config,
         dtype=torch.float16,
         low_cpu_mem_usage=True,
         device_map="cpu",
