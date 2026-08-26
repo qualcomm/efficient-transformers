@@ -26,6 +26,12 @@ from transformers.models.granitemoe.modeling_granitemoe import (
     repeat_kv,
     rotate_half,
 )
+from transformers.models.granitemoe.modeling_granitemoe import (
+    GraniteMoeExperts as GraniteMoeParallelExperts,
+)
+from transformers.models.granitemoe.modeling_granitemoe import (
+    GraniteMoeTopKRouter as GraniteMoeTopKGating,
+)
 
 from QEfficient.blocking.attention_blocking import (
     AttentionBlockingConfig,

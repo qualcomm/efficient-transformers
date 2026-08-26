@@ -5,6 +5,8 @@
 #
 # -----------------------------------------------------------------------------
 
+from typing import ClassVar
+
 from diffusers.models.autoencoders.autoencoder_kl_wan import (
     AutoencoderKLWan,
     WanDecoder3d,
@@ -54,20 +56,20 @@ from QEfficient.transformers.models.clip.modeling_clip import QEffCLIPTextModel
 
 
 class CustomOpsTransform(ModuleMappingTransform):
-    _module_mapping = {
+    _module_mapping: ClassVar[dict[type, type]] = {
         RMSNorm: CustomRMSNormAIC,
         nn.RMSNorm: CustomRMSNormAIC,  #  for torch.nn.RMSNorm
     }
 
 
 class CLIPTextTransform(ModuleMappingTransform):
-    _module_mapping = {
+    _module_mapping: ClassVar[dict[type, type]] = {
         CLIPTextModel: QEffCLIPTextModel,
     }
 
 
 class AttentionTransform(ModuleMappingTransform):
-    _module_mapping = {
+    _module_mapping: ClassVar[dict[type, type]] = {
         FluxSingleTransformerBlock: QEffFluxSingleTransformerBlock,
         FluxTransformerBlock: QEffFluxTransformerBlock,
         FluxTransformer2DModel: QEffFluxTransformer2DModel,
@@ -85,7 +87,7 @@ class AttentionTransform(ModuleMappingTransform):
 
 
 class NormalizationTransform(ModuleMappingTransform):
-    _module_mapping = {
+    _module_mapping: ClassVar[dict[type, type]] = {
         AdaLayerNormZero: QEffAdaLayerNormZero,
         AdaLayerNormZeroSingle: QEffAdaLayerNormZeroSingle,
         AdaLayerNormContinuous: QEffAdaLayerNormContinuous,
