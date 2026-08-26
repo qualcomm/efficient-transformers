@@ -24,7 +24,6 @@ from transformers.models.gemma3.modeling_gemma3 import (
     repeat_kv,
     rotate_half,
 )
-from transformers.utils import logging
 
 from QEfficient.customop.rms_norm import CustomRMSNorm
 from QEfficient.transformers.cache_utils import QEffSlidingWindowCache
@@ -32,8 +31,7 @@ from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
-
-logger = logging.get_logger(__name__)
+from QEfficient.utils.logging_utils import logger
 
 
 class GemmaRMSNormFunc(torch.autograd.Function):
