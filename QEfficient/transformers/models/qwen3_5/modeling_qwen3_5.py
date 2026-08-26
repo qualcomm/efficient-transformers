@@ -1657,6 +1657,11 @@ class QEffQwen3_5ForCausalLM(Qwen3_5ForCausalLM):
         }
         return {layer_classes[layer_type] for layer_type in self.config.layer_types}
 
+    def get_onnx_past_key_value_names(self, layer_idx: int, layer_state=None) -> List[str]:
+        if self.config.text_config.layer_types[layer_idx] == "full_attention":
+            return [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
+        return [f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}"]
+
     @staticmethod
     def _reorder_cache(past_key_values, beam_idx):
         if hasattr(past_key_values, "reorder_cache"):
@@ -2094,10 +2099,10 @@ class QEffQwen3_5DecoderWrapper(nn.Module):
 
     def _get_attention_blocking_config(self):
         for layer in getattr(self.language_model, "layers", ()):
-            attention = getattr(layer, "self_attn", None)
-            blocking_config = getattr(attention, "attn_blocking_config", None)
-            if blocking_config is not None:
-                return blocking_config
+            for attention in (getattr(layer, "self_attn", None), getattr(layer, "linear_attn", None)):
+                blocking_config = getattr(attention, "attn_blocking_config", None)
+                if blocking_config is not None:
+                    return blocking_config
         return None
 
     def get_onnx_past_key_value_names(self, layer_idx: int, layer_state=None) -> List[str]:
