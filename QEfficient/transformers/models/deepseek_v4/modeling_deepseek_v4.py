@@ -5,7 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-from typing import Any, Optional, Type
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -26,11 +26,14 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4RotaryEmbedding,
     DeepseekV4SparseMoeBlock,
     DeepseekV4TopKRouter,
+    DeepseekV4UnweightedRMSNorm,
 )
 
 from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKV as CtxGatherBlockedKVFunc
 from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, CustomRMSNormFunc
+from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
+from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 
 
 class QEffSlidingCacheLayer(CacheLayerMixin):
@@ -672,11 +675,14 @@ class QEffCSACacheLayer(CacheLayerMixin):
         current_overlap_gate = chunk_gate[..., :head_dim]
         old_overlap_kv = getattr(self, overlap_kv_attr)
         old_overlap_gate = getattr(self, overlap_gate_attr)
+        # CtxScatter mutates its input in eager mode, so materialize the old values before scattering.
+        saved_overlap_kv = CtxGatherBlockedKVFunc.apply(old_overlap_kv, overlap_positions.unsqueeze(1))
+        saved_overlap_gate = CtxGatherBlockedKVFunc.apply(old_overlap_gate, overlap_positions.unsqueeze(1))
         new_overlap_kv = CtxScatterFunc.apply(old_overlap_kv, overlap_positions, current_overlap_kv.unsqueeze(1))
         new_overlap_gate = CtxScatterFunc.apply(old_overlap_gate, overlap_positions, current_overlap_gate.unsqueeze(1))
         boundary_mask = write_mask.to(torch.bool).unsqueeze(-1).unsqueeze(-1)
-        setattr(self, overlap_kv_attr, torch.where(boundary_mask, new_overlap_kv, old_overlap_kv))
-        setattr(self, overlap_gate_attr, torch.where(boundary_mask, new_overlap_gate, old_overlap_gate))
+        setattr(self, overlap_kv_attr, torch.where(boundary_mask, new_overlap_kv, saved_overlap_kv))
+        setattr(self, overlap_gate_attr, torch.where(boundary_mask, new_overlap_gate, saved_overlap_gate))
         if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
             completed = entry_positions[write_mask.to(torch.bool)]
             if completed.numel():
@@ -808,39 +814,41 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         key_states = repeat_key_states(key)
         attn_logits = torch.matmul(query, key_states.transpose(2, 3)) * self.scaling
         if attention_mask is not None:
-            attn_logits = attn_logits + attention_mask
+            attn_logits = torch.where(
+                attention_mask,
+                torch.full_like(attn_logits, MIN_MASKED_ATTENTION_VALUE, dtype=attn_logits.dtype),
+                attn_logits,
+            )
 
         sinks = self.sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
-        normalizer = attn_logits.max(dim=-1, keepdim=True).values
         compressed_states = None
         compressed_logits = None
+        logit_parts = [attn_logits, sinks]
         if compressed_key is not None:
             compressed_states = repeat_key_states(compressed_key)
             compressed_logits = torch.matmul(query, compressed_states.transpose(2, 3)) * self.scaling
             if compressed_mask is not None:
-                compressed_logits = compressed_logits + compressed_mask
-            normalizer = torch.maximum(
-                normalizer,
-                compressed_logits.max(dim=-1, keepdim=True).values,
-            )
-        normalizer = torch.maximum(normalizer, sinks)
-        exp_logits = torch.exp(attn_logits - normalizer)
-        exp_sinks = torch.exp(sinks - normalizer)
-        denominator = torch.einsum("bhqk->bhq", exp_logits).unsqueeze(-1) + exp_sinks
-        exp_compressed = None
-        if compressed_logits is not None:
-            exp_compressed = torch.exp(compressed_logits - normalizer)
-            denominator = denominator + torch.einsum("bhqk->bhq", exp_compressed).unsqueeze(-1)
-        attn_weights = exp_logits / denominator
+                compressed_logits = torch.where(
+                    compressed_mask,
+                    torch.full_like(compressed_logits, MIN_MASKED_ATTENTION_VALUE, dtype=compressed_logits.dtype),
+                    compressed_logits,
+                )
+            logit_parts.append(compressed_logits)
+
+        combined_logits = torch.cat(logit_parts, dim=-1)
+        combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+        probabilities = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
+        probability_parts = probabilities.split(tuple(logits.shape[-1] for logits in logit_parts), dim=-1)
+        attn_weights = probability_parts[0]
         attn_weights = F.dropout(
             attn_weights,
             p=0.0 if not self.training else self.attention_dropout,
             training=self.training,
         ).to(key_states.dtype)
         attn_output = torch.matmul(attn_weights, key_states)
-        if exp_compressed is not None and compressed_states is not None:
+        if compressed_states is not None:
             compressed_weights = F.dropout(
-                exp_compressed / denominator,
+                probability_parts[2],
                 p=0.0 if not self.training else self.attention_dropout,
                 training=self.training,
             ).to(compressed_states.dtype)
@@ -915,8 +923,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             compressed = self.compressor.kv_norm(
                 torch.einsum(
                     "bhrd->bhd",
-                    layer.compressor_kv_buffer
-                    * weighted_gate.softmax(dim=2, dtype=torch.float32).to(layer.dtype),
+                    layer.compressor_kv_buffer * weighted_gate.softmax(dim=2, dtype=torch.float32).to(layer.dtype),
                 )
             ).to(layer.dtype)
             entry_positions = torch.div(position_ids, layer.compression_size, rounding_mode="floor")
@@ -939,11 +946,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             entry_indices = torch.arange(
                 compressed_capacity, device=compressed_kv.device, dtype=completed_entries.dtype
             )
-            block_bias = compressed_kv.new_zeros((hidden_states.shape[0], 1, 1, compressed_capacity))
-            block_bias = block_bias.masked_fill(
-                entry_indices.view(1, 1, 1, -1) >= completed_entries.unsqueeze(1).unsqueeze(-1),
-                float("-inf"),
-            )
+            block_bias = entry_indices.view(1, 1, 1, -1) >= completed_entries.unsqueeze(1).unsqueeze(-1)
         elif (
             self.compressor is not None
             and past_key_values is not None
@@ -972,9 +975,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 new_kv[:, ratio:] = chunk_kv[..., head_dim:]
                 new_gate[:, ratio:] = chunk_gate[..., head_dim:]
                 compressed = norm(
-                    torch.einsum(
-                        "brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)
-                    )
+                    torch.einsum("brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype))
                 ).to(new_kv.dtype)
                 entry_positions = torch.div(position_ids, ratio, rounding_mode="floor")
                 rope_positions = entry_positions * ratio
@@ -1034,9 +1035,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 new_kv[:, ratio:] = current_kv[..., head_dim:]
                 new_gate[:, ratio:] = current_gate[..., head_dim:]
                 compressed = norm(
-                    torch.einsum(
-                        "brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype)
-                    )
+                    torch.einsum("brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype))
                 ).to(new_kv.dtype)
                 rope_positions = entry_positions * ratio
                 comp_cos, comp_sin = rotary(
@@ -1123,8 +1122,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             valid = top_k_indices < completed_entries.unsqueeze(-1)
             safe_indices = torch.where(valid, top_k_indices, torch.zeros_like(top_k_indices)).to(torch.int32)
             compressed_kv = CtxGatherBlockedKVFunc.apply(compressed_kv, safe_indices[:, 0].unsqueeze(1))
-            block_bias = compressed_kv.new_zeros((hidden_states.shape[0], 1, 1, top_k))
-            block_bias = block_bias.masked_fill(~valid[:, None, :, :], float("-inf"))
+            block_bias = ~valid[:, None, :, :]
         elif self.compressor is not None:
             compressed_kv, block_bias = self.compressor(
                 hidden_states, q_residual, position_ids, past_key_values, self.layer_idx
@@ -1242,7 +1240,7 @@ class QEffDeepseekV4Cache(Cache):
         key_states: torch.Tensor,
         value_states: torch.Tensor,
         layer_idx: int,
-        cache_kwargs: Optional[dict[str, Any]] = None,
+        cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.layers[layer_idx].update(key_states, value_states, cache_kwargs)
 
@@ -1296,7 +1294,7 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
     """Gather routed expert weights and evaluate them as activations with BMM."""
 
     def __qeff_init__(self):
-        self.expert_dim = getattr(self, "intermediate_dim")
+        self.expert_dim = self.intermediate_dim
         self.gate_proj = nn.Parameter(self.gate_up_proj[:, : self.expert_dim, :].transpose(1, 2).detach().clone())
         self.up_proj = nn.Parameter(self.gate_up_proj[:, self.expert_dim :, :].transpose(1, 2).detach().clone())
         self.down_proj = nn.Parameter(self.down_proj.transpose(1, 2).detach().clone())
@@ -1347,11 +1345,21 @@ class QEffDeepseekV4RMSNorm(CustomRMSNormAIC):
         return normalized.to(input_dtype)
 
 
+class QEffDeepseekV4UnweightedRMSNorm(DeepseekV4UnweightedRMSNorm):
+    """DeepSeek V4 unweighted FP32 normalization using the QEff RMSNorm custom operation."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        unit_weight = hidden_states.new_ones(hidden_states.shape[-1], dtype=torch.float32)
+        normalized = CustomRMSNormFunc.apply(hidden_states.float(), unit_weight, self.eps)
+        return normalized.to(input_dtype)
+
+
 class QEffDeepseekV4SparseMoeBlock(DeepseekV4SparseMoeBlock):
     def __qeff_init__(self):
         self.experts.top_k = self.gate.top_k
 
-    def forward(self, hidden_states: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
         batch, seq_len, hidden_dim = hidden_states.shape
         flat = hidden_states.view(-1, hidden_dim)
         if self.is_hash:
@@ -1418,7 +1426,7 @@ class QEffDeepseekV4DecoderLayer(DeepseekV4DecoderLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        input_ids: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         dtype = hidden_states.dtype
@@ -1440,12 +1448,12 @@ class QEffDeepseekV4DecoderLayer(DeepseekV4DecoderLayer):
 class QEffDeepseekV4Model(DeepseekV4Model):
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[tuple[tuple[torch.Tensor, ...], ...]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: tuple[tuple[torch.Tensor, ...], ...] | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
         **kwargs: Any,
     ) -> MoeModelOutputWithPast:
         if (input_ids is None) == (inputs_embeds is None):
@@ -1465,16 +1473,15 @@ class QEffDeepseekV4Model(DeepseekV4Model):
             )
         cache = QEffDeepseekV4Cache.from_legacy_cache(self.config, past_key_values, position_ids)
         ctx_len = cache.layers[0].max_cache_len
-        query_positions = position_ids[:, None, :, None]
-        key_positions = torch.arange(ctx_len, device=position_ids.device).view(1, 1, 1, -1)
-        key_positions = key_positions + query_positions + 1 - ctx_len
-        valid = (
-            (key_positions >= 0)
-            & (key_positions <= query_positions)
-            & (key_positions > query_positions - self.config.sliding_window)
+        physical_position_ids = torch.full_like(position_ids, ctx_len - 1)
+        causal_mask = _create_causal_mask(
+            position_ids=physical_position_ids,
+            target_length=ctx_len,
+            sliding_window=self.config.sliding_window,
         )
-        causal_mask = torch.zeros(valid.shape, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        causal_mask = causal_mask.masked_fill(~valid, torch.finfo(inputs_embeds.dtype).min)
+        cache_indices = torch.arange(ctx_len, device=position_ids.device).view(1, 1, 1, -1)
+        uninitialized_prefix_mask = cache_indices < (ctx_len - position_ids - 1)[:, None, :, None]
+        causal_mask = causal_mask | uninitialized_prefix_mask
         hidden_states = inputs_embeds.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
         position_embeddings = {
             "main": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="main"),
@@ -1498,7 +1505,7 @@ class QEffDeepseekV4Model(DeepseekV4Model):
 
 
 class QEffDeepseekV4ForCausalLM(DeepseekV4ForCausalLM):
-    def get_submodules_for_export(self) -> Type[nn.Module]:
+    def get_submodules_for_export(self) -> type[nn.Module]:
         return {QEffDeepseekV4DecoderLayer}
 
     def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs: Any) -> list[dict]:
@@ -1539,14 +1546,14 @@ class QEffDeepseekV4ForCausalLM(DeepseekV4ForCausalLM):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[tuple[tuple[torch.Tensor, ...], ...]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: tuple[tuple[torch.Tensor, ...], ...] | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        output_router_logits: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Any,
     ) -> MoeCausalLMOutputWithPast:
@@ -1564,5 +1571,5 @@ class QEffDeepseekV4ForCausalLM(DeepseekV4ForCausalLM):
         logit_index = position_ids.to(torch.int32).argmax(dim=1, keepdim=True)
         batch_index = torch.arange(position_ids.shape[0], device=position_ids.device).view(-1, 1)
         hidden_states = outputs.last_hidden_state[batch_index, logit_index]
-        logits = self.lm_head(hidden_states)
+        logits = self.lm_head(hidden_states).float()
         return MoeCausalLMOutputWithPast(logits=logits, past_key_values=outputs.past_key_values)
