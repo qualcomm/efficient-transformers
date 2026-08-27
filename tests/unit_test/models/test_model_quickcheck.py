@@ -30,7 +30,7 @@ from copy import deepcopy
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, Optional, Set
+from typing import Set
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -39,6 +39,7 @@ import onnxruntime as ort
 import pytest
 import torch
 from torch import nn
+import torch.nn.functional as F
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -54,7 +55,10 @@ from transformers import (
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
-from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    DeepseekV4ForCausalLM,
+    DeepseekV4UnweightedRMSNorm,
+)
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
@@ -70,7 +74,11 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeVisionConfig,
 )
 
-from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import QEffDeepseekV4Cache
+from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    QEffDeepseekV4Attention,
+    QEffDeepseekV4Cache,
+    QEffDeepseekV4UnweightedRMSNorm,
+)
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
@@ -79,6 +87,7 @@ from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModelForSequenceClassification,
     QEFFAutoModelForSpeechSeq2Seq,
 )
+from QEfficient.transformers.models.pytorch_transforms import CustomOpsTransform
 from QEfficient.transformers.quantizers.auto import replace_transformers_quantizers
 from QEfficient.utils._utils import _infer_specialization_name, to_named_specializations
 from QEfficient.utils.run_utils import ApiRunner
@@ -117,6 +126,128 @@ def _tiny_deepseek_v4_config() -> DeepseekV4Config:
         compress_rates={"heavily_compressed_attention": 4, "compressed_sparse_attention": 2},
         max_position_embeddings=32,
     )
+
+
+def test_deepseek_v4_unweighted_rms_norm_uses_custom_op_mapping():
+    norm = DeepseekV4UnweightedRMSNorm(eps=1e-6)
+    hidden_states = torch.randn(2, 3, 16)
+    expected = norm(hidden_states)
+
+    transformed_norm, transformed = CustomOpsTransform.apply(norm)
+    actual = transformed_norm(hidden_states)
+
+    assert transformed
+    assert type(transformed_norm) is QEffDeepseekV4UnweightedRMSNorm
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("layer_type", "has_compressed_key"),
+    [
+        ("sliding_attention", False),
+        ("heavily_compressed_attention", True),
+        ("compressed_sparse_attention", True),
+    ],
+)
+def test_deepseek_v4_attention_uses_joint_softmax(layer_type, has_compressed_key):
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = [layer_type]
+    config.mlp_layer_types = ["hash_moe"]
+    attention = QEffDeepseekV4Attention(config, layer_idx=0).eval()
+
+    torch.manual_seed(0)
+    query = torch.randn(1, config.num_attention_heads, 1, config.head_dim)
+    key = torch.randn(1, config.num_key_value_heads, config.sliding_window, config.head_dim)
+    attention_mask = torch.zeros(1, 1, 1, config.sliding_window, dtype=torch.bool)
+    attention_mask[..., :2] = True
+    compressed_key = None
+    compressed_mask = None
+    if has_compressed_key:
+        compressed_key = torch.randn(1, config.num_key_value_heads, 2, config.head_dim)
+        compressed_mask = torch.tensor([[[[False, True]]]])
+
+    output, weights = attention._attention_forward(
+        query,
+        key,
+        attention_mask,
+        compressed_key,
+        compressed_mask,
+    )
+
+    key_states = key.repeat_interleave(attention.num_key_value_groups, dim=1)
+    main_logits = torch.matmul(query, key_states.transpose(2, 3)) * attention.scaling
+    main_logits = torch.where(
+        attention_mask,
+        torch.full_like(main_logits, float("-inf")),
+        main_logits,
+    )
+    sinks = attention.sinks.reshape(1, -1, 1, 1)
+    expected_logits = [main_logits, sinks]
+    compressed_states = None
+    if compressed_key is not None:
+        compressed_states = compressed_key.repeat_interleave(attention.num_key_value_groups, dim=1)
+        compressed_logits = torch.matmul(query, compressed_states.transpose(2, 3)) * attention.scaling
+        expected_logits.append(
+            torch.where(
+                compressed_mask,
+                torch.full_like(compressed_logits, float("-inf")),
+                compressed_logits,
+            )
+        )
+    expected_probabilities = F.softmax(torch.cat(expected_logits, dim=-1), dim=-1)
+    expected_parts = expected_probabilities.split(tuple(logits.shape[-1] for logits in expected_logits), dim=-1)
+    expected_output = torch.matmul(expected_parts[0], key_states)
+    if compressed_states is not None:
+        expected_output = expected_output + torch.matmul(expected_parts[2], compressed_states)
+
+    torch.testing.assert_close(weights, expected_parts[0])
+    torch.testing.assert_close(output, expected_output.transpose(1, 2).contiguous())
+
+
+@pytest.mark.parametrize(("name", "head_dim"), [("compressor", 8), ("indexer", 4)])
+def test_deepseek_v4_csa_overlap_updates_only_at_window_boundary(name, head_dim):
+    config = _tiny_deepseek_v4_config()
+    legacy_cache = QEffDeepseekV4Cache.get_dummy_cache(config, batch_size=1, ctx_len=8, dtype=torch.float32)
+    cache = QEffDeepseekV4Cache.from_legacy_cache(config, legacy_cache, torch.tensor([[0]]))
+    layer = cache.layers[2]
+    ratio = config.compress_rates["compressed_sparse_attention"]
+
+    torch.manual_seed(0)
+    chunk_kv = torch.randn(1, ratio, 2 * head_dim)
+    chunk_gate = torch.randn_like(chunk_kv)
+    compressed = torch.randn(1, head_dim)
+    entry_positions = torch.tensor([[0]])
+    overlap_kv = getattr(layer, f"{name}_overlap_kv")
+    overlap_gate = getattr(layer, f"{name}_overlap_gate")
+    expected_kv = overlap_kv.clone()
+    expected_gate = overlap_gate.clone()
+
+    layer.update_csa_compressed_state(
+        name,
+        compressed,
+        chunk_kv,
+        chunk_gate,
+        head_dim,
+        entry_positions,
+        write_mask=torch.tensor([[False]]),
+    )
+
+    torch.testing.assert_close(getattr(layer, f"{name}_overlap_kv"), expected_kv)
+    torch.testing.assert_close(getattr(layer, f"{name}_overlap_gate"), expected_gate)
+
+    layer.update_csa_compressed_state(
+        name,
+        compressed,
+        chunk_kv,
+        chunk_gate,
+        head_dim,
+        entry_positions,
+        write_mask=torch.tensor([[True]]),
+    )
+
+    torch.testing.assert_close(getattr(layer, f"{name}_overlap_kv"), chunk_kv[..., :head_dim].unsqueeze(1))
+    torch.testing.assert_close(getattr(layer, f"{name}_overlap_gate"), chunk_gate[..., :head_dim].unsqueeze(1))
 
 
 @pytest.mark.llm_model
@@ -499,7 +630,7 @@ def _count_decoder_block_subfunctions(onnx_model, qeff_model) -> int:
     return sum(any(block_name in func.name for block_name in block_names) for func in onnx_model.functions)
 
 
-def _decoder_block_subfunction_names(onnx_model, qeff_model) -> Set[str]:
+def _decoder_block_subfunction_names(onnx_model, qeff_model) -> set[str]:
     get_submodules = getattr(qeff_model.model, "get_submodules_for_export", None)
     assert callable(get_submodules)
 
@@ -514,7 +645,7 @@ def _decoder_block_subfunction_names(onnx_model, qeff_model) -> Set[str]:
     return {func.name for func in onnx_model.functions if any(block_name in func.name for block_name in block_names)}
 
 
-def _function_op_types(onnx_model, function_names: Set[str]) -> Set[str]:
+def _function_op_types(onnx_model, function_names: set[str]) -> set[str]:
     return {
         node.op_type
         for function_proto in onnx_model.functions
@@ -535,7 +666,7 @@ def _assert_has_retained_state_outputs(onnx_path: Path) -> None:
     assert retained_outputs
 
 
-def _run_embedding_ort(onnx_path: Path, inputs: Dict[str, torch.Tensor]) -> np.ndarray:
+def _run_embedding_ort(onnx_path: Path, inputs: dict[str, torch.Tensor]) -> np.ndarray:
     session = _ort_session(onnx_path)
     input_names = {item.name for item in session.get_inputs()}
     ort_inputs = {name: tensor.detach().numpy() for name, tensor in inputs.items() if name in input_names}
@@ -549,7 +680,7 @@ def _run_whisper_export_smoke(qeff_model: QEFFAutoModelForSpeechSeq2Seq, out_dir
 
 
 def _assert_proxy_only_onnx_transform_policy(
-    qeff_model, enable_proxy: bool, always_on_transforms: Optional[Set[str]] = None
+    qeff_model, enable_proxy: bool, always_on_transforms: set[str] | None = None
 ) -> None:
     pytorch_transform_names = {transform.__name__ for transform in qeff_model._pytorch_transforms}
     transform_names = {transform.__name__ for transform in qeff_model._onnx_transforms}
@@ -812,7 +943,7 @@ def _qwen_decoder_export_model(qeff_model):
     return _qwen_decoder_qeff_model(qeff_model).model
 
 
-def _qwen_decoder_subfunction_names(qeff_model) -> Set[str]:
+def _qwen_decoder_subfunction_names(qeff_model) -> set[str]:
     return {module_cls.__name__ for module_cls in _qwen_decoder_export_model(qeff_model).get_submodules_for_export()}
 
 
@@ -3511,7 +3642,7 @@ def test_resolve_torch_dtype_normalizes_dtype_alias(caplog):
 def test_qwen3_5_moe_gated_norm_preserves_float16():
     """GatedDeltaNet RMSNorm must keep the input dtype so the gated output feeds
     the float16 out_proj without a dtype mismatch (Qwen3.5 float16 export)."""
-    import torch.nn as nn
+    from torch import nn
 
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
         QEffQwen3_5MoeGatedDeltaNetCustomRMSNormAIC,
@@ -5432,7 +5563,6 @@ def test_layerwise_cache_miss_exports_all_windows(monkeypatch, tmp_path):
     class ProbeModel:
         def compile(self, **kwargs):
             assert kwargs.pop("_layerwise_cache_probe") is True
-            return None
 
     exported_windows = []
 
@@ -5849,12 +5979,12 @@ def test_layerwise_compile_rejects_unsupported_model():
 # ---------------------------------------------------------------------------
 
 
-def _retained_state_outputs(onnx_path: Path) -> Set[str]:
+def _retained_state_outputs(onnx_path: Path) -> set[str]:
     onnx_model = onnx.load(onnx_path, load_external_data=False)
     return {out.name for out in onnx_model.graph.output if out.name.endswith("_RetainedState")}
 
 
-def _kv_input_names(onnx_path: Path) -> Set[str]:
+def _kv_input_names(onnx_path: Path) -> set[str]:
     onnx_model = onnx.load(onnx_path, load_external_data=False)
     return {
         inp.name
