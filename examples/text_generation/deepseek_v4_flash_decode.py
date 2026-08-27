@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 
+import onnx
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -22,9 +23,68 @@ DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_ARTIFACT_ROOT = "/home/ochougul/qeff_oc/qeff_artifacts/deepseek_v4_flash_full_decode"
 PREFILL_PROMPT = "<replace with the prefill prompt>"
 
+GATE_PREFIX_OUTPUTS = (
+    "mlp/gate/MatMul_output_0",
+    "mlp/gate/score_fn/Softplus_output_0",
+    "mlp/gate/score_fn/Sqrt_output_0",
+    "mlp/gate/Add_output_0",
+)
+GATE_SUFFIX_OUTPUTS = (
+    "mlp/gate/Reshape_output_0",
+    "mlp/gate/GatherElements_output_0",
+    "mlp/gate/Einsum_output_0",
+    "mlp/gate/Unsqueeze_output_0",
+    "mlp/gate/Div_output_0",
+    "mlp/gate/Mul_output_0",
+)
+
 
 def parse_device_group(value: str) -> list[int]:
     return [int(device_id) for device_id in value.strip("[]").split(",") if device_id.strip()]
+
+
+def generate_npi_file(onnx_path: Path, artifact_root: Path, num_hidden_layers: int) -> Path:
+    """Generate the DeepSeek-V4-Flash FP32 node list from the exported graph."""
+    model = onnx.load(onnx_path, load_external_data=False)
+    graph_outputs = [output for node in model.graph.node for output in node.output]
+    graph_output_set = set(graph_outputs)
+    fp32_outputs = []
+
+    for layer_idx in range(num_hidden_layers):
+        layer_prefix = f"/model/layers.{layer_idx}/"
+        required_outputs = [layer_prefix + output for output in GATE_PREFIX_OUTPUTS]
+        optional_topk = layer_prefix + "mlp/gate/TopK_output_0"
+        if optional_topk in graph_output_set:
+            required_outputs.append(optional_topk)
+
+        ffn_prefix = layer_prefix + "ffn_hc/"
+        ffn_outputs = [output for output in graph_outputs if output.startswith(ffn_prefix)]
+        if not ffn_outputs:
+            raise ValueError(f"No ffn_hc outputs found for layer {layer_idx} in {onnx_path}.")
+        required_outputs.extend(ffn_outputs)
+
+        required_outputs.append(layer_prefix + "Cast_4_output_0")
+        post_layernorm_prefix = layer_prefix + "post_attention_layernorm/"
+        post_layernorm_outputs = [output for output in graph_outputs if output.startswith(post_layernorm_prefix)]
+        if not post_layernorm_outputs:
+            raise ValueError(f"No post-attention layernorm outputs found for layer {layer_idx} in {onnx_path}.")
+        required_outputs.extend(post_layernorm_outputs)
+        required_outputs.append(layer_prefix + "Cast_5_output_0")
+        required_outputs.extend(layer_prefix + output for output in GATE_SUFFIX_OUTPUTS)
+
+        optional_gate_add = layer_prefix + "mlp/gate/Add_1_output_0"
+        if optional_gate_add in graph_output_set:
+            required_outputs.append(optional_gate_add)
+
+        missing_outputs = [output for output in required_outputs if output not in graph_output_set]
+        if missing_outputs:
+            raise ValueError(f"Cannot generate NPI for layer {layer_idx}; missing ONNX outputs: {missing_outputs}")
+        fp32_outputs.extend(required_outputs)
+
+    npi_path = artifact_root / f"router_full_fp32_ffn_hc_post_ln_gate_weight_{num_hidden_layers}layer.yaml"
+    npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
+    npi_path.write_text(npi_contents, encoding="utf-8")
+    return npi_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,6 +165,9 @@ def main() -> None:
     )
     print(f"ONNX_PATH={onnx_path}")
 
+    npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
+    print(f"NPI_PATH={npi_path}")
+
     print("Compiling retained-state decode specialization: seq_len=1, ctx_len=%d" % args.ctx_len)
     qpc_path = Path(
         qeff_model.compile(
@@ -119,6 +182,7 @@ def main() -> None:
             use_onnx_subfunctions=False,
             mxint8_kv_cache=False,
             mxfp6_matmul=True,
+            node_precision_info=str(npi_path),
         )
     )
     print(f"QPC_PATH={qpc_path}")
@@ -140,6 +204,7 @@ def main() -> None:
         "model_id": args.model_id,
         "prefill_prompt": args.prefill_prompt,
         "onnx_path": str(onnx_path),
+        "npi_path": str(npi_path),
         "qpc_path": str(qpc_path),
         "generated_texts": exec_info.generated_texts,
         "generated_ids": [ids.tolist() if hasattr(ids, "tolist") else ids for ids in exec_info.generated_ids],
