@@ -461,7 +461,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
 
 
 class QEffCSACacheLayer(CacheLayerMixin):
-    """Fixed-capacity retained state for one DeepSeek V4 CSA layer."""
+    """Fixed-capacity retained state with ping-pong buffers for one DeepSeek V4 CSA layer."""
 
     is_compileable = True
     is_sliding = True
@@ -472,13 +472,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
         sliding_window_kv: torch.Tensor,
         compressor_kv_buffer: torch.Tensor,
         compressor_gate_buffer: torch.Tensor,
-        compressor_overlap_kv: torch.Tensor,
-        compressor_overlap_gate: torch.Tensor,
         actual_compressed_kv: torch.Tensor,
         indexer_kv_buffer: torch.Tensor,
         indexer_gate_buffer: torch.Tensor,
-        indexer_overlap_kv: torch.Tensor,
-        indexer_overlap_gate: torch.Tensor,
         actual_indexer_compressed_kv: torch.Tensor,
         *,
         cumulative_length: int = 0,
@@ -490,13 +486,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
         self.sliding_window_kv = sliding_window_kv
         self.compressor_kv_buffer = compressor_kv_buffer
         self.compressor_gate_buffer = compressor_gate_buffer
-        self.compressor_overlap_kv = compressor_overlap_kv
-        self.compressor_overlap_gate = compressor_overlap_gate
         self.actual_compressed_kv = actual_compressed_kv
         self.indexer_kv_buffer = indexer_kv_buffer
         self.indexer_gate_buffer = indexer_gate_buffer
-        self.indexer_overlap_kv = indexer_overlap_kv
-        self.indexer_overlap_gate = indexer_overlap_gate
         self.actual_indexer_compressed_kv = actual_indexer_compressed_kv
         self.cumulative_length = cumulative_length
         self.compressor_entry_count = compressor_entry_count
@@ -511,17 +503,14 @@ class QEffCSACacheLayer(CacheLayerMixin):
         batch = self.sliding_window_kv.shape[0]
         capacity = (self.max_cache_len + self.compression_size - 1) // self.compression_size
         common_prefix = (batch, 1)
+        banked = 2 * self.compression_size
         expected = {
             "sliding_window_kv": (batch, config.num_key_value_heads, self.max_cache_len, config.head_dim),
-            "compressor_kv_buffer": (*common_prefix, self.compression_size, 2 * config.head_dim),
-            "compressor_gate_buffer": (*common_prefix, self.compression_size, 2 * config.head_dim),
-            "compressor_overlap_kv": (*common_prefix, self.compression_size, config.head_dim),
-            "compressor_overlap_gate": (*common_prefix, self.compression_size, config.head_dim),
+            "compressor_kv_buffer": (*common_prefix, banked, 2 * config.head_dim),
+            "compressor_gate_buffer": (*common_prefix, banked, 2 * config.head_dim),
             "actual_compressed_kv": (*common_prefix, capacity, config.head_dim),
-            "indexer_kv_buffer": (*common_prefix, self.compression_size, 2 * config.index_head_dim),
-            "indexer_gate_buffer": (*common_prefix, self.compression_size, 2 * config.index_head_dim),
-            "indexer_overlap_kv": (*common_prefix, self.compression_size, config.index_head_dim),
-            "indexer_overlap_gate": (*common_prefix, self.compression_size, config.index_head_dim),
+            "indexer_kv_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
+            "indexer_gate_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
             "actual_indexer_compressed_kv": (*common_prefix, capacity, config.index_head_dim),
         }
         for name, shape in expected.items():
@@ -590,7 +579,10 @@ class QEffCSACacheLayer(CacheLayerMixin):
         self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
-        buffer_positions = torch.remainder(position_ids, self.compression_size)
+        entry_positions = torch.div(position_ids, self.compression_size, rounding_mode="floor")
+        buffer_positions = torch.remainder(entry_positions, 2) * self.compression_size + torch.remainder(
+            position_ids, self.compression_size
+        )
         for prefix, expected_dim in (
             ("compressor", self.compressor_kv_buffer.shape[-1]),
             ("indexer", self.indexer_kv_buffer.shape[-1]),
@@ -639,21 +631,14 @@ class QEffCSACacheLayer(CacheLayerMixin):
         self,
         name: str,
         compressed: torch.Tensor,
-        chunk_kv: torch.Tensor,
-        chunk_gate: torch.Tensor,
-        head_dim: int,
         entry_positions: torch.Tensor,
         write_mask: torch.Tensor,
     ) -> torch.Tensor:
         if name == "compressor":
             compressed_attr = "actual_compressed_kv"
-            overlap_kv_attr = "compressor_overlap_kv"
-            overlap_gate_attr = "compressor_overlap_gate"
             count_attr = "compressor_entry_count"
         elif name == "indexer":
             compressed_attr = "actual_indexer_compressed_kv"
-            overlap_kv_attr = "indexer_overlap_kv"
-            overlap_gate_attr = "indexer_overlap_gate"
             count_attr = "indexer_entry_count"
         else:
             raise ValueError(f"Unsupported CSA compressor state: {name}")
@@ -666,23 +651,6 @@ class QEffCSACacheLayer(CacheLayerMixin):
                 compressed.unsqueeze(1).unsqueeze(1),
             ),
         )
-        overlap_positions = (
-            torch.arange(self.compression_size, device=self.device, dtype=torch.int64)
-            .unsqueeze(0)
-            .expand(self.max_batch_size, -1)
-        )
-        current_overlap_kv = chunk_kv[..., :head_dim]
-        current_overlap_gate = chunk_gate[..., :head_dim]
-        old_overlap_kv = getattr(self, overlap_kv_attr)
-        old_overlap_gate = getattr(self, overlap_gate_attr)
-        # CtxScatter mutates its input in eager mode, so materialize the old values before scattering.
-        saved_overlap_kv = CtxGatherBlockedKVFunc.apply(old_overlap_kv, overlap_positions.unsqueeze(1))
-        saved_overlap_gate = CtxGatherBlockedKVFunc.apply(old_overlap_gate, overlap_positions.unsqueeze(1))
-        new_overlap_kv = CtxScatterFunc.apply(old_overlap_kv, overlap_positions, current_overlap_kv.unsqueeze(1))
-        new_overlap_gate = CtxScatterFunc.apply(old_overlap_gate, overlap_positions, current_overlap_gate.unsqueeze(1))
-        boundary_mask = write_mask.to(torch.bool).unsqueeze(-1).unsqueeze(-1)
-        setattr(self, overlap_kv_attr, torch.where(boundary_mask, new_overlap_kv, saved_overlap_kv))
-        setattr(self, overlap_gate_attr, torch.where(boundary_mask, new_overlap_gate, saved_overlap_gate))
         if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
             completed = entry_positions[write_mask.to(torch.bool)]
             if completed.numel():
@@ -694,18 +662,12 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "sliding_window_kv",
             "compressor_kv_buffer",
             "compressor_gate_buffer",
-            "compressor_overlap_kv",
-            "compressor_overlap_gate",
             "actual_compressed_kv",
             "indexer_kv_buffer",
             "indexer_gate_buffer",
-            "indexer_overlap_kv",
-            "indexer_overlap_gate",
             "actual_indexer_compressed_kv",
         ):
             getattr(self, name).zero_()
-        self.compressor_overlap_gate.fill_(float("-inf"))
-        self.indexer_overlap_gate.fill_(float("-inf"))
         self.cumulative_length = 0
         self.compressor_entry_count = 0
         self.indexer_entry_count = 0
@@ -715,13 +677,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "sliding_window_kv",
             "compressor_kv_buffer",
             "compressor_gate_buffer",
-            "compressor_overlap_kv",
-            "compressor_overlap_gate",
             "actual_compressed_kv",
             "indexer_kv_buffer",
             "indexer_gate_buffer",
-            "indexer_overlap_kv",
-            "indexer_overlap_gate",
             "actual_indexer_compressed_kv",
         ):
             setattr(self, name, getattr(self, name).index_select(0, beam_idx.to(self.device)))
@@ -735,13 +693,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "sliding_window_kv",
             "compressor_kv_buffer",
             "compressor_gate_buffer",
-            "compressor_overlap_kv",
-            "compressor_overlap_gate",
             "actual_compressed_kv",
             "indexer_kv_buffer",
             "indexer_gate_buffer",
-            "indexer_overlap_kv",
-            "indexer_overlap_gate",
             "actual_indexer_compressed_kv",
         ):
             setattr(self, name, getattr(self, name).repeat_interleave(repeats, dim=0))
@@ -751,13 +705,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "sliding_window_kv",
             "compressor_kv_buffer",
             "compressor_gate_buffer",
-            "compressor_overlap_kv",
-            "compressor_overlap_gate",
             "actual_compressed_kv",
             "indexer_kv_buffer",
             "indexer_gate_buffer",
-            "indexer_overlap_kv",
-            "indexer_overlap_gate",
             "actual_indexer_compressed_kv",
         ):
             setattr(self, name, getattr(self, name)[indices])
@@ -954,52 +904,6 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         ):
             layer = past_key_values.layers[self.layer_idx]
 
-            def build_csa_overlap_compressed(
-                name: str,
-                kv_buffer: torch.Tensor,
-                gate_buffer: torch.Tensor,
-                overlap_kv: torch.Tensor,
-                overlap_gate: torch.Tensor,
-                position_bias: torch.Tensor,
-                norm: nn.Module,
-                rotary: DeepseekV4RotaryEmbedding,
-                head_dim: int,
-            ) -> torch.Tensor:
-                ratio = layer.compression_size
-                chunk_kv = kv_buffer[:, 0]
-                chunk_gate = gate_buffer[:, 0] + position_bias.view(1, ratio, 2 * head_dim)
-                new_kv = chunk_kv.new_zeros((chunk_kv.shape[0], 2 * ratio, head_dim))
-                new_gate = chunk_gate.new_full((chunk_gate.shape[0], 2 * ratio, head_dim), float("-inf"))
-                new_kv[:, :ratio] = overlap_kv[:, 0]
-                new_gate[:, :ratio] = overlap_gate[:, 0]
-                new_kv[:, ratio:] = chunk_kv[..., head_dim:]
-                new_gate[:, ratio:] = chunk_gate[..., head_dim:]
-                compressed = norm(
-                    torch.einsum("brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype))
-                ).to(new_kv.dtype)
-                entry_positions = torch.div(position_ids, ratio, rounding_mode="floor")
-                rope_positions = entry_positions * ratio
-                comp_cos, comp_sin = rotary(
-                    compressed,
-                    position_ids=rope_positions,
-                    layer_type=self.compressor.rope_layer_type,
-                )
-                compressed = (
-                    qeff_apply_rotary_pos_emb(compressed.unsqueeze(1).unsqueeze(1), comp_cos, comp_sin)
-                    .squeeze(1)
-                    .squeeze(1)
-                )
-                write_mask = torch.remainder(position_ids + 1, ratio) == 0
-                return layer.update_csa_compressed_state(
-                    name,
-                    compressed,
-                    chunk_kv,
-                    chunk_gate,
-                    head_dim,
-                    entry_positions,
-                    write_mask,
-                )
-
             def build_csa_pingpong_compressed(
                 name: str,
                 kv_buffer: torch.Tensor,
@@ -1056,48 +960,24 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                     write_mask,
                 )
 
-            if False:  # The model integration uses the validated CSA overlap retained-state layout.
-                compressed_kv = build_csa_pingpong_compressed(
-                    "compressor",
-                    layer.compressor_kv_buffer,
-                    layer.compressor_gate_buffer,
-                    self.compressor.position_bias,
-                    self.compressor.kv_norm,
-                    self.compressor.rotary_emb,
-                    self.compressor.head_dim,
-                )
-                indexer_compressed = build_csa_pingpong_compressed(
-                    "indexer",
-                    layer.indexer_kv_buffer,
-                    layer.indexer_gate_buffer,
-                    self.compressor.indexer.position_bias,
-                    self.compressor.indexer.kv_norm,
-                    self.compressor.indexer.rotary_emb,
-                    self.compressor.indexer.head_dim,
-                )
-            else:
-                compressed_kv = build_csa_overlap_compressed(
-                    "compressor",
-                    layer.compressor_kv_buffer,
-                    layer.compressor_gate_buffer,
-                    layer.compressor_overlap_kv,
-                    layer.compressor_overlap_gate,
-                    self.compressor.position_bias,
-                    self.compressor.kv_norm,
-                    self.compressor.rotary_emb,
-                    self.compressor.head_dim,
-                )
-                indexer_compressed = build_csa_overlap_compressed(
-                    "indexer",
-                    layer.indexer_kv_buffer,
-                    layer.indexer_gate_buffer,
-                    layer.indexer_overlap_kv,
-                    layer.indexer_overlap_gate,
-                    self.compressor.indexer.position_bias,
-                    self.compressor.indexer.kv_norm,
-                    self.compressor.indexer.rotary_emb,
-                    self.compressor.indexer.head_dim,
-                )
+            compressed_kv = build_csa_pingpong_compressed(
+                "compressor",
+                layer.compressor_kv_buffer,
+                layer.compressor_gate_buffer,
+                self.compressor.position_bias,
+                self.compressor.kv_norm,
+                self.compressor.rotary_emb,
+                self.compressor.head_dim,
+            )
+            indexer_compressed = build_csa_pingpong_compressed(
+                "indexer",
+                layer.indexer_kv_buffer,
+                layer.indexer_gate_buffer,
+                self.compressor.indexer.position_bias,
+                self.compressor.indexer.kv_norm,
+                self.compressor.indexer.rotary_emb,
+                self.compressor.indexer.head_dim,
+            )
             completed_entries = torch.div(position_ids + 1, layer.compression_size, rounding_mode="floor")
             compressed_capacity = compressed_kv.shape[2]
             entry_indices = torch.arange(
@@ -1156,13 +1036,9 @@ class QEffDeepseekV4Cache(Cache):
         "sliding_window_kv",
         "compressor_kv_buffer",
         "compressor_gate_buffer",
-        "compressor_overlap_kv",
-        "compressor_overlap_gate",
         "actual_compressed_kv",
         "indexer_kv_buffer",
         "indexer_gate_buffer",
-        "indexer_overlap_kv",
-        "indexer_overlap_gate",
         "actual_indexer_compressed_kv",
     )
 
@@ -1205,7 +1081,7 @@ class QEffDeepseekV4Cache(Cache):
                 )
             elif layer_type == "compressed_sparse_attention":
                 if len(states) != len(cls._CSA_STATE_NAMES):
-                    raise ValueError("CSA cache layers require eleven retained-state tensors.")
+                    raise ValueError("CSA cache layers require seven retained-state tensors.")
                 ratio = config.compress_rates[layer_type]
                 entry_count = cumulative_length // ratio
                 layers.append(
@@ -1272,18 +1148,15 @@ class QEffDeepseekV4Cache(Cache):
                     )
                 )
                 continue
+            banked = 2 * ratio
             layers.append(
                 (
                     sliding,
-                    torch.zeros(batch_size, 1, ratio, 2 * config.head_dim, **common),
-                    torch.zeros(batch_size, 1, ratio, 2 * config.head_dim, **common),
-                    torch.zeros(batch_size, 1, ratio, config.head_dim, **common),
-                    torch.full((batch_size, 1, ratio, config.head_dim), float("-inf"), **common),
+                    torch.zeros(batch_size, 1, banked, 2 * config.head_dim, **common),
+                    torch.zeros(batch_size, 1, banked, 2 * config.head_dim, **common),
                     torch.zeros(batch_size, 1, capacity, config.head_dim, **common),
-                    torch.zeros(batch_size, 1, ratio, 2 * config.index_head_dim, **common),
-                    torch.zeros(batch_size, 1, ratio, 2 * config.index_head_dim, **common),
-                    torch.zeros(batch_size, 1, ratio, config.index_head_dim, **common),
-                    torch.full((batch_size, 1, ratio, config.index_head_dim), float("-inf"), **common),
+                    torch.zeros(batch_size, 1, banked, 2 * config.index_head_dim, **common),
+                    torch.zeros(batch_size, 1, banked, 2 * config.index_head_dim, **common),
                     torch.zeros(batch_size, 1, capacity, config.index_head_dim, **common),
                 )
             )
