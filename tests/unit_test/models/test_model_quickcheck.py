@@ -206,48 +206,34 @@ def test_deepseek_v4_attention_uses_joint_softmax(layer_type, has_compressed_key
 
 
 @pytest.mark.parametrize(("name", "head_dim"), [("compressor", 8), ("indexer", 4)])
-def test_deepseek_v4_csa_overlap_updates_only_at_window_boundary(name, head_dim):
+def test_deepseek_v4_csa_uses_pingpong_projection_buffers(name, head_dim):
     config = _tiny_deepseek_v4_config()
     legacy_cache = QEffDeepseekV4Cache.get_dummy_cache(config, batch_size=1, ctx_len=8, dtype=torch.float32)
     cache = QEffDeepseekV4Cache.from_legacy_cache(config, legacy_cache, torch.tensor([[0]]))
     layer = cache.layers[2]
     ratio = config.compress_rates["compressed_sparse_attention"]
 
-    torch.manual_seed(0)
-    chunk_kv = torch.randn(1, ratio, 2 * head_dim)
-    chunk_gate = torch.randn_like(chunk_kv)
-    compressed = torch.randn(1, head_dim)
-    entry_positions = torch.tensor([[0]])
-    overlap_kv = getattr(layer, f"{name}_overlap_kv")
-    overlap_gate = getattr(layer, f"{name}_overlap_gate")
-    expected_kv = overlap_kv.clone()
-    expected_gate = overlap_gate.clone()
+    assert getattr(layer, f"{name}_kv_buffer").shape[2] == 2 * ratio
+    for position in range(2 * ratio + 1):
+        projection = torch.full((1, 1, 2 * head_dim), position + 1.0)
+        cache_kwargs = {
+            "position_ids": torch.tensor([[position]]),
+            "context_length": 8,
+            f"{name}_kv": projection,
+            f"{name}_gate": -projection,
+        }
+        layer.update(
+            torch.zeros(1, config.num_key_value_heads, 1, config.head_dim),
+            torch.zeros(1, config.num_key_value_heads, 1, config.head_dim),
+            cache_kwargs,
+        )
 
-    layer.update_csa_compressed_state(
-        name,
-        compressed,
-        chunk_kv,
-        chunk_gate,
-        head_dim,
-        entry_positions,
-        write_mask=torch.tensor([[False]]),
-    )
-
-    torch.testing.assert_close(getattr(layer, f"{name}_overlap_kv"), expected_kv)
-    torch.testing.assert_close(getattr(layer, f"{name}_overlap_gate"), expected_gate)
-
-    layer.update_csa_compressed_state(
-        name,
-        compressed,
-        chunk_kv,
-        chunk_gate,
-        head_dim,
-        entry_positions,
-        write_mask=torch.tensor([[True]]),
-    )
-
-    torch.testing.assert_close(getattr(layer, f"{name}_overlap_kv"), chunk_kv[..., :head_dim].unsqueeze(1))
-    torch.testing.assert_close(getattr(layer, f"{name}_overlap_gate"), chunk_gate[..., :head_dim].unsqueeze(1))
+    expected = torch.arange(1, 2 * ratio + 1, dtype=torch.float32)
+    expected[0] = 2 * ratio + 1
+    actual_kv = getattr(layer, f"{name}_kv_buffer")[0, 0, :, 0]
+    actual_gate = getattr(layer, f"{name}_gate_buffer")[0, 0, :, 0]
+    torch.testing.assert_close(actual_kv, expected)
+    torch.testing.assert_close(actual_gate, -expected)
 
 
 @pytest.mark.llm_model
@@ -265,9 +251,9 @@ def test_deepseek_v4_three_layer_decode_parity():
 
     hf_cache = DynamicCache(config=config)
     qeff_cache = QEffDeepseekV4Cache.get_dummy_cache(config, batch_size=1, ctx_len=8, dtype=torch.float32)
-    assert [len(layer_state) for layer_state in qeff_cache] == [4, 4, 11]
+    assert [len(layer_state) for layer_state in qeff_cache] == [4, 4, 7]
 
-    for position, token_id in enumerate((3, 7, 11, 5)):
+    for position, token_id in enumerate((3, 7, 11, 5, 13, 17)):
         input_ids = torch.tensor([[token_id]])
         position_ids = torch.tensor([[position]])
         with torch.no_grad():
