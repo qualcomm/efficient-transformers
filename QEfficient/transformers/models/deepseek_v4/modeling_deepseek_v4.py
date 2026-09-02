@@ -32,8 +32,27 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
 from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKV as CtxGatherBlockedKVFunc
 from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, CustomRMSNormFunc
-from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+
+
+def _sliding_window_context_indices(
+    position_ids: torch.Tensor,
+    sliding_window: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fixed-width (== sliding_window) context indices ending at the current query's
+    last position, for reading back only the raw sliding window instead of the full
+    ctx_len-wide cache. The window is always the most recent `sliding_window` absolute
+    positions, so no wraparound/modular indexing is needed even though the underlying
+    buffer is allocated at ctx_len width. Returns (context_indices, valid): valid is
+    False for positions before decoding began (only relevant during the first
+    `sliding_window` decode steps).
+    """
+    context_end = position_ids[:, -1:].to(torch.int32).unsqueeze(1) + 1
+    offsets = torch.arange(sliding_window, device=device, dtype=torch.int32).view(1, 1, -1)
+    context_indices = offsets + context_end - sliding_window
+    valid = context_indices >= 0
+    return context_indices, valid
 
 
 class QEffSlidingCacheLayer(CacheLayerMixin):
@@ -121,12 +140,9 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
         self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, position_ids, key_states)
         self.cumulative_length += key_states.shape[2]
 
-        context_length = (cache_kwargs or {}).get("context_length", self.max_cache_len)
-        context_indices = torch.arange(context_length, device=self.device, dtype=torch.int32).view(1, 1, -1)
-        context_end = position_ids[:, -1:].to(torch.int32).unsqueeze(1) + 1
-        context_indices = context_indices + context_end - context_length
+        context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
         context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
-        valid = context_indices >= 0
+        valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
         invalid_index = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
         gathered = CtxGatherBlockedKVFunc.apply(
             self.sliding_window_kv, torch.where(valid, context_indices, invalid_index)
@@ -315,11 +331,9 @@ class QEffHCACacheLayer(CacheLayerMixin):
             context_indices = context_indices.expand(self.max_batch_size, self.sliding_window_kv.shape[1], -1)
             valid = context_indices <= position_ids.max(dim=1, keepdim=True).values.to(torch.int32).unsqueeze(1)
         else:
-            context_indices = torch.arange(context_length, device=self.device, dtype=torch.int32).view(1, 1, -1)
-            context_end = position_ids[:, -1:].to(torch.int32).unsqueeze(1) + 1
-            context_indices = context_indices + context_end - context_length
+            context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
             context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
-            valid = context_indices >= 0
+            valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
         invalid_index = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
         gathered = CtxGatherBlockedKVFunc.apply(
             self.sliding_window_kv,
@@ -615,11 +629,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
             context_indices = context_indices.expand(self.max_batch_size, self.sliding_window_kv.shape[1], -1)
             valid = context_indices <= position_ids.max(dim=1, keepdim=True).values.to(torch.int32).unsqueeze(1)
         else:
-            context_indices = torch.arange(context_length, device=self.device, dtype=torch.int32).view(1, 1, -1)
-            context_end = position_ids[:, -1:].to(torch.int32).unsqueeze(1) + 1
-            context_indices = context_indices + context_end - context_length
+            context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
             context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
-            valid = context_indices >= 0
+            valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
         invalid_index = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
         gathered = CtxGatherBlockedKVFunc.apply(
             self.sliding_window_kv, torch.where(valid, context_indices, invalid_index)
@@ -1345,16 +1357,8 @@ class QEffDeepseekV4Model(DeepseekV4Model):
                 self.config, inputs_embeds.shape[0], ctx_len, inputs_embeds.dtype, inputs_embeds.device
             )
         cache = QEffDeepseekV4Cache.from_legacy_cache(self.config, past_key_values, position_ids)
-        ctx_len = cache.layers[0].max_cache_len
-        physical_position_ids = torch.full_like(position_ids, ctx_len - 1)
-        causal_mask = _create_causal_mask(
-            position_ids=physical_position_ids,
-            target_length=ctx_len,
-            sliding_window=self.config.sliding_window,
-        )
-        cache_indices = torch.arange(ctx_len, device=position_ids.device).view(1, 1, 1, -1)
-        uninitialized_prefix_mask = cache_indices < (ctx_len - position_ids - 1)[:, None, :, None]
-        causal_mask = causal_mask | uninitialized_prefix_mask
+        _, valid = _sliding_window_context_indices(position_ids, self.config.sliding_window, position_ids.device)
+        causal_mask = ~valid.unsqueeze(1)
         hidden_states = inputs_embeds.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
         position_embeddings = {
             "main": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="main"),
