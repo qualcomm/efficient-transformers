@@ -48,6 +48,11 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxScatterFuncCB,
     CtxScatterFuncCB3D,
 )
+from QEfficient.customop.fp8_dequantize import (
+    FP8DequantizeBlockedFunc,
+    FP8DequantizePerAxisFunc,
+    FP8DequantizePerTensorFunc,
+)
 
 # from QEfficient.customop.quantization_ops import CastToUInt4, CastToUInt4Func
 from QEfficient.customop.onnxscript_utils import get_onnxscript_func
@@ -120,11 +125,11 @@ class CustomOpTransform(BaseOnnxTransform):
         "CtxScatterFuncCB": (CtxScatterFuncCB, CtxScatterCB),
         "CtxGatherFuncCB": (CtxGatherFuncCB, CtxGatherCB),
         "CastToUInt4": (CastToUInt4Func, CastToUInt4),
-        "FP8DequantizePerTensorFunc": (FP8DequantizePerTensorFunc, FP8DequantizePerTensor),
-        "FP8DequantizePerAxisFunc": (FP8DequantizePerAxisFunc, FP8DequantizePerAxis),
-        # FP8DequantizeBlockedFunc maps to None: the blocked onnxscript function is
-        # block-size-specific and is injected at export time via
-        # _build_blocked_translation_table(model) in modeling_qeff.py.
+        # FP8 retained-weight ops emit standard DequantizeLinear from their
+        # TorchScript symbolics on the legacy path, so no ONNX function proto is
+        # appended here.
+        "FP8DequantizePerTensorFunc": (FP8DequantizePerTensorFunc, None),
+        "FP8DequantizePerAxisFunc": (FP8DequantizePerAxisFunc, None),
         "FP8DequantizeBlockedFunc": (FP8DequantizeBlockedFunc, None),
     }
 

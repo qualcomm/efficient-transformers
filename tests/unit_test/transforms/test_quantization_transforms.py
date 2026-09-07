@@ -334,17 +334,44 @@ class TestQEFFAutoModelQuantizationIntegration:
 
     def test_image_text_wrappers_include_pack_quantized_int4_transform(self):
         from QEfficient.transformers.models.modeling_auto import (
+            _QEFFAutoModelForImageTextToTextSingleQPC,
             QEffCausalLMForTextImageToTextModel,
             QEffVisionEncoderForTextImageToTextModel,
         )
         from QEfficient.transformers.models.pytorch_transforms import CustomOpsTransform
         from QEfficient.transformers.quantizers.quant_transforms import PackQuantizedInt4ToMatMulNBitsTransform
 
-        for wrapper_cls in [QEffVisionEncoderForTextImageToTextModel, QEffCausalLMForTextImageToTextModel]:
+        for wrapper_cls in [
+            QEffVisionEncoderForTextImageToTextModel,
+            QEffCausalLMForTextImageToTextModel,
+            _QEFFAutoModelForImageTextToTextSingleQPC,
+        ]:
             transforms = wrapper_cls._pytorch_transforms
             pack_idx = transforms.index(PackQuantizedInt4ToMatMulNBitsTransform)
             custom_ops_idx = transforms.index(CustomOpsTransform)
             assert pack_idx < custom_ops_idx
+
+    def test_image_text_wrappers_include_fp8_dequant_transforms(self):
+        from QEfficient.transformers.models.modeling_auto import (
+            _QEFFAutoModelForImageTextToTextSingleQPC,
+            QEffCausalLMForTextImageToTextModel,
+            QEffVisionEncoderForTextImageToTextModel,
+        )
+        from QEfficient.transformers.quantizers.quant_transforms import (
+            FP8BlockWiseDequantLinearToLinearTransform,
+            FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform,
+            FP8DeQuantLinearToLinearTransform,
+        )
+
+        for wrapper_cls in [
+            QEffVisionEncoderForTextImageToTextModel,
+            QEffCausalLMForTextImageToTextModel,
+            _QEFFAutoModelForImageTextToTextSingleQPC,
+        ]:
+            transforms = wrapper_cls._pytorch_transforms
+            assert FP8DeQuantLinearToLinearTransform in transforms
+            assert FP8BlockWiseDequantLinearToLinearTransform in transforms
+            assert FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform in transforms
 
     def test_pack_quantized_int4_transform_matches_compressed_linear_metadata(self, monkeypatch):
         import importlib
