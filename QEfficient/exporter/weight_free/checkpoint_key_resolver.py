@@ -270,6 +270,12 @@ def find_checkpoint_key(
             if key is not None:
                 return key
 
+    if stripped.endswith(".block_sparse_moe.router.weight"):
+        router_layer_key = stripped[: -len(".router.weight")] + ".router.layer.weight"
+        key = _find_checkpoint_key([router_layer_key], checkpoint_index, onnx_name)
+        if key is not None:
+            return key
+
     # 4. Legacy MoE weight aliases (kept for old prepared checkpoints)
     return _find_checkpoint_key(
         [alias for c in candidates for alias in _moe_weight_aliases(c)],

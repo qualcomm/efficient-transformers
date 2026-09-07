@@ -35,6 +35,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 
 from QEfficient.base.checkpoint_transforms import (
     CHECKPOINT_PREPARED_MANIFEST,
+    CHECKPOINT_PREPARED_SENTINEL,
     CheckpointPlan,
     CheckpointTask,
     CheckpointTransformPipeline,
@@ -395,6 +396,7 @@ class TestWeightFreeCheckpointTransforms:
         prepared_weight_map = json.loads((prepared / "model.safetensors.index.json").read_text())["weight_map"]
         prepared_shard = next(iter(set(prepared_weight_map.values())))
         (prepared / prepared_shard).unlink()
+        assert (out / CHECKPOINT_PREPARED_SENTINEL).is_file()
 
         prepared = pipeline.apply(src, out, target_dtype=torch.float32)
 
@@ -1176,6 +1178,16 @@ class TestWeightFreeCheckpointTransforms:
         assert (
             find_checkpoint_key("model.layers.2.block_sparse_moe.moe_weights.down", checkpoint_index, backbone)
             == "model.layers.2.block_sparse_moe.experts.down_proj_t"
+        )
+
+    def test_resolver_accepts_granitemoe_router_layer_alias(self):
+        checkpoint_index = {"model.layers.0.block_sparse_moe.router.layer.weight": "model.safetensors"}
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert (
+            find_checkpoint_key("model.layers.0.block_sparse_moe.router.weight", checkpoint_index, backbone)
+            == "model.layers.0.block_sparse_moe.router.layer.weight"
         )
 
     @pytest.mark.parametrize(
