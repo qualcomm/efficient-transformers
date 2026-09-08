@@ -58,7 +58,7 @@ def gptoss_clamped_glu_mlp(
     W_d: torch.Tensor,
     b_g: torch.Tensor,
     b_u: torch.Tensor,
-    b_d: torch.Tensor,
+    b_d: Optional[torch.Tensor],
     *,
     limit: float,
     alpha: float,
@@ -72,11 +72,14 @@ def gptoss_clamped_glu_mlp(
     b_d = b_d.to(x.dtype)
     gate = (x @ W_g) + b_g.unsqueeze(-2)
     up = (x @ W_u) + b_u.unsqueeze(-2)
-    gate = gptoss_clamp(gate, min_value=torch.finfo(torch.float16).min, max_value=limit)
-    up = gptoss_clamp(up, min_value=-limit, max_value=limit)
+    _fp16_min = torch.tensor(torch.finfo(torch.float16).min, dtype=x.dtype, device=x.device)
+    _limit_t = torch.tensor(limit, dtype=x.dtype, device=x.device)
+    gate = torch.minimum(torch.maximum(gate, _fp16_min), _limit_t)
+    up = torch.minimum(torch.maximum(up, -_limit_t), _limit_t)
     glu = gate * torch.sigmoid(gate * alpha)
     intermediate = (up + 1) * glu
-    return (intermediate @ W_d) + b_d.unsqueeze(-2)
+    out = intermediate @ W_d
+    return out + b_d.unsqueeze(-2) if b_d is not None else out
 
 
 def gptoss_clamp(

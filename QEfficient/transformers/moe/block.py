@@ -60,6 +60,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     experts_per_soc: Optional[int] = None
     tree_reduce: bool = False
     expert_parallel_num_packed_chunks: int = 1
+    expert_intermediate_block_size: Optional[int] = None
     # Set by OptimizedMoEWeightsTransform after model-local canonicalization.
     weights_transformed: bool = False
 
@@ -170,6 +171,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
                 experts_per_soc=getattr(self, "experts_per_soc", None),
                 tree_reduce=getattr(self, "tree_reduce", False),
                 num_packed_chunks=num_packed_chunks,
+                expert_intermediate_block_size=getattr(self, "expert_intermediate_block_size", None),
             )
         if quantized_experts:
             raise NotImplementedError(f"moe flavour {flavour.value!r} is not supported for quantized experts")

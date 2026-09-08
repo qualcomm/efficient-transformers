@@ -94,7 +94,13 @@ def parse_args():
         "--moe-prefill-packed-chunk-size",
         type=int,
         default=256,
-        help="MoE prefill packed chunk size (passed to compiler for MoE models)",
+        help="MoE prefill expert-parallel chunk size (expert_parallel_chunk_size in moe_config).",
+    )
+    parser.add_argument(
+        "--moe-intermediate-block-size",
+        type=int,
+        default=None,
+        help="MoE I-dim block size to reduce VTCM pressure (expert_intermediate_block_size in moe_config). None = no blocking.",
     )
     return parser.parse_args()
 
@@ -135,11 +141,15 @@ def run_chunked_prefill(prefill_session, inputs, num_chunks, prefill_seq_len, nu
 
 
 def run_decode_loop(decode_session, decode_inputs, generation_len, num_hidden_layers):
-    """Autoregressive decode loop. Returns (token array [B, gen_len], elapsed seconds)."""
+    """Autoregressive decode loop. Returns (token array [B, gen_len], elapsed seconds, first_step_seconds)."""
     all_tokens = []
+    t_first = None
     st = time.time()
-    for _ in range(generation_len):
+    for step in range(generation_len):
+        t_step = time.time()
         out = decode_session.run(decode_inputs)
+        if step == 0:
+            t_first = time.time() - t_step
         next_tokens = np.argmax(out["logits"], axis=-1)  # [B, 1]
         all_tokens.append(next_tokens)
         decode_inputs["input_ids"] = next_tokens
@@ -147,7 +157,7 @@ def run_decode_loop(decode_session, decode_inputs, generation_len, num_hidden_la
         for layer in range(num_hidden_layers):
             decode_inputs[f"past_key.{layer}"] = out[f"past_key.{layer}_RetainedState"]
             decode_inputs[f"past_value.{layer}"] = out[f"past_value.{layer}_RetainedState"]
-    return np.concatenate(all_tokens, axis=1), time.time() - st  # [B, gen_len]
+    return np.concatenate(all_tokens, axis=1), time.time() - st, t_first  # [B, gen_len]
 
 
 def build_decode_inputs(qpc_out, inputs, num_hidden_layers, prefill_seq_len):
@@ -208,6 +218,11 @@ def main():
         "num_kv_blocks": 2,
         "num_q_blocks": 2,
         "ctx_len": args.ctx_len,
+        "moe_config": {
+            "expert_parallel_chunk_size": args.moe_prefill_packed_chunk_size,
+            **({"expert_intermediate_block_size": args.moe_intermediate_block_size}
+               if args.moe_intermediate_block_size is not None else {}),
+        },
     }
 
     compile_kwargs = dict(
@@ -242,7 +257,6 @@ def main():
         prefill_only=True,
         enable_chunking=True,
         user_tiled=True,
-        moe_prefill_packed_chunk_size=args.moe_prefill_packed_chunk_size,
         **compile_kwargs,
     )
     print(f"  -> {prefill_qpc_path}")
@@ -265,7 +279,6 @@ def main():
             prefill_only=True,
             enable_chunking=True,
             aic_enable_depth_first=True,
-            moe_prefill_packed_chunk_size=args.moe_prefill_packed_chunk_size,
             **compile_kwargs,
         )
         print(f"  -> decode:  {baseline_decode_qpc}")
@@ -290,7 +303,8 @@ def main():
     decode_inputs = build_decode_inputs(qpc_out, inputs, num_hidden_layers, args.prefill_seq_len)
     first_token_ids = decode_inputs["input_ids"].copy()  # [B, 1], save before decode modifies it
     print(f"\n--- Blocked head-par decode ({generation_len} tokens) ---")
-    tokens, t_decode = run_decode_loop(decode_session, decode_inputs, generation_len, num_hidden_layers)
+    tokens, t_decode, t_first_decode = run_decode_loop(decode_session, decode_inputs, generation_len, num_hidden_layers)
+    t_ttft = t_prefill + t_first_decode
     # tokens: [B, gen_len]; prepend first token from prefill to get full generated sequence
     blocked_texts = [tokenizer.decode(list(first_token_ids[b]) + list(tokens[b])) for b in range(args.full_batch_size)]
 
@@ -312,9 +326,10 @@ def main():
         decode_inputs_bl = build_decode_inputs(qpc_out_bl, inputs_bl, num_hidden_layers, args.prefill_seq_len)
         first_token_ids_bl = decode_inputs_bl["input_ids"].copy()
         print(f"\n--- Baseline decode ({generation_len} tokens) ---")
-        tokens_bl, t_baseline_decode = run_decode_loop(
+        tokens_bl, t_baseline_decode, t_first_decode_bl = run_decode_loop(
             baseline_decode_session, decode_inputs_bl, generation_len, num_hidden_layers
         )
+        t_ttft_bl = t_baseline_prefill + t_first_decode_bl
         baseline_texts = [
             tokenizer.decode(list(first_token_ids_bl[b]) + list(tokens_bl[b])) for b in range(args.full_batch_size)
         ]
@@ -322,16 +337,17 @@ def main():
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 70)
     print(f"Prompt: {args.prompt}\n")
-    print(f"[Blocked head-par]  prefill {t_prefill:.3f}s | decode {generation_len / t_decode:.1f} tok/s")
+    print(f"[Blocked head-par]  prefill {t_prefill:.3f}s | TTFT {t_ttft:.3f}s | decode {generation_len / t_decode:.1f} tok/s")
     for b, text in enumerate(blocked_texts):
         print(f"Output[{b}]: {text}")
     if args.compare_non_blocked:
         print(
-            f"\n[Baseline]          prefill {t_baseline_prefill:.3f}s | decode {generation_len / t_baseline_decode:.1f} tok/s"
+            f"\n[Baseline]          prefill {t_baseline_prefill:.3f}s | TTFT {t_ttft_bl:.3f}s | decode {generation_len / t_baseline_decode:.1f} tok/s"
         )
         for b, text in enumerate(baseline_texts):
             print(f"Output[{b}]: {text}")
         print(f"\nPrefill speedup: {t_baseline_prefill / t_prefill:.2f}x")
+        print(f"TTFT    speedup: {t_ttft_bl / t_ttft:.2f}x")
         print(f"Decode  speedup: {(generation_len / t_decode) / (generation_len / t_baseline_decode):.2f}x")
     print("=" * 70)
 

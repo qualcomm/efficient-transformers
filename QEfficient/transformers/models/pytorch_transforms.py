@@ -1849,6 +1849,15 @@ class OptimizedMoEExportConfigTransform(PytorchTransform):
                 module.tree_reduce = tree_reduce
                 module.expert_parallel_num_packed_chunks = num_packed_chunks
                 module.expert_blocking_packed_chunk_size = expert_parallel_chunk_size
+                expert_intermediate_block_size = moe_config.get("expert_intermediate_block_size", None)
+                if expert_intermediate_block_size is not None:
+                    expert_intermediate_block_size = int(expert_intermediate_block_size)
+                    if expert_intermediate_block_size <= 0:
+                        raise ValueError(
+                            f"moe_config['expert_intermediate_block_size'] must be a positive integer, "
+                            f"got {expert_intermediate_block_size}"
+                        )
+                module.expert_intermediate_block_size = expert_intermediate_block_size
             transformed = True
 
         if uses_expert_parallel and compile_num_tokens % expert_parallel_chunk_size != 0:

@@ -5,8 +5,8 @@
 
 # Prefill-only model
 ## Blocking default behviour when `prefill_only=True` in compile API
- - NUM_Q_BLOCKS=<int> set number of Q blocks in attention 
- - NUM_FFN_BLOCKS=<int> set number of blocks in FFN
+ - NUM_Q_BLOCKS=<int> set number of Q blocks in attention
+ - NUM_FFN_BLOCKS=<int> set number of token blocks in the MoE FFN expert loop; overrides the configured MoE flavour and always runs token-blocked simple-loop
  - ENABLE_OPT_SWA="0" or "1" to enable/disable optimized SWA. when enabled we will be using only valid KVs for given block in Attention reducing MACs
  - prefix_caching is not supported with this mode
 
