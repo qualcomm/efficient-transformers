@@ -27,8 +27,14 @@ from QEfficient.utils import constants
 
 MODEL_ID = "Qwen/Qwen3.8-2.4T-A95B"
 RANDOM_SEED = 42
+SYNTHETIC_TINY_DTYPE = torch.bfloat16
 
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
+
+def _set_model_dtype_config(qeff_model, dtype: torch.dtype) -> None:
+    qeff_model.model.config.dtype = dtype
+    qeff_model.model.config.torch_dtype = dtype
 
 
 def _tiny_qwen3_5_moe_text_config() -> Qwen3_5MoeTextConfig:
@@ -50,7 +56,13 @@ def _tiny_qwen3_5_moe_text_config() -> Qwen3_5MoeTextConfig:
         num_experts=2,
         num_experts_per_tok=1,
         max_position_embeddings=128,
-        dtype="float32",
+        rope_parameters={
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.25,
+            "rope_type": "default",
+            "mrope_section": [2, 1, 1],
+        },
+        dtype=SYNTHETIC_TINY_DTYPE,
     )
 
 
@@ -70,7 +82,7 @@ def _ensure_synthetic_tiny_checkpoint(config: Qwen3_5MoeTextConfig, checkpoint_d
         return checkpoint_dir
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    hf_model = Qwen3_5MoeForCausalLM(config).eval()
+    hf_model = Qwen3_5MoeForCausalLM(config).eval().to(SYNTHETIC_TINY_DTYPE)
     hf_model.save_pretrained(checkpoint_dir, safe_serialization=True)
     return checkpoint_dir
 
@@ -88,12 +100,14 @@ def _load_qeff_model(args):
                 str(checkpoint_dir),
                 config=config,
                 weight_free=True,
+                dtype=SYNTHETIC_TINY_DTYPE,
                 trust_remote_code=True,
             )
+            _set_model_dtype_config(qeff_model, SYNTHETIC_TINY_DTYPE)
             qeff_model.model.eval()
             return qeff_model, None
 
-        hf_model = Qwen3_5MoeForCausalLM(config).eval()
+        hf_model = Qwen3_5MoeForCausalLM(config).eval().to(SYNTHETIC_TINY_DTYPE)
         return QEFFAutoModelForCausalLM(hf_model), None
 
     if args.model_name == MODEL_ID and not args.weight_free and not args.allow_full_weight_load:
@@ -108,12 +122,20 @@ def _load_qeff_model(args):
         if hasattr(config, "layer_types"):
             config.layer_types = config.layer_types[: args.num_hidden_layers]
 
+    load_kwargs = {
+        "config": config,
+        "weight_free": args.weight_free,
+        "trust_remote_code": True,
+    }
+    if getattr(config, "dtype", None) is not None:
+        load_kwargs["dtype"] = config.dtype
+
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
         args.model_name,
-        config=config,
-        weight_free=args.weight_free,
-        trust_remote_code=True,
+        **load_kwargs,
     )
+    if args.weight_free and getattr(config, "dtype", None) is not None:
+        _set_model_dtype_config(qeff_model, config.dtype)
     qeff_model.model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     return qeff_model, tokenizer
@@ -136,6 +158,19 @@ def main():
     parser.add_argument("--use-onnx-subfunctions", action="store_true", help="Export decoder layers as ONNX functions")
     parser.add_argument("--compile", action="store_true", help="Compile after export")
     parser.add_argument(
+        "--blocking-mode",
+        choices=("kv", "kv_headpar"),
+        default=None,
+        help="Decode attention blocking mode. Start with kv before trying kv_headpar.",
+    )
+    parser.add_argument("--num-kv-blocks", type=int, default=2, help="Number of KV blocks for decode blocking")
+    parser.add_argument(
+        "--headpar-split",
+        type=int,
+        default=None,
+        help="Head-parallel split factor for --blocking-mode kv_headpar",
+    )
+    parser.add_argument(
         "--synthetic-checkpoint-dir",
         type=Path,
         default=None,
@@ -149,6 +184,15 @@ def main():
     args = parser.parse_args()
 
     qeff_model, tokenizer = _load_qeff_model(args)
+    qaic_config = None
+    if args.blocking_mode is not None:
+        qaic_config = {
+            "blocking_mode": args.blocking_mode,
+            "num_kv_blocks": args.num_kv_blocks,
+            "ctx_len": args.ctx_len,
+        }
+        if args.blocking_mode == "kv_headpar" and args.headpar_split is not None:
+            qaic_config["headpar_split"] = args.headpar_split
 
     if args.compile:
         qpc_path = qeff_model.compile(
@@ -159,6 +203,7 @@ def main():
             num_devices=args.num_devices,
             dynamo=True,
             use_onnx_subfunctions=args.use_onnx_subfunctions,
+            qaic_config=qaic_config,
         )
         print(f"Compiled decode QPC: {qpc_path}")
         return
