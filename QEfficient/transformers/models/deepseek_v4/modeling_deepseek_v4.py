@@ -29,10 +29,14 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4UnweightedRMSNorm,
 )
 
-from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKV as CtxGatherBlockedKVFunc
-from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc
+from QEfficient.customop import ctx_gather_blocked_kv, ctx_scatter
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, CustomRMSNormFunc
+from QEfficient.customop.utils import select_interface
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+
+
+def _is_export_capture() -> bool:
+    return torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
 
 def _sliding_window_context_indices(
@@ -124,7 +128,7 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
             raise ValueError("KV update batch/head dimensions do not match the allocated cache.")
         if key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
             raise ValueError("KV update head_dim does not match the allocated cache.")
-        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if not (_is_export_capture()):
             expected = position_ids[:, :1] + torch.arange(
                 position_ids.shape[1], device=position_ids.device, dtype=position_ids.dtype
             )
@@ -137,16 +141,14 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
                 position_ids.min().item() < 0 or position_ids.max().item() >= self.max_cache_len
             ):
                 raise ValueError("position_ids exceed the allocated QEff sliding cache capacity.")
-        self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, position_ids, key_states)
+        self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, position_ids, key_states)
         self.cumulative_length += key_states.shape[2]
 
         context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
         context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
         valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
-        invalid_index = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
-        gathered = CtxGatherBlockedKVFunc.apply(
-            self.sliding_window_kv, torch.where(valid, context_indices, invalid_index)
-        )
+        invalid_index = torch.iinfo(torch.int32).max if _is_export_capture() else 0
+        gathered = ctx_gather_blocked_kv(self.sliding_window_kv, torch.where(valid, context_indices, invalid_index))
         gathered = torch.where(valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
         return gathered, gathered
 
@@ -285,7 +287,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
             raise ValueError("KV update batch/head dimensions do not match the allocated cache.")
         if key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
             raise ValueError("KV update head_dim does not match the allocated cache.")
-        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if not (_is_export_capture()):
             expected = position_ids[:, :1] + torch.arange(
                 position_ids.shape[1], device=position_ids.device, dtype=position_ids.dtype
             )
@@ -302,7 +304,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
         self._previous_length = self.cumulative_length
         self._last_position_ids = position_ids
         scatter_positions = position_ids
-        self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, scatter_positions, key_states)
+        self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
         projected_kv = cache_kwargs.get("compressor_kv")
@@ -314,12 +316,12 @@ class QEffHCACacheLayer(CacheLayerMixin):
             if tuple(projected_kv.shape) != expected_shape or projected_gate.shape != projected_kv.shape:
                 raise ValueError(f"Decode-only compressor projections must both have shape {expected_shape}.")
             buffer_positions = torch.remainder(position_ids, self.compression_size)
-            self.compressor_kv_buffer = CtxScatterFunc.apply(
+            self.compressor_kv_buffer = ctx_scatter(
                 self.compressor_kv_buffer,
                 buffer_positions,
                 projected_kv.unsqueeze(1),
             )
-            self.compressor_gate_buffer = CtxScatterFunc.apply(
+            self.compressor_gate_buffer = ctx_scatter(
                 self.compressor_gate_buffer,
                 buffer_positions,
                 projected_gate.unsqueeze(1),
@@ -334,8 +336,8 @@ class QEffHCACacheLayer(CacheLayerMixin):
             context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
             context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
             valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
-        invalid_index = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
-        gathered = CtxGatherBlockedKVFunc.apply(
+        invalid_index = torch.iinfo(torch.int32).max if _is_export_capture() else 0
+        gathered = ctx_gather_blocked_kv(
             self.sliding_window_kv,
             torch.where(valid, context_indices, invalid_index),
         )
@@ -374,12 +376,12 @@ class QEffHCACacheLayer(CacheLayerMixin):
                 .unsqueeze(0)
                 .expand(self.max_batch_size, -1)
             )
-            self.compressor_kv_buffer = CtxScatterFunc.apply(
+            self.compressor_kv_buffer = ctx_scatter(
                 self.compressor_kv_buffer,
                 buffer_positions,
                 remainder_kv.unsqueeze(1),
             )
-            self.compressor_gate_buffer = CtxScatterFunc.apply(
+            self.compressor_gate_buffer = ctx_scatter(
                 self.compressor_gate_buffer,
                 buffer_positions,
                 remainder_gate.unsqueeze(1),
@@ -404,12 +406,12 @@ class QEffHCACacheLayer(CacheLayerMixin):
                 raise ValueError("Decode-only compressed updates require one entry position per batch row.")
             if write_mask is None or write_mask.shape != entry_positions.shape:
                 raise ValueError("Decode-only compressed updates require a matching write_mask.")
-            self.actual_compressed_kv = CtxScatterFunc.apply(
+            self.actual_compressed_kv = ctx_scatter(
                 self.actual_compressed_kv,
                 entry_positions,
                 compressed.unsqueeze(1),
             )
-            if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+            if not (_is_export_capture()):
                 completed = entry_positions[write_mask.to(torch.bool)]
                 if completed.numel():
                     self.compressor_entry_count = max(
@@ -433,7 +435,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
                 .unsqueeze(0)
                 .expand(self.max_batch_size, -1)
             )
-            self.actual_compressed_kv = CtxScatterFunc.apply(
+            self.actual_compressed_kv = ctx_scatter(
                 self.actual_compressed_kv,
                 entry_positions,
                 compressed.unsqueeze(1),
@@ -575,7 +577,7 @@ class QEffCSACacheLayer(CacheLayerMixin):
             raise ValueError("KV update batch/head dimensions do not match the allocated cache.")
         if key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
             raise ValueError("KV update head_dim does not match the allocated cache.")
-        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if not (_is_export_capture()):
             expected = position_ids[:, :1] + torch.arange(
                 position_ids.shape[1], device=position_ids.device, dtype=position_ids.dtype
             )
@@ -590,7 +592,7 @@ class QEffCSACacheLayer(CacheLayerMixin):
                 raise ValueError("position_ids exceed the allocated QEff CSA cache capacity.")
 
         scatter_positions = position_ids
-        self.sliding_window_kv = CtxScatterFunc.apply(self.sliding_window_kv, scatter_positions, key_states)
+        self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
         entry_positions = torch.div(position_ids, self.compression_size, rounding_mode="floor")
@@ -613,14 +615,12 @@ class QEffCSACacheLayer(CacheLayerMixin):
             setattr(
                 self,
                 f"{prefix}_kv_buffer",
-                CtxScatterFunc.apply(getattr(self, f"{prefix}_kv_buffer"), buffer_positions, projected_kv.unsqueeze(1)),
+                ctx_scatter(getattr(self, f"{prefix}_kv_buffer"), buffer_positions, projected_kv.unsqueeze(1)),
             )
             setattr(
                 self,
                 f"{prefix}_gate_buffer",
-                CtxScatterFunc.apply(
-                    getattr(self, f"{prefix}_gate_buffer"), buffer_positions, projected_gate.unsqueeze(1)
-                ),
+                ctx_scatter(getattr(self, f"{prefix}_gate_buffer"), buffer_positions, projected_gate.unsqueeze(1)),
             )
 
         context_length = cache_kwargs.get("context_length")
@@ -632,10 +632,8 @@ class QEffCSACacheLayer(CacheLayerMixin):
             context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
             context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
             valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
-        invalid_index = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
-        gathered = CtxGatherBlockedKVFunc.apply(
-            self.sliding_window_kv, torch.where(valid, context_indices, invalid_index)
-        )
+        invalid_index = torch.iinfo(torch.int32).max if _is_export_capture() else 0
+        gathered = ctx_gather_blocked_kv(self.sliding_window_kv, torch.where(valid, context_indices, invalid_index))
         gathered = torch.where(valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
         return gathered, gathered
 
@@ -657,13 +655,13 @@ class QEffCSACacheLayer(CacheLayerMixin):
         setattr(
             self,
             compressed_attr,
-            CtxScatterFunc.apply(
+            ctx_scatter(
                 getattr(self, compressed_attr),
                 entry_positions,
                 compressed.unsqueeze(1).unsqueeze(1),
             ),
         )
-        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
+        if not (_is_export_capture()):
             completed = entry_positions[write_mask.to(torch.bool)]
             if completed.numel():
                 setattr(self, count_attr, max(getattr(self, count_attr), int(completed.max().item()) + 1))
@@ -932,10 +930,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 slot_offsets = torch.arange(ratio, device=position_ids.device, dtype=torch.int32).unsqueeze(0)
                 current_positions = current_bank.to(torch.int32) * ratio + slot_offsets
                 previous_positions = previous_bank.to(torch.int32) * ratio + slot_offsets
-                current_kv = CtxGatherBlockedKVFunc.apply(kv_buffer, current_positions.unsqueeze(1))[:, 0]
-                current_gate = CtxGatherBlockedKVFunc.apply(gate_buffer, current_positions.unsqueeze(1))[:, 0]
-                previous_kv = CtxGatherBlockedKVFunc.apply(kv_buffer, previous_positions.unsqueeze(1))[:, 0]
-                previous_gate = CtxGatherBlockedKVFunc.apply(gate_buffer, previous_positions.unsqueeze(1))[:, 0]
+                current_kv = ctx_gather_blocked_kv(kv_buffer, current_positions.unsqueeze(1))[:, 0]
+                current_gate = ctx_gather_blocked_kv(gate_buffer, current_positions.unsqueeze(1))[:, 0]
+                previous_kv = ctx_gather_blocked_kv(kv_buffer, previous_positions.unsqueeze(1))[:, 0]
+                previous_gate = ctx_gather_blocked_kv(gate_buffer, previous_positions.unsqueeze(1))[:, 0]
                 bias = position_bias.view(1, ratio, 2 * head_dim)
                 current_gate = current_gate + bias
                 previous_gate = previous_gate + bias
@@ -1013,7 +1011,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             top_k_indices = index_scores.topk(top_k, dim=-1).indices
             valid = top_k_indices < completed_entries.unsqueeze(-1)
             safe_indices = torch.where(valid, top_k_indices, torch.zeros_like(top_k_indices)).to(torch.int32)
-            compressed_kv = CtxGatherBlockedKVFunc.apply(compressed_kv, safe_indices[:, 0].unsqueeze(1))
+            compressed_kv = ctx_gather_blocked_kv(compressed_kv, safe_indices[:, 0].unsqueeze(1))
             block_bias = ~valid[:, None, :, :]
         elif self.compressor is not None:
             compressed_kv, block_bias = self.compressor(
@@ -1059,7 +1057,7 @@ class QEffDeepseekV4Cache(Cache):
 
     @staticmethod
     def _position(position_ids: torch.Tensor) -> int:
-        if torch.onnx.is_in_onnx_export() or torch.jit.is_tracing():
+        if _is_export_capture():
             return 0
         return int(position_ids[:, 0].min().item())
 
@@ -1222,7 +1220,7 @@ class QEffDeepseekV4RMSNorm(CustomRMSNormAIC):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
-        normalized = CustomRMSNormFunc.apply(
+        normalized = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(
             hidden_states.float(),
             self.weight.float(),
             self.variance_epsilon,
@@ -1236,7 +1234,9 @@ class QEffDeepseekV4UnweightedRMSNorm(DeepseekV4UnweightedRMSNorm):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         unit_weight = hidden_states.new_ones(hidden_states.shape[-1], dtype=torch.float32)
-        normalized = CustomRMSNormFunc.apply(hidden_states.float(), unit_weight, self.eps)
+        normalized = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(
+            hidden_states.float(), unit_weight, self.eps
+        )
         return normalized.to(input_dtype)
 
 
