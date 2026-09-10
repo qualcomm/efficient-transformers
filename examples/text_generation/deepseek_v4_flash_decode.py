@@ -10,6 +10,7 @@
 import argparse
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
 
 import onnx
@@ -20,7 +21,7 @@ from QEfficient import QEFFAutoModelForCausalLM
 
 DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
-DEFAULT_ARTIFACT_ROOT = "/home/ochougul/qeff_oc/qeff_artifacts/deepseek_v4_flash_full_decode"
+DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
 PREFILL_PROMPT = "<replace with the prefill prompt>"
 
 GATE_PREFIX_OUTPUTS = (
@@ -68,6 +69,10 @@ def generate_npi_file(onnx_path: Path, artifact_root: Path, num_hidden_layers: i
     model = onnx.load(onnx_path, load_external_data=False)
     graph_outputs = [output for node in model.graph.node for output in node.output]
     graph_output_set = set(graph_outputs)
+
+    if not any(output.startswith("/model/layers.") for output in graph_outputs):
+        return generate_dynamo_npi_file(model, artifact_root, num_hidden_layers)
+
     fp32_outputs = []
 
     for layer_idx in range(num_hidden_layers):
@@ -116,6 +121,108 @@ def generate_npi_file(onnx_path: Path, artifact_root: Path, num_hidden_layers: i
         raise ValueError(f"Cannot generate NPI; missing ONNX head outputs: {missing_heads}")
     fp32_outputs.extend(targeted_heads)
 
+    npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
+    npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
+    npi_path.write_text(npi_contents, encoding="utf-8")
+    return npi_path
+
+
+def generate_dynamo_npi_file(model: onnx.ModelProto, artifact_root: Path, num_hidden_layers: int) -> Path:
+    """Generate the NPI file for Dynamo ONNX exports.
+
+    Dynamo does not preserve module paths in intermediate tensor names. It does retain qualified initializer names,
+    so identify the module-owned graph regions from those initializers instead of relying on tensor name prefixes.
+    """
+    parameter_consumers: dict[str, list[int]] = defaultdict(list)
+    tensor_consumers: dict[str, list[int]] = defaultdict(list)
+    for node_idx, node in enumerate(model.graph.node):
+        for node_input in node.input:
+            tensor_consumers[node_input].append(node_idx)
+    for initializer in model.graph.initializer:
+        parameter_consumers[initializer.name] = tensor_consumers[initializer.name]
+
+    def require_consumer(parameter_name: str) -> int:
+        consumer_indices = parameter_consumers[parameter_name]
+        if not consumer_indices:
+            raise ValueError(f"Cannot generate Dynamo NPI; missing consumer for parameter {parameter_name}.")
+        return min(consumer_indices)
+
+    def add_outputs(output_indices: list[int], start_idx: int, stop_idx: int) -> None:
+        if start_idx >= stop_idx:
+            raise ValueError(f"Cannot generate Dynamo NPI; invalid node range [{start_idx}, {stop_idx}).")
+        for node in model.graph.node[start_idx:stop_idx]:
+            output_indices.extend(node.output)
+
+    def add_linear_outputs(output_indices: list[int], parameter_name: str) -> None:
+        for consumer_idx in parameter_consumers[parameter_name]:
+            consumer = model.graph.node[consumer_idx]
+            if consumer.op_type in {"Gemm", "MatMul"}:
+                output_indices.extend(consumer.output)
+                continue
+
+            for parameter_output in consumer.output:
+                for next_idx in tensor_consumers[parameter_output]:
+                    next_node = model.graph.node[next_idx]
+                    if next_node.op_type in {"Gemm", "MatMul"}:
+                        output_indices.extend(next_node.output)
+
+    fp32_outputs = []
+    for layer_idx in range(num_hidden_layers):
+        layer_prefix = f"model.layers.{layer_idx}"
+        ffn_parameters = [
+            f"{layer_prefix}.ffn_hc.fn",
+            f"{layer_prefix}.ffn_hc.base",
+            f"{layer_prefix}.ffn_hc.scale",
+        ]
+        ffn_start = min(require_consumer(parameter_name) for parameter_name in ffn_parameters)
+        post_layernorm_parameter = f"{layer_prefix}.post_attention_layernorm.weight"
+        post_layernorm_idx = require_consumer(post_layernorm_parameter)
+        add_outputs(fp32_outputs, ffn_start, post_layernorm_idx)
+        fp32_outputs.extend(model.graph.node[post_layernorm_idx].output)
+
+        gate_parameter = f"{layer_prefix}.mlp.gate.weight"
+        gate_start = require_consumer(gate_parameter)
+        expert_parameters = (
+            f"{layer_prefix}.mlp.experts.gate_proj",
+            f"{layer_prefix}.mlp.experts.up_proj",
+            f"{layer_prefix}.mlp.experts.down_proj",
+            f"{layer_prefix}.mlp.shared_experts.gate_proj.weight",
+            f"{layer_prefix}.mlp.shared_experts.up_proj.weight",
+            f"{layer_prefix}.mlp.shared_experts.down_proj.weight",
+        )
+        expert_start = min(
+            require_consumer(parameter_name)
+            for parameter_name in expert_parameters
+            if parameter_consumers[parameter_name]
+        )
+        add_outputs(fp32_outputs, gate_start, expert_start)
+
+        add_linear_outputs(fp32_outputs, f"{layer_prefix}.attn_hc.fn")
+        if num_hidden_layers <= 4:
+            add_linear_outputs(fp32_outputs, f"{layer_prefix}.mlp.experts.down_proj")
+            add_linear_outputs(fp32_outputs, f"{layer_prefix}.mlp.shared_experts.down_proj.weight")
+
+        attention_parameters = (
+            f"{layer_prefix}.self_attn.kv_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.kv_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.kv_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.gate_proj.weight",
+            f"{layer_prefix}.self_attn.q_b_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.q_b_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.scorer.weights_proj.weight",
+        )
+        for parameter_name in attention_parameters:
+            if parameter_consumers[parameter_name]:
+                add_linear_outputs(fp32_outputs, parameter_name)
+
+    add_linear_outputs(fp32_outputs, "model.hc_head.hc_fn")
+    if num_hidden_layers <= 4:
+        add_linear_outputs(fp32_outputs, "lm_head.weight")
+
+    if not fp32_outputs:
+        raise ValueError(f"Cannot generate Dynamo NPI; no FP32 outputs were found in {model.graph.name}.")
+
+    fp32_outputs = list(dict.fromkeys(fp32_outputs))
     npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
     npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
     npi_path.write_text(npi_contents, encoding="utf-8")
@@ -198,6 +305,7 @@ def main() -> None:
             prefill_only=False,
             use_onnx_subfunctions=False,
             offload_pt_weights=True,
+            dynamo=True,
         )
     )
     print(f"ONNX_PATH={onnx_path}")
@@ -225,6 +333,7 @@ def main() -> None:
             mxint8_kv_cache=False,
             mxfp6_matmul=True,
             node_precision_info=str(npi_path),
+            dynamo=True,
         )
     )
     print(f"QPC_PATH={qpc_path}")
