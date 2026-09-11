@@ -159,7 +159,11 @@ def _load_qeff_model(args):
             "Use the default weight-free path, or pass --synthetic-tiny for regular tiny-model validation."
         )
 
-    config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
+    from_pretrained_kwargs = {"trust_remote_code": True}
+    if args.cache_dir is not None:
+        from_pretrained_kwargs["cache_dir"] = str(args.cache_dir)
+
+    config = AutoConfig.from_pretrained(args.model_name, **from_pretrained_kwargs)
     if args.num_hidden_layers > 0:
         config.num_hidden_layers = args.num_hidden_layers
         if hasattr(config, "layer_types"):
@@ -168,7 +172,7 @@ def _load_qeff_model(args):
     load_kwargs = {
         "config": config,
         "weight_free": args.weight_free,
-        "trust_remote_code": True,
+        **from_pretrained_kwargs,
     }
     if getattr(config, "dtype", None) is not None:
         load_kwargs["dtype"] = config.dtype
@@ -180,7 +184,7 @@ def _load_qeff_model(args):
     if args.weight_free and getattr(config, "dtype", None) is not None:
         _set_model_dtype_config(qeff_model, config.dtype)
     qeff_model.model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, **from_pretrained_kwargs)
     return qeff_model, tokenizer
 
 
@@ -190,6 +194,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model-name", type=str, default=MODEL_ID, help="Hugging Face model ID or local path")
+    parser.add_argument("--cache-dir", type=Path, default=None, help="Hugging Face cache directory for downloaded files")
     parser.add_argument("--compile-dir", type=Path, default=None, help="Optional QPC compile directory")
     parser.add_argument("--prompt", type=str, default=DEFAULT_PROMPT, help="Input prompt for generation")
     parser.add_argument("--batch-size", type=int, default=1, help="Prompt batch size")
