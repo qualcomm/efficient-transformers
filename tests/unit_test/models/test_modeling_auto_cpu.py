@@ -64,6 +64,8 @@ VOCAB_SIZE = 500
 CTX_LEN = 32
 SEQ_LEN = 8
 UNSUPPORTED_WEIGHT_FREE_WARNING = "weight_free=True is only supported for QEFFAutoModelForCausalLM"
+UNSUPPORTED_WEIGHT_FREE_DISAGG_COMPILE = "weight_free=True is not supported with disaggregated prefill compile"
+
 
 # ---------------------------------------------------------------------------
 # Tiny model factories
@@ -542,10 +544,26 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
             qeff.compile(prefill_seq_len=32, ctx_len=128, prefill_only="yes")
 
     @pytest.mark.parametrize(
+        "compile_kwargs",
+        [
+            pytest.param({"prefill_only": True, "prefill_seq_len": 32}, id="prefill-only"),
+        ],
+    )
+    def test_weight_free_compile_rejects_disaggregated_modes(self, compile_kwargs):
+        """weight_free=True rejects disaggregated prefill compile mode."""
+        model, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model, weight_free=True)
+
+        with pytest.raises(NotImplementedError, match=UNSUPPORTED_WEIGHT_FREE_DISAGG_COMPILE):
+            qeff.compile(ctx_len=128, **compile_kwargs)
+
+    @pytest.mark.parametrize(
         ("compile_kwargs", "expected_graph_names"),
         [
             pytest.param({"prefill_seq_len": 32}, ["Prefill", "Decode"], id="combined"),
             pytest.param({"prefill_only": False, "prefill_seq_len": 32}, ["Decode"], id="explicit-decode-nonunit"),
+            pytest.param({"prefill_seq_len": 1}, ["Prefill"], id="implicit-unit-decode"),
+            pytest.param({"prefill_only": False, "prefill_seq_len": 1}, ["Decode"], id="explicit-unit-decode"),
         ],
     )
     def test_weight_free_compile_allows_supported_modes(
