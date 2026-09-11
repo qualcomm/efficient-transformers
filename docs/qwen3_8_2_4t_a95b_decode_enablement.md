@@ -124,7 +124,7 @@
   `.qeff/qwen3_8_decode_kv_pass3/Qwen3_5MoeForCausalLM/Qwen3_5MoeForCausalLM-7adb8e13876cb07f/Qwen3_5MoeForCausalLM.onnx`
   with a `weight_spec.json` containing 76 external weight inputs.
 - Validation run:
-  `python examples/dynamo/causal_lm/qwen3_8_2_4t_a95b_decode_dynamo.py --synthetic-tiny --weight-free --compile --ctx-len 128 --num-cores 4 --num-devices 1 --blocking-mode kv --num-kv-blocks 2 --compile-dir .qeff/qwen3_8_decode_kv_pass3/synthetic_tiny_weight_free_compile_kv_bf16`.
+  `python examples/dynamo/causal_lm/qwen3_8_2_4t_a95b_decode_dynamo.py --synthetic-tiny --weight-free --ctx-len 128 --num-cores 4 --num-devices 1 --blocking-mode kv --num-kv-blocks 2 --compile-dir .qeff/qwen3_8_decode_kv_pass3/synthetic_tiny_weight_free_compile_kv_bf16`.
 - Additional checks passed: `git diff --check`, `python -m ruff check ...`, `python -m pytest -q tests/weight_free/test_transforms.py`,
   and `python -m pytest -q tests/unit_test/models/test_model_quickcheck.py -k "qwen3_5_moe"`.
 - Confirm target weight-free export resolves fused MoE checkpoint keys to QEff `moe_weights` keys

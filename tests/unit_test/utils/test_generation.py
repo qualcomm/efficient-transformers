@@ -61,6 +61,7 @@ def _make_mock_session(
     full_batch_size=None,
     include_sampler=False,
     force_seq_len=None,
+    position_ids_shape=None,
 ):
     """
     Build a MagicMock that mimics QAICInferenceSession well enough for
@@ -81,7 +82,7 @@ def _make_mock_session(
     # Build bindings list
     bindings = [
         _binding("input_ids", [batch_size, prefill_seq_len], "input"),
-        _binding("position_ids", [batch_size, prefill_seq_len], "input"),
+        _binding("position_ids", position_ids_shape or [batch_size, prefill_seq_len], "input"),
         _binding("logits", [batch_size, prefill_seq_len, vocab_size], "output"),
     ]
     if full_batch_size is not None:
@@ -128,6 +129,7 @@ def _make_base_instance(
     batch_size=BATCH_SIZE,
     ctx_len=CTX_LEN,
     full_batch_size=None,
+    position_ids_shape=None,
 ):
     """
     Construct a QEffTextGenerationBase with a mocked session.
@@ -140,6 +142,7 @@ def _make_base_instance(
         batch_size=batch_size,
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
+        position_ids_shape=position_ids_shape,
     )
 
     with patch(
@@ -572,6 +575,16 @@ class TestPrepareDecodeInputs:
         decode_inputs = obj.prepare_decode_inputs()
         assert decode_inputs["position_ids"].shape == (2, 1)
 
+    def test_qwen_style_position_ids_shape_includes_position_sections(self):
+        obj, _, _ = _make_base_instance(batch_size=2, position_ids_shape=[4, 2, PREFILL_LEN])
+        obj.initialize_decode_inputs(2, 2, 10)
+        obj.decode_pos_ids[:] = PREFILL_LEN
+        decode_inputs = obj.prepare_decode_inputs()
+        assert decode_inputs["input_ids"].shape == (2, PREFILL_LEN)
+        assert decode_inputs["position_ids"].shape == (4, 2, PREFILL_LEN)
+        assert np.all(decode_inputs["position_ids"][..., 0] == PREFILL_LEN)
+        assert np.all(decode_inputs["position_ids"][..., 1:] == -1)
+
     def test_no_batch_index_without_full_batch_size(self):
         obj, _, _ = _make_base_instance()
         obj.initialize_decode_inputs(1, 1, 10)
@@ -715,6 +728,13 @@ class TestRunPrefill:
         _, position_ids, _ = obj.run_prefill(prompt=["Hello world"], generation_len=None)
         assert position_ids.shape[0] == 1  # batch dim
 
+    def test_run_prefill_expands_qwen_style_position_ids_for_session(self):
+        obj, _, mock_session = _make_base_instance(position_ids_shape=[4, BATCH_SIZE, PREFILL_LEN])
+        obj.initialize_decode_inputs(1, 1, CTX_LEN)
+        obj.run_prefill(prompt=["Hello world"], generation_len=None)
+        first_inputs = mock_session.run.call_args_list[0].args[0]
+        assert first_inputs["position_ids"].shape == (4, BATCH_SIZE, PREFILL_LEN)
+
 
 # ---------------------------------------------------------------------------
 # Tests: run_decode (mocked session)
@@ -799,6 +819,18 @@ class TestRunDecode:
         # After decode, position_ids should have advanced
         final_pos = decode_inputs["position_ids"][0, -1].item()
         assert final_pos > initial_pos
+
+    def test_run_decode_qwen_style_position_ids_advance(self):
+        obj, _, _ = _make_base_instance(position_ids_shape=[4, BATCH_SIZE, PREFILL_LEN])
+        obj.initialize_decode_inputs(1, 1, 5)
+        outputs = {"logits": np.zeros((1, 1, VOCAB_SIZE), dtype=np.float32)}
+        outputs["logits"][0, 0, 42] = 1.0
+        obj.update_decode_input(outputs, np.array([[PREFILL_LEN]]), generation_len=3)
+        decode_inputs = obj.prepare_decode_inputs()
+        initial_pos = decode_inputs["position_ids"][..., 0].copy()
+        obj.run_decode(decode_inputs, 3, automation=True)
+        assert np.all(decode_inputs["position_ids"][..., 0] > initial_pos)
+        assert np.all(decode_inputs["position_ids"][..., 1:] == -1)
 
     def test_run_decode_generated_ids_are_valid_tokens(self):
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
