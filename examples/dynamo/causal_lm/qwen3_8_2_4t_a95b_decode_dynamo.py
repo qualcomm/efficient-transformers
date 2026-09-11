@@ -5,11 +5,11 @@
 #
 # -----------------------------------------------------------------------------
 
-"""Decode-oriented dynamo export example for Qwen3.8-2.4T-A95B.
+"""Decode-oriented dynamo compile and generation example for Qwen3.8-2.4T-A95B.
 
-The full target checkpoint is intended for weight-free export. For regular
-dynamo export without weight-free, use ``--synthetic-tiny`` so no full
-checkpoint weights are loaded.
+The full target checkpoint is intended for weight-free export/compile. Use
+``--synthetic-tiny`` to validate the same hybrid retained-state decode path with
+a small local checkpoint.
 """
 
 import argparse
@@ -18,7 +18,10 @@ import shutil
 from pathlib import Path
 
 import torch
-from transformers import AutoConfig, AutoTokenizer
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 
@@ -27,9 +30,21 @@ from QEfficient.utils import constants
 
 MODEL_ID = "Qwen/Qwen3.8-2.4T-A95B"
 RANDOM_SEED = 42
-SYNTHETIC_TINY_DTYPE = torch.bfloat16
+DEFAULT_PROMPT = "Hello"
+TINY_PAD_TOKEN = "[PAD]"
+TINY_UNK_TOKEN = "[UNK]"
+TINY_EOS_TOKEN = "[EOS]"
+SYNTHETIC_DTYPE_MAP = {
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "float32": torch.float32,
+}
 
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
+
+def _parse_device_group(device_ids: str) -> list[int]:
+    return [int(device_id) for device_id in device_ids.strip("[]").split(",")]
 
 
 def _set_model_dtype_config(qeff_model, dtype: torch.dtype) -> None:
@@ -37,7 +52,31 @@ def _set_model_dtype_config(qeff_model, dtype: torch.dtype) -> None:
     qeff_model.model.config.torch_dtype = dtype
 
 
-def _tiny_qwen3_5_moe_text_config() -> Qwen3_5MoeTextConfig:
+def _resolve_synthetic_dtype(dtype_name: str, aic_hw_version: str) -> torch.dtype:
+    if dtype_name != "auto":
+        return SYNTHETIC_DTYPE_MAP[dtype_name]
+    return torch.bfloat16 if aic_hw_version == "ai200" else torch.float16
+
+
+def _tiny_tokenizer() -> PreTrainedTokenizerFast:
+    vocab = {
+        TINY_PAD_TOKEN: 0,
+        TINY_UNK_TOKEN: 1,
+        TINY_EOS_TOKEN: 2,
+        "Hello": 3,
+    }
+    vocab.update({f"token_{idx}": idx for idx in range(len(vocab), 128)})
+    tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token=TINY_UNK_TOKEN))
+    tokenizer.pre_tokenizer = Whitespace()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        pad_token=TINY_PAD_TOKEN,
+        unk_token=TINY_UNK_TOKEN,
+        eos_token=TINY_EOS_TOKEN,
+    )
+
+
+def _tiny_qwen3_5_moe_text_config(dtype: torch.dtype) -> Qwen3_5MoeTextConfig:
     return Qwen3_5MoeTextConfig(
         vocab_size=128,
         hidden_size=128,
@@ -62,7 +101,9 @@ def _tiny_qwen3_5_moe_text_config() -> Qwen3_5MoeTextConfig:
             "rope_type": "default",
             "mrope_section": [2, 1, 1],
         },
-        dtype=SYNTHETIC_TINY_DTYPE,
+        dtype=dtype,
+        pad_token_id=0,
+        eos_token_id=2,
     )
 
 
@@ -82,7 +123,7 @@ def _ensure_synthetic_tiny_checkpoint(config: Qwen3_5MoeTextConfig, checkpoint_d
         return checkpoint_dir
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    hf_model = Qwen3_5MoeForCausalLM(config).eval().to(SYNTHETIC_TINY_DTYPE)
+    hf_model = Qwen3_5MoeForCausalLM(config).eval().to(config.dtype)
     hf_model.save_pretrained(checkpoint_dir, safe_serialization=True)
     return checkpoint_dir
 
@@ -90,7 +131,9 @@ def _ensure_synthetic_tiny_checkpoint(config: Qwen3_5MoeTextConfig, checkpoint_d
 def _load_qeff_model(args):
     torch.manual_seed(RANDOM_SEED)
     if args.synthetic_tiny:
-        config = _tiny_qwen3_5_moe_text_config()
+        synthetic_dtype = _resolve_synthetic_dtype(args.synthetic_dtype, args.aic_hw_version)
+        config = _tiny_qwen3_5_moe_text_config(synthetic_dtype)
+        tokenizer = _tiny_tokenizer()
         if args.weight_free:
             checkpoint_dir = _ensure_synthetic_tiny_checkpoint(
                 config,
@@ -100,20 +143,20 @@ def _load_qeff_model(args):
                 str(checkpoint_dir),
                 config=config,
                 weight_free=True,
-                dtype=SYNTHETIC_TINY_DTYPE,
+                dtype=synthetic_dtype,
                 trust_remote_code=True,
             )
-            _set_model_dtype_config(qeff_model, SYNTHETIC_TINY_DTYPE)
+            _set_model_dtype_config(qeff_model, synthetic_dtype)
             qeff_model.model.eval()
-            return qeff_model, None
+            return qeff_model, tokenizer
 
-        hf_model = Qwen3_5MoeForCausalLM(config).eval().to(SYNTHETIC_TINY_DTYPE)
-        return QEFFAutoModelForCausalLM(hf_model), None
+        hf_model = Qwen3_5MoeForCausalLM(config).eval().to(synthetic_dtype)
+        return QEFFAutoModelForCausalLM(hf_model), tokenizer
 
-    if args.model_name == MODEL_ID and not args.weight_free and not args.allow_full_weight_load:
+    if args.model_name == MODEL_ID and not args.weight_free:
         raise ValueError(
-            "Regular dynamo export for the full Qwen3.8-2.4T checkpoint would load full weights. "
-            "Pass --weight-free for the target model, or pass --synthetic-tiny for regular dynamo export."
+            "Regular dynamo compile for the full Qwen3.8-2.4T checkpoint would load full weights. "
+            "Use the default weight-free path, or pass --synthetic-tiny for regular tiny-model validation."
         )
 
     config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
@@ -143,20 +186,42 @@ def _load_qeff_model(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Dynamo export/compile for Qwen3.8-2.4T-A95B decode graph.",
+        description="Dynamo compile and decode generation for Qwen3.8-2.4T-A95B.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model-name", type=str, default=MODEL_ID, help="Hugging Face model ID or local path")
-    parser.add_argument("--export-dir", type=Path, default=None, help="Optional ONNX export directory")
     parser.add_argument("--compile-dir", type=Path, default=None, help="Optional QPC compile directory")
+    parser.add_argument("--prompt", type=str, default=DEFAULT_PROMPT, help="Input prompt for generation")
+    parser.add_argument("--batch-size", type=int, default=1, help="Prompt batch size")
+    parser.add_argument("--prefill-seq-len", type=int, default=1, help="Decode-only prefill sequence length")
     parser.add_argument("--ctx-len", type=int, default=4096, help="Context length")
+    parser.add_argument("--generation-len", type=int, default=100, help="Number of new tokens to generate")
     parser.add_argument("--num-cores", type=int, default=constants.DEFAULT_AIC_NUM_CORES, help="Number of AI cores")
     parser.add_argument("--num-devices", type=int, default=1, help="Number of devices for compile")
+    parser.add_argument(
+        "--aic-hw-version", type=str, default=constants.DEFAULT_AIC_HW_VERSION, help="AIC hardware version"
+    )
+    parser.add_argument(
+        "--device-group",
+        type=_parse_device_group,
+        default=None,
+        help="Device IDs for generation, e.g. [0,1]",
+    )
     parser.add_argument("--num-hidden-layers", type=int, default=-1, help="Debug-only layer limit for non-tiny models")
     parser.add_argument("--synthetic-tiny", action="store_true", help="Use a local 4-layer Qwen3.5-MoE text model")
-    parser.add_argument("--weight-free", action="store_true", help="Build the model on meta tensors for export")
+    parser.add_argument(
+        "--synthetic-dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+        help="Synthetic tiny model dtype. Auto uses float16 on AI100 and bfloat16 on AI200.",
+    )
+    parser.add_argument(
+        "--weight-free",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Build the model on meta tensors and load weights at compile time",
+    )
     parser.add_argument("--use-onnx-subfunctions", action="store_true", help="Export decoder layers as ONNX functions")
-    parser.add_argument("--compile", action="store_true", help="Compile after export")
     parser.add_argument(
         "--blocking-mode",
         choices=("kv", "kv_headpar"),
@@ -176,11 +241,6 @@ def main():
         default=None,
         help="Local checkpoint path used by --synthetic-tiny --weight-free",
     )
-    parser.add_argument(
-        "--allow-full-weight-load",
-        action="store_true",
-        help="Allow regular from_pretrained for the full target checkpoint",
-    )
     args = parser.parse_args()
 
     qeff_model, tokenizer = _load_qeff_model(args)
@@ -194,30 +254,30 @@ def main():
         if args.blocking_mode == "kv_headpar" and args.headpar_split is not None:
             qaic_config["headpar_split"] = args.headpar_split
 
-    if args.compile:
-        qpc_path = qeff_model.compile(
-            compile_dir=str(args.compile_dir) if args.compile_dir else None,
-            prefill_seq_len=1,
-            ctx_len=args.ctx_len,
-            num_cores=args.num_cores,
-            num_devices=args.num_devices,
-            dynamo=True,
-            use_onnx_subfunctions=args.use_onnx_subfunctions,
-            qaic_config=qaic_config,
-        )
-        print(f"Compiled decode QPC: {qpc_path}")
-        return
-
-    onnx_path = qeff_model.export(
-        export_dir=str(args.export_dir) if args.export_dir else None,
-        prefill_seq_len=1,
+    num_devices = len(args.device_group) if args.device_group is not None else args.num_devices
+    qpc_path = qeff_model.compile(
+        batch_size=args.batch_size,
+        compile_dir=str(args.compile_dir) if args.compile_dir else None,
+        prefill_seq_len=args.prefill_seq_len,
+        ctx_len=args.ctx_len,
+        num_cores=args.num_cores,
+        num_devices=num_devices,
+        aic_hw_version=args.aic_hw_version,
         dynamo=True,
         use_onnx_subfunctions=args.use_onnx_subfunctions,
-        offload_pt_weights=not args.synthetic_tiny,
+        qaic_config=qaic_config,
     )
-    print(f"Exported decode ONNX: {onnx_path}")
-    if tokenizer is None:
-        print("Synthetic tiny export completed without tokenizer/generation.")
+    print(f"Model compiled to: {qpc_path}")
+
+    exec_info = qeff_model.generate(
+        tokenizer=tokenizer,
+        prompts=[args.prompt] * args.batch_size,
+        device_id=args.device_group,
+        generation_len=args.generation_len,
+    )
+    print(f"\nPrompt   : {args.prompt}")
+    print(f"Generated: {exec_info.generated_texts[0]}")
+    print(exec_info)
 
 
 if __name__ == "__main__":
