@@ -1956,7 +1956,7 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         ctx_indices = torch.arange(start=start_idx, end=end_idx, dtype=position_ids.dtype, device=position_ids.device)[
             None, None, ...
         ]
-        gather_limit = position_ids.max(1, keepdim=True).values.unsqueeze(1).to(position_ids.dtype)
+        gather_limit = position_ids.max(1, keepdim=True).values.unsqueeze(1).to(prosition_ids.dtype)
         invalid_mask = ctx_indices > gather_limit
         invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
