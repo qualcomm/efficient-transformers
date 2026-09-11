@@ -334,9 +334,9 @@ class TestQEFFAutoModelQuantizationIntegration:
 
     def test_image_text_wrappers_include_pack_quantized_int4_transform(self):
         from QEfficient.transformers.models.modeling_auto import (
-            _QEFFAutoModelForImageTextToTextSingleQPC,
             QEffCausalLMForTextImageToTextModel,
             QEffVisionEncoderForTextImageToTextModel,
+            _QEFFAutoModelForImageTextToTextSingleQPC,
         )
         from QEfficient.transformers.models.pytorch_transforms import CustomOpsTransform
         from QEfficient.transformers.quantizers.quant_transforms import PackQuantizedInt4ToMatMulNBitsTransform
@@ -353,9 +353,9 @@ class TestQEFFAutoModelQuantizationIntegration:
 
     def test_image_text_wrappers_include_fp8_dequant_transforms(self):
         from QEfficient.transformers.models.modeling_auto import (
-            _QEFFAutoModelForImageTextToTextSingleQPC,
             QEffCausalLMForTextImageToTextModel,
             QEffVisionEncoderForTextImageToTextModel,
+            _QEFFAutoModelForImageTextToTextSingleQPC,
         )
         from QEfficient.transformers.quantizers.quant_transforms import (
             FP8BlockWiseDequantLinearToLinearTransform,
@@ -445,3 +445,39 @@ class TestQEFFAutoModelQuantizationIntegration:
         assert torch.allclose(original_logits, pack_logits), (
             "Packed-int4 transform must not change non-quantized model output"
         )
+
+    def test_fp8_weight_scales_are_normalized_for_onnx_rank_requirements(self, tmp_path):
+        import onnx
+        import torch
+
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
+            FP8DeQuantLinear,
+            _squeeze_fp8_per_channel_scales,
+        )
+
+        tensorwise = FP8DeQuantLinear(4, 4)
+        tensorwise.register_buffer("weight_scale", torch.ones(1))
+        channelwise = FP8DeQuantLinear(4, 4)
+        channelwise.register_buffer("weight_scale", torch.ones(4, 1))
+        model = torch.nn.Sequential(tensorwise, channelwise)
+
+        _squeeze_fp8_per_channel_scales(model)
+
+        assert tensorwise.weight_scale.ndim == 0
+        assert channelwise.weight_scale.shape == (4,)
+
+        tensorwise.weight.copy_(torch.ones((4, 4), dtype=torch.int8).to(torch.float8_e4m3fn))
+        onnx_path = tmp_path / "fp8_tensorwise.onnx"
+        torch.onnx.export(
+            tensorwise.eval(),
+            (torch.ones((1, 4), dtype=torch.float16),),
+            str(onnx_path),
+            dynamo=False,
+            opset_version=20,
+        )
+        onnx_model = onnx.load(onnx_path, load_external_data=False)
+        dequantize_node = next(node for node in onnx_model.graph.node if node.op_type == "DequantizeLinear")
+        scale = next(
+            initializer for initializer in onnx_model.graph.initializer if initializer.name == dequantize_node.input[1]
+        )
+        assert list(scale.dims) == []

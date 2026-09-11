@@ -160,6 +160,8 @@ class FP8DeQuantLinear(torch.nn.Module):
         scale = self.weight_scale
         if scale.ndim == 2 and scale.shape[1] == 1:
             scale = scale.squeeze(-1)
+        if scale.ndim != 0 and scale.numel() == 1:
+            scale = scale.reshape(())
         if scale.ndim == 0 or scale.numel() == 1:
             # Per-tensor: scalar scale — dispatches to DequantizeLinear (no axis) in ONNX.
             dequantized_weights = select_interface(
@@ -419,21 +421,28 @@ def _replace_with_fp8_dequant_linear_and_experts_if_qwen(
 
 
 def _squeeze_fp8_per_channel_scales(model: "torch.nn.Module") -> None:
-    """Squeeze per-channel weight scales from (N, 1) to (N,) after HF weight loading.
+    """Normalize FP8 weight scale ranks after HF weight loading.
 
     HF's weight-loading path uses set_module_tensor_to_device which bypasses
-    _load_from_state_dict, so checkpoints that store weight_scale as (N, 1)
-    arrive in the buffer with that shape intact.  ONNX DequantizeLinear requires
-    a 1-D scale for per-axis dequantization (axis=0), so we squeeze here.
+    _load_from_state_dict, so checkpoint scale shapes arrive in the buffer
+    unchanged. ONNX DequantizeLinear requires a 1-D scale for per-axis
+    dequantization (axis=0) and a 0-D scale for tensorwise dequantization, so
+    normalize both forms here.
     """
     for module in model.modules():
         if isinstance(module, FP8DeQuantLinear):
             scale = module.weight_scale
-            if scale.ndim == 2 and scale.shape[1] == 1:
+            normalized_scale = scale
+            if normalized_scale.ndim == 2 and normalized_scale.shape[1] == 1:
+                normalized_scale = normalized_scale.squeeze(-1)
+            if normalized_scale.ndim != 0 and normalized_scale.numel() == 1:
+                normalized_scale = normalized_scale.reshape(())
+
+            if normalized_scale.shape != scale.shape:
                 module.weight_scale = (
-                    torch.nn.Parameter(scale.squeeze(-1), requires_grad=False)
+                    torch.nn.Parameter(normalized_scale, requires_grad=False)
                     if isinstance(scale, torch.nn.Parameter)
-                    else scale.squeeze(-1).clone()
+                    else normalized_scale.clone()
                 )
                 # Re-register as buffer so it stays a buffer, not a parameter
                 module.register_buffer("weight_scale", module.weight_scale)
