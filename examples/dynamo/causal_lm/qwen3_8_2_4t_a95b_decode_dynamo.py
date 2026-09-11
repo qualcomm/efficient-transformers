@@ -58,6 +58,12 @@ def _resolve_synthetic_dtype(dtype_name: str, aic_hw_version: str) -> torch.dtyp
     return torch.bfloat16 if aic_hw_version == "ai200" else torch.float16
 
 
+def _resolve_dtype_override(dtype_name: str) -> torch.dtype | None:
+    if dtype_name == "auto":
+        return None
+    return SYNTHETIC_DTYPE_MAP[dtype_name]
+
+
 def _tiny_tokenizer() -> PreTrainedTokenizerFast:
     vocab = {
         TINY_PAD_TOKEN: 0,
@@ -168,6 +174,10 @@ def _load_qeff_model(args):
         config.num_hidden_layers = args.num_hidden_layers
         if hasattr(config, "layer_types"):
             config.layer_types = config.layer_types[: args.num_hidden_layers]
+    dtype_override = _resolve_dtype_override(args.dtype)
+    if dtype_override is not None:
+        config.dtype = dtype_override
+        config.torch_dtype = dtype_override
 
     load_kwargs = {
         "config": config,
@@ -194,7 +204,9 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model-name", type=str, default=MODEL_ID, help="Hugging Face model ID or local path")
-    parser.add_argument("--cache-dir", type=Path, default=None, help="Hugging Face cache directory for downloaded files")
+    parser.add_argument(
+        "--cache-dir", type=Path, default=None, help="Hugging Face cache directory for downloaded files"
+    )
     parser.add_argument("--compile-dir", type=Path, default=None, help="Optional QPC compile directory")
     parser.add_argument("--prompt", type=str, default=DEFAULT_PROMPT, help="Input prompt for generation")
     parser.add_argument("--batch-size", type=int, default=1, help="Prompt batch size")
@@ -219,6 +231,12 @@ def main():
         choices=("auto", "float16", "bfloat16", "float32"),
         default="auto",
         help="Synthetic tiny model dtype. Auto uses float16 on AI100 and bfloat16 on AI200.",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+        help="Override dtype for non-synthetic model export. Auto uses the checkpoint config dtype.",
     )
     parser.add_argument(
         "--weight-free",
