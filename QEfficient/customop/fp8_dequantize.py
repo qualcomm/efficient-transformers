@@ -22,9 +22,67 @@ Three granularities:
                                     DequantizeLinear(axis=-1, block_size=C).
 """
 
+import onnxscript
 import torch
 
 from QEfficient.utils import constants
+
+# Dynamo ONNX translations use the standard-domain DequantizeLinear operator
+# directly.  Keep these separate from the legacy symbolics below: the Dynamo
+# exporter expects an ONNXScript function in its custom translation table.
+_DYNAMO_OPS = getattr(onnxscript, f"opset{constants.ONNX_DYNAMO_EXPORT_OPSET}")
+
+
+@onnxscript.script()
+def FP8DequantizePerTensorDynamo(weight: onnxscript.FLOAT8E4M3FN, scale: onnxscript.FLOAT) -> onnxscript.FLOAT:
+    return _DYNAMO_OPS.DequantizeLinear(weight, scale)
+
+
+@onnxscript.script()
+def FP8DequantizePerAxisDynamo(weight: onnxscript.FLOAT8E4M3FN, scale: onnxscript.FLOAT) -> onnxscript.FLOAT:
+    return _DYNAMO_OPS.DequantizeLinear(weight, scale, axis=0)
+
+
+@onnxscript.script()
+def FP8DequantizeBlocked1x128Dynamo(
+    weight: onnxscript.FLOAT8E4M3FN,
+    scale: onnxscript.FLOAT,
+    row_block_size: int,
+    col_block_size: int,
+) -> onnxscript.FLOAT:
+    # ONNX blocked quantization expands only along `axis`; the row dimension
+    # must therefore be expanded explicitly before DequantizeLinear.  The
+    # compact scale remains reduced along the last dimension and is described
+    # by block_size there.
+    scale = _DYNAMO_OPS.Unsqueeze(scale, [1])
+    scale = _DYNAMO_OPS.Tile(scale, [1, 1, 1])
+    scale = _DYNAMO_OPS.Flatten(scale, axis=2)
+    return _DYNAMO_OPS.DequantizeLinear(weight, scale, axis=-1, block_size=128)
+
+
+@onnxscript.script()
+def FP8DequantizeBlocked128x128Dynamo(
+    weight: onnxscript.FLOAT8E4M3FN,
+    scale: onnxscript.FLOAT,
+    row_block_size: int,
+    col_block_size: int,
+) -> onnxscript.FLOAT:
+    scale = _DYNAMO_OPS.Unsqueeze(scale, [1])
+    scale = _DYNAMO_OPS.Tile(scale, [1, 128, 1])
+    scale = _DYNAMO_OPS.Flatten(scale, axis=2)
+    return _DYNAMO_OPS.DequantizeLinear(weight, scale, axis=-1, block_size=128)
+
+
+def get_blocked_fn(row_block_size: int, col_block_size: int):
+    """Return the Dynamo translator for a concrete blocked FP8 block size."""
+    blocked_functions = {
+        (1, 128): FP8DequantizeBlocked1x128Dynamo,
+        (128, 128): FP8DequantizeBlocked128x128Dynamo,
+    }
+    if (row_block_size, col_block_size) in blocked_functions:
+        return blocked_functions[(row_block_size, col_block_size)]
+    raise ValueError(f"Unsupported blocked FP8 block size ({row_block_size}, {col_block_size})")
+
 
 # ── TorchScript-path symbolic wrappers ───────────────────────────────────────
 

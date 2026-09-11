@@ -24,6 +24,10 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxScatterCB,
     CtxScatterCB3D,
 )
+from QEfficient.customop.fp8_dequantize import (
+    FP8DequantizePerAxisDynamo,
+    FP8DequantizePerTensorDynamo,
+)
 from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
 from QEfficient.customop.rms_norm import CustomRMSNorm
 
@@ -467,6 +471,8 @@ def _(weight: torch.Tensor, scale: torch.Tensor, row_block_size: int, col_block_
 # ---------------------------------------------------------------------------
 
 DYNAMO_CUSTOM_OP_TABLE = {
+    torch.ops.qefficient.fp8_dequantize_per_tensor.default: FP8DequantizePerTensorDynamo,
+    torch.ops.qefficient.fp8_dequantize_per_axis.default: FP8DequantizePerAxisDynamo,
     torch.ops.qefficient.rms_norm.default: get_dynamo_onnxscript_func(CustomRMSNorm),
     torch.ops.qefficient.ctx_scatter.default: get_dynamo_onnxscript_func(CtxScatter),
     torch.ops.qefficient.ctx_scatter_3d.default: get_dynamo_onnxscript_func(CtxScatter3D),
