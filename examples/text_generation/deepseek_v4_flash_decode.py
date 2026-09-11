@@ -15,7 +15,7 @@ from pathlib import Path
 
 import onnx
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
 
@@ -23,7 +23,6 @@ DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
 PREFILL_PROMPT = "<replace with the prefill prompt>"
-
 GATE_PREFIX_OUTPUTS = (
     "mlp/gate/MatMul_output_0",
     "mlp/gate/score_fn/Softplus_output_0",
@@ -138,8 +137,10 @@ def generate_dynamo_npi_file(model: onnx.ModelProto, artifact_root: Path, num_hi
     for node_idx, node in enumerate(model.graph.node):
         for node_input in node.input:
             tensor_consumers[node_input].append(node_idx)
-    for initializer in model.graph.initializer:
-        parameter_consumers[initializer.name] = tensor_consumers[initializer.name]
+    parameter_names = {initializer.name for initializer in model.graph.initializer}
+    parameter_names.update(graph_input.name for graph_input in model.graph.input)
+    for parameter_name in parameter_names:
+        parameter_consumers[parameter_name] = tensor_consumers[parameter_name]
 
     def require_consumer(parameter_name: str) -> int:
         consumer_indices = parameter_consumers[parameter_name]
@@ -238,7 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generation-len", type=int, default=250)
     parser.add_argument("--num-hidden-layers", type=int, default=43)
     parser.add_argument("--num-cores", type=int, default=12)
-    parser.add_argument("--device-group", type=parse_device_group, default=[i for i in range(16)])
+    parser.add_argument("--device-group", type=parse_device_group, default=[i for i in range(4)])
     parser.add_argument("--prefill-prompt", default=PREFILL_PROMPT)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--automation", action="store_true")
@@ -267,7 +268,7 @@ def main() -> None:
     export_root.mkdir(parents=True, exist_ok=True)
     compile_root.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading {args.model_id} with Transformers in float32")
+    print(f"Loading {args.model_id} tokenizer and config")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_id,
         cache_dir=args.hf_cache,
@@ -284,18 +285,14 @@ def main() -> None:
     config.layer_types = config.layer_types[: args.num_hidden_layers]
     config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
 
-    hf_model = AutoModelForCausalLM.from_pretrained(
+    print("Building the QEfficient model in weight-free mode")
+    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
         args.model_id,
         cache_dir=args.hf_cache,
         config=config,
-        dtype=torch.float32,
-        low_cpu_mem_usage=True,
-        device_map="cpu",
         local_files_only=args.local_files_only,
-    ).eval()
-
-    print("Applying QEfficient replacements to the loaded Transformers model")
-    qeff_model = QEFFAutoModelForCausalLM(hf_model)
+        weight_free=True,
+    )
     qeff_model.model.to(dtype=torch.float32)
 
     print("Exporting the one-token decode graph through qeff_model.export()")
@@ -304,7 +301,6 @@ def main() -> None:
             export_dir=str(export_root),
             prefill_only=False,
             use_onnx_subfunctions=False,
-            offload_pt_weights=True,
             dynamo=True,
         )
     )
@@ -318,12 +314,12 @@ def main() -> None:
 
     # Export FP32 weights, then lower only the non-NPI compiler path to FP16.
     qeff_model.model.config.torch_dtype = torch.float16
-    print(f"Compiling retained-state decode specialization: seq_len=1, ctx_len={args.ctx_len}")
+    print(f"Compiling combined prefill/decode specialization: seq_len={args.ctx_len}, ctx_len={args.ctx_len}")
     qpc_path = Path(
         qeff_model.compile(
             onnx_path=str(onnx_path),
             compile_dir=str(compile_root),
-            prefill_seq_len=1,
+            prefill_seq_len=args.ctx_len,
             ctx_len=args.ctx_len,
             batch_size=1,
             num_cores=args.num_cores,

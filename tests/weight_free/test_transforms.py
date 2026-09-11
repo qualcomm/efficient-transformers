@@ -54,6 +54,7 @@ from QEfficient.exporter.weight_free.checkpoint_key_resolver import (
     find_checkpoint_key,
 )
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
+    DeepseekV4CheckpointTransform,
     DtypeConversionCheckpointTransform,
     ExpertParallelPackingCheckpointTransform,
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
@@ -274,6 +275,62 @@ class TestWeightFreeCheckpointTransforms:
         transform = detect_group_transform(SimpleNamespace(num_local_experts=2), weight_map)
 
         assert transform is GptOssMxfp4ExpertDequantSplitCheckpointTransform
+    def test_prepares_native_deepseek_v4_checkpoint(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        _write_safetensors_checkpoint(
+            src,
+            {
+                "embed.weight": torch.ones(2, 4),
+                "head.weight": torch.full((2, 4), 2.0),
+                "norm.weight": torch.ones(4),
+                "layers.0.attn.wkv.weight": torch.ones(2, 4),
+                "layers.0.attn.wkv.scale": torch.full((1, 1), 0.5),
+                "layers.0.hc_attn_scale": torch.ones(1),
+                "layers.0.ffn.experts.0.w1.weight": torch.tensor([[0x21], [0x43]], dtype=torch.int8),
+                "layers.0.ffn.experts.0.w1.scale": torch.full((2, 1), 127, dtype=torch.uint8),
+                "layers.0.ffn.experts.0.w2.weight": torch.tensor([[0x21], [0x43]], dtype=torch.int8),
+                "layers.0.ffn.experts.0.w2.scale": torch.full((2, 1), 127, dtype=torch.uint8),
+                "layers.0.ffn.experts.0.w3.weight": torch.tensor([[0x21], [0x43]], dtype=torch.int8),
+                "layers.0.ffn.experts.0.w3.scale": torch.full((2, 1), 127, dtype=torch.uint8),
+            },
+        )
+
+        changed = DeepseekV4CheckpointTransform.apply(src, out, target_dtype=torch.float32, num_hidden_layers=1)
+
+        assert changed
+        tensors = _load_prepared_tensors(out)
+        assert "model.embed_tokens.weight" in tensors
+        assert "lm_head.weight" in tensors
+        assert "model.layers.0.self_attn.kv_proj.weight" in tensors
+        assert "model.layers.0.self_attn.kv_proj.weight_scale_inv" not in tensors
+        assert "model.layers.0.attn_hc.scale" in tensors
+        torch.testing.assert_close(tensors["model.layers.0.self_attn.kv_proj.weight"], torch.full((2, 4), 0.5))
+        from transformers.integrations.finegrained_fp8 import Fp8Dequantize
+
+        expected = (
+            Fp8Dequantize(None)
+            ._dequantize_one(
+                torch.tensor([[0x21], [0x43]], dtype=torch.int8),
+                torch.full((2, 1), 127, dtype=torch.uint8),
+                output_dtype=torch.float32,
+            )
+            .transpose(0, 1)
+            .unsqueeze(0)
+        )
+        torch.testing.assert_close(tensors["model.layers.0.mlp.experts.gate_proj"], expected)
+        torch.testing.assert_close(tensors["model.layers.0.mlp.experts.up_proj"], expected)
+        torch.testing.assert_close(tensors["model.layers.0.mlp.experts.down_proj"], expected)
+
+    @pytest.mark.skipif(not hasattr(torch, "float8_e8m0fnu"), reason="PyTorch does not provide UE8M0 tensors")
+    def test_deepseek_v4_transform_decodes_ue8m0_scales(self):
+        scale = torch.tensor([0.5, 1.0], dtype=torch.float8_e8m0fnu)
+
+        decoded = DeepseekV4CheckpointTransform._decode_ue8m0_scale(scale)
+
+        assert decoded.dtype == torch.float32
+        torch.testing.assert_close(decoded, scale.to(torch.float32))
 
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
@@ -1281,6 +1338,10 @@ class TestWeightFreeCheckpointTransforms:
         "state_kind,state_name",
         [
             ("buffer", "rotary_emb.inv_freq"),
+            ("buffer", "model.rotary_emb.main_inv_freq"),
+            ("buffer", "model.rotary_emb.main_original_inv_freq"),
+            ("buffer", "model.rotary_emb.compress_inv_freq"),
+            ("buffer", "model.rotary_emb.compress_original_inv_freq"),
             ("buffer", "transformer.h.0.attn.embed_positions"),
             ("buffer", "model.embed_tokens.embed_scale"),
             ("buffer", "model.layers.0.linear_attn._mask_causal"),

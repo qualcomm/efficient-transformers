@@ -20,6 +20,7 @@ Tests verify:
 All tests run on CPU only, no quantized model downloads required.
 """
 
+import torch
 
 # ---------------------------------------------------------------------------
 # Tests: Quantization Transform Importability and Structure
@@ -86,6 +87,48 @@ class TestQuantizationTransformImportability:
         from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8DeQuantLinear
 
         assert FP8DeQuantLinearToLinearTransform._match_class is FP8DeQuantLinear
+
+    def test_fp8_blockwise_grouped_linear_preserves_grouped_shape(self):
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8BlockWiseDequantGroupedLinear
+
+        layer = FP8BlockWiseDequantGroupedLinear.for_fp8_layer_with_blocksize(
+            in_features=4,
+            out_features=8,
+            weight_block_size=[2, 2],
+            fmt="e4m3",
+            n_groups=2,
+            bias=False,
+        ).to_empty(device="meta")
+
+        output = layer(torch.empty(1, 2, 4, device="meta"))
+
+        assert output.shape == (1, 2, 4)
+
+    def test_fp8_quantizer_dequantizes_deepseek_experts_before_merging(self):
+        from transformers.conversion_mapping import WeightConverter, get_checkpoint_conversion_mapping
+        from transformers.integrations.finegrained_fp8 import Fp8Dequantize
+
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import QEffFP8Config, QEffFP8Quantizer
+
+        quantizer = QEffFP8Quantizer(
+            QEffFP8Config(
+                quant_method="fp8",
+                activation_scheme="dynamic",
+                fmt="e4m3",
+                scale_fmt="ue8m0",
+                weight_block_size=[128, 128],
+            )
+        )
+        conversions = quantizer.update_weight_conversions(get_checkpoint_conversion_mapping("deepseek_v4"))
+        expert_converter = next(
+            conversion
+            for conversion in conversions
+            if isinstance(conversion, WeightConverter) and "mlp.experts.*.w1.weight$" in conversion.source_patterns
+        )
+
+        assert "mlp.experts.*.w1.weight_scale_inv$" in expert_converter.source_patterns
+        assert "mlp.experts.*.w3.weight_scale_inv$" in expert_converter.source_patterns
+        assert isinstance(expert_converter.operations[0], Fp8Dequantize)
 
     def test_all_transforms_have_mutate_classmethod(self):
         from QEfficient.transformers.quantizers.quant_transforms import (

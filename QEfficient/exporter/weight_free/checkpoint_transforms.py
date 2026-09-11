@@ -229,6 +229,167 @@ class _LayerStacker:
         }
 
 
+class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
+    """Prepare native DeepSeek-V4 checkpoints for QEff weight-free export.
+
+    DeepSeek-V4-Flash uses a native namespace and stores routed experts in
+    packed FP4 tensors.  The normal Transformers loader renames the dense
+    keys and dequantizes/merges those expert tensors while loading them into
+    memory.  Weight-free export needs the same result on disk so ONNX inputs
+    can reference the QEff model's parameter names directly.
+    """
+
+    EXPERT_RE = re.compile(r"^layers\.(\d+)\.ffn\.experts\.(\d+)\.(w1|w2|w3)\.(weight|scale)$")
+
+    @staticmethod
+    def _decode_ue8m0_scale(tensor: torch.Tensor) -> torch.Tensor:
+        """Materialize UE8M0 block scales in a compiler-supported dtype."""
+        ue8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+        if tensor.dtype == torch.uint8:
+            return (tensor.to(torch.float32) - 127.0).exp2()
+        if ue8m0_dtype is not None and tensor.dtype == ue8m0_dtype:
+            return tensor.to(torch.float32)
+        return tensor
+
+    @classmethod
+    def is_applicable(cls, weight_map: Dict[str, str], **kwargs) -> bool:
+        """Return True for the native DeepSeek-V4 routed-expert layout."""
+        return "embed.weight" in weight_map and any(cls.EXPERT_RE.match(key) for key in weight_map)
+
+    @staticmethod
+    def _rename_key(key: str, weight_map: Optional[Dict[str, str]] = None) -> str:
+        """Apply the upstream DeepSeek-V4 key conversion for non-expert tensors."""
+        from transformers.conversion_mapping import WeightRenaming, get_checkpoint_conversion_mapping
+
+        renamed = key
+        for transform in get_checkpoint_conversion_mapping("deepseek_v4"):
+            if isinstance(transform, WeightRenaming):
+                renamed, _ = transform.rename_source_key(renamed)
+
+        if renamed.endswith(".scale") and weight_map is not None and key[: -len(".scale")] + ".weight" in weight_map:
+            renamed = renamed[: -len(".scale")] + ".weight_scale_inv"
+        return renamed if renamed.startswith("lm_head.") else f"model.{renamed}"
+
+    @classmethod
+    def apply(
+        cls,
+        src: Path,
+        out: Path,
+        target_dtype: torch.dtype = torch.float32,
+        num_hidden_layers: Optional[int] = None,
+        **kwargs,
+    ) -> bool:
+        """Rename dense tensors and dequantize/stack the selected routed-expert layers."""
+        sentinel = out / _SENTINEL
+        if sentinel.exists():
+            logger.info("DeepseekV4CheckpointTransform: prepared checkpoint exists, skipping.")
+            return False
+
+        out.mkdir(parents=True, exist_ok=True)
+        copy_checkpoint_aux_files(src, out)
+        weight_map = read_weight_map(src)
+        expert_entries: Dict[Tuple[int, int, str], Dict[str, Tuple[str, str]]] = {}
+        base_entries: Dict[str, str] = {}
+
+        for key, shard_name in weight_map.items():
+            expert_match = cls.EXPERT_RE.match(key)
+            if expert_match:
+                layer_idx, expert_idx, projection, tensor_kind = expert_match.groups()
+                layer_idx = int(layer_idx)
+                if num_hidden_layers is None or layer_idx < num_hidden_layers:
+                    expert_entries.setdefault((layer_idx, int(expert_idx), projection), {})[tensor_kind] = (
+                        shard_name,
+                        key,
+                    )
+                continue
+
+            layer_match = re.match(r"^layers\.(\d+)\.", key)
+            if layer_match and num_hidden_layers is not None and int(layer_match.group(1)) >= num_hidden_layers:
+                continue
+            if key.startswith("mtp."):
+                continue
+            if key.endswith(".scale") and key[: -len(".scale")] + ".weight" in weight_map:
+                continue
+            base_entries[key] = shard_name
+
+        new_weight_map: Dict[str, str] = {}
+        base_by_shard: Dict[str, list[str]] = {}
+        for key, shard_name in base_entries.items():
+            base_by_shard.setdefault(shard_name, []).append(key)
+
+        for shard_idx, (shard_name, keys) in enumerate(sorted(base_by_shard.items())):
+            tensors: Dict[str, torch.Tensor] = {}
+            with safe_open(str(src / shard_name), framework="pt") as checkpoint:
+                for key in keys:
+                    tensor = checkpoint.get_tensor(key)
+                    renamed_key = cls._rename_key(key, weight_map)
+                    is_quantized_weight = key.endswith(".weight") and key[: -len(".weight")] + ".scale" in weight_map
+                    if is_quantized_weight:
+                        scale_shard = weight_map[key[: -len(".weight")] + ".scale"]
+                        with safe_open(str(src / scale_shard), framework="pt") as scale_checkpoint:
+                            scale = scale_checkpoint.get_tensor(key[: -len(".weight")] + ".scale")
+                        from transformers.integrations.finegrained_fp8 import Fp8Dequantize
+
+                        tensor = Fp8Dequantize(None)._dequantize_one(tensor, scale, target_dtype)
+                    elif tensor.is_floating_point() and not renamed_key.endswith("weight_scale_inv"):
+                        tensor = tensor.to(target_dtype)
+                    if renamed_key.endswith("weight_scale_inv"):
+                        tensor = cls._decode_ue8m0_scale(tensor)
+                    tensors[renamed_key] = tensor
+
+            out_name = f"base-{shard_idx:04d}.safetensors"
+            atomic_save(tensors, out / out_name)
+            new_weight_map.update({cls._rename_key(key, weight_map): out_name for key in keys})
+
+        layer_indices = sorted({layer_idx for layer_idx, _, _ in expert_entries})
+        for layer_idx in layer_indices:
+            layer_entries = {
+                (expert_idx, projection): entry
+                for (entry_layer_idx, expert_idx, projection), entry in expert_entries.items()
+                if entry_layer_idx == layer_idx
+            }
+            expert_indices = sorted({expert_idx for expert_idx, _ in layer_entries})
+            if expert_indices != list(range(len(expert_indices))):
+                raise ValueError(f"DeepSeek-V4 layer {layer_idx} has non-contiguous routed expert indices.")
+
+            projections = {projection for _, projection in layer_entries}
+            if projections != {"w1", "w2", "w3"}:
+                raise ValueError(f"DeepSeek-V4 layer {layer_idx} is missing routed-expert projections: {projections}")
+
+            from transformers.integrations.finegrained_fp8 import Fp8Dequantize
+
+            dequantizer = Fp8Dequantize(None)
+            dequantized = {"w1": [], "w2": [], "w3": []}
+            for expert_idx in expert_indices:
+                for projection in ("w1", "w2", "w3"):
+                    entry = layer_entries[(expert_idx, projection)]
+                    if set(entry) != {"weight", "scale"}:
+                        raise ValueError(
+                            f"DeepSeek-V4 layer {layer_idx} expert {expert_idx} {projection} is missing weight or scale."
+                        )
+                    weight_shard, weight_key = entry["weight"]
+                    scale_shard, scale_key = entry["scale"]
+                    with safe_open(str(src / weight_shard), framework="pt") as checkpoint:
+                        weight = checkpoint.get_tensor(weight_key)
+                    with safe_open(str(src / scale_shard), framework="pt") as checkpoint:
+                        scale = checkpoint.get_tensor(scale_key)
+                    dequantized[projection].append(dequantizer._dequantize_one(weight, scale, target_dtype))
+
+            tensors = {
+                f"model.layers.{layer_idx}.mlp.experts.gate_proj": torch.stack(dequantized["w1"]).transpose(1, 2),
+                f"model.layers.{layer_idx}.mlp.experts.up_proj": torch.stack(dequantized["w3"]).transpose(1, 2),
+                f"model.layers.{layer_idx}.mlp.experts.down_proj": torch.stack(dequantized["w2"]).transpose(1, 2),
+            }
+            out_name = f"experts-layer-{layer_idx:05d}.safetensors"
+            atomic_save(tensors, out / out_name)
+            new_weight_map.update({key: out_name for key in tensors})
+
+        write_index(out, new_weight_map)
+        sentinel.touch()
+        logger.info("DeepseekV4CheckpointTransform: done → %s", out)
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Transform 2: MoE expert stacking
 # ---------------------------------------------------------------------------
