@@ -6,12 +6,14 @@
 # ----------------------------------------------------------------------------
 
 import hashlib
+import inspect
 import json
 import time
 from pathlib import Path
 from typing import Any
 
 import onnx
+import onnx_ir as ir
 import torch
 from accelerate import init_empty_weights
 
@@ -64,6 +66,47 @@ def _resolve_weight_free_target_dtype(qeff_model) -> torch.dtype:
             if isinstance(dtype, torch.dtype):
                 return dtype
     return torch.float32
+def _build_qeff_quantization_config(config_cls, quantization_config: dict):
+    """Construct a QEff quantization config from checkpoint metadata."""
+    config_kwargs = dict(quantization_config)
+    if "quant_method" not in config_kwargs and "quant_type" in config_kwargs:
+        config_kwargs["quant_method"] = config_kwargs["quant_type"]
+
+    supported_kwargs = inspect.signature(config_cls).parameters
+    return config_cls(**{key: value for key, value in config_kwargs.items() if key in supported_kwargs})
+
+
+def _preserve_non_persistent_buffers(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Return generated buffers that must stay materialized in the exported graph."""
+    preserved_buffers = {}
+    for module_name, module in model.named_modules():
+        for buffer_name in module._non_persistent_buffers_set:
+            buffer = module._buffers.get(buffer_name)
+            if buffer is not None:
+                full_name = f"{module_name}.{buffer_name}" if module_name else buffer_name
+                preserved_buffers[full_name] = buffer.detach().cpu()
+    return preserved_buffers
+
+
+def _restore_non_persistent_buffers(model: torch.nn.Module, preserved_buffers: dict[str, torch.Tensor]) -> None:
+    """Restore generated buffers after ``to_empty(device='meta')`` removes their data."""
+    for full_name, buffer in preserved_buffers.items():
+        module_path, _, buffer_name = full_name.rpartition(".")
+        module = model.get_submodule(module_path) if module_path else model
+        module._buffers[buffer_name] = buffer
+
+
+def _restore_embedded_initializers(onnx_program, preserved_buffers: dict[str, torch.Tensor]) -> None:
+    """Replace meta ONNX initializers for generated buffers with their captured values."""
+    for name, tensor in preserved_buffers.items():
+        initializer = onnx_program.model.graph.initializers.get(name)
+        if initializer is not None:
+            initializer.const_value = ir.Tensor(
+                tensor,
+                dtype=initializer.dtype,
+                shape=initializer.shape,
+                name=name,
+            )
 
 
 def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
@@ -98,11 +141,17 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
                 raise NotImplementedError(
                     f"Weight-free export is not implemented for quantization type '{quant_type}'. Supported: mxfp4"
                 )
-            init_kwargs = dict(quant_config)
-            quant_config = config_cls(**init_kwargs)
+            quant_config = _build_qeff_quantization_config(config_cls, quant_config)
         else:
             quant_method = getattr(quant_config, "quant_method", None) or getattr(quant_config, "quant_type", None)
             quant_type = quant_method.value if hasattr(quant_method, "value") else quant_method
+
+        if quant_type == "fp8" and getattr(qeff_model.model.config, "model_type", None) == "deepseek_v4":
+            preserved_buffers = _preserve_non_persistent_buffers(qeff_model.model)
+            qeff_model.model = qeff_model.model.to(dtype=target_dtype)
+            qeff_model.model.to_empty(device="meta")
+            qeff_model._weight_free_embedded_buffers = preserved_buffers
+            return qeff_model
 
         quantizer_cls = QEFF_AUTO_QUANTIZER_MAPPING.get(quant_type) if quant_type else None
         if quantizer_cls is None:
@@ -114,6 +163,9 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
         # the meta device and are treated as weight-spec entries, not embedded constants.
         with init_empty_weights(include_buffers=True):
             quantizer._process_model_before_weight_loading(qeff_model.model)
+        preserved_buffers = _preserve_non_persistent_buffers(qeff_model.model)
+        qeff_model.model.to_empty(device="meta")
+        _restore_non_persistent_buffers(qeff_model.model, preserved_buffers)
     else:
         qeff_model.model = qeff_model.model.to(dtype=target_dtype)
 
@@ -246,6 +298,12 @@ def _prepare_checkpoint_for_weight_free_export(
         hash_params=hash_params,
     )
     moe_prefill_flavour = hash_params.get("moe_prefill_flavour", "none")
+    model_config = getattr(qeff_model.model, "config", None)
+    plan_payload = plan.fingerprint_payload()
+    is_deepseek_v4 = getattr(model_config, "model_type", None) == "deepseek_v4"
+    num_hidden_layers = getattr(model_config, "num_hidden_layers", None)
+    if is_deepseek_v4:
+        plan_payload = {**plan_payload, "num_hidden_layers": num_hidden_layers}
 
     prepared_hash = _prepared_checkpoint_hash(
         model_ref=model_ref,
@@ -254,7 +312,7 @@ def _prepare_checkpoint_for_weight_free_export(
         moe_prefill_flavour=moe_prefill_flavour,
         moe_prefill_num_pipeline_stages=hash_params.get("moe_prefill_num_pipeline_stages"),
         moe_prefill_num_parallelized_experts=hash_params.get("moe_prefill_num_parallelized_experts"),
-        plan_payload=plan.fingerprint_payload(),
+        plan_payload=plan_payload,
     )
     prepared_name = source_dir.name + f"-qeff-prepared-{prepared_hash}"
     if QEFF_CHECKPOINT_HOME:
@@ -262,12 +320,23 @@ def _prepare_checkpoint_for_weight_free_export(
     else:
         prepared_out = source_dir.parent / prepared_name
 
+    if is_deepseek_v4:
+        from QEfficient.exporter.weight_free.checkpoint_transforms import DeepseekV4CheckpointTransform
+
+        DeepseekV4CheckpointTransform.apply(
+            src=source_dir,
+            out=prepared_out,
+            target_dtype=target_dtype,
+            num_hidden_layers=num_hidden_layers,
+        )
+        return str(prepared_out)
+
     return str(
         prep_pipeline.apply(
             src=source_dir,
             out=prepared_out,
             target_dtype=target_dtype,
-            config=getattr(qeff_model.model, "config", None),
+            config=model_config,
             hash_params=hash_params,
             plan=plan,
         )
@@ -348,6 +417,7 @@ def export_weight_free_onnx(
         )
     if onnx_program is None:
         raise RuntimeError("torch.onnx.export returned None for weight-free dynamo export")
+    _restore_embedded_initializers(onnx_program, getattr(meta_qeff_model, "_weight_free_embedded_buffers", {}))
 
     prep_start = time.perf_counter()
     prepared_model_ref = _prepare_checkpoint_for_weight_free_export(meta_qeff_model, model_ref, target_dtype)
