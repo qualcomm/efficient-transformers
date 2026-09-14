@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 import onnx
 import pytest
+import torch
 
 from QEfficient.base.modeling_qeff import QEFFBaseModel
+from QEfficient.exporter.onnx_exporter import export_via_dynamo
 
 
 def test_compiler_invalid_file(tmp_path):
@@ -42,3 +44,23 @@ def test_compiler_invalid_flag(tmp_path):
 
     with pytest.raises(RuntimeError):
         QEFFBaseModel._compile(qeff_obj, valid_file, tmp_path, convert_tofp16=True, aic_binary_dir=tmp_path)
+
+
+def test_dynamo_export_forces_external_data(tmp_path, mocker):
+    onnx_program = mocker.MagicMock()
+    mocker.patch("QEfficient.exporter.onnx_exporter.torch.onnx.export", return_value=onnx_program)
+    mocker.patch("QEfficient.exporter.onnx_exporter.PruneFakeInitializersTransform.apply")
+
+    onnx_path = tmp_path / "model.onnx"
+    result = export_via_dynamo(
+        SimpleNamespace(model=torch.nn.Identity().eval()),
+        onnx_path,
+        {"input": torch.ones(1)},
+        ["input"],
+        ["output"],
+        None,
+        {},
+    )
+
+    onnx_program.save.assert_called_once_with(str(onnx_path), external_data=True)
+    assert result.onnx_path == onnx_path

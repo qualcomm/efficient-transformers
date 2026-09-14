@@ -725,7 +725,7 @@ class QEFFBaseModel(ABC):
             if onnx_program is None:
                 raise RuntimeError("torch.onnx.export returned None for dynamo export")
             PruneFakeInitializersTransform.apply(onnx_program)
-            onnx_program.save(str(onnx_path))
+            onnx_program.save(str(onnx_path), external_data=True)
         finally:
             if prev_invoke_fallback is None:
                 os.environ.pop("TORCH_INVOKE_ALLOW_CREATE_FALLBACK", None)
