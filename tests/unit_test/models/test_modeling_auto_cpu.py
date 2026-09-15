@@ -308,6 +308,16 @@ class TestQEFFTransformersBase:
         }
         assert captured["example_inputs"]["input_ids"].shape[0] >= 2
 
+def test_direct_init_keeps_dtype_and_torch_dtype_in_sync(self):
+        """Direct wrappers must not leave config.dtype stale for weight-free export."""
+        model, cfg = make_tiny_llama()
+        cfg.dtype = torch.float16
+
+        qeff_model = QEFFAutoModelForCausalLM(model, weight_free=True, dtype=torch.float32)
+
+        assert qeff_model.model.config.torch_dtype is torch.float32
+        assert qeff_model.model.config.dtype is torch.float32
+
 
 # ---------------------------------------------------------------------------
 # Stage 2: QEFFAutoModelForCausalLM — logic methods
@@ -573,7 +583,7 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
         [
             pytest.param({"prefill_seq_len": 32}, ["Prefill", "Decode"], id="combined"),
             pytest.param({"prefill_only": False, "prefill_seq_len": 32}, ["Decode"], id="explicit-decode-nonunit"),
-            pytest.param({"prefill_seq_len": 1}, ["Prefill"], id="implicit-unit-decode"),
+            pytest.param({"prefill_seq_len": 1}, ["Decode"], id="implicit-unit-decode"),
             pytest.param({"prefill_only": False, "prefill_seq_len": 1}, ["Decode"], id="explicit-unit-decode"),
         ],
     )

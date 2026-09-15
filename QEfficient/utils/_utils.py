@@ -49,6 +49,28 @@ _RETAINED_STATE_SUFFIX = "_RetainedState"
 _INTERNAL_RETAINED_STATE_SUFFIX = "_InternalRetainedState"
 
 
+def resolve_torch_dtype(dtype: Any, default: torch.dtype = torch.float32) -> torch.dtype:
+    """Normalize torch dtype aliases from configs or user kwargs."""
+    if dtype is None:
+        return default
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if isinstance(dtype, str):
+        # Configs and CLI kwargs use both HF-style strings and short aliases for the same torch dtypes.
+        normalized = dtype.replace("torch.", "").lower()
+        return {
+            "float": torch.float32,
+            "float32": torch.float32,
+            "fp32": torch.float32,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "half": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+        }.get(normalized, default)
+    return default
+
+
 def validate_kv_cache_prefix(kv_cache_prefix: str | None) -> str | None:
     """
     Validate the optional KV-cache buffer-name prefix.
