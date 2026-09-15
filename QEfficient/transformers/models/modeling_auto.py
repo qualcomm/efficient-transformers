@@ -4318,6 +4318,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         layerwise_window_size: int = 1,
         kv_cache_prefix: str | None = None,
         dynamo: bool = False,
+        export_batch_size: Optional[int] = None,
+        cache_ctx_len: Optional[int] = None,
         **kwargs,
     ) -> str:
         """
@@ -4336,6 +4338,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
         dynamo: bool, optional
             whether to enable dynamo during export.
+        export_batch_size: int, optional
+            Batch size used to construct example inputs and retained-state caches.
+        cache_ctx_len: int, optional
+            Context length used to construct DeepSeek V4 retained-state caches.
         Returns
         -------
         str
@@ -4406,9 +4412,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     self.hash_params["retain_full_kv"] = True
         #######################################################################
 
-        bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
+        bs: int = export_batch_size or constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
+        if bs < 1:
+            raise ValueError("export_batch_size must be at least 1.")
+        if cache_ctx_len is not None and cache_ctx_len < 1:
+            raise ValueError("cache_ctx_len must be at least 1.")
 
         # TODO: Remove this hack ##################
         if dynamo:
@@ -4619,19 +4629,31 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             output_names.extend(retained_state_specs["output_names"])
         elif is_deepseek_v4:
             pkv_cache = self.model.get_dummy_pkv_cache(
-                self.model.config, fbs if self.continuous_batching else bs, seq_len
+                self.model.config,
+                fbs if self.continuous_batching else bs,
+                cache_ctx_len or seq_len,
             )
             for layer_idx, layer_state in enumerate(pkv_cache):
                 state_names = self.model.get_onnx_past_key_value_names(layer_idx, layer_state)
+                csa_dp_layout = (
+                    self.model.config.layer_types[layer_idx] == "compressed_sparse_attention"
+                    and int(getattr(self.model.config, "qeff_csa_attention_dp", 1)) > 1
+                )
                 for state_name, state in zip(state_names, layer_state):
                     example_inputs["past_key_values"][layer_idx].append(state)
-                    state_axes = {
-                        0: "full_batch_size" if self.continuous_batching else "batch_size",
-                    }
+                    state_axes = {}
+                    if not csa_dp_layout:
+                        state_axes[0] = "full_batch_size" if self.continuous_batching else "batch_size"
                     if "sliding_window_kv" in state_name:
-                        state_axes[2] = "ctx_len"
+                        if not bool(getattr(self.model.config, "qeff_csa_folded_row_cache", False)):
+                            state_axes[2] = "ctx_len"
                     elif "actual_" in state_name:
-                        state_axes[2] = f"compressed_ctx_len_{layer_idx}"
+                        cp_tiled_indexer_cache = (
+                            "actual_indexer_compressed_kv" in state_name
+                            and int(getattr(self.model.config, "qeff_csa_indexer_cp", 1)) > 1
+                        )
+                        if not cp_tiled_indexer_cache:
+                            state_axes[2] = f"compressed_ctx_len_{layer_idx}"
                     dynamic_axes[state_name] = state_axes
                     output_names.append(f"{state_name}_RetainedState")
         elif (
@@ -5198,6 +5220,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         # --- Validation ---
         if prefill_only is not None and not isinstance(prefill_only, bool):
             raise TypeError("`prefill_only` must be a boolean.")
+
+        if self._weight_free and prefill_only is True:
+            raise NotImplementedError(
+                "weight_free=True is not supported with disaggregated compile (prefill_only=True or prefill_seq_len=1)."
+            )
 
         _decode_ks = (
             sorted(set(num_speculative_tokens))

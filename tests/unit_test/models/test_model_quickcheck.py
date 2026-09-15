@@ -25,6 +25,7 @@ import os
 import shutil
 import tempfile
 from collections import Counter
+from argparse import Namespace
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from copy import deepcopy
 from io import StringIO
@@ -38,8 +39,8 @@ import onnx
 import onnxruntime as ort
 import pytest
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -234,6 +235,133 @@ def test_deepseek_v4_csa_uses_pingpong_projection_buffers(name, head_dim):
     actual_gate = getattr(layer, f"{name}_gate_buffer")[0, 0, :, 0]
     torch.testing.assert_close(actual_kv, expected)
     torch.testing.assert_close(actual_gate, -expected)
+
+
+def test_deepseek_v4_csa_dp_cache_layout_uses_dp_context_ops():
+    config = _tiny_deepseek_v4_config()
+    config.qeff_csa_attention_dp = 2
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    cache = qeff_model.get_dummy_pkv_cache(config, batch_size=2, ctx_len=8)
+
+    csa_cache = cache[2]
+    assert csa_cache[0].shape == (1, 2, 8, config.head_dim)
+    assert csa_cache[3].shape == (1, 2, 4, config.head_dim)
+
+    with torch.no_grad():
+        output = qeff_model(
+            input_ids=torch.tensor([[3], [7]]),
+            position_ids=torch.tensor([[0], [0]]),
+            past_key_values=cache,
+            use_cache=True,
+        )
+
+    assert output.logits.shape == (2, 1, config.vocab_size)
+    assert torch.isfinite(output.logits).all()
+    assert output.past_key_values[2][0].shape == (1, 2, 8, config.head_dim)
+
+
+def test_deepseek_v4_csa_dp_cp_indexer_cache_layout_decodes():
+    config = _tiny_deepseek_v4_config()
+    config.qeff_csa_attention_dp = 2
+    config.qeff_csa_indexer_cp = 2
+    config.qeff_csa_folded_row_cache = True
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    cache = qeff_model.get_dummy_pkv_cache(config, batch_size=4, ctx_len=8)
+
+    assert cache[2][0].shape == (1, 4, config.sliding_window, config.head_dim)
+    assert cache[2][6].shape == (2, 2, 4, config.index_head_dim)
+
+    with torch.no_grad():
+        for position, tokens in enumerate(((3, 7, 9, 15), (5, 11, 19, 21), (13, 17, 23, 27))):
+            output = qeff_model(
+                input_ids=torch.tensor(tokens).unsqueeze(1),
+                position_ids=torch.full((4, 1), position),
+                past_key_values=cache,
+                use_cache=True,
+            )
+            cache = output.past_key_values
+            assert torch.isfinite(output.logits).all()
+
+    assert cache[2][6].shape == (2, 2, 4, config.index_head_dim)
+
+
+def test_deepseek_v4_example_csa_layout_controls():
+    from examples.text_generation.deepseek_v4_flash_decode import configure_qeff_csa_layout
+
+    config = _tiny_deepseek_v4_config()
+    configure_qeff_csa_layout(
+        config,
+        Namespace(
+            batch_size=4,
+            csa_attention_dp=2,
+            csa_indexer_cp=2,
+            csa_folded_row_cache=True,
+            ctx_len=8,
+            device_group=[0, 1],
+        ),
+    )
+
+    assert config.qeff_csa_attention_dp == 2
+    assert config.qeff_csa_indexer_cp == 2
+    assert config.qeff_csa_folded_row_cache is True
+
+
+def test_deepseek_v4_folded_csa_dp_matches_batch_major_decode():
+    config = _tiny_deepseek_v4_config()
+    config.qeff_csa_attention_dp = 2
+    torch.manual_seed(0)
+    reference_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+
+    folded_config = deepcopy(config)
+    folded_config.qeff_csa_folded_row_cache = True
+    folded_model = deepcopy(reference_model).eval()
+    folded_model.config.qeff_csa_folded_row_cache = folded_config.qeff_csa_folded_row_cache
+
+    reference_cache = reference_model.get_dummy_pkv_cache(config, batch_size=2, ctx_len=8)
+    folded_cache = folded_model.get_dummy_pkv_cache(folded_config, batch_size=2, ctx_len=8)
+
+    for position, tokens in enumerate(((3, 7), (5, 11), (13, 17), (19, 23), (29, 31))):
+        input_ids = torch.tensor(tokens).unsqueeze(1)
+        position_ids = torch.full((2, 1), position)
+        with torch.no_grad():
+            reference_output = reference_model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=reference_cache,
+                use_cache=True,
+            )
+            folded_output = folded_model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=folded_cache,
+                use_cache=True,
+            )
+        reference_cache = reference_output.past_key_values
+        folded_cache = folded_output.past_key_values
+        torch.testing.assert_close(reference_output.logits, folded_output.logits, atol=2e-4, rtol=2e-4)
+
+
+def test_deepseek_v4_csa_dp_cp_export_uses_requested_capture_layout(monkeypatch):
+    config = _tiny_deepseek_v4_config()
+    config.qeff_csa_attention_dp = 2
+    config.qeff_csa_indexer_cp = 2
+    config.qeff_csa_folded_row_cache = True
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    captured = {}
+
+    def fake_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["example_inputs"] = example_inputs
+        captured["dynamic_axes"] = dynamic_axes
+        return "unused.onnx"
+
+    monkeypatch.setattr(qeff_model, "_export", fake_export)
+    qeff_model.export(export_batch_size=4, cache_ctx_len=8, dynamo=False)
+
+    csa_indexer_cache = captured["example_inputs"]["past_key_values"][2][6]
+    assert captured["example_inputs"]["input_ids"].shape == (4, 1)
+    assert csa_indexer_cache.shape == (2, 2, 4, config.index_head_dim)
+    assert captured["dynamic_axes"]["past_sliding_window_kv.2"] == {}
+    assert captured["dynamic_axes"]["past_actual_indexer_compressed_kv.2"] == {}
 
 
 @pytest.mark.llm_model

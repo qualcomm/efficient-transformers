@@ -82,6 +82,12 @@ class TestONNXTransformsModuleStructure:
         assert callable(CustomOpTransform.apply)
 
     def test_custom_op_variants_use_legacy_and_dynamo_opsets(self):
+        from QEfficient.customop.ctx_scatter_gather import (
+            CtxGatherDPCP,
+            CtxGatherFoldedRows,
+            CtxScatterDPCP,
+            CtxScatterFoldedRows,
+        )
         from QEfficient.customop.onnxscript_utils import get_onnxscript_func
         from QEfficient.customop.rms_norm import CustomRMSNorm
         from QEfficient.utils import constants
@@ -141,6 +147,90 @@ class TestONNXTransformsModuleStructure:
 
         assert function_name in {function.name for function in model.functions}
         onnx.checker.check_model(model)
+        for custom_op in (CtxScatterDPCP, CtxGatherDPCP):
+            legacy_proto = get_onnxscript_func(
+                custom_op, constants.get_onnx_export_opset(dynamo=False)
+            ).to_function_proto()
+            dynamo_proto = get_onnxscript_func(
+                custom_op, constants.get_onnx_export_opset(dynamo=True)
+            ).to_function_proto()
+
+            assert default_domain_opset(legacy_proto) == constants.ONNX_LEGACY_EXPORT_OPSET
+            assert default_domain_opset(dynamo_proto) == constants.ONNX_DYNAMO_EXPORT_OPSET
+
+            for function_proto in (legacy_proto, dynamo_proto):
+                producers = {output: node for node in function_proto.node for output in node.output}
+                context_parallel_cast = next(
+                    node
+                    for node in function_proto.node
+                    if node.op_type == "Cast" and node.input == ["context_parallel"]
+                )
+                slots_per_cp_divide = next(
+                    node
+                    for node in function_proto.node
+                    if node.op_type == "Div" and context_parallel_cast.output[0] in node.input
+                )
+                context_slots = producers[slots_per_cp_divide.input[0]]
+
+                assert context_slots.op_type == "Gather"
+
+        for custom_op in (CtxScatterFoldedRows, CtxGatherFoldedRows):
+            legacy_proto = get_onnxscript_func(
+                custom_op, constants.get_onnx_export_opset(dynamo=False)
+            ).to_function_proto()
+            dynamo_proto = get_onnxscript_func(
+                custom_op, constants.get_onnx_export_opset(dynamo=True)
+            ).to_function_proto()
+
+            assert default_domain_opset(legacy_proto) == constants.ONNX_LEGACY_EXPORT_OPSET
+            assert default_domain_opset(dynamo_proto) == constants.ONNX_DYNAMO_EXPORT_OPSET
+
+        for function_proto in (
+            get_onnxscript_func(
+                CtxScatterFoldedRows, constants.get_onnx_export_opset(dynamo=False)
+            ).to_function_proto(),
+            get_onnxscript_func(CtxScatterFoldedRows, constants.get_onnx_export_opset(dynamo=True)).to_function_proto(),
+        ):
+            scatter = next(node for node in function_proto.node if node.op_type == "ScatterND")
+            producers = {output: node for node in function_proto.node for output in node.output}
+            updates_transpose = producers[scatter.input[2]]
+
+            assert updates_transpose.op_type == "Transpose"
+            assert next(attribute.ints for attribute in updates_transpose.attribute if attribute.name == "perm") == [
+                1,
+                0,
+                2,
+                3,
+            ]
+
+    def test_dp_cp_gather_uses_batch_dims_without_expanded_indices(self):
+        from QEfficient.customop.ctx_scatter_gather import CtxGatherDPCP
+        from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
+
+        function = get_dynamo_onnxscript_func(CtxGatherDPCP).to_function_proto()
+        gather_node = next(node for node in function.node if node.op_type == "GatherND")
+
+        assert next(attr for attr in gather_node.attribute if attr.name == "batch_dims").i == 2
+        assert any(
+            node.op_type == "Cast" and next(attribute.i for attribute in node.attribute if attribute.name == "to") == 7
+            for node in function.node
+        )
+        assert not any(node.op_type in {"Expand", "Range"} for node in function.node)
+
+    def test_dp_context_ops_are_registered_for_onnx_transforms(self):
+        from QEfficient.base.onnx_transforms import CustomOpTransform, PreserveNestedCacheRetainedStateTransform
+
+        assert {
+            "CtxScatterDPFunc",
+            "CtxScatterDPCPFunc",
+            "CtxScatterFoldedRowsFunc",
+            "CtxGatherDPFunc",
+            "CtxGatherDPCPFunc",
+            "CtxGatherFoldedRowsFunc",
+        } <= {*CustomOpTransform._custom_ops}
+        assert {"CtxScatterDP", "CtxScatterDPCP", "CtxScatterFoldedRows"} <= (
+            PreserveNestedCacheRetainedStateTransform._SCATTER_OP_TYPES
+        )
 
     def test_base_onnx_transform_importable(self):
         from QEfficient.base.onnx_transforms import BaseOnnxTransform

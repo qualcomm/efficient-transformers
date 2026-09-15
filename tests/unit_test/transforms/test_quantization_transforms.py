@@ -130,6 +130,32 @@ class TestQuantizationTransformImportability:
         assert "mlp.experts.*.w3.weight_scale_inv$" in expert_converter.source_patterns
         assert isinstance(expert_converter.operations[0], Fp8Dequantize)
 
+    def test_dp_context_scatter_and_gather_preserve_rows(self):
+        from QEfficient.customop import ctx_gather_dp, ctx_scatter_dp
+
+        cache = torch.zeros(1, 2, 4, 3)
+        positions = torch.tensor([[[1], [3]]], dtype=torch.int32)
+        updates = torch.tensor([[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]]])
+
+        updated_cache = ctx_scatter_dp(cache, positions, updates)
+        gathered = ctx_gather_dp(updated_cache, positions)
+
+        torch.testing.assert_close(gathered, updates)
+
+    def test_dp_cp_context_scatter_and_gather_preserve_global_slot_order(self):
+        from QEfficient.customop import ctx_gather_dp_cp, ctx_scatter_dp_cp
+
+        cache = torch.zeros(1, 2, 6, 1)
+        positions = torch.tensor([[[0, 1, 2], [3, 4, 5]]], dtype=torch.int32)
+        updates = torch.arange(1, 7, dtype=torch.float32).reshape(1, 2, 3, 1)
+
+        updated_cache = ctx_scatter_dp_cp(cache, positions, updates, context_parallel=2)
+        gathered = ctx_gather_dp_cp(updated_cache, positions, context_parallel=2)
+
+        torch.testing.assert_close(gathered, updates)
+        assert updated_cache[0, 0, 3, 0] == 2
+        assert updated_cache[0, 1, 5, 0] == 6
+
     def test_all_transforms_have_mutate_classmethod(self):
         from QEfficient.transformers.quantizers.quant_transforms import (
             AwqToMatmulNbitsTransform,

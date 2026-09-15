@@ -17,8 +17,6 @@ import onnx
 import torch
 from transformers import AutoConfig, AutoTokenizer
 
-from QEfficient import QEFFAutoModelForCausalLM
-
 DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
@@ -230,7 +228,7 @@ def generate_dynamo_npi_file(model: onnx.ModelProto, artifact_root: Path, num_hi
     return npi_path
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
     parser.add_argument("--hf-cache", type=Path, default=Path(DEFAULT_HF_CACHE))
@@ -240,16 +238,65 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-hidden-layers", type=int, default=43)
     parser.add_argument("--num-cores", type=int, default=12)
     parser.add_argument("--device-group", type=parse_device_group, default=[i for i in range(4)])
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--csa-attention-dp",
+        type=int,
+        default=None,
+        help="CSA data-parallel cache rows; defaults to the device-group size.",
+    )
+    parser.add_argument(
+        "--csa-indexer-cp",
+        type=int,
+        default=1,
+        help="CSA indexer compressed-cache context parallelism.",
+    )
+    parser.add_argument(
+        "--csa-folded-row-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use the folded-row CSA local-KV cache layout.",
+    )
     parser.add_argument("--prefill-prompt", default=PREFILL_PROMPT)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--automation", action="store_true")
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--compile-only", action="store_true")
+    if defaults:
+        parser.set_defaults(**defaults)
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def configure_qeff_csa_layout(config, args: argparse.Namespace) -> None:
+    """Apply the requested CSA cache layout to a DeepSeek V4 configuration."""
+    csa_attention_dp = args.csa_attention_dp or len(args.device_group)
+    csa_indexer_cp = args.csa_indexer_cp
+    if csa_attention_dp < 1:
+        raise ValueError("csa_attention_dp must be at least 1.")
+    if args.batch_size % csa_attention_dp:
+        raise ValueError("batch_size must be divisible by csa_attention_dp.")
+    if csa_indexer_cp < 1:
+        raise ValueError("csa_indexer_cp must be at least 1.")
+
+    csa_capacity = None
+    for layer_type in config.layer_types:
+        if layer_type == "compressed_sparse_attention":
+            csa_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
+            if csa_capacity % csa_indexer_cp:
+                raise ValueError("CSA compressed-cache capacity must be divisible by csa_indexer_cp.")
+    config.qeff_csa_attention_dp = csa_attention_dp
+    config.qeff_csa_indexer_cp = csa_indexer_cp
+    config.qeff_csa_folded_row_cache = args.csa_folded_row_cache
+    print(
+        "CSA cache layout: "
+        f"batch_size={args.batch_size}, attention_dp={csa_attention_dp}, "
+        f"indexer_cp={csa_indexer_cp}, folded_row_cache={config.qeff_csa_folded_row_cache}, "
+        f"compressed_capacity={csa_capacity}"
+    )
+
+
+def main(defaults: dict[str, object] | None = None) -> None:
+    args = parse_args(defaults)
     if args.ctx_len < 2:
         raise ValueError("ctx_len must be at least 2.")
     if not 1 <= args.generation_len < args.ctx_len:
@@ -258,10 +305,14 @@ def main() -> None:
         raise ValueError("num_hidden_layers must be at least 1.")
     if not args.device_group:
         raise ValueError("device_group must contain at least one QAIC device ID.")
-
+    if args.batch_size % len(args.device_group):
+        raise ValueError("DeepSeek V4 Flash decode requires batch_size to be divisible by the device-group size.")
     os.environ["HF_HUB_CACHE"] = str(args.hf_cache)
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     os.environ.setdefault("QEFF_HOME", str(args.artifact_root))
+    os.environ.setdefault("QEFF_CHECKPOINT_HOME", str(args.artifact_root / "checkpoints"))
+
+    from QEfficient import QEFFAutoModelForCausalLM
 
     export_root = args.artifact_root / "onnx"
     compile_root = args.artifact_root / "compile"
@@ -284,6 +335,8 @@ def main() -> None:
     config.num_hidden_layers = args.num_hidden_layers
     config.layer_types = config.layer_types[: args.num_hidden_layers]
     config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
+    batch_size = args.batch_size
+    configure_qeff_csa_layout(config, args)
 
     print("Building the QEfficient model in weight-free mode")
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
@@ -302,6 +355,8 @@ def main() -> None:
             prefill_only=False,
             use_onnx_subfunctions=False,
             dynamo=True,
+            export_batch_size=batch_size,
+            cache_ctx_len=args.ctx_len,
         )
     )
     print(f"ONNX_PATH={onnx_path}")
@@ -321,7 +376,7 @@ def main() -> None:
             compile_dir=str(compile_root),
             prefill_seq_len=1,
             ctx_len=args.ctx_len,
-            batch_size=1,
+            batch_size=batch_size,
             num_cores=args.num_cores,
             num_devices=len(args.device_group),
             prefill_only=False,
@@ -342,7 +397,7 @@ def main() -> None:
     print("Running qeff_model.generate()")
     exec_info = qeff_model.generate(
         tokenizer=tokenizer,
-        prompts=[args.prefill_prompt],
+        prompts=[args.prefill_prompt] * batch_size,
         device_id=args.device_group,
         generation_len=args.generation_len,
         automation=args.automation,
