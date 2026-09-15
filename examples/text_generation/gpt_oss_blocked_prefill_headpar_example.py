@@ -220,8 +220,11 @@ def main():
         "ctx_len": args.ctx_len,
         "moe_config": {
             "expert_parallel_chunk_size": args.moe_prefill_packed_chunk_size,
-            **({"expert_intermediate_block_size": args.moe_intermediate_block_size}
-               if args.moe_intermediate_block_size is not None else {}),
+            **(
+                {"expert_intermediate_block_size": args.moe_intermediate_block_size}
+                if args.moe_intermediate_block_size is not None
+                else {}
+            ),
         },
     }
 
@@ -337,7 +340,9 @@ def main():
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 70)
     print(f"Prompt: {args.prompt}\n")
-    print(f"[Blocked head-par]  prefill {t_prefill:.3f}s | TTFT {t_ttft:.3f}s | decode {generation_len / t_decode:.1f} tok/s")
+    print(
+        f"[Blocked head-par]  prefill {t_prefill:.3f}s | TTFT {t_ttft:.3f}s | decode {generation_len / t_decode:.1f} tok/s"
+    )
     for b, text in enumerate(blocked_texts):
         print(f"Output[{b}]: {text}")
     if args.compare_non_blocked:

@@ -116,10 +116,8 @@ class QEffGptOssExperts(GptOssExperts):
 
     def route(self, x: torch.Tensor):
         router_logits = F.linear(x, self.router.weight, self.router.bias)
-        probs = F.softmax(router_logits, dim=-1, dtype=torch.float)
-        top_w, top_i = torch.topk(probs, self.router.top_k, dim=-1)
-        top_w = top_w / top_w.sum(dim=-1, keepdim=True)
-        top_w = top_w.to(x.dtype)
+        top_w, top_i = torch.topk(router_logits, self.router.top_k, dim=-1)
+        top_w = F.softmax(top_w, dim=1, dtype=top_w.dtype)
         return (top_i, top_w), router_logits
 
     def execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:

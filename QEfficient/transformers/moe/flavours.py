@@ -143,7 +143,6 @@ def cumsum_scatter_gather_update_expert_blocked(
             packed_stop = seq_len
         else:
             packed_stop = packed_start + packed_chunk_size
-        chunk_rows = packed_stop - packed_start
         chunk_matched_idx = matched_idx[:, packed_start:packed_stop]
 
         x_chunk = ctx_gather_3d_generalized(x_expanded, chunk_matched_idx)
@@ -225,13 +224,7 @@ def moe_expert_parallel(
     N = num_parallelized_experts
     L = num_pipeline_stages
     expert_out = x.new_zeros((N, T, H))
-    rw = (
-        routing_weights.transpose(0, 1)
-        .contiguous()
-        .view(L, N, T)
-        .transpose(0, 1)
-        .contiguous()
-    )
+    rw = routing_weights.transpose(0, 1).contiguous().view(L, N, T).transpose(0, 1).contiguous()
     routing_weights_unsqueezed = rw.unsqueeze(-1)
     for slot in range(L):
         T2Ei = rw[:, slot, :] > 0
