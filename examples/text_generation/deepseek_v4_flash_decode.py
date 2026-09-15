@@ -314,12 +314,12 @@ def main() -> None:
 
     # Export FP32 weights, then lower only the non-NPI compiler path to FP16.
     qeff_model.model.config.torch_dtype = torch.float16
-    print(f"Compiling combined prefill/decode specialization: seq_len={args.ctx_len}, ctx_len={args.ctx_len}")
+    print(f"Compiling combined prefill/decode specialization: seq_len=1, ctx_len={args.ctx_len}")
     qpc_path = Path(
         qeff_model.compile(
             onnx_path=str(onnx_path),
             compile_dir=str(compile_root),
-            prefill_seq_len=args.ctx_len,
+            prefill_seq_len=1,
             ctx_len=args.ctx_len,
             batch_size=1,
             num_cores=args.num_cores,
