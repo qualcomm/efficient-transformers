@@ -878,50 +878,6 @@ def test_glm_blocked_prefill_topk_matches_monolithic(parallel):
     torch.testing.assert_close(torch.sort(actual, dim=-1).values, torch.sort(expected, dim=-1).values)
 
 
-@pytest.mark.parametrize("parallel", [False, True])
-def test_glm_blocked_prefill_topk_matches_monolithic(parallel):
-    from QEfficient.blocking.glm_attention import blocked_glm_dsa_prefill_topk
-    from QEfficient.transformers.cache_utils import glm_dsa_scatter_cache
-
-    torch.manual_seed(23)
-    batch_size, query_length, context_length = 2, 4, 16
-    dp, cp, num_heads, head_dim = 1, 2, 2, 4
-    folded_cache = torch.zeros(batch_size, dp * cp, context_length // cp, head_dim)
-    logical_keys = torch.rand(batch_size, context_length, head_dim)
-    cache_positions = torch.arange(context_length).view(1, -1).expand(batch_size, -1)
-    folded_cache = glm_dsa_scatter_cache(folded_cache, cache_positions, logical_keys, dp=dp, cp=cp)
-    query = torch.rand(batch_size, query_length, num_heads, head_dim)
-    head_weights = torch.rand(batch_size, query_length, num_heads)
-    position_ids = torch.arange(8, 12).view(1, -1).expand(batch_size, -1)
-    attention_mask = torch.arange(context_length).view(1, 1, -1) > position_ids.unsqueeze(-1)
-    attention_mask = attention_mask.clone()
-    attention_mask[:, :, 1] = True
-
-    actual = blocked_glm_dsa_prefill_topk(
-        query,
-        head_weights,
-        folded_cache,
-        attention_mask,
-        position_ids,
-        scale=head_dim**-0.5,
-        dp=dp,
-        cp=cp,
-        num_blocks=2,
-        num_cores_per_device=2,
-        query_chunk_size=4,
-        query_block_size=4,
-        topk_blocking=2,
-        parallel=parallel,
-        final_topk=4,
-    )
-
-    scores = torch.einsum("bqhd,btd->bqht", query.float(), logical_keys.float()) * (head_dim**-0.5)
-    scores = (torch.relu(scores) * head_weights.unsqueeze(-1)).sum(dim=2)
-    scores = scores.masked_fill(attention_mask, float("-inf"))
-    expected = scores.topk(4, dim=-1).indices.to(torch.int32)
-    torch.testing.assert_close(torch.sort(actual, dim=-1).values, torch.sort(expected, dim=-1).values)
-
-
 @pytest.mark.parametrize(
     ("batch_size", "context_length", "num_devices", "error"),
     [
