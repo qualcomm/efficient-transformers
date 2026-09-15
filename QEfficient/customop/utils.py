@@ -36,6 +36,30 @@ def ctx_scatter_3d(data: torch.Tensor, position_ids: torch.Tensor, updates: torc
     return select_interface(CtxScatterFunc3D.apply, torch.ops.qefficient.ctx_scatter_3d)(data, position_ids, updates)
 
 
+def ctx_scatter_dp(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterDPFunc
+
+    return select_interface(CtxScatterDPFunc.apply, torch.ops.qefficient.ctx_scatter_dp)(data, position_ids, updates)
+
+
+def ctx_scatter_folded_rows(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterFoldedRowsFunc
+
+    return select_interface(CtxScatterFoldedRowsFunc.apply, torch.ops.qefficient.ctx_scatter_folded_rows)(
+        data, position_ids, updates
+    )
+
+
+def ctx_scatter_dp_cp(
+    data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor, context_parallel: int
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterDPCPFunc
+
+    return select_interface(CtxScatterDPCPFunc.apply, torch.ops.qefficient.ctx_scatter_dp_cp)(
+        data, position_ids, updates, context_parallel
+    )
+
+
 def ctx_scatter_3d_generalized(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc3DGeneralized
 
@@ -56,6 +80,28 @@ def ctx_gather_3d(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor
     from QEfficient.customop.ctx_scatter_gather import CtxGatherFunc3D
 
     return select_interface(CtxGatherFunc3D.apply, torch.ops.qefficient.ctx_gather_3d)(data, ctx_indices)
+
+
+def ctx_gather_dp(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherDPFunc
+
+    return select_interface(CtxGatherDPFunc.apply, torch.ops.qefficient.ctx_gather_dp)(data, ctx_indices)
+
+
+def ctx_gather_folded_rows(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFoldedRowsFunc
+
+    return select_interface(CtxGatherFoldedRowsFunc.apply, torch.ops.qefficient.ctx_gather_folded_rows)(
+        data, ctx_indices
+    )
+
+
+def ctx_gather_dp_cp(data: torch.Tensor, ctx_indices: torch.Tensor, context_parallel: int) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherDPCPFunc
+
+    return select_interface(CtxGatherDPCPFunc.apply, torch.ops.qefficient.ctx_gather_dp_cp)(
+        data, ctx_indices, context_parallel
+    )
 
 
 def ctx_gather_3d_generalized(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:

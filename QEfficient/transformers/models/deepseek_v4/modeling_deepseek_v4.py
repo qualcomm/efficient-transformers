@@ -29,7 +29,16 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4UnweightedRMSNorm,
 )
 
-from QEfficient.customop import ctx_gather_blocked_kv, ctx_scatter
+from QEfficient.customop import (
+    ctx_gather_blocked_kv,
+    ctx_gather_dp,
+    ctx_gather_dp_cp,
+    ctx_gather_folded_rows,
+    ctx_scatter,
+    ctx_scatter_dp,
+    ctx_scatter_dp_cp,
+    ctx_scatter_folded_rows,
+)
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, CustomRMSNormFunc
 from QEfficient.customop.utils import select_interface
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
@@ -57,6 +66,16 @@ def _sliding_window_context_indices(
     context_indices = offsets + context_end - sliding_window
     valid = context_indices >= 0
     return context_indices, valid
+
+
+def _folded_sliding_window_context_indices(
+    position_ids: torch.Tensor, sliding_window: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return QEff mask-compatible chronological addresses for a folded ring cache."""
+    position = position_ids[:, -1:].to(torch.int32)
+    offsets = torch.arange(sliding_window, device=position_ids.device, dtype=torch.int32).view(1, -1)
+    absolute_indices = offsets + position + 1 - sliding_window
+    return torch.remainder(absolute_indices, sliding_window), absolute_indices >= 0
 
 
 class QEffSlidingCacheLayer(CacheLayerMixin):
@@ -509,26 +528,89 @@ class QEffCSACacheLayer(CacheLayerMixin):
         self.cumulative_length = cumulative_length
         self.compressor_entry_count = compressor_entry_count
         self.indexer_entry_count = indexer_entry_count
-        self.max_cache_len = sliding_window_kv.shape[2]
+        self._attention_dp = int(getattr(config, "qeff_csa_attention_dp", 1))
+        self._indexer_cp = int(getattr(config, "qeff_csa_indexer_cp", 1))
+        self._folded_row_cache = bool(getattr(config, "qeff_csa_folded_row_cache", False))
+        self.max_cache_len = (
+            actual_compressed_kv.shape[2] * self.compression_size
+            if self._folded_row_cache
+            else sliding_window_kv.shape[2]
+        )
         self.is_initialized = True
         self.device = sliding_window_kv.device
         self.dtype = sliding_window_kv.dtype
         self._validate_state(config)
 
+    @property
+    def uses_dp_layout(self) -> bool:
+        return self._attention_dp > 1
+
+    @property
+    def uses_folded_row_cache(self) -> bool:
+        return self._folded_row_cache
+
+    @property
+    def attention_dp(self) -> int:
+        return self._attention_dp
+
+    @property
+    def indexer_cp(self) -> int:
+        return self._indexer_cp
+
     def _validate_state(self, config: DeepseekV4Config) -> None:
-        batch = self.sliding_window_kv.shape[0]
+        if self.uses_dp_layout:
+            if self.uses_folded_row_cache:
+                if self.sliding_window_kv.ndim != 4 or self.sliding_window_kv.shape[0] != 1:
+                    raise ValueError("CSA folded-row cache must have shape [1, batch, sliding_window, head_dim].")
+                batch = self.sliding_window_kv.shape[1]
+                batch_local = batch // self.attention_dp
+                attention_dp = self.attention_dp
+            else:
+                batch_local, attention_dp, _, _ = self.sliding_window_kv.shape
+            if attention_dp < 1:
+                raise ValueError("CSA DP cache layout requires attention_dp >= 1.")
+            if not self.uses_folded_row_cache:
+                batch = batch_local * attention_dp
+        else:
+            batch = self.sliding_window_kv.shape[0]
         capacity = (self.max_cache_len + self.compression_size - 1) // self.compression_size
-        common_prefix = (batch, 1)
         banked = 2 * self.compression_size
-        expected = {
-            "sliding_window_kv": (batch, config.num_key_value_heads, self.max_cache_len, config.head_dim),
-            "compressor_kv_buffer": (*common_prefix, banked, 2 * config.head_dim),
-            "compressor_gate_buffer": (*common_prefix, banked, 2 * config.head_dim),
-            "actual_compressed_kv": (*common_prefix, capacity, config.head_dim),
-            "indexer_kv_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
-            "indexer_gate_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
-            "actual_indexer_compressed_kv": (*common_prefix, capacity, config.index_head_dim),
-        }
+        if self.uses_dp_layout:
+            if config.num_key_value_heads != 1:
+                raise NotImplementedError("CSA DP cache layout currently requires one key/value head.")
+            if self.indexer_cp < 1:
+                raise ValueError("CSA indexer CP cache layout requires qeff_csa_indexer_cp >= 1.")
+            if capacity % self.indexer_cp:
+                raise ValueError("CSA compressed-cache capacity must be divisible by qeff_csa_indexer_cp.")
+            common_prefix = (batch_local, attention_dp)
+            indexer_compressed_shape = (*common_prefix, capacity, config.index_head_dim)
+            sliding_window_shape = (
+                (1, batch, self.sliding_window, config.head_dim)
+                if self.uses_folded_row_cache
+                else (*common_prefix, self.max_cache_len, config.head_dim)
+            )
+            expected = {
+                "sliding_window_kv": sliding_window_shape,
+                "compressor_kv_buffer": (*common_prefix, banked, 2 * config.head_dim),
+                "compressor_gate_buffer": (*common_prefix, banked, 2 * config.head_dim),
+                "actual_compressed_kv": (*common_prefix, capacity, config.head_dim),
+                "indexer_kv_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
+                "indexer_gate_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
+                "actual_indexer_compressed_kv": indexer_compressed_shape,
+            }
+        else:
+            if self.indexer_cp != 1:
+                raise ValueError("CSA indexer CP cache layout requires qeff_csa_attention_dp > 1.")
+            common_prefix = (batch, 1)
+            expected = {
+                "sliding_window_kv": (batch, config.num_key_value_heads, self.max_cache_len, config.head_dim),
+                "compressor_kv_buffer": (*common_prefix, banked, 2 * config.head_dim),
+                "compressor_gate_buffer": (*common_prefix, banked, 2 * config.head_dim),
+                "actual_compressed_kv": (*common_prefix, capacity, config.head_dim),
+                "indexer_kv_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
+                "indexer_gate_buffer": (*common_prefix, banked, 2 * config.index_head_dim),
+                "actual_indexer_compressed_kv": (*common_prefix, capacity, config.index_head_dim),
+            }
         for name, shape in expected.items():
             tensor = getattr(self, name)
             if tuple(tensor.shape) != shape:
@@ -540,7 +622,45 @@ class QEffCSACacheLayer(CacheLayerMixin):
 
     @property
     def max_batch_size(self) -> int:
-        return self.sliding_window_kv.shape[0]
+        return (
+            self.sliding_window_kv.shape[1]
+            if self.uses_folded_row_cache
+            else self.sliding_window_kv.shape[0] * self.attention_dp
+        )
+
+    def _to_dp_layout(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not self.uses_dp_layout:
+            raise RuntimeError("CSA cache is not using the DP layout.")
+        return tensor.reshape(self.max_batch_size // self.attention_dp, self.attention_dp, *tensor.shape[1:])
+
+    def _from_dp_layout(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.reshape(self.max_batch_size, *tensor.shape[2:])
+
+    def as_batch_major(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Expose DP retained states to existing DeepSeek attention math."""
+        if not self.uses_dp_layout:
+            return tensor
+        if tensor is self.sliding_window_kv and self.uses_folded_row_cache:
+            return tensor.permute(1, 0, 2, 3)
+        if tensor is self.actual_indexer_compressed_kv and self.indexer_cp > 1:
+            capacity = tensor.shape[2]
+            context_indices = torch.arange(capacity, device=tensor.device, dtype=torch.int32).view(1, 1, -1)
+            context_indices = context_indices.expand(tensor.shape[0], tensor.shape[1], -1)
+            return self._from_dp_layout(ctx_gather_dp_cp(tensor, context_indices, self.indexer_cp)).unsqueeze(1)
+        if tensor.ndim == 5:
+            return tensor.permute(0, 1, 3, 2, 4).reshape(self.max_batch_size, -1, tensor.shape[-1]).unsqueeze(1)
+        return self._from_dp_layout(tensor).unsqueeze(1)
+
+    def _select_batch(self, tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        if not self.uses_dp_layout:
+            return tensor.index_select(0, indices.to(tensor.device))
+        if tensor is self.sliding_window_kv and self.uses_folded_row_cache:
+            return tensor.index_select(1, indices.to(tensor.device))
+        source_batch_size = tensor.shape[0] * self.attention_dp
+        selected = tensor.reshape(source_batch_size, *tensor.shape[2:]).index_select(0, indices.to(tensor.device))
+        if selected.shape[0] % self.attention_dp:
+            raise ValueError("CSA DP cache batch size must remain divisible by qeff_csa_attention_dp.")
+        return selected.reshape(selected.shape[0] // self.attention_dp, self.attention_dp, *selected.shape[1:])
 
     def lazy_initialization(self, key_states: torch.Tensor, value_states: torch.Tensor) -> None:
         if key_states.shape[0] != self.max_batch_size or key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
@@ -573,7 +693,8 @@ class QEffCSACacheLayer(CacheLayerMixin):
             raise ValueError("QEffCSACache.update requires position_ids in cache_kwargs.")
         if position_ids.shape != key_states.shape[:1] + key_states.shape[2:3]:
             raise ValueError("position_ids must have shape [batch, query_length].")
-        if key_states.shape[0] != self.max_batch_size or key_states.shape[1] != self.sliding_window_kv.shape[1]:
+        expected_num_heads = 1 if self.uses_dp_layout else self.sliding_window_kv.shape[1]
+        if key_states.shape[0] != self.max_batch_size or key_states.shape[1] != expected_num_heads:
             raise ValueError("KV update batch/head dimensions do not match the allocated cache.")
         if key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
             raise ValueError("KV update head_dim does not match the allocated cache.")
@@ -592,7 +713,21 @@ class QEffCSACacheLayer(CacheLayerMixin):
                 raise ValueError("position_ids exceed the allocated QEff CSA cache capacity.")
 
         scatter_positions = position_ids
-        self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, key_states)
+        if self.uses_folded_row_cache:
+            self.sliding_window_kv = ctx_scatter_folded_rows(
+                self.sliding_window_kv,
+                torch.remainder(scatter_positions, self.sliding_window).to(torch.int32),
+                key_states,
+            )
+        elif self.uses_dp_layout:
+            key_updates = self._to_dp_layout(key_states[:, 0])
+            self.sliding_window_kv = ctx_scatter_dp(
+                self.sliding_window_kv,
+                self._to_dp_layout(scatter_positions),
+                key_updates,
+            )
+        else:
+            self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
         entry_positions = torch.div(position_ids, self.compression_size, rounding_mode="floor")
@@ -612,28 +747,64 @@ class QEffCSACacheLayer(CacheLayerMixin):
             expected_shape = (self.max_batch_size, 1, expected_dim)
             if tuple(projected_kv.shape) != expected_shape or projected_gate.shape != projected_kv.shape:
                 raise ValueError(f"Decode-only {prefix} projections must both have shape {expected_shape}.")
-            setattr(
-                self,
-                f"{prefix}_kv_buffer",
-                ctx_scatter(getattr(self, f"{prefix}_kv_buffer"), buffer_positions, projected_kv.unsqueeze(1)),
-            )
-            setattr(
-                self,
-                f"{prefix}_gate_buffer",
-                ctx_scatter(getattr(self, f"{prefix}_gate_buffer"), buffer_positions, projected_gate.unsqueeze(1)),
-            )
+            if self.uses_dp_layout:
+                setattr(
+                    self,
+                    f"{prefix}_kv_buffer",
+                    ctx_scatter_dp(
+                        getattr(self, f"{prefix}_kv_buffer"),
+                        self._to_dp_layout(buffer_positions),
+                        self._to_dp_layout(projected_kv),
+                    ),
+                )
+                setattr(
+                    self,
+                    f"{prefix}_gate_buffer",
+                    ctx_scatter_dp(
+                        getattr(self, f"{prefix}_gate_buffer"),
+                        self._to_dp_layout(buffer_positions),
+                        self._to_dp_layout(projected_gate),
+                    ),
+                )
+            else:
+                setattr(
+                    self,
+                    f"{prefix}_kv_buffer",
+                    ctx_scatter(getattr(self, f"{prefix}_kv_buffer"), buffer_positions, projected_kv.unsqueeze(1)),
+                )
+                setattr(
+                    self,
+                    f"{prefix}_gate_buffer",
+                    ctx_scatter(getattr(self, f"{prefix}_gate_buffer"), buffer_positions, projected_gate.unsqueeze(1)),
+                )
 
         context_length = cache_kwargs.get("context_length")
         if context_length is None:
             context_indices = torch.arange(self.max_cache_len, device=self.device, dtype=torch.int32).view(1, 1, -1)
-            context_indices = context_indices.expand(self.max_batch_size, self.sliding_window_kv.shape[1], -1)
+            context_indices = context_indices.expand(self.max_batch_size, 1, -1)
             valid = context_indices <= position_ids.max(dim=1, keepdim=True).values.to(torch.int32).unsqueeze(1)
         else:
             context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
+        if not self.uses_dp_layout:
             context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
             valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
         invalid_index = torch.iinfo(torch.int32).max if _is_export_capture() else 0
-        gathered = ctx_gather_blocked_kv(self.sliding_window_kv, torch.where(valid, context_indices, invalid_index))
+        if self.uses_folded_row_cache:
+            folded_indices, folded_valid = _folded_sliding_window_context_indices(position_ids, self.sliding_window)
+            safe_indices = torch.where(folded_valid, folded_indices, torch.full_like(folded_indices, invalid_index))
+            gathered = ctx_gather_folded_rows(self.sliding_window_kv, safe_indices).squeeze(0).unsqueeze(1)
+            valid = folded_valid.unsqueeze(1)
+        elif self.uses_dp_layout:
+            gathered = ctx_gather_dp(
+                self.sliding_window_kv,
+                self._to_dp_layout(torch.where(valid, context_indices, invalid_index)).squeeze(2),
+            )
+            gathered = self._from_dp_layout(gathered).unsqueeze(1)
+        else:
+            gathered = ctx_gather_blocked_kv(
+                self.sliding_window_kv,
+                torch.where(valid, context_indices, invalid_index),
+            )
         gathered = torch.where(valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
         return gathered, gathered
 
@@ -652,20 +823,30 @@ class QEffCSACacheLayer(CacheLayerMixin):
             count_attr = "indexer_entry_count"
         else:
             raise ValueError(f"Unsupported CSA compressor state: {name}")
-        setattr(
-            self,
-            compressed_attr,
-            ctx_scatter(
-                getattr(self, compressed_attr),
-                entry_positions,
-                compressed.unsqueeze(1).unsqueeze(1),
-            ),
-        )
+        if self.uses_dp_layout:
+            cache = getattr(self, compressed_attr)
+            positions = self._to_dp_layout(entry_positions)
+            updates = self._to_dp_layout(compressed.unsqueeze(1))
+            if name == "indexer" and self.indexer_cp > 1:
+                cache = ctx_scatter_dp_cp(cache, positions, updates, self.indexer_cp)
+            else:
+                cache = ctx_scatter_dp(cache, positions, updates)
+            setattr(self, compressed_attr, cache)
+        else:
+            setattr(
+                self,
+                compressed_attr,
+                ctx_scatter(
+                    getattr(self, compressed_attr),
+                    entry_positions,
+                    compressed.unsqueeze(1).unsqueeze(1),
+                ),
+            )
         if not (_is_export_capture()):
             completed = entry_positions[write_mask.to(torch.bool)]
             if completed.numel():
                 setattr(self, count_attr, max(getattr(self, count_attr), int(completed.max().item()) + 1))
-        return getattr(self, compressed_attr)
+        return self.as_batch_major(getattr(self, compressed_attr))
 
     def reset(self) -> None:
         for name in (
@@ -692,7 +873,7 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "indexer_gate_buffer",
             "actual_indexer_compressed_kv",
         ):
-            setattr(self, name, getattr(self, name).index_select(0, beam_idx.to(self.device)))
+            setattr(self, name, self._select_batch(getattr(self, name), beam_idx))
 
     def crop(self, max_length: int) -> None:
         if max_length != self.cumulative_length:
@@ -708,7 +889,10 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "indexer_gate_buffer",
             "actual_indexer_compressed_kv",
         ):
-            setattr(self, name, getattr(self, name).repeat_interleave(repeats, dim=0))
+            tensor = getattr(self, name)
+            source_batch_size = tensor.shape[0] * self.attention_dp if self.uses_dp_layout else tensor.shape[0]
+            indices = torch.arange(source_batch_size, device=self.device).repeat_interleave(repeats)
+            setattr(self, name, self._select_batch(tensor, indices))
 
     def batch_select_indices(self, indices: torch.Tensor) -> None:
         for name in (
@@ -720,7 +904,7 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "indexer_gate_buffer",
             "actual_indexer_compressed_kv",
         ):
-            setattr(self, name, getattr(self, name)[indices])
+            setattr(self, name, self._select_batch(getattr(self, name), indices))
 
 
 def qeff_apply_rotary_pos_emb(
@@ -925,6 +1109,50 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             ) -> torch.Tensor:
                 ratio = layer.compression_size
                 entry_positions = torch.div(position_ids, ratio, rounding_mode="floor")
+                if layer.uses_dp_layout:
+                    entry_positions_dp = layer._to_dp_layout(entry_positions).squeeze(-1).to(torch.int32)
+                    slot_offsets = torch.arange(ratio, device=position_ids.device, dtype=torch.int32).view(1, 1, -1)
+                    current_positions = torch.remainder(entry_positions_dp, 2).unsqueeze(-1) * ratio + slot_offsets
+                    previous_positions = (1 - torch.remainder(entry_positions_dp, 2)).unsqueeze(
+                        -1
+                    ) * ratio + slot_offsets
+                    current_kv = ctx_gather_dp(kv_buffer, current_positions)
+                    current_gate = ctx_gather_dp(gate_buffer, current_positions)
+                    previous_kv = ctx_gather_dp(kv_buffer, previous_positions)
+                    previous_gate = ctx_gather_dp(gate_buffer, previous_positions)
+                    bias = position_bias.view(1, 1, ratio, 2 * head_dim)
+                    previous_valid = entry_positions_dp > 0
+                    pooled_kv = torch.cat([previous_kv[..., :head_dim], current_kv[..., head_dim:]], dim=2)
+                    pooled_gate = torch.cat(
+                        [
+                            torch.where(
+                                previous_valid.unsqueeze(-1).unsqueeze(-1),
+                                previous_gate[..., :head_dim] + bias[..., :head_dim],
+                                torch.full_like(previous_gate[..., :head_dim], float("-inf")),
+                            ),
+                            current_gate[..., head_dim:] + bias[..., head_dim:],
+                        ],
+                        dim=2,
+                    )
+                    compressed = norm(
+                        torch.einsum(
+                            "bpnd->bpd", pooled_kv * pooled_gate.softmax(dim=2, dtype=torch.float32).to(pooled_kv.dtype)
+                        )
+                    ).to(pooled_kv.dtype)
+                    compressed = compressed.reshape(hidden_states.shape[0], head_dim)
+                    rope_positions = entry_positions * ratio
+                    comp_cos, comp_sin = rotary(
+                        compressed,
+                        position_ids=rope_positions,
+                        layer_type=self.compressor.rope_layer_type,
+                    )
+                    compressed = (
+                        qeff_apply_rotary_pos_emb(compressed.unsqueeze(1).unsqueeze(1), comp_cos, comp_sin)
+                        .squeeze(1)
+                        .squeeze(1)
+                    )
+                    write_mask = torch.remainder(position_ids + 1, ratio) == 0
+                    return layer.update_csa_compressed_state(name, compressed, entry_positions, write_mask)
                 current_bank = torch.remainder(entry_positions, 2).to(torch.int32)
                 previous_bank = 1 - current_bank
                 slot_offsets = torch.arange(ratio, device=position_ids.device, dtype=torch.int32).unsqueeze(0)
@@ -1159,6 +1387,37 @@ class QEffDeepseekV4Cache(Cache):
                 )
                 continue
             banked = 2 * ratio
+            attention_dp = int(getattr(config, "qeff_csa_attention_dp", 1))
+            indexer_cp = int(getattr(config, "qeff_csa_indexer_cp", 1))
+            if attention_dp > 1:
+                if batch_size % attention_dp:
+                    raise ValueError("batch_size must be divisible by qeff_csa_attention_dp.")
+                if config.num_key_value_heads != 1:
+                    raise NotImplementedError("CSA DP cache layout currently requires one key/value head.")
+                if indexer_cp < 1:
+                    raise ValueError("qeff_csa_indexer_cp must be >= 1.")
+                if capacity % indexer_cp:
+                    raise ValueError("CSA compressed-cache capacity must be divisible by qeff_csa_indexer_cp.")
+                batch_local = batch_size // attention_dp
+                folded_row_cache = bool(getattr(config, "qeff_csa_folded_row_cache", False))
+                layers.append(
+                    (
+                        (
+                            torch.zeros(1, batch_size, config.sliding_window, config.head_dim, **common)
+                            if folded_row_cache
+                            else torch.zeros(batch_local, attention_dp, ctx_len, config.head_dim, **common)
+                        ),
+                        torch.zeros(batch_local, attention_dp, banked, 2 * config.head_dim, **common),
+                        torch.zeros(batch_local, attention_dp, banked, 2 * config.head_dim, **common),
+                        torch.zeros(batch_local, attention_dp, capacity, config.head_dim, **common),
+                        torch.zeros(batch_local, attention_dp, banked, 2 * config.index_head_dim, **common),
+                        torch.zeros(batch_local, attention_dp, banked, 2 * config.index_head_dim, **common),
+                        torch.zeros(batch_local, attention_dp, capacity, config.index_head_dim, **common),
+                    )
+                )
+                continue
+            if indexer_cp != 1:
+                raise ValueError("qeff_csa_indexer_cp requires qeff_csa_attention_dp > 1.")
             layers.append(
                 (
                     sliding,
