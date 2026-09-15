@@ -4808,8 +4808,62 @@ def test_qwen3_5_moe_retained_state_specs_keep_flat_conv_and_recurrent_state_flo
     assert model.get_retained_state_custom_io_dtypes(default_dtype="float16")["recurrent_state.1"] == "float"
 
 
-@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
-def test_qwen3_5_get_specializations_supports_multi_resolution(moe):
+def test_qwen3_5_moe_decode_export_uses_static_token_axis():
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeForCausalLM
+
+    example_inputs = {
+        "input_ids": torch.zeros((2, 1), dtype=torch.int64),
+        "position_ids": torch.zeros((2, 1), dtype=torch.int64),
+    }
+    dynamic_axes = {
+        "input_ids": {0: "batch_size", 1: "seq_len"},
+        "position_ids": {0: "batch_size", 1: "seq_len"},
+    }
+
+    assert QEffQwen3_5MoeForCausalLM.get_onnx_export_seq_len(32, prefill_seq_len=1) == 1
+
+    example_inputs, dynamic_axes = QEffQwen3_5MoeForCausalLM.prepare_onnx_export_inputs(
+        example_inputs,
+        dynamic_axes,
+        seq_len=1,
+    )
+
+    assert example_inputs["position_ids"].shape == (4, 2, 1)
+    assert dynamic_axes["input_ids"] == {0: "batch_size"}
+    assert dynamic_axes["position_ids"] == {1: "batch_size"}
+
+
+def test_qwen3_5_moe_retained_state_specs_keep_recurrent_state_float32():
+    from types import SimpleNamespace
+
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeForCausalLM
+
+    model = QEffQwen3_5MoeForCausalLM.__new__(QEffQwen3_5MoeForCausalLM)
+    model.config = SimpleNamespace(
+        layer_types=["full_attention", "linear_attention"],
+        torch_dtype=torch.bfloat16,
+        mamba_ssm_dtype="float32",
+    )
+    linear_attn = SimpleNamespace(
+        conv_dim=16,
+        num_k_heads=2,
+        conv_kernel_size=4,
+        num_v_heads=4,
+        head_k_dim=8,
+        head_v_dim=8,
+    )
+    model.model = SimpleNamespace(layers=[SimpleNamespace(), SimpleNamespace(linear_attn=linear_attn)])
+
+    specs = model.get_onnx_retained_state_specs(batch_size=2, seq_len=1, kv_cache_shape=[2, 1, 32, 8])
+
+    assert specs["past_key_values"][0][0].dtype == torch.bfloat16
+    assert specs["past_key_values"][1][0].dtype == torch.bfloat16
+    assert specs["past_key_values"][1][1].dtype == torch.float32
+    assert specs["state_dtypes"]["recurrent_state.1"] == torch.float32
+    assert model.get_retained_state_custom_io_dtypes(default_dtype="float16")["recurrent_state.1"] == "float"
+
+
+def test_qwen3_5_moe_get_specializations_supports_multi_resolution():
     from types import SimpleNamespace
 
     from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5ForConditionalGeneration
