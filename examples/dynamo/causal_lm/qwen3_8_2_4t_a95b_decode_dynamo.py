@@ -7,6 +7,7 @@
 
 """Simple decode-only dynamo example for Qwen3.8-2.4T-A95B."""
 
+import argparse
 import os
 import shutil
 from pathlib import Path
@@ -24,29 +25,49 @@ from QEfficient import QEFFAutoModelForCausalLM
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 MODEL_ID = "Qwen/Qwen3.8-2.4T-A95B"
-TORCH_DTYPE = getattr(torch, os.environ.get("TORCH_DTYPE", "float32"))
-
-USE_SYNTHETIC_TINY = os.environ.get("USE_SYNTHETIC_TINY", "1").lower() in ("1", "true", "yes")
-SYNTHETIC_CHECKPOINT_DIR = Path(".qeff/qwen3_8_decode/synthetic_tiny_checkpoint")
-NUM_HIDDEN_LAYERS = int(os.environ.get("NUM_HIDDEN_LAYERS", "4"))
-
-WEIGHT_FREE = True
-USE_ONNX_SUBFUNCTIONS = True
-
-ENABLE_BLOCKING = False
-BLOCKING_MODE = "kv"  # "kv" or "kv_headpar"
-NUM_KV_BLOCKS = 2
-HEADPAR_SPLIT = 4
-
-BATCH_SIZE = 1
-PREFILL_SEQ_LEN = 1
-CTX_LEN = 262144
-GENERATION_LEN = 100
-NUM_CORES = 4
-NUM_DEVICES = 4
-AIC_HW_VERSION = "ai200"
-PROMPT = "Hello"
+SYNTHETIC_CHECKPOINT_DIR = ".qeff/qwen3_8_decode/synthetic_tiny_checkpoint"
 RANDOM_SEED = 42
+DType = torch.dtype
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument("--hf-hub-cache", default=None)
+    parser.add_argument("--qeff-home", default=None)
+    parser.add_argument("--use-synthetic-tiny", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--synthetic-checkpoint-dir", default=SYNTHETIC_CHECKPOINT_DIR)
+    parser.add_argument("--torch-dtype", choices=("float32", "float16", "bfloat16"), default="float32")
+    parser.add_argument("--num-hidden-layers", type=int, default=4)
+    parser.add_argument("--weight-free", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-onnx-subfunctions", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--enable-blocking", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--blocking-mode", choices=("kv", "kv_headpar"), default="kv")
+    parser.add_argument("--num-kv-blocks", type=int, default=2)
+    parser.add_argument("--headpar-split", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--prefill-seq-len", type=int, default=1)
+    parser.add_argument("--ctx-len", type=int, default=262144)
+    parser.add_argument("--generation-len", type=int, default=100)
+    parser.add_argument("--write-io", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--num-cores", type=int, default=4)
+    parser.add_argument("--num-devices", type=int, default=4)
+    parser.add_argument("--device-ids", type=int, nargs="*", default=None)
+    parser.add_argument("--aic-hw-version", default="ai200")
+    parser.add_argument("--prompt", default="Hello")
+    parser.add_argument("--random-seed", type=int, default=RANDOM_SEED)
+    return parser.parse_args()
+
+
+def torch_dtype(dtype_name: str) -> DType:
+    return getattr(torch, dtype_name)
+
+
+def layer_types(num_hidden_layers: int) -> list[str]:
+    return [
+        "full_attention" if (layer_idx + 1) % 4 == 0 else "linear_attention"
+        for layer_idx in range(num_hidden_layers)
+    ]
 
 
 def tiny_tokenizer() -> PreTrainedTokenizerFast:
@@ -62,15 +83,15 @@ def tiny_tokenizer() -> PreTrainedTokenizerFast:
     )
 
 
-def tiny_config() -> Qwen3_5MoeTextConfig:
+def tiny_config(dtype: DType, num_hidden_layers: int) -> Qwen3_5MoeTextConfig:
     return Qwen3_5MoeTextConfig(
         vocab_size=128,
         hidden_size=128,
-        num_hidden_layers=4,
+        num_hidden_layers=num_hidden_layers,
         num_attention_heads=4,
         num_key_value_heads=1,
         head_dim=32,
-        layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+        layer_types=layer_types(num_hidden_layers),
         linear_conv_kernel_dim=4,
         linear_key_head_dim=8,
         linear_value_head_dim=8,
@@ -87,99 +108,116 @@ def tiny_config() -> Qwen3_5MoeTextConfig:
             "rope_type": "default",
             "mrope_section": [2, 1, 1],
         },
-        dtype=TORCH_DTYPE,
+        dtype=dtype,
         pad_token_id=0,
         eos_token_id=2,
     )
 
 
-def ensure_synthetic_checkpoint(config: Qwen3_5MoeTextConfig) -> Path:
-    config_path = SYNTHETIC_CHECKPOINT_DIR / "config.json"
+def ensure_synthetic_checkpoint(config: Qwen3_5MoeTextConfig, checkpoint_dir: Path, dtype: DType, seed: int) -> Path:
+    config_path = checkpoint_dir / "config.json"
     if config_path.exists():
-        saved_config = Qwen3_5MoeTextConfig.from_pretrained(SYNTHETIC_CHECKPOINT_DIR)
+        saved_config = Qwen3_5MoeTextConfig.from_pretrained(checkpoint_dir)
         if saved_config.to_dict() != config.to_dict():
-            shutil.rmtree(SYNTHETIC_CHECKPOINT_DIR)
+            shutil.rmtree(checkpoint_dir)
 
-    if (SYNTHETIC_CHECKPOINT_DIR / "model.safetensors").exists():
-        return SYNTHETIC_CHECKPOINT_DIR
+    if (checkpoint_dir / "model.safetensors").exists():
+        return checkpoint_dir
 
-    SYNTHETIC_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    torch.manual_seed(RANDOM_SEED)
-    model = Qwen3_5MoeForCausalLM(config).eval().to(TORCH_DTYPE)
-    model.save_pretrained(SYNTHETIC_CHECKPOINT_DIR, safe_serialization=True)
-    return SYNTHETIC_CHECKPOINT_DIR
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    torch.manual_seed(seed)
+    model = Qwen3_5MoeForCausalLM(config).eval().to(dtype)
+    model.save_pretrained(checkpoint_dir, safe_serialization=True)
+    return checkpoint_dir
 
 
-def load_model_and_tokenizer():
-    torch.manual_seed(RANDOM_SEED)
-    if USE_SYNTHETIC_TINY:
-        config = tiny_config()
+def load_model_and_tokenizer(args=None):
+    args = args or parse_args()
+    dtype = torch_dtype(args.torch_dtype)
+    torch.manual_seed(args.random_seed)
+    if args.use_synthetic_tiny:
+        config = tiny_config(dtype, args.num_hidden_layers)
         tokenizer = tiny_tokenizer()
-        if WEIGHT_FREE:
-            checkpoint_dir = ensure_synthetic_checkpoint(config)
+        if args.weight_free:
+            checkpoint_dir = ensure_synthetic_checkpoint(
+                config,
+                Path(args.synthetic_checkpoint_dir),
+                dtype,
+                args.random_seed,
+            )
             qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
                 str(checkpoint_dir),
                 config=config,
                 weight_free=True,
-                dtype=TORCH_DTYPE,
+                dtype=dtype,
                 trust_remote_code=True,
             )
         else:
-            model = Qwen3_5MoeForCausalLM(config).eval().to(TORCH_DTYPE)
-            qeff_model = QEFFAutoModelForCausalLM(model, dtype=TORCH_DTYPE)
-        qeff_model.model.config.dtype = TORCH_DTYPE
-        qeff_model.model.config.torch_dtype = TORCH_DTYPE
+            model = Qwen3_5MoeForCausalLM(config).eval().to(dtype)
+            qeff_model = QEFFAutoModelForCausalLM(model, dtype=dtype)
+        qeff_model.model.config.dtype = dtype
+        qeff_model.model.config.torch_dtype = dtype
         return qeff_model, tokenizer
 
-    config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
-    if NUM_HIDDEN_LAYERS > 0:
-        config.num_hidden_layers = NUM_HIDDEN_LAYERS
+    hub_kwargs = {"cache_dir": args.hf_hub_cache} if args.hf_hub_cache else {}
+    config = AutoConfig.from_pretrained(args.model_id, trust_remote_code=True, **hub_kwargs)
+    if args.num_hidden_layers > 0:
+        config.num_hidden_layers = args.num_hidden_layers
         if hasattr(config, "layer_types"):
-            config.layer_types = config.layer_types[:NUM_HIDDEN_LAYERS]
-    config.dtype = TORCH_DTYPE
-    config.torch_dtype = TORCH_DTYPE
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+            config.layer_types = config.layer_types[: args.num_hidden_layers]
+    config.dtype = dtype
+    config.torch_dtype = dtype
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True, **hub_kwargs)
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        args.model_id,
         config=config,
-        weight_free=WEIGHT_FREE,
-        dtype=TORCH_DTYPE,
+        weight_free=args.weight_free,
+        dtype=dtype,
         trust_remote_code=True,
+        **hub_kwargs,
     )
     return qeff_model, tokenizer
 
 
 def main():
-    qeff_model, tokenizer = load_model_and_tokenizer()
+    args = parse_args()
+    if args.hf_hub_cache:
+        os.environ["HF_HUB_CACHE"] = args.hf_hub_cache
+    if args.qeff_home:
+        os.environ["QEFF_HOME"] = args.qeff_home
+
+    qeff_model, tokenizer = load_model_and_tokenizer(args)
     qeff_model.model.eval()
 
     qaic_config = None
-    if ENABLE_BLOCKING:
+    if args.enable_blocking:
         qaic_config = {
-            "blocking_mode": BLOCKING_MODE,
-            "num_kv_blocks": NUM_KV_BLOCKS,
-            "ctx_len": CTX_LEN,
+            "blocking_mode": args.blocking_mode,
+            "num_kv_blocks": args.num_kv_blocks,
+            "ctx_len": args.ctx_len,
         }
-        if BLOCKING_MODE == "kv_headpar":
-            qaic_config["headpar_split"] = HEADPAR_SPLIT
+        if args.blocking_mode == "kv_headpar":
+            qaic_config["headpar_split"] = args.headpar_split
 
     qpc_path = qeff_model.compile(
-        batch_size=BATCH_SIZE,
-        prefill_seq_len=PREFILL_SEQ_LEN,
-        ctx_len=CTX_LEN,
-        num_cores=NUM_CORES,
-        num_devices=NUM_DEVICES,
-        aic_hw_version=AIC_HW_VERSION,
+        batch_size=args.batch_size,
+        prefill_seq_len=args.prefill_seq_len,
+        ctx_len=args.ctx_len,
+        num_cores=args.num_cores,
+        num_devices=args.num_devices,
+        aic_hw_version=args.aic_hw_version,
         dynamo=True,
-        use_onnx_subfunctions=USE_ONNX_SUBFUNCTIONS,
+        use_onnx_subfunctions=args.use_onnx_subfunctions,
         qaic_config=qaic_config,
     )
     print(f"Final QPC path: {qpc_path}")
 
     output = qeff_model.generate(
         tokenizer=tokenizer,
-        prompts=[PROMPT] * BATCH_SIZE,
-        generation_len=GENERATION_LEN,
+        prompts=[args.prompt] * args.batch_size,
+        device_id=args.device_ids,
+        generation_len=args.generation_len,
+        write_io=args.write_io,
     )
     print(output.generated_ids)
     print(output.generated_texts)
