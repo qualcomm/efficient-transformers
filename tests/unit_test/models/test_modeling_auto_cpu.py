@@ -406,6 +406,17 @@ class TestQEFFAutoModelForCausalLMLogic:
         spec = qeff.build_prefill_specialization(prefill_seq_len=32, ctx_len=128, batch_size=1)
         assert all(v is not None for v in spec.values())
 
+    def test_build_prefill_specialization_names_seq_len_one_as_decode(self):
+        """The prefill_seq_len=1 compile convention is decode-only unless prefill_only=True."""
+        model, cfg = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model)
+
+        decode = qeff.build_prefill_specialization(prefill_seq_len=1, ctx_len=64, batch_size=1)
+        prefill = qeff.build_prefill_specialization(prefill_seq_len=1, ctx_len=64, batch_size=1, prefill_only=True)
+
+        assert decode["_graph_name"] == "Decode"
+        assert prefill["_graph_name"] == "Prefill"
+
     # --- build_decode_specialization ---
 
     def test_build_decode_specialization_basic(self):
