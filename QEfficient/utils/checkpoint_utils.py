@@ -33,17 +33,6 @@ def huggingface_hub_cache_dir() -> Path:
     return Path.home() / ".cache" / "huggingface" / "hub"
 
 
-def _all_checkpoint_files_under(root: Path, checkpoint_files: Sequence[str]) -> bool:
-    """Return True when every checkpoint file is contained under ``root``."""
-    root = root.expanduser()
-    for checkpoint_file in checkpoint_files:
-        try:
-            Path(checkpoint_file).expanduser().relative_to(root)
-        except ValueError:
-            return False
-    return True
-
-
 def load_checkpoint_weights(checkpoint_path: str, keys: set[str]) -> dict[str, torch.Tensor]:
     """Read selected tensors from safetensors; pickle-backed PyTorch checkpoints are unsupported for security."""
     path = Path(checkpoint_path)
@@ -120,8 +109,9 @@ def requires_dtype_conversion(src: Path, weight_map: dict[str, str], target_dtyp
     """Return True when any floating-point checkpoint tensor differs from ``target_dtype``."""
     for shard_name in sorted(set(weight_map.values())):
         with safe_open(str(src / shard_name), framework="pt") as handle:
-            keys = handle.keys()
-            for key in keys:
+            for key in handle.keys():
+                if key not in weight_map:
+                    continue
                 dtype = safetensors_dtype_to_torch(handle.get_slice(key).get_dtype())
                 if dtype is not None and dtype != target_dtype:
                     return True
@@ -157,6 +147,7 @@ def checkpoint_files_complete(src: Path) -> bool:
         return False
 
     return all((src / shard_name).is_file() for shard_name in set(weight_map.values()))
+
 
 @cache
 def resolve_checkpoint_dir(model_id_or_path: str) -> Path:
@@ -244,10 +235,6 @@ def checkpoint_root(model_id_or_path: str, checkpoint_files: Sequence[str]) -> P
     """
     if not checkpoint_files:
         return None
-
-    hf_cache_root = huggingface_hub_cache_dir()
-    if _all_checkpoint_files_under(hf_cache_root, checkpoint_files):
-        return hf_cache_root
 
     candidate = Path(model_id_or_path).expanduser()
     if candidate.exists():
