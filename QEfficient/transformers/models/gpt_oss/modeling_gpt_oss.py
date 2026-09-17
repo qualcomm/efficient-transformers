@@ -47,8 +47,8 @@ from QEfficient.transformers.moe import (
     delete_module_attrs,
     gptoss_clamp,
     gptoss_clamped_glu_mlp,
-    moe_simple_loop,
     resolve_routing,
+    unpack_moe_weights_from_expert_parallel,
 )
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 from QEfficient.utils.logging_utils import QEFFLogger
@@ -123,17 +123,11 @@ class QEffGptOssExperts(GptOssExperts):
     def execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:
         """Override to preserve backward-compatible NUM_FFN_BLOCKS token-blocking behaviour.
 
-        When NUM_FFN_BLOCKS is set in the environment the token sequence T is split into
-        that many equal chunks and each chunk is processed through all experts via
-        moe_simple_loop before the results are concatenated. This matches the behaviour
-        of the legacy _QEffGptOssLegacyBlockedMixin that existed on this class before the
-        shared QEffMoEBlockMixin was adopted: the mixin intercepted forward() and bypassed
-        the flavour system entirely, so NUM_FFN_BLOCKS overrode whatever _moe_flavour was
-        configured. The same unconditional override is preserved here.
-
-        Routing weights are computed over the full T by QEffMoEBlockMixin.forward() before
-        this call; only the per-expert matmuls are token-blocked. When NUM_FFN_BLOCKS is
-        not set, dispatch falls through to the standard flavour path.
+        When NUM_FFN_BLOCKS is set, iterates outer-expert inner-token-block so each
+        expert's weights are loaded once and reused across all token blocks before moving
+        to the next expert. This preserves the CopyToVTCM+compute pipelining that the
+        compiler can exploit (weights stay hot across token blocks). When NUM_FFN_BLOCKS
+        is not set, dispatch falls through to the standard flavour path.
         """
         num_ffn_blocks = os.environ.get("NUM_FFN_BLOCKS", None)
         if num_ffn_blocks is None:
@@ -145,16 +139,67 @@ class QEffGptOssExperts(GptOssExperts):
             )
 
         num_ffn_blocks = int(num_ffn_blocks)
-        T = x.shape[0]
+        T, H = x.shape
         dense, _ = resolve_routing(routing, self.moe_weights.num_experts)
-        profile = self.moe_profile
         block_size = T // num_ffn_blocks
-        outs = []
-        for i in range(num_ffn_blocks):
-            start = i * block_size
-            end = T if i == num_ffn_blocks - 1 else start + block_size
-            outs.append(moe_simple_loop(x[start:end], dense[start:end], self.moe_weights, profile))
-        return torch.cat(outs, dim=0)
+
+        weights = self.moe_weights
+        if weights.gate.ndim == 4:
+            weights = unpack_moe_weights_from_expert_parallel(weights)
+
+        limit = self.experts.limit
+        alpha = self.experts.alpha
+        _fp16_min = torch.finfo(torch.float16).min
+
+        i_block_size = getattr(self, "expert_intermediate_block_size", None)
+
+        expert_out = x.new_zeros((T, H))
+        for e in range(weights.num_experts):
+            routing_weight = dense[:, e].unsqueeze(-1)
+            W_g = weights.gate[e]
+            W_u = weights.up[e]
+            W_d = weights.down[e]
+            b_g = weights.gate_bias[e] if weights.gate_bias is not None else None
+            b_u = weights.up_bias[e] if weights.up_bias is not None else None
+            b_d = weights.down_bias[e] if weights.down_bias is not None else None
+            outs = []
+            for i in range(num_ffn_blocks):
+                start = i * block_size
+                end = T if i == num_ffn_blocks - 1 else start + block_size
+                xb = x[start:end]
+                if i_block_size is None:
+                    gate = xb @ W_g
+                    if b_g is not None:
+                        gate = gate + b_g
+                    up = xb @ W_u
+                    if b_u is not None:
+                        up = up + b_u
+                    gate = gate.clamp(min=_fp16_min, max=limit)
+                    up = up.clamp(min=-limit, max=limit)
+                    glu = gate * torch.sigmoid(gate * alpha)
+                    intermediate = (up + 1) * glu
+                    down = intermediate @ W_d
+                else:
+                    inter_size = W_d.shape[0]
+                    down = xb.new_zeros((xb.shape[0], H))
+                    for i_start in range(0, inter_size, i_block_size):
+                        i_end = min(i_start + i_block_size, inter_size)
+                        gate_s = xb @ W_g[:, i_start:i_end]
+                        if b_g is not None:
+                            gate_s = gate_s + b_g[i_start:i_end]
+                        up_s = xb @ W_u[:, i_start:i_end]
+                        if b_u is not None:
+                            up_s = up_s + b_u[i_start:i_end]
+                        gate_s = gate_s.clamp(min=_fp16_min, max=limit)
+                        up_s = up_s.clamp(min=-limit, max=limit)
+                        glu_s = gate_s * torch.sigmoid(gate_s * alpha)
+                        intermediate_s = (up_s + 1) * glu_s
+                        down = down + intermediate_s @ W_d[i_start:i_end, :]
+                if b_d is not None:
+                    down = down + b_d
+                outs.append(down)
+            expert_out = expert_out + torch.cat(outs, dim=0) * routing_weight
+        return expert_out
 
 
 #  Can be replaced with llama/modeling_llama.py::QEffLlamaRotaryEmbedding but keeping it following transformers ideology
