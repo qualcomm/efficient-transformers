@@ -4635,24 +4635,35 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
             for layer_idx, layer_state in enumerate(pkv_cache):
                 state_names = self.model.get_onnx_past_key_value_names(layer_idx, layer_state)
+                layer_type = self.model.config.layer_types[layer_idx]
                 csa_dp_layout = (
-                    self.model.config.layer_types[layer_idx] == "compressed_sparse_attention"
+                    layer_type == "compressed_sparse_attention"
                     and int(getattr(self.model.config, "qeff_csa_attention_dp", 1)) > 1
+                )
+                hca_dp_layout = (
+                    layer_type == "heavily_compressed_attention"
+                    and int(getattr(self.model.config, "qeff_hca_attention_dp", 1)) > 1
+                )
+                parallel_layout = csa_dp_layout or hca_dp_layout
+                folded_row_cache = (
+                    bool(getattr(self.model.config, "qeff_csa_folded_row_cache", False))
+                    if layer_type == "compressed_sparse_attention"
+                    else bool(getattr(self.model.config, "qeff_hca_folded_row_cache", False))
                 )
                 for state_name, state in zip(state_names, layer_state):
                     example_inputs["past_key_values"][layer_idx].append(state)
                     state_axes = {}
-                    if not csa_dp_layout:
+                    if not parallel_layout:
                         state_axes[0] = "full_batch_size" if self.continuous_batching else "batch_size"
                     if "sliding_window_kv" in state_name:
-                        if not bool(getattr(self.model.config, "qeff_csa_folded_row_cache", False)):
+                        if not folded_row_cache:
                             state_axes[2] = "ctx_len"
                     elif "actual_" in state_name:
                         cp_tiled_indexer_cache = (
                             "actual_indexer_compressed_kv" in state_name
                             and int(getattr(self.model.config, "qeff_csa_indexer_cp", 1)) > 1
                         )
-                        if not cp_tiled_indexer_cache:
+                        if not (cp_tiled_indexer_cache or hca_dp_layout):
                             state_axes[2] = f"compressed_ctx_len_{layer_idx}"
                     dynamic_axes[state_name] = state_axes
                     output_names.append(f"{state_name}_RetainedState")
