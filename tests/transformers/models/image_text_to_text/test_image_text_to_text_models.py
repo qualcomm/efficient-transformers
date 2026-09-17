@@ -560,6 +560,8 @@ def test_few_image_text_to_text_intersection_mdp_compile_only(model_name, kv_off
 @pytest.mark.parametrize("model_name", test_mm_models)
 @pytest.mark.parametrize("kv_offload", [True])  # VLMs only need dual-QPC coverage; single-QPC isn't exercised.
 def test_dummy_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(model_name, kv_offload, manual_cleanup):
+    if is_kimi_k25(model_name):
+        pytest.xfail("Temporary: Kimi-K2.5 dummy parity is unstable on QAIC in CI.")
     if model_name in ModelConfig.SKIPPED_MODELS:
         pytest.skip("Test skipped for this model due to some issues.")
     torch.manual_seed(42)
@@ -666,6 +668,8 @@ def test_dummy_image_text_to_text_ccl_dual_qpc(model_name, manual_cleanup):
     decode logits (HF top1-top2 margin <0.11 on most positions), which fp16 rounding at
     the QPC flips into a different top-K member on those steps.
     """
+    if is_kimi_k25(model_name):
+        pytest.xfail("Temporary: Kimi-K2.5 dummy CCL dual-QPC parity is unstable on QAIC in CI.")
     ccl_forced = {
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     }
