@@ -10,7 +10,6 @@
 import argparse
 import json
 import os
-import warnings
 from collections import defaultdict
 from pathlib import Path
 
@@ -286,13 +285,6 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
         raise ValueError("indexer_cp must be at least 1.")
     if num_kv_blocks < 1:
         raise ValueError("num_kv_blocks must be at least 1.")
-    if num_kv_blocks > 1:
-        warnings.warn(
-            "CSA num_kv_blocks > 1 enables the benchmark tiled indexer scorer, but qaic-compile currently "
-            "segfaults for this graph. Use num_kv_blocks=1 for a compilable QPC.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
     if hca_compressed_kv_cp < 1:
         raise ValueError("hca_compressed_kv_cp must be at least 1.")
     if hca_attn_blocks < 1:

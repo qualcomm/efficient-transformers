@@ -292,7 +292,7 @@ def test_deepseek_v4_example_parallel_layout_controls():
     assert MICROBENCH_DEFAULTS["attn_dp"] == 16
     assert MICROBENCH_DEFAULTS["indexer_cp"] == 16
     assert MICROBENCH_DEFAULTS["num_hidden_layers"] == 4
-    assert MICROBENCH_DEFAULTS["num_kv_blocks"] == 1
+    assert MICROBENCH_DEFAULTS["num_kv_blocks"] == 4
     assert MICROBENCH_DEFAULTS["hca_compressed_kv_cp"] == 1
     assert MICROBENCH_DEFAULTS["hca_attn_blocks"] == 16
     assert MICROBENCH_DEFAULTS["hw_version"] == "ai100"

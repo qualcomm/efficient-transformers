@@ -1274,11 +1274,32 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             tokens_per_core,
             indexer.head_dim,
         )
-        raw_tile_scores = torch.einsum("lphsd,lpcgntd->lphscgnt", prepared_q.float(), tiled_cache.float()).relu()
+        folded_batch = batch_local * layer.attention_dp
+        raw_tile_scores = torch.einsum(
+            "bhd,bcgntd->bhcgnt",
+            prepared_q[:, :, :, 0].reshape(folded_batch, indexer.num_heads, indexer.head_dim).float(),
+            tiled_cache.reshape(
+                folded_batch,
+                cp,
+                num_kv_blocks,
+                attention_cores,
+                tokens_per_core,
+                indexer.head_dim,
+            ).float(),
+        ).relu()
         tile_scores = (
-            raw_tile_scores
-            * prepared_weights.permute(0, 1, 3, 2).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        ).sum(dim=2)[:, :, 0]
+            (
+                raw_tile_scores
+                * prepared_weights[:, :, 0]
+                .reshape(folded_batch, indexer.num_heads)
+                .unsqueeze(-1)
+                .unsqueeze(-1)
+                .unsqueeze(-1)
+                .unsqueeze(-1)
+            )
+            .sum(dim=1)
+            .reshape(batch_local, layer.attention_dp, cp, num_kv_blocks, attention_cores, tokens_per_core)
+        )
 
         local_ids = torch.arange(slots_per_cp, device=q_index.device, dtype=torch.int64).view(
             1,
