@@ -285,25 +285,42 @@ def test_deepseek_v4_csa_dp_cp_indexer_cache_layout_decodes():
     assert cache[2][6].shape == (2, 2, 4, config.index_head_dim)
 
 
-def test_deepseek_v4_example_csa_layout_controls():
-    from examples.text_generation.deepseek_v4_flash_decode import configure_qeff_csa_layout
+def test_deepseek_v4_example_parallel_layout_controls():
+    from examples.text_generation.deepseek_v4_flash_decode import configure_qeff_parallel_layout
+    from examples.text_generation.deepseek_v4_flash_decode_micro_benmark import MICROBENCH_DEFAULTS
+
+    assert MICROBENCH_DEFAULTS["attn_dp"] == 16
+    assert MICROBENCH_DEFAULTS["indexer_cp"] == 16
+    assert MICROBENCH_DEFAULTS["num_hidden_layers"] == 4
+    assert MICROBENCH_DEFAULTS["num_kv_blocks"] == 1
+    assert MICROBENCH_DEFAULTS["hca_compressed_kv_cp"] == 1
+    assert MICROBENCH_DEFAULTS["hca_attn_blocks"] == 16
+    assert MICROBENCH_DEFAULTS["hw_version"] == "ai100"
 
     config = _tiny_deepseek_v4_config()
-    configure_qeff_csa_layout(
+    configure_qeff_parallel_layout(
         config,
         Namespace(
             batch_size=4,
-            csa_attention_dp=2,
-            csa_indexer_cp=2,
-            csa_folded_row_cache=True,
-            ctx_len=8,
+            attn_dp=2,
+            indexer_cp=2,
+            num_kv_blocks=1,
+            hca_compressed_kv_cp=2,
+            hca_attn_blocks=2,
+            hw_version="ai200",
+            ctx_len=16,
             device_group=[0, 1],
         ),
     )
 
     assert config.qeff_csa_attention_dp == 2
     assert config.qeff_csa_indexer_cp == 2
+    assert config.qeff_csa_num_kv_blocks == 1
     assert config.qeff_csa_folded_row_cache is True
+    assert config.qeff_hca_attention_dp == 2
+    assert config.qeff_hca_compressed_kv_cp == 2
+    assert config.qeff_hca_attn_blocks == 2
+    assert config.qeff_hca_folded_row_cache is True
 
 
 def test_deepseek_v4_folded_csa_dp_matches_batch_major_decode():
@@ -321,6 +338,89 @@ def test_deepseek_v4_folded_csa_dp_matches_batch_major_decode():
     folded_cache = folded_model.get_dummy_pkv_cache(folded_config, batch_size=2, ctx_len=8)
 
     for position, tokens in enumerate(((3, 7), (5, 11), (13, 17), (19, 23), (29, 31))):
+        input_ids = torch.tensor(tokens).unsqueeze(1)
+        position_ids = torch.full((2, 1), position)
+        with torch.no_grad():
+            reference_output = reference_model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=reference_cache,
+                use_cache=True,
+            )
+            folded_output = folded_model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=folded_cache,
+                use_cache=True,
+            )
+        reference_cache = reference_output.past_key_values
+        folded_cache = folded_output.past_key_values
+        torch.testing.assert_close(reference_output.logits, folded_output.logits, atol=2e-4, rtol=2e-4)
+
+
+def test_deepseek_v4_blocked_csa_indexer_matches_batch_major_decode():
+    config = _tiny_deepseek_v4_config()
+    torch.manual_seed(0)
+    reference_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+
+    blocked_config = deepcopy(config)
+    blocked_config.qeff_csa_attention_dp = 2
+    blocked_config.qeff_csa_indexer_cp = 2
+    blocked_config.qeff_csa_num_kv_blocks = 2
+    blocked_config.qeff_csa_folded_row_cache = True
+    blocked_model = deepcopy(reference_model).eval()
+    blocked_model.config.qeff_csa_attention_dp = blocked_config.qeff_csa_attention_dp
+    blocked_model.config.qeff_csa_indexer_cp = blocked_config.qeff_csa_indexer_cp
+    blocked_model.config.qeff_csa_num_kv_blocks = blocked_config.qeff_csa_num_kv_blocks
+    blocked_model.config.qeff_csa_folded_row_cache = blocked_config.qeff_csa_folded_row_cache
+
+    reference_cache = reference_model.get_dummy_pkv_cache(config, batch_size=2, ctx_len=16)
+    blocked_cache = blocked_model.get_dummy_pkv_cache(blocked_config, batch_size=2, ctx_len=16)
+    assert blocked_cache[2][6].shape == (1, 2, 8, config.index_head_dim)
+
+    for position, tokens in enumerate(((3, 7), (5, 11), (13, 17), (19, 23), (29, 31), (37, 41))):
+        input_ids = torch.tensor(tokens).unsqueeze(1)
+        position_ids = torch.full((2, 1), position)
+        with torch.no_grad():
+            reference_output = reference_model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=reference_cache,
+                use_cache=True,
+            )
+            blocked_output = blocked_model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=blocked_cache,
+                use_cache=True,
+            )
+        reference_cache = reference_output.past_key_values
+        blocked_cache = blocked_output.past_key_values
+        torch.testing.assert_close(reference_output.logits, blocked_output.logits, atol=2e-4, rtol=2e-4)
+
+
+def test_deepseek_v4_folded_hca_dp_matches_batch_major_decode():
+    config = _tiny_deepseek_v4_config()
+    torch.manual_seed(0)
+    reference_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+
+    folded_config = deepcopy(config)
+    folded_config.qeff_hca_attention_dp = 2
+    folded_config.qeff_hca_compressed_kv_cp = 2
+    folded_config.qeff_hca_attn_blocks = 4
+    folded_config.qeff_hca_folded_row_cache = True
+    folded_model = deepcopy(reference_model).eval()
+    folded_model.config.qeff_hca_attention_dp = folded_config.qeff_hca_attention_dp
+    folded_model.config.qeff_hca_compressed_kv_cp = folded_config.qeff_hca_compressed_kv_cp
+    folded_model.config.qeff_hca_attn_blocks = folded_config.qeff_hca_attn_blocks
+    folded_model.config.qeff_hca_folded_row_cache = folded_config.qeff_hca_folded_row_cache
+
+    reference_cache = reference_model.get_dummy_pkv_cache(config, batch_size=2, ctx_len=32)
+    folded_cache = folded_model.get_dummy_pkv_cache(folded_config, batch_size=2, ctx_len=32)
+    assert folded_cache[0][0].shape == (1, 2, config.sliding_window, config.head_dim)
+    assert folded_cache[0][3].shape == (1, 2, 8, config.head_dim)
+
+    for position, tokens in enumerate(((3, 7), (5, 11), (13, 17), (19, 23), (29, 31), (37, 41), (43, 47), (53, 59))):
         input_ids = torch.tensor(tokens).unsqueeze(1)
         position_ids = torch.full((2, 1), position)
         with torch.no_grad():
@@ -362,6 +462,30 @@ def test_deepseek_v4_csa_dp_cp_export_uses_requested_capture_layout(monkeypatch)
     assert csa_indexer_cache.shape == (2, 2, 4, config.index_head_dim)
     assert captured["dynamic_axes"]["past_sliding_window_kv.2"] == {}
     assert captured["dynamic_axes"]["past_actual_indexer_compressed_kv.2"] == {}
+
+
+def test_deepseek_v4_hca_dp_export_uses_requested_capture_layout(monkeypatch):
+    config = _tiny_deepseek_v4_config()
+    config.qeff_hca_attention_dp = 2
+    config.qeff_hca_compressed_kv_cp = 2
+    config.qeff_hca_attn_blocks = 2
+    config.qeff_hca_folded_row_cache = True
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    captured = {}
+
+    def fake_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["example_inputs"] = example_inputs
+        captured["dynamic_axes"] = dynamic_axes
+        return "unused.onnx"
+
+    monkeypatch.setattr(qeff_model, "_export", fake_export)
+    qeff_model.export(export_batch_size=2, cache_ctx_len=16, dynamo=False)
+
+    hca_cache = captured["example_inputs"]["past_key_values"][0]
+    assert hca_cache[0].shape == (1, 2, config.sliding_window, config.head_dim)
+    assert hca_cache[3].shape == (1, 2, 4, config.head_dim)
+    assert captured["dynamic_axes"]["past_sliding_window_kv.0"] == {}
+    assert captured["dynamic_axes"]["past_actual_compressed_kv.0"] == {}
 
 
 @pytest.mark.llm_model

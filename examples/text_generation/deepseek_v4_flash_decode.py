@@ -10,6 +10,7 @@
 import argparse
 import json
 import os
+import warnings
 from collections import defaultdict
 from pathlib import Path
 
@@ -50,6 +51,7 @@ TARGETED_HEAD_OUTPUTS = (
     "/model/hc_head/MatMul_output_0",
     "/lm_head/MatMul_output_0",
 )
+HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
 
 
 def parse_device_group(value: str) -> list[int]:
@@ -236,27 +238,30 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--ctx-len", type=int, default=512)
     parser.add_argument("--generation-len", type=int, default=250)
     parser.add_argument("--num-hidden-layers", type=int, default=43)
-    parser.add_argument("--num-cores", type=int, default=12)
+    parser.add_argument("--num-cores", "--compile-num-cores", dest="num_cores", type=int, default=12)
     parser.add_argument("--device-group", type=parse_device_group, default=[i for i in range(4)])
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--attn-dp", type=int, default=None, help="Folded decode attention data-parallel rows.")
+    parser.add_argument("--indexer-cp", type=int, default=1, help="CSA indexer compressed-cache context parallelism.")
     parser.add_argument(
-        "--csa-attention-dp",
-        type=int,
-        default=None,
-        help="CSA data-parallel cache rows; defaults to the device-group size.",
-    )
-    parser.add_argument(
-        "--csa-indexer-cp",
+        "--num-kv-blocks",
         type=int,
         default=1,
-        help="CSA indexer compressed-cache context parallelism.",
+        help="CSA indexer CP-local blocks; values above one currently trigger a QAIC compiler crash.",
     )
     parser.add_argument(
-        "--csa-folded-row-cache",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use the folded-row CSA local-KV cache layout.",
+        "--hca-compressed-kv-cp",
+        type=int,
+        default=1,
+        help="HCA compressed-KV context-parallel degree.",
     )
+    parser.add_argument(
+        "--hca-attn-blocks",
+        type=int,
+        default=None,
+        help="HCA dense compressed-attention tiles; defaults to the hardware attention-core count.",
+    )
+    parser.add_argument("--hw-version", choices=tuple(HW_CORES_PER_DEVICE), default="ai100")
     parser.add_argument("--prefill-prompt", default=PREFILL_PROMPT)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--automation", action="store_true")
@@ -267,31 +272,67 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     return parser.parse_args()
 
 
-def configure_qeff_csa_layout(config, args: argparse.Namespace) -> None:
-    """Apply the requested CSA cache layout to a DeepSeek V4 configuration."""
-    csa_attention_dp = args.csa_attention_dp or len(args.device_group)
-    csa_indexer_cp = args.csa_indexer_cp
-    if csa_attention_dp < 1:
-        raise ValueError("csa_attention_dp must be at least 1.")
-    if args.batch_size % csa_attention_dp:
-        raise ValueError("batch_size must be divisible by csa_attention_dp.")
-    if csa_indexer_cp < 1:
-        raise ValueError("csa_indexer_cp must be at least 1.")
+def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
+    """Apply the benchmark's shared folded decode controls to QEff cache layouts."""
+    attention_dp = args.attn_dp or len(args.device_group)
+    indexer_cp = args.indexer_cp
+    num_kv_blocks = args.num_kv_blocks
+    attention_cores = HW_CORES_PER_DEVICE[args.hw_version]
+    hca_compressed_kv_cp = args.hca_compressed_kv_cp
+    hca_attn_blocks = args.hca_attn_blocks or attention_cores
+    if attention_dp < 1:
+        raise ValueError("attn_dp must be at least 1.")
+    if indexer_cp < 1:
+        raise ValueError("indexer_cp must be at least 1.")
+    if num_kv_blocks < 1:
+        raise ValueError("num_kv_blocks must be at least 1.")
+    if num_kv_blocks > 1:
+        warnings.warn(
+            "CSA num_kv_blocks > 1 enables the benchmark tiled indexer scorer, but qaic-compile currently "
+            "segfaults for this graph. Use num_kv_blocks=1 for a compilable QPC.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    if hca_compressed_kv_cp < 1:
+        raise ValueError("hca_compressed_kv_cp must be at least 1.")
+    if hca_attn_blocks < 1:
+        raise ValueError("hca_attn_blocks must be at least 1.")
+    if args.batch_size % attention_dp:
+        raise ValueError("batch_size must be divisible by attn_dp.")
 
     csa_capacity = None
+    hca_capacity = None
     for layer_type in config.layer_types:
         if layer_type == "compressed_sparse_attention":
             csa_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
-            if csa_capacity % csa_indexer_cp:
-                raise ValueError("CSA compressed-cache capacity must be divisible by csa_indexer_cp.")
-    config.qeff_csa_attention_dp = csa_attention_dp
-    config.qeff_csa_indexer_cp = csa_indexer_cp
-    config.qeff_csa_folded_row_cache = args.csa_folded_row_cache
+            if csa_capacity % indexer_cp:
+                raise ValueError("CSA compressed-cache capacity must be divisible by indexer_cp.")
+            csa_slots_per_cp = csa_capacity // indexer_cp
+            if csa_slots_per_cp % num_kv_blocks:
+                raise ValueError("CSA CP-way slot count must be divisible by num_kv_blocks.")
+            if (csa_slots_per_cp // num_kv_blocks) % attention_cores:
+                raise ValueError("CSA KV-block width must be divisible by the hardware attention-core count.")
+        if layer_type == "heavily_compressed_attention":
+            hca_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
+            if hca_capacity % hca_compressed_kv_cp:
+                raise ValueError("HCA compressed-cache capacity must be divisible by hca_compressed_kv_cp.")
+            if (hca_capacity // hca_compressed_kv_cp) % hca_attn_blocks:
+                raise ValueError("HCA CP-way slot count must be divisible by hca_attn_blocks.")
+    config.qeff_csa_attention_dp = attention_dp
+    config.qeff_csa_indexer_cp = indexer_cp
+    config.qeff_csa_num_kv_blocks = num_kv_blocks
+    config.qeff_csa_indexer_attention_cores = attention_cores
+    config.qeff_csa_folded_row_cache = True
+    config.qeff_hca_attention_dp = attention_dp
+    config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
+    config.qeff_hca_attn_blocks = hca_attn_blocks
+    config.qeff_hca_folded_row_cache = True
     print(
-        "CSA cache layout: "
-        f"batch_size={args.batch_size}, attention_dp={csa_attention_dp}, "
-        f"indexer_cp={csa_indexer_cp}, folded_row_cache={config.qeff_csa_folded_row_cache}, "
-        f"compressed_capacity={csa_capacity}"
+        "Folded decode layout: "
+        f"batch_size={args.batch_size}, attn_dp={attention_dp}, indexer_cp={indexer_cp}, "
+        f"num_kv_blocks={num_kv_blocks}, "
+        f"hw_version={args.hw_version}, hca_compressed_kv_cp={hca_compressed_kv_cp}, "
+        f"hca_attn_blocks={hca_attn_blocks}, csa_capacity={csa_capacity}, hca_capacity={hca_capacity}"
     )
 
 
@@ -336,7 +377,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
     config.layer_types = config.layer_types[: args.num_hidden_layers]
     config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
     batch_size = args.batch_size
-    configure_qeff_csa_layout(config, args)
+    configure_qeff_parallel_layout(config, args)
 
     print("Building the QEfficient model in weight-free mode")
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
@@ -379,6 +420,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
             batch_size=batch_size,
             num_cores=args.num_cores,
             num_devices=len(args.device_group),
+            aic_hw_version=args.hw_version,
             prefill_only=False,
             use_onnx_subfunctions=False,
             mxint8_kv_cache=False,
