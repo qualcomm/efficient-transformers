@@ -20,7 +20,7 @@ MICROBENCH_DEFAULTS = {
     "device_group": list(range(16)),
     "attn_dp": 16,
     "indexer_cp": 16,
-    "num_kv_blocks": 1,
+    "num_kv_blocks": 4,
     "hca_compressed_kv_cp": 1,
     "hca_attn_blocks": 16,
     "hw_version": "ai100",
