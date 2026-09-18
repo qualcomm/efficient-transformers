@@ -54,6 +54,7 @@ _COMPUTED_INITIALIZER_NAMES = {
     "_mask_strict",
     "_ones_lower",
     "_eye",
+    "sinks",
 }
 
 

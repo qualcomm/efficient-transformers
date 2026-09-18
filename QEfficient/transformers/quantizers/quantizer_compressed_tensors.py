@@ -433,24 +433,38 @@ def _replace_with_fp8_dequant_linear_and_experts(
         if isinstance(child_module, torch.nn.Linear) and name not in (modules_to_not_convert or []):
             current_key_name_str = ".".join(current_key_name)
             if not any(key in current_key_name_str for key in (modules_to_not_convert or [])):
-                if hasattr(child_module, "n_groups"):
-                    model._modules[name] = FP8BlockWiseDequantGroupedLinear.for_fp8_layer_with_blocksize(
-                        child_module.in_features,
-                        child_module.out_features,
-                        quantization_config.weight_block_size,
-                        quantization_config.fmt,
-                        child_module.n_groups,
-                        child_module.bias is not None,
-                    )
+                weight_block_size = quantization_config.weight_block_size
+                if (
+                    child_module.in_features % weight_block_size[0] == 0
+                    and child_module.out_features % weight_block_size[1] == 0
+                ):
+                    if hasattr(child_module, "n_groups"):
+                        model._modules[name] = FP8BlockWiseDequantGroupedLinear.for_fp8_layer_with_blocksize(
+                            child_module.in_features,
+                            child_module.out_features,
+                            weight_block_size,
+                            quantization_config.fmt,
+                            child_module.n_groups,
+                            child_module.bias is not None,
+                        )
+                    else:
+                        model._modules[name] = FP8BlockWiseDequantLinear.for_fp8_layer_with_blocksize(
+                            child_module.in_features,
+                            child_module.out_features,
+                            weight_block_size,
+                            quantization_config.fmt,
+                            child_module.bias is not None,
+                        )
+                    has_been_replaced = True
                 else:
-                    model._modules[name] = FP8BlockWiseDequantLinear.for_fp8_layer_with_blocksize(
-                        child_module.in_features,
+                    logger.debug(
+                        "Skipping FP8 blockwise replacement for %s with shape (%s, %s): "
+                        "not divisible by block size %s.",
+                        current_key_name_str,
                         child_module.out_features,
-                        quantization_config.weight_block_size,
-                        quantization_config.fmt,
-                        child_module.bias is not None,
+                        child_module.in_features,
+                        weight_block_size,
                     )
-                has_been_replaced = True
 
         if isinstance(child_module, Qwen3VLMoeTextExperts) and name not in (modules_to_not_convert or []):
             current_key_name_str = ".".join(current_key_name)

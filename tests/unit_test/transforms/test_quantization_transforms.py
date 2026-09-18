@@ -104,6 +104,32 @@ class TestQuantizationTransformImportability:
 
         assert output.shape == (1, 2, 4)
 
+    def test_fp8_blockwise_replacement_skips_incompatible_linear_shapes(self):
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
+            FP8BlockWiseDequantLinear,
+            QEffFP8Config,
+            _replace_with_fp8_dequant_linear_and_experts_if_qwen,
+        )
+
+        model = torch.nn.Module()
+        model.compatible = torch.nn.Linear(128, 128, bias=False)
+        model.incompatible = torch.nn.Linear(4096, 64, bias=False)
+
+        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
+            model,
+            quantization_config=QEffFP8Config(
+                quant_method="fp8",
+                activation_scheme="dynamic",
+                fmt="e4m3",
+                scale_fmt="ue8m0",
+                weight_block_size=[128, 128],
+            ),
+        )
+
+        assert has_been_replaced
+        assert isinstance(model.compatible, FP8BlockWiseDequantLinear)
+        assert type(model.incompatible) is torch.nn.Linear
+
     def test_fp8_quantizer_dequantizes_deepseek_experts_before_merging(self):
         from transformers.conversion_mapping import WeightConverter, get_checkpoint_conversion_mapping
         from transformers.integrations.finegrained_fp8 import Fp8Dequantize

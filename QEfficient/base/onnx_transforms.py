@@ -5,6 +5,9 @@
 #
 # ----------------------------------------------------------------------------
 
+import copy
+import hashlib
+import json
 import logging
 import os
 import re
@@ -14,7 +17,7 @@ from typing import Any, Dict, Tuple
 import numpy as np
 import onnx
 import torch
-from onnx import ModelProto, TensorProto, external_data_helper, numpy_helper
+from onnx import AttributeProto, ModelProto, TensorProto, external_data_helper, numpy_helper
 
 from QEfficient.customop.ctx_scatter_gather import (
     CtxChunkScatterBatch,
@@ -528,6 +531,8 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
             for attr in node.attribute:
                 if attr.HasField("g"):
                     yield from cls._iter_all_nodes(attr.g.node)
+                for graph in attr.graphs:
+                    yield from cls._iter_all_nodes(graph.node)
 
     @staticmethod
     def _rename_op_types(nodes, old_to_new: dict[str, str]) -> None:
@@ -596,6 +601,318 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
             cls._rename_op_types(fn.node, old_to_new)
 
         return True
+
+
+class DeduplicateRepeatedSubgraphTransform(BaseOnnxTransform):
+    """Collapse structurally identical repeated decoder local functions.
+
+    Dynamo subfunction export can emit one FunctionProto per decoder layer, even
+    when those function bodies differ only by local SSA names or layer-indexed
+    formal parameter names. ONNX local-function calls bind inputs and outputs by
+    position, so duplicate call nodes can safely target the first structurally
+    equivalent function without changing graph-level tensor names.
+    """
+
+    _NUMERIC_SUFFIX_RE = re.compile(r"^(?P<base>.+)_(?P<idx>\d+)$")
+
+    @classmethod
+    def apply(cls, model: ModelProto, target_classnames: Optional[List[str]] = None, **kwargs) -> bool:
+        target_classnames = [name for name in (target_classnames or []) if name]
+        candidates = cls._collect_candidate_functions(model, target_classnames)
+        if len(candidates) < 2:
+            return False
+
+        input_dim_signatures = cls._function_input_dim_signatures(model, candidates)
+        active_input_indices = {fn.name: cls._active_input_indices(fn) for _, fn in candidates}
+        fingerprint_to_canonical = {}
+        duplicate_to_canonical = {}
+        functions_to_remove = set()
+
+        for _, fn in candidates:
+            fingerprint = cls._function_fingerprint(
+                fn, input_dim_signatures.get(fn.name), active_input_indices.get(fn.name)
+            )
+            canonical = fingerprint_to_canonical.get(fingerprint)
+            if canonical is None:
+                fingerprint_to_canonical[fingerprint] = fn
+                continue
+            duplicate_to_canonical[fn.name] = (canonical.name, active_input_indices[fn.name])
+            functions_to_remove.add(fn.name)
+
+        if not duplicate_to_canonical:
+            return False
+
+        cls._rewrite_function_calls(model.graph.node, duplicate_to_canonical)
+        for fn in model.functions:
+            cls._rewrite_function_calls(fn.node, duplicate_to_canonical)
+
+        kept_functions = [fn for fn in model.functions if fn.name not in functions_to_remove]
+        del model.functions[:]
+        model.functions.extend(kept_functions)
+        return True
+
+    @classmethod
+    def _collect_candidate_functions(cls, model: ModelProto, target_classnames: List[str]):
+        called_function_names = cls._called_function_names(model)
+        candidates = []
+        for fn in model.functions:
+            if fn.name not in called_function_names:
+                continue
+            order = cls._candidate_order(fn.name, target_classnames)
+            if order is None:
+                continue
+            candidates.append((order, fn))
+        candidates.sort(key=lambda item: item[0])
+        return candidates
+
+    @classmethod
+    def _candidate_order(cls, name: str, target_classnames: List[str]) -> Optional[Tuple[int, int, str]]:
+        for pattern_index, pattern in enumerate(RenameRepeatedSubgraphTransform._REPEATED_SUBGRAPH_PATTERNS):
+            match = pattern.match(name)
+            if match:
+                return pattern_index, int(match.group(1)), name
+
+        for class_index, class_name in enumerate(target_classnames):
+            if name == class_name:
+                return 100 + class_index, 0, name
+            match = cls._NUMERIC_SUFFIX_RE.match(name)
+            if match and match.group("base") == class_name:
+                return 100 + class_index, int(match.group("idx")), name
+
+        return None
+
+    @classmethod
+    def _called_function_names(cls, model: ModelProto) -> set[str]:
+        function_names = {fn.name for fn in model.functions}
+        called = set()
+        for node in cls._iter_all_nodes(model.graph.node):
+            if node.op_type in function_names:
+                called.add(node.op_type)
+        for fn in model.functions:
+            for node in cls._iter_all_nodes(fn.node):
+                if node.op_type in function_names:
+                    called.add(node.op_type)
+        return called
+
+    @classmethod
+    def _active_input_indices(cls, fn: onnx.FunctionProto) -> List[int]:
+        used_names = set(fn.output)
+        for node in cls._iter_all_nodes(fn.node):
+            used_names.update(name for name in node.input if name)
+        return [idx for idx, name in enumerate(fn.input) if name in used_names]
+
+    @staticmethod
+    def _rewrite_function_calls(nodes, old_to_new) -> None:
+        for node in DeduplicateRepeatedSubgraphTransform._iter_all_nodes(nodes):
+            rewrite = old_to_new.get(node.op_type)
+            if rewrite is None:
+                continue
+            new_op_type, kept_input_indices = rewrite
+            original_inputs = list(node.input)
+            node.op_type = new_op_type
+            node.input[:] = [original_inputs[idx] for idx in kept_input_indices if idx < len(original_inputs)]
+
+    @staticmethod
+    def _iter_all_nodes(nodes):
+        yield from RenameRepeatedSubgraphTransform._iter_all_nodes(nodes)
+
+    @classmethod
+    def _function_fingerprint(
+        cls,
+        fn: onnx.FunctionProto,
+        input_dim_signatures: Optional[Dict[int, tuple]] = None,
+        active_input_indices: Optional[List[int]] = None,
+    ) -> str:
+        active_input_indices = active_input_indices or list(range(len(fn.input)))
+        active_inputs = [fn.input[idx] for idx in active_input_indices]
+        state = cls._new_value_state(active_inputs, active_input_indices)
+        payload = {
+            "domain": fn.domain,
+            "inputs": [state["value"](name) for name in active_inputs],
+            "outputs": [state["value"](name) for name in fn.output],
+            "opsets": sorted((opset.domain, opset.version) for opset in fn.opset_import),
+            "nodes": [
+                node_key
+                for node in fn.node
+                if (node_key := cls._node_key(node, state, input_dim_signatures)) is not None
+            ],
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _new_value_state(inputs, original_indices=None):
+        original_indices = original_indices or list(range(len(inputs)))
+        input_index = {name: original_idx for name, original_idx in zip(inputs, original_indices)}
+        value_map = {name: f"arg{idx}" for idx, name in enumerate(inputs)}
+        counter = {"value": 0}
+
+        def value(name: str) -> str:
+            if not name:
+                return ""
+            if name not in value_map:
+                value_map[name] = f"tmp{counter['value']}"
+                counter["value"] += 1
+            return value_map[name]
+
+        def assign(name: str, canonical_value: str) -> None:
+            if name:
+                value_map[name] = canonical_value
+
+        return {"value": value, "assign": assign, "input_index": input_index}
+
+    @classmethod
+    def _node_key(
+        cls, node: onnx.NodeProto, state, input_dim_signatures: Optional[Dict[int, tuple]] = None
+    ) -> Optional[tuple]:
+        shape_dim_key = cls._shape_dim_key(node, state, input_dim_signatures)
+        if shape_dim_key is not None:
+            canonical_output = cls._shape_dim_value_name(shape_dim_key)
+            state["assign"](node.output[0], canonical_output)
+            return None
+
+        squeezed_shape_dim = cls._squeezed_shape_dim_value(node, state)
+        if squeezed_shape_dim is not None:
+            state["assign"](node.output[0], squeezed_shape_dim)
+            return None
+
+        return (
+            node.domain,
+            node.op_type,
+            tuple(state["value"](name) for name in node.input),
+            tuple(state["value"](name) for name in node.output),
+            tuple(cls._attribute_key(attr, state) for attr in sorted(node.attribute, key=lambda attr: attr.name)),
+        )
+
+    @classmethod
+    def _shape_dim_key(
+        cls, node: onnx.NodeProto, state, input_dim_signatures: Optional[Dict[int, tuple]]
+    ) -> Optional[tuple]:
+        if node.op_type != "Shape" or len(node.input) != 1 or len(node.output) != 1 or input_dim_signatures is None:
+            return None
+
+        input_index = state["input_index"].get(node.input[0])
+        if input_index is None:
+            return None
+
+        dims = input_dim_signatures.get(input_index)
+        if not dims:
+            return None
+
+        attrs = {attr.name: attr.i for attr in node.attribute if attr.name in {"start", "end"}}
+        start = attrs.get("start", 0)
+        end = attrs.get("end", len(dims))
+        if start < 0:
+            start += len(dims)
+        if end < 0:
+            end += len(dims)
+        if start < 0 or end > len(dims) or end - start != 1:
+            return None
+
+        dim = dims[start]
+        if dim is None:
+            return None
+        return "shape_dim", dim
+
+    @staticmethod
+    def _shape_dim_value_name(shape_dim_key: tuple) -> str:
+        _, dim = shape_dim_key
+        return "shape_dim_" + "_".join(str(part) for part in dim)
+
+    @classmethod
+    def _squeezed_shape_dim_value(cls, node: onnx.NodeProto, state) -> Optional[str]:
+        if node.op_type != "Squeeze" or len(node.input) != 1 or len(node.output) != 1:
+            return None
+        input_value = state["value"](node.input[0])
+        if not input_value.startswith("shape_dim_"):
+            return None
+        return f"squeezed_{input_value}"
+
+    @classmethod
+    def _attribute_key(cls, attr: onnx.AttributeProto, state) -> tuple:
+        attr_type = attr.type
+        if attr_type == AttributeProto.FLOAT:
+            return attr.name, "f", attr.f
+        if attr_type == AttributeProto.INT:
+            return attr.name, "i", attr.i
+        if attr_type == AttributeProto.STRING:
+            return attr.name, "s", attr.s.decode("utf-8", errors="replace")
+        if attr_type == AttributeProto.FLOATS:
+            return attr.name, "floats", tuple(attr.floats)
+        if attr_type == AttributeProto.INTS:
+            return attr.name, "ints", tuple(attr.ints)
+        if attr_type == AttributeProto.STRINGS:
+            return attr.name, "strings", tuple(s.decode("utf-8", errors="replace") for s in attr.strings)
+        if attr_type == AttributeProto.TENSOR:
+            return attr.name, "t", cls._tensor_key(attr.t)
+        if attr_type == AttributeProto.TENSORS:
+            return attr.name, "tensors", tuple(cls._tensor_key(tensor) for tensor in attr.tensors)
+        if attr_type == AttributeProto.GRAPH:
+            return attr.name, "g", cls._graph_key(attr.g)
+        if attr_type == AttributeProto.GRAPHS:
+            return attr.name, "graphs", tuple(cls._graph_key(graph) for graph in attr.graphs)
+        return attr.name, "raw", attr.SerializeToString().hex()
+
+    @classmethod
+    def _graph_key(cls, graph: onnx.GraphProto) -> tuple:
+        inputs = [value.name for value in graph.input]
+        state = cls._new_value_state(inputs)
+        return (
+            tuple(state["value"](value.name) for value in graph.input),
+            tuple(state["value"](value.name) for value in graph.output),
+            tuple(cls._tensor_key(tensor) for tensor in graph.initializer),
+            tuple(cls._node_key(node, state) for node in graph.node),
+        )
+
+    @classmethod
+    def _function_input_dim_signatures(cls, model: ModelProto, candidates) -> Dict[str, Dict[int, tuple]]:
+        function_by_name = {fn.name: fn for _, fn in candidates}
+        value_shapes = cls._graph_value_shape_signatures(model.graph)
+        observed_shapes: Dict[str, Dict[int, set]] = {name: {} for name in function_by_name}
+
+        for node in cls._iter_all_nodes(model.graph.node):
+            fn = function_by_name.get(node.op_type)
+            if fn is None:
+                continue
+            for idx, input_name in enumerate(node.input[: len(fn.input)]):
+                shape = value_shapes.get(input_name)
+                if shape is None:
+                    continue
+                observed_shapes[node.op_type].setdefault(idx, set()).add(shape)
+
+        input_dim_signatures = {}
+        for function_name, shapes_by_input in observed_shapes.items():
+            stable_shapes = {idx: next(iter(shapes)) for idx, shapes in shapes_by_input.items() if len(shapes) == 1}
+            input_dim_signatures[function_name] = stable_shapes
+        return input_dim_signatures
+
+    @staticmethod
+    def _graph_value_shape_signatures(graph: onnx.GraphProto) -> Dict[str, tuple]:
+        value_shapes = {}
+
+        def dim_key(dim, index):
+            if dim.dim_param:
+                return "sym", dim.dim_param
+            if dim.HasField("dim_value"):
+                return "value", dim.dim_value
+            return "unknown", index
+
+        for value_info in list(graph.input) + list(graph.value_info) + list(graph.output):
+            tensor_type = value_info.type.tensor_type
+            if not tensor_type.HasField("shape"):
+                continue
+            value_shapes[value_info.name] = tuple(dim_key(dim, idx) for idx, dim in enumerate(tensor_type.shape.dim))
+
+        for initializer in graph.initializer:
+            value_shapes[initializer.name] = tuple(("value", dim) for dim in initializer.dims)
+
+        return value_shapes
+
+    @staticmethod
+    def _tensor_key(tensor: onnx.TensorProto) -> tuple:
+        tensor = copy.deepcopy(tensor)
+        tensor.name = ""
+        return tensor.data_type, tuple(tensor.dims), tensor.SerializeToString().hex()
 
 
 class AdapterWeightsToInputsTransform(BaseOnnxTransform):
@@ -997,6 +1314,9 @@ class OnnxTransformPipeline(BaseOnnxTransform):
 
         if PreserveNestedCacheRetainedStateTransform in requested:
             applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        if DeduplicateRepeatedSubgraphTransform in requested:
+            applied[DeduplicateRepeatedSubgraphTransform] = DeduplicateRepeatedSubgraphTransform.apply(model, **kwargs)
 
         if RenameRepeatedSubgraphTransform in requested:
             applied[RenameRepeatedSubgraphTransform] = RenameRepeatedSubgraphTransform.apply(model, **kwargs)
