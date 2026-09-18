@@ -25,9 +25,16 @@ from QEfficient.base.onnx_transforms import (
     PruneFakeInitializersTransform,
     RenameRepeatedSubgraphTransform,
 )
+from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils import export_subfunctions
+from QEfficient.utils.torch_patches import (
+    _same_export_region,
+    preserve_mixed_export_subfunctions,
+    preserve_subfunction_source_lines,
+    temporarily_enable_nested_compile_regions,
+)
 from QEfficient.utils.torch_patches import (
     _same_export_region,
     preserve_mixed_export_subfunctions,
@@ -87,6 +94,96 @@ class _InterpreterSpy:
 
     def run(self, *operands):
         return self.graph_module(*operands)
+
+
+def test_minimax_ctx_scatter_gather_ops_have_fake_kernels_and_translations():
+    def float_tensor(*shape):
+        return torch.empty(shape, dtype=torch.float32, device="meta")
+
+    def int_tensor(*shape):
+        return torch.empty(shape, dtype=torch.int32, device="meta")
+
+    cases = (
+        (
+            torch.ops.qefficient.ctx_scatter_paged_attention.default,
+            (float_tensor(4, 2, 8, 3), int_tensor(2, 1), int_tensor(2, 2), float_tensor(2, 2, 2, 3)),
+            (4, 2, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_chunk_scatter_batch.default,
+            (float_tensor(1, 4, 8, 3), int_tensor(2, 2), float_tensor(2, 2, 2, 3)),
+            (1, 4, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_blocked_kv_batch.default,
+            (float_tensor(1, 4, 8, 3), int_tensor(1, 4, 5)),
+            (1, 4, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_paged_attention.default,
+            (float_tensor(4, 2, 8, 3), int_tensor(2, 1), int_tensor(2, 5)),
+            (2, 2, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_paged_kv_dp.default,
+            (float_tensor(8, 4, 16, 3), int_tensor(2, 4)),
+            (1, 4, 32, 3),
+        ),
+        (
+            torch.ops.qefficient.m3_ctx_scatter.default,
+            (float_tensor(2, 1, 8, 3), int_tensor(2, 2), float_tensor(2, 1, 2, 3)),
+            (2, 1, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_paged_scatter_dp.default,
+            (float_tensor(8, 4, 16, 3), int_tensor(1, 4, 2), int_tensor(1, 4, 2), float_tensor(1, 4, 2, 3)),
+            (8, 4, 16, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_blocked_kv_dp.default,
+            (float_tensor(2, 4, 8, 3), int_tensor(2, 4, 5)),
+            (2, 4, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_block_range_kv_dp.default,
+            (float_tensor(2, 4, 6, 8, 3), int_tensor(2, 4, 2)),
+            (2, 4, 2, 8, 3),
+        ),
+    )
+
+    for op, args, expected_shape in cases:
+        assert op in DYNAMO_CUSTOM_OP_TABLE
+        output = op(*args)
+        assert output.shape == expected_shape
+        assert output.dtype == torch.float32
+        assert output.device.type == "meta"
+
+
+def test_minimax_sequence_chunk_is_safe_inside_nested_compile_region():
+    from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import _dynamic_sequence_chunks
+
+    op = torch.ops.qefficient.compile_length_sequence_chunk.default
+    fake_result = op(torch.empty((2, 3, 16), dtype=torch.bool, device="meta"), -1, 4, 2, 16)
+
+    assert fake_result.shape == (2, 3, 4)
+    assert fake_result.dtype == torch.bool
+    assert op in DYNAMO_CUSTOM_OP_TABLE
+
+    class ChunkModule(torch.nn.Module):
+        @torch.compiler.nested_compile_region
+        def forward(self, tensor):
+            return _dynamic_sequence_chunks(tensor, num_chunks=4, dim=1, compile_axis_size=16)[1]
+
+    source = torch.arange(128).view(1, 16, 8)
+    sequence_length = torch.export.Dim("sequence_length", min=4, max=16)
+    exported = torch.export.export(
+        ChunkModule(),
+        (source,),
+        dynamic_shapes={"args": ({1: sequence_length},)},
+    )
+    result = exported.module()(source)
+
+    assert torch.equal(result, source[:, 4:8])
 
 
 def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch):
@@ -406,6 +503,116 @@ def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_coun
     return model
 
 
+def _make_minimal_glm_onnx_with_repeated_subgraph():
+    """Build a GLM function with three cache writes and one unrelated MoE scatter."""
+    cache_names = ["compressed_kv.0", "k_pe.0", "indexer_key.0"]
+    formal_names = ["arg10_1", "arg12_1", "arg18_1"]
+    nodes = [
+        helper.make_node(
+            "GlmPagedScatter",
+            [formal, "updates", "position_ids"],
+            [f"{cache_name}_updated"],
+            domain="qti.aisw",
+        )
+        for cache_name, formal in zip(cache_names, formal_names)
+    ]
+    nodes.append(
+        helper.make_node(
+            "CtxScatter3D",
+            ["moe_buffer", "updates", "position_ids"],
+            ["moe_scatter_output"],
+            domain="qti.aisw",
+        )
+    )
+    fn = helper.make_function(
+        "",
+        "repeated_subgraph0",
+        [*formal_names, "moe_buffer", "updates", "position_ids"],
+        [],
+        nodes,
+        [helper.make_opsetid("", 17), helper.make_opsetid("qti.aisw", 1)],
+    )
+    retained_names = [f"{name}_RetainedState" for name in cache_names]
+    call = helper.make_node(
+        "repeated_subgraph0",
+        [*retained_names, "moe_buffer", "updates", "position_ids"],
+        [],
+    )
+    inputs = [helper.make_tensor_value_info(name, TensorProto.FLOAT, None) for name in retained_names]
+    inputs.extend(
+        helper.make_tensor_value_info(name, dtype, None)
+        for name, dtype in (
+            ("moe_buffer", TensorProto.FLOAT),
+            ("updates", TensorProto.FLOAT),
+            ("position_ids", TensorProto.INT64),
+        )
+    )
+    outputs = [helper.make_tensor_value_info(name, TensorProto.FLOAT, None) for name in retained_names]
+    model = helper.make_model(helper.make_graph([call], "glm_test_graph", inputs, outputs))
+    model.functions.append(fn)
+    return model
+
+
+def _make_function_model(functions):
+    call_nodes = [
+        helper.make_node(fn.name, inputs=[f"x{i}", f"w{i}"], outputs=[f"y{i}"]) for i, fn in enumerate(functions)
+    ]
+    graph_inputs = [
+        helper.make_tensor_value_info(name, TensorProto.FLOAT, None) for node in call_nodes for name in node.input
+    ]
+    graph_outputs = [helper.make_tensor_value_info(node.output[0], TensorProto.FLOAT, None) for node in call_nodes]
+    graph = helper.make_graph(call_nodes, "g", graph_inputs, graph_outputs)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.functions.extend(functions)
+    return model
+
+
+def _make_linear_function(name, input_name="hidden", weight_name="weight", output_name="out", node_name="matmul"):
+    node = helper.make_node("MatMul", inputs=[input_name, weight_name], outputs=[output_name], name=node_name)
+    return helper.make_function(
+        domain="",
+        fname=name,
+        inputs=[input_name, weight_name],
+        outputs=[output_name],
+        nodes=[node],
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+
+
+def _make_shape_dim_function(name, *, shape_input, start, end):
+    shape_node = helper.make_node("Shape", inputs=[shape_input], outputs=["dim"], start=start, end=end)
+    reshape_node = helper.make_node("Reshape", inputs=["data", "dim"], outputs=["out"])
+    return helper.make_function(
+        domain="",
+        fname=name,
+        inputs=["data", "cache", "mask"],
+        outputs=["out"],
+        nodes=[shape_node, reshape_node],
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+
+
+def _make_shape_dim_model(fn0, fn1, *, second_cache_dim="ctx_len"):
+    call0 = helper.make_node(fn0.name, inputs=["data0", "cache0", "mask0"], outputs=["out0"])
+    call1 = helper.make_node(fn1.name, inputs=["data1", "cache1", "mask1"], outputs=["out1"])
+    graph_inputs = [
+        helper.make_tensor_value_info("data0", TensorProto.FLOAT, ["ctx_len"]),
+        helper.make_tensor_value_info("cache0", TensorProto.FLOAT, ["batch_size", 2, "ctx_len", 256]),
+        helper.make_tensor_value_info("mask0", TensorProto.BOOL, ["batch_size", 1, 32, "ctx_len"]),
+        helper.make_tensor_value_info("data1", TensorProto.FLOAT, [second_cache_dim]),
+        helper.make_tensor_value_info("cache1", TensorProto.FLOAT, ["batch_size", 2, second_cache_dim, 256]),
+        helper.make_tensor_value_info("mask1", TensorProto.BOOL, ["batch_size", 1, 32, "ctx_len"]),
+    ]
+    graph_outputs = [
+        helper.make_tensor_value_info("out0", TensorProto.FLOAT, ["ctx_len"]),
+        helper.make_tensor_value_info("out1", TensorProto.FLOAT, [second_cache_dim]),
+    ]
+    graph = helper.make_graph([call0, call1], "g", graph_inputs, graph_outputs)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.functions.extend([fn0, fn1])
+    return model
+
+
 # ---------------------------------------------------------------------------
 # TestTemporarilyEnableNestedCompileRegions
 # ---------------------------------------------------------------------------
@@ -476,6 +683,62 @@ class TestPreserveNestedCacheRetainedStateTransform:
         changed = PreserveNestedCacheRetainedStateTransform.apply(model)
         assert not changed, "Transform should be a no-op when there are no dangling _RetainedState outputs"
 
+    def test_exposes_index_key_retained_state_for_sparse_layers(self):
+        layer_idx = 3
+        fn = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=["index_key_arg", "past_key_arg", "past_value_arg", "update"],
+            outputs=["hidden_out"],
+            nodes=[
+                helper.make_node(
+                    "M3CtxScatter", ["index_key_arg", "pos", "update"], ["index_scatter"], domain="qti.aisw"
+                ),
+                helper.make_node("CtxScatter", ["past_key_arg", "pos", "update"], ["key_scatter"], domain="qti.aisw"),
+                helper.make_node(
+                    "CtxScatter", ["past_value_arg", "pos", "update"], ["value_scatter"], domain="qti.aisw"
+                ),
+                helper.make_node("Identity", ["update"], ["hidden_out"]),
+            ],
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("qti.aisw", 1)],
+        )
+        call_inputs = [
+            f"index_key.{layer_idx}_RetainedState",
+            f"past_key.{layer_idx}",
+            f"past_value.{layer_idx}",
+            "update",
+        ]
+        graph = helper.make_graph(
+            [helper.make_node("repeated_subgraph0", call_inputs, ["hidden_out"])],
+            "sparse_graph",
+            [helper.make_tensor_value_info(name, TensorProto.FLOAT, None) for name in call_inputs],
+            [
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, None)
+                for name in (
+                    "hidden_out",
+                    f"past_key.{layer_idx}_RetainedState",
+                    f"past_value.{layer_idx}_RetainedState",
+                    f"index_key.{layer_idx}_RetainedState",
+                )
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(fn)
+
+        assert PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert list(model.functions[0].output) == ["hidden_out", "key_scatter", "value_scatter", "index_scatter"]
+        call_node = model.graph.node[0]
+        assert list(call_node.output) == [
+            "hidden_out",
+            f"past_key.{layer_idx}_RetainedState",
+            f"past_value.{layer_idx}_RetainedState",
+            f"index_key.{layer_idx}_RetainedState",
+        ]
+        input_names = [value.name for value in model.graph.input]
+        assert f"index_key.{layer_idx}" in input_names
+        assert f"index_key.{layer_idx}_RetainedState" not in input_names
+
     def test_rejects_missing_cache_writer_without_partial_rewire(self):
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=1, scatter_count_per_fn=1)
         with pytest.raises(ValueError, match="Could not uniquely resolve"):
@@ -484,6 +747,27 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert len(fn.output) == 1, f"Function with 1 scatter should not have outputs added, got {list(fn.output)}"
         assert not model.graph.node[0].output, "Function call must not be partially rewired"
 
+    def test_wires_glm_cache_outputs_and_ignores_moe_scatter(self):
+        model = _make_minimal_glm_onnx_with_repeated_subgraph()
+
+        assert PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        expected_inputs = ["compressed_kv.0", "k_pe.0", "indexer_key.0"]
+        expected_outputs = [f"{name}_RetainedState" for name in expected_inputs]
+        assert list(model.graph.node[0].input[:3]) == expected_inputs
+        assert list(model.graph.node[0].output) == expected_outputs
+        assert list(model.functions[0].output) == [
+            "compressed_kv.0_updated",
+            "k_pe.0_updated",
+            "indexer_key.0_updated",
+        ]
+        assert "moe_scatter_output" not in model.functions[0].output
+        assert [value.name for value in model.graph.input[:3]] == expected_inputs
+
+    def test_glm_transform_is_idempotent(self):
+        model = _make_minimal_glm_onnx_with_repeated_subgraph()
+        assert PreserveNestedCacheRetainedStateTransform.apply(model)
+        assert not PreserveNestedCacheRetainedStateTransform.apply(model)
     def test_preserves_v4_retained_state_with_nested_subfunction(self):
         retained_state = "past_local_kv_cache.0_InternalRetainedState"
         state_input = "past_local_kv_cache.0"
@@ -526,6 +810,50 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert list(model.functions[0].output) == ["updated_local_kv_cache"]
         assert list(model.graph.node[0].input) == [state_input, "position_ids", "updates"]
         assert list(model.graph.node[0].output) == [retained_state]
+
+    def test_preserves_v4_retained_state_from_plain_cache_input(self):
+        cache_input = "past_local_kv_cache.0"
+        retained_state = f"{cache_input}_RetainedState"
+        function = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=[cache_input, "position_ids", "updates"],
+            outputs=["hidden_states"],
+            nodes=[
+                helper.make_node(
+                    "V4CtxScatter1D",
+                    inputs=[cache_input, "position_ids", "updates"],
+                    outputs=["updated_local_kv_cache"],
+                    domain="com.qualcomm.cloud",
+                )
+            ],
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("com.qualcomm.cloud", 1)],
+        )
+        call_node = helper.make_node(
+            "repeated_subgraph0",
+            inputs=[cache_input, "position_ids", "updates"],
+            outputs=["hidden_states"],
+        )
+        graph = helper.make_graph(
+            [call_node],
+            "test_graph",
+            [
+                helper.make_tensor_value_info(cache_input, TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("position_ids", TensorProto.INT32, None),
+                helper.make_tensor_value_info("updates", TensorProto.FLOAT, None),
+            ],
+            [
+                helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(function)
+
+        assert PreserveNestedCacheRetainedStateTransform.apply(model)
+        assert list(model.functions[0].output) == ["hidden_states", "updated_local_kv_cache"]
+        assert list(model.graph.node[0].input) == [cache_input, "position_ids", "updates"]
+        assert list(model.graph.node[0].output) == ["hidden_states", retained_state]
 
     def test_aligns_prefill_retained_state_function_outputs_with_call_outputs(self):
         retained_states = [
@@ -730,6 +1058,29 @@ class TestRenameRepeatedSubgraphTransform:
         node_op_types = [n.op_type for n in model.graph.node]
         assert "QEffLlamaDecoderLayer" in node_op_types
         assert "QEffLlamaDecoderLayer_1" in node_op_types
+
+        # Call nodes get readable names instead of dynamo's invoke_subgraph names
+        assert [n.name for n in model.graph.node] == ["QEffLlamaDecoderLayer.0", "QEffLlamaDecoderLayer_1.1"]
+
+    def test_renames_stale_subgraph_names_inside_loop_bodies(self):
+        model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=1)
+        body = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0__while_loop_cond_graph_0",
+            inputs=["x"],
+            outputs=["y"],
+            nodes=[
+                helper.make_node("Identity", ["x"], ["y"], name="node_repeated_subgraph0__while_loop_cond_graph_0_7")
+            ],
+            opset_imports=[helper.make_opsetid("", 17)],
+        )
+        model.functions.append(body)
+
+        RenameRepeatedSubgraphTransform.apply(model, target_classnames=["QEffLlamaDecoderLayer"])
+
+        body_fn = next(fn for fn in model.functions if fn.name.endswith("__while_loop_cond_graph_0"))
+        assert body_fn.name == "QEffLlamaDecoderLayer__while_loop_cond_graph_0"
+        assert body_fn.node[0].name == "node_QEffLlamaDecoderLayer__while_loop_cond_graph_0_7"
 
     def test_noop_on_empty_classnames(self):
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=2)
