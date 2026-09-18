@@ -382,8 +382,8 @@ class TestRepeatKVTransformFast:
     def test_repeat_kv_mqa_config(self):
         qeff_model = self._tiny_llama_qeff(num_attention_heads=4, num_key_value_heads=1)
         qeff_model.transform(ctx_len=64, seq_len=8, bs=1, num_devices=4, qaic_config={"replicate_kv_heads": True})
-        assert qeff_model.model.config.orig_kv_heads == 1
-        assert qeff_model.model.config.num_key_value_heads == 2
+        assert not hasattr(qeff_model.model.config, "orig_kv_heads")
+        assert qeff_model.model.config.num_key_value_heads == 1
 
     def test_repeat_kv_mutate_is_attention_local(self):
         qeff_model = self._tiny_llama_qeff()
@@ -459,9 +459,16 @@ class TestRepeatKVTransformFast:
     def test_calculate_num_replicate_kv_heads_for_gqa_mqa_and_mha(self):
         gqa_cfg = self._tiny_llama_qeff(num_attention_heads=4, num_key_value_heads=2).model.config
         mqa_cfg = self._tiny_llama_qeff(num_attention_heads=4, num_key_value_heads=1).model.config
+        qwen_gqa_cfg = copy.deepcopy(gqa_cfg)
+        # Qwen3.8 uses 64 query heads and 4 source KV heads.  A 16-device
+        # group therefore needs a repeat factor of 4 to reach 16 effective KV
+        # heads while retaining an integral query-to-KV grouping.
+        qwen_gqa_cfg.num_attention_heads = 64
+        qwen_gqa_cfg.num_key_value_heads = 4
         mha_cfg = self._tiny_llama_qeff(num_attention_heads=4, num_key_value_heads=4).model.config
         assert calculate_num_replicate_kv_heads(num_devices=4, text_model_config=gqa_cfg) == 2
-        assert calculate_num_replicate_kv_heads(num_devices=4, text_model_config=mqa_cfg) == 2
+        assert calculate_num_replicate_kv_heads(num_devices=4, text_model_config=mqa_cfg) == 1
+        assert calculate_num_replicate_kv_heads(num_devices=16, text_model_config=qwen_gqa_cfg) == 4
         assert calculate_num_replicate_kv_heads(num_devices=4, text_model_config=mha_cfg) is None
 
 
