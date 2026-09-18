@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--weight-free", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-onnx-subfunctions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--enable-blocking", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--replicate-kv-heads", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--blocking-mode", choices=("kv", "kv_headpar"), default="kv")
     parser.add_argument("--num-kv-blocks", type=int, default=2)
     parser.add_argument("--headpar-split", type=int, default=4)
@@ -65,8 +66,7 @@ def torch_dtype(dtype_name: str) -> DType:
 
 def layer_types(num_hidden_layers: int) -> list[str]:
     return [
-        "full_attention" if (layer_idx + 1) % 4 == 0 else "linear_attention"
-        for layer_idx in range(num_hidden_layers)
+        "full_attention" if (layer_idx + 1) % 4 == 0 else "linear_attention" for layer_idx in range(num_hidden_layers)
     ]
 
 
@@ -190,14 +190,20 @@ def main():
     qeff_model.model.eval()
 
     qaic_config = None
-    if args.enable_blocking:
-        qaic_config = {
-            "blocking_mode": args.blocking_mode,
-            "num_kv_blocks": args.num_kv_blocks,
-            "ctx_len": args.ctx_len,
-        }
-        if args.blocking_mode == "kv_headpar":
-            qaic_config["headpar_split"] = args.headpar_split
+    if args.enable_blocking or args.replicate_kv_heads:
+        qaic_config = {}
+        if args.enable_blocking:
+            qaic_config.update(
+                {
+                    "blocking_mode": args.blocking_mode,
+                    "num_kv_blocks": args.num_kv_blocks,
+                    "ctx_len": args.ctx_len,
+                }
+            )
+            if args.blocking_mode == "kv_headpar":
+                qaic_config["headpar_split"] = args.headpar_split
+        if args.replicate_kv_heads:
+            qaic_config["replicate_kv_heads"] = True
 
     qpc_path = qeff_model.compile(
         batch_size=args.batch_size,
