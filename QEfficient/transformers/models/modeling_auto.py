@@ -4764,12 +4764,18 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     dynamic_axes[f"past_{kv}.{i}"] = pkv_dynamic_axes[i]
                     output_names.append(f"past_{kv}.{i}_RetainedState")
 
-        if "DeepseekV3ForCausalLM" in (getattr(self.model.config, "architectures", None) or []):
+        model_architectures = getattr(self.model.config, "architectures", None) or []
+        is_deepseek_v3 = "DeepseekV3ForCausalLM" in model_architectures
+        is_glm_moe_dsa = (
+            "GlmMoeDsaForCausalLM" in model_architectures
+            or getattr(self.model.config, "model_type", None) == "glm_moe_dsa"
+        )
+        if is_deepseek_v3 or is_glm_moe_dsa:
             if self.model.qaic_config is not None and self.model.qaic_config.get("mla_absorption", None) is not None:
                 mla_absorption = self.model.qaic_config["mla_absorption"]
                 cache_compressed = mla_absorption.get("cache_compressed", False)
             else:
-                cache_compressed = False
+                cache_compressed = is_glm_moe_dsa
             pkv_cache = self.model.get_dummy_pkv_cache(
                 self.model.config, fbs if self.continuous_batching else bs, seq_len
             )
@@ -4795,6 +4801,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     }
                     output_names.append(f"compressed_kv.{i}_RetainedState")
                     output_names.append(f"k_pe.{i}_RetainedState")
+                if is_glm_moe_dsa:
+                    example_inputs["indexer_key_cache"] = list(
+                        self.model.get_dummy_indexer_cache(
+                            self.model.config,
+                            fbs if self.continuous_batching else bs,
+                            seq_len,
+                        )
+                    )
+                    for i in self.model.get_indexer_cache_layers(self.model.config):
+                        dynamic_axes[f"indexer_key.{i}"] = {
+                            0: "full_batch_size" if self.continuous_batching else "batch_size",
+                            1: "ctx_len",
+                        }
+                        output_names.append(f"indexer_key.{i}_RetainedState")
             else:
                 example_inputs["past_key_values"] = [[] for _ in range(self.num_layers)]
                 for i in range(self.num_layers):
@@ -4887,23 +4907,25 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             dynamic_axes["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}
             dynamic_axes["hidden_states"] = {0: "batch_size", 1: "seq_len"}
 
-        if QEFFBaseModel._layerwise_active:
-            return self._export_layerwise(
-                example_inputs,
-                output_names=output_names,
-                dynamic_axes=dynamic_axes,
-                export_dir=export_dir,
-                use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
-                offload_pt_weights=kwargs.get("offload_pt_weights", True),
-                prefill_only=prefill_only,
-                enable_chunking=enable_chunking,
-                num_cores=num_cores,
-                qaic_config=qaic_config,
-                prefill_seq_len=prefill_seq_len,
-                kv_cache_prefix=kv_cache_prefix,
-                _layerwise_cache_probe=kwargs.get("_layerwise_cache_probe", False),
-            )
-        else:
+        try:
+            if is_glm_moe_dsa:
+                self.model._qeff_export_with_cache_outputs = True
+            if QEFFBaseModel._layerwise_active:
+                return self._export_layerwise(
+                    example_inputs,
+                    output_names=output_names,
+                    dynamic_axes=dynamic_axes,
+                    export_dir=export_dir,
+                    use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+                    offload_pt_weights=kwargs.get("offload_pt_weights", True),
+                    prefill_only=prefill_only,
+                    enable_chunking=enable_chunking,
+                    num_cores=num_cores,
+                    qaic_config=qaic_config,
+                    prefill_seq_len=prefill_seq_len,
+                    kv_cache_prefix=kv_cache_prefix,
+                    _layerwise_cache_probe=kwargs.get("_layerwise_cache_probe", False),
+                )
             return self._export(
                 example_inputs,
                 output_names=output_names,
@@ -4914,6 +4936,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
                 onnx_transform_kwargs=onnx_transform_kwargs,
             )
+        finally:
+            if is_glm_moe_dsa and hasattr(self.model, "_qeff_export_with_cache_outputs"):
+                delattr(self.model, "_qeff_export_with_cache_outputs")
 
     def build_prefill_specialization(
         self,
@@ -5470,6 +5495,21 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 for prefix in ("compressed_kv", "k_pe"):
                     output_name = _compile_io_name(
                         f"{prefix}.{i}{kv_infix}_RetainedState",
+                        use_onnx_subfunctions=use_onnx_subfunctions,
+                    )
+                    _add_retained_state_custom_io(
+                        custom_io,
+                        output_name,
+                        dtype=kv_cache_dtype,
+                        use_onnx_subfunctions=False,
+                    )
+            if (
+                "GlmMoeDsaForCausalLM" in (getattr(self.model.config, "architectures", None) or [])
+                or getattr(self.model.config, "model_type", None) == "glm_moe_dsa"
+            ):
+                for i in self.model.get_indexer_cache_layers(self.model.config):
+                    output_name = _compile_io_name(
+                        f"indexer_key.{i}{kv_infix}_RetainedState",
                         use_onnx_subfunctions=use_onnx_subfunctions,
                     )
                     _add_retained_state_custom_io(

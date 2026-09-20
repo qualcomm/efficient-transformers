@@ -5580,6 +5580,119 @@ def test_moe_prefill_transform_does_not_require_enable_chunking():
         assert MoEFlavour.EXPERT_PARALLEL in moe_cls.supported_moe_flavours
 
 
+def _tiny_glm_moe_dsa_config():
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaConfig
+
+    return GlmMoeDsaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        moe_intermediate_size=16,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        q_lora_rank=16,
+        kv_lora_rank=8,
+        qk_rope_head_dim=4,
+        qk_nope_head_dim=8,
+        v_head_dim=8,
+        index_head_dim=8,
+        index_n_heads=2,
+        index_topk=4,
+        max_position_embeddings=32,
+        first_k_dense_replace=3,
+        n_group=1,
+        topk_group=1,
+        norm_topk_prob=True,
+        indexer_types=["full", "full", "full", "shared"],
+        mlp_layer_types=["dense", "dense", "dense", "sparse"],
+        rope_parameters={"rope_type": "default", "rope_theta": 10000},
+        dtype="float32",
+    )
+
+
+def _tiny_glm_moe_dsa_qeff_model(hf_model):
+    from QEfficient.transformers.models.pytorch_transforms import (
+        CustomOpsTransform,
+        KVCacheTransform,
+        OptimizedMoEMapperTransform,
+        OptimizedMoEWeightsTransform,
+    )
+
+    qeff_model = deepcopy(hf_model).eval()
+    transforms = (CustomOpsTransform, KVCacheTransform, OptimizedMoEMapperTransform, OptimizedMoEWeightsTransform)
+    for transform in transforms:
+        qeff_model, _ = transform.apply(qeff_model)
+    return qeff_model
+
+
+def test_glm_moe_dsa_four_layer_decode_parity_and_shared_indexer_cache():
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+
+    config = _tiny_glm_moe_dsa_config()
+    torch.manual_seed(0)
+    hf_model = GlmMoeDsaForCausalLM(config).eval()
+    qeff_model = _tiny_glm_moe_dsa_qeff_model(hf_model)
+    input_ids = torch.tensor([[1, 5, 7, 9]], dtype=torch.long)
+    position_ids = torch.arange(input_ids.shape[1], dtype=torch.long).unsqueeze(0)
+    attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+
+    with torch.no_grad():
+        hf_logits = hf_model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids).logits[
+            :, -1
+        ]
+        qeff_logits = qeff_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=False,
+        ).logits.squeeze(1)
+
+    torch.testing.assert_close(qeff_logits, hf_logits, atol=1e-6, rtol=1e-6)
+
+    compressed_kvs = list(qeff_model.get_dummy_pkv_cache(config, batch_size=1, seq_len=8))
+    indexer_key_cache = list(qeff_model.get_dummy_indexer_cache(config, batch_size=1, seq_len=8))
+    assert qeff_model.get_indexer_cache_layers(config) == (0, 1, 2)
+    assert len(compressed_kvs) == 4
+    assert len(indexer_key_cache) == 3
+
+    hf_past_key_values = None
+    for token_position, token_id in enumerate(input_ids[0].tolist()):
+        decode_input_ids = torch.tensor([[token_id]], dtype=torch.long)
+        decode_position_ids = torch.tensor([[token_position]], dtype=torch.long)
+        hf_attention_mask = torch.ones((1, token_position + 1), dtype=torch.bool)
+
+        with torch.no_grad():
+            hf_outputs = hf_model(
+                input_ids=decode_input_ids,
+                attention_mask=hf_attention_mask,
+                position_ids=decode_position_ids,
+                past_key_values=hf_past_key_values,
+                use_cache=True,
+            )
+            qeff_outputs = qeff_model(
+                input_ids=decode_input_ids,
+                attention_mask=torch.ones((1, 8), dtype=torch.bool),
+                position_ids=decode_position_ids,
+                compressed_kvs=compressed_kvs,
+                indexer_key_cache=indexer_key_cache,
+                use_cache=True,
+            )
+
+        hf_past_key_values = hf_outputs.past_key_values
+        compressed_kvs, indexer_key_cache = qeff_outputs.past_key_values
+        torch.testing.assert_close(
+            qeff_outputs.logits.squeeze(1),
+            hf_outputs.logits[:, -1],
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        assert len(compressed_kvs) == 4
+        assert len(indexer_key_cache) == 3
+
+
 def _tiny_qwen3_vl_moe_sparse_block_pair(num_experts: int = 2):
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextSparseMoeBlock
 

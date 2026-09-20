@@ -8,6 +8,11 @@ description: Add support for a new Hugging Face model in this QEfficient repo. U
 ## Overview
 Use this skill to convert an upstream Hugging Face model into the nearest valid QEff implementation in this repo with minimal divergence. Given either a Hub model id or a pasted model card, classify the architecture, reuse the closest local modeling pattern, wire export/runtime/cache behavior, and prove support through the repo’s consolidated quickcheck.
 
+For new-model work performed by multiple agents, use the staged workflow in
+`references/subagent-orchestration.md`. It makes PyTorch, ORT, and QAIC parity
+separate gates and assigns planning, implementation, and independent review to
+different agents.
+
 ## Inputs
 - Accept any of these as starting material:
   - a Hugging Face model id
@@ -25,27 +30,31 @@ Use this skill to convert an upstream Hugging Face model into the nearest valid 
   - multimodal or audio components
 
 ## Workflow
-1. Classify the model before editing anything.
+1. If using subagents, have the coordinator create the architecture inventory and
+   minimum semantic-layer coverage matrix before editing. Read
+   `references/subagent-orchestration.md`.
+
+2. Classify the model before editing anything.
 Read `references/model-family-map.md` and map the incoming model onto the closest local QEff family.
 
-2. Prefer the nearest existing wrapper over inventing a new one.
+3. Prefer the nearest existing wrapper over inventing a new one.
 Reuse the smallest viable pattern from the closest family. Keep divergence at wrapper and cache/export boundaries whenever possible.
 
-3. Touch the repo in the expected order.
+4. Touch the repo in the expected order.
 Update the model wrapper first, then the module replacement map, then the auto/export/runtime glue, then tests.
 
-4. Add cache changes only when the model actually needs new retained-state behavior.
+5. Add cache changes only when the model actually needs new retained-state behavior.
 If the new model works with existing cache types, do not create a new cache abstraction.
 
-5. Select a validation model that exercises the feature you changed.
+6. Select a validation model that exercises the feature you changed.
 Prefer an existing tiny Hub checkpoint. If none exists, derive a dummy config that still activates the same architecture path.
 
-6. Add or extend coverage in `tests/test_model_quickcheck.py`.
+7. Add or extend coverage in `tests/test_model_quickcheck.py`.
 Use the existing coverage tier that best matches the model:
 - runtime parity for stable CPU-supported paths
 - export smoke for supported families without stable CPU parity yet
 
-7. Validate before claiming support.
+8. Validate before claiming support.
 Read `references/validation-playbook.md`, run the narrowest relevant test slice first, then run the full quickcheck if shared causal/export/cache code changed.
 
 ## Repo Hotspots
@@ -67,6 +76,12 @@ Read `references/validation-playbook.md`, run the narrowest relevant test slice 
 
 ## Non-Negotiables
 - Preserve HF PyTorch to QEff PyTorch parity before treating ONNX or compile success as sufficient.
+- Do not run or claim a later parity stage for a semantic-layer representative
+  until its prior stage passed: HF PyTorch -> QEff PyTorch -> ORT -> QAIC.
+  An unavailable ORT or QAIC environment is a recorded blocked capability, not a pass.
+- Cover the minimum set of distinct attention, MLP/MoE, norm, positional
+  encoding, cache, and modality execution paths. Do not mistake a single
+  homogeneous layer for coverage of a mixed-layer architecture.
 - Keep tuple-cache compatibility whenever shared export or runtime code still expects legacy cache layout.
 - Prefer feature detection and boundary normalization over version-specific hacks.
 - For MoE architectures, start with a weights-as-activation implementation as the default decode path. Use this as the first integration mode because it is faster to validate and simpler to debug; add alternate/prefill-specialized paths only after baseline parity and export stability are proven.
@@ -77,3 +92,5 @@ Read `references/validation-playbook.md`, run the narrowest relevant test slice 
 ## References
 - Load `references/model-family-map.md` when deciding which local modeling file to copy or extend.
 - Load `references/validation-playbook.md` when choosing tiny models, export commands, and quickcheck coverage.
+- Load `references/subagent-orchestration.md` when onboarding is delegated across
+  coordinator, architect, executor, and verifier agents.
