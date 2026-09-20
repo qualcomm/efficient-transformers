@@ -870,6 +870,12 @@ class QEFFBaseModel(ABC):
                                 f"k_pe.{i}",
                             ]
                         )
+                elif param == "indexer_key_cache":
+                    if hasattr(self.model, "get_indexer_cache_layers"):
+                        indexer_layers = self.model.get_indexer_cache_layers(self.model.config)
+                    else:
+                        indexer_layers = range(len(example_inputs["indexer_key_cache"]))
+                    input_names.extend(f"indexer_key.{i}" for i in indexer_layers)
                 else:
                     input_names.append(param)
 
@@ -1229,6 +1235,12 @@ class QEFFBaseModel(ABC):
                     for layer_offset in range(len(example_inputs["compressed_kvs"])):
                         layer_idx = idx + layer_offset
                         input_names.extend([f"compressed_kv.{layer_idx}", f"k_pe.{layer_idx}"])
+                elif param == "indexer_key_cache":
+                    if hasattr(self.model, "get_indexer_cache_layers"):
+                        indexer_layers = self.model.get_indexer_cache_layers(self.model.config)
+                    else:
+                        indexer_layers = range(len(example_inputs["indexer_key_cache"]))
+                    input_names.extend(f"indexer_key.{i}" for i in indexer_layers)
                 else:
                     input_names.append(param)
         dynamic_axes = {k: v for k, v in dynamic_axes.items() if k in input_names}
