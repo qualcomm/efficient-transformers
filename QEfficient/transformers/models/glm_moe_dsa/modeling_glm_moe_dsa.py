@@ -43,6 +43,19 @@ from QEfficient.transformers.moe import (
 from QEfficient.utils.constants import MAX_POSITION_EMBEDDINGS, MIN_MASKED_ATTENTION_VALUE
 
 
+def _trim_live_context_for_pytorch(
+    position_ids: torch.Tensor | None, attention_mask: torch.Tensor | None, *states: torch.Tensor
+) -> tuple[torch.Tensor | None, tuple[torch.Tensor, ...]]:
+    if position_ids is None or torch.onnx.is_in_onnx_export() or torch.jit.is_tracing():
+        return attention_mask, states
+
+    live_context = int(position_ids.max().item()) + 1
+    trimmed_states = tuple(state[..., :live_context, :] for state in states)
+    if attention_mask is not None:
+        attention_mask = attention_mask[..., :live_context]
+    return attention_mask, trimmed_states
+
+
 class QEffDynamicGlmMoeDsaIndexerLayer:
     def __init__(self, indexer_key: torch.Tensor):
         self.indexer_key = indexer_key
@@ -98,7 +111,7 @@ class QEffDynamicGlmMoeDsaIndexerCache:
 class QEffGlmMoeDsaRotaryEmbedding(GlmMoeDsaRotaryEmbedding):
     def __init__(self, config: GlmMoeDsaConfig, device=None):
         super().__init__(config=config)
-        self._set_cos_sin_cache(MAX_POSITION_EMBEDDINGS, self.inv_freq.device, torch.get_default_dtype())
+        self._set_cos_sin_cache(MAX_POSITION_EMBEDDINGS, self.inv_freq.device, torch.float32)
 
     def _set_cos_sin_cache(self, seq_len: int, device, dtype):
         self.max_seq_len_cached = seq_len
@@ -109,10 +122,9 @@ class QEffGlmMoeDsaRotaryEmbedding(GlmMoeDsaRotaryEmbedding):
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
 
     def forward(self, x: torch.Tensor, position_ids: torch.LongTensor):
-        del x
         return (
-            self.cos_cached[position_ids].to(dtype=self.cos_cached.dtype),
-            self.sin_cached[position_ids].to(dtype=self.sin_cached.dtype),
+            self.cos_cached[position_ids].to(dtype=x.dtype),
+            self.sin_cached[position_ids].to(dtype=x.dtype),
         )
 
 
@@ -153,6 +165,7 @@ class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
         if indexer_key_cache is not None:
             cache_kwargs = {"position_ids": position_ids}
             k = indexer_key_cache.update_indexer(k, self.layer_idx, cache_kwargs)
+            attention_mask, (k,) = _trim_live_context_for_pytorch(position_ids, attention_mask, k)
 
         scores = torch.matmul(q.float(), k.transpose(-1, -2).float().unsqueeze(1)) * self.softmax_scale
         scores = F.relu(scores)
@@ -219,6 +232,9 @@ class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
         if compressed_kvs is not None:
             kv_pass = compressed_kvs.update_ckv(kv_pass, self.layer_idx, cache_kwargs)
             k_rot = compressed_kvs.update_k_pe(k_rot, self.layer_idx, cache_kwargs)
+            attention_mask, (kv_pass, k_rot) = _trim_live_context_for_pytorch(
+                position_ids, attention_mask, kv_pass, k_rot
+            )
 
         query_states = torch.cat((q_pass, q_rot), dim=-1)
         key_states, value_states = _expand_glm_moe_dsa_kv(self, kv_pass, k_rot)
@@ -396,16 +412,16 @@ class QEffGlmMoeDsaModel(GlmMoeDsaModel):
 class QEffGlmMoeDsaTopkRouter(GlmMoeDsaTopkRouter):
     def forward(self, hidden_states):
         hidden_states = hidden_states.view(-1, self.hidden_dim)
-        router_logits = F.linear(hidden_states, self.weight)
+        router_logits = F.linear(hidden_states.type(torch.float32), self.weight.type(torch.float32))
         scores = router_logits.sigmoid()
-        scores_for_choice = scores + self.e_score_correction_bias.to(device=scores.device).unsqueeze(0)
+        scores_for_choice = scores + self.e_score_correction_bias.to(device=scores.device)
         group_scores_top2 = scores_for_choice.view(-1, self.num_group, self.num_experts // self.num_group).topk(
             2, dim=-1
         )[0]
         group_scores = group_scores_top2.sum(dim=-1)
         group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
         group_mask = torch.zeros_like(group_scores)
-        group_mask = group_mask.scatter(1, group_idx, torch.ones_like(group_idx, dtype=group_scores.dtype))
+        group_mask = group_mask.scatter(1, group_idx, 1)
         score_mask = (
             group_mask.unsqueeze(-1)
             .expand(-1, self.num_group, self.num_experts // self.num_group)
@@ -415,10 +431,10 @@ class QEffGlmMoeDsaTopkRouter(GlmMoeDsaTopkRouter):
         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
         topk_weights = scores.gather(1, topk_indices)
         if self.norm_topk_prob:
-            denominator = torch.einsum("te->t", topk_weights).unsqueeze(-1) + 1e-20
+            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
             topk_weights = topk_weights / denominator
         topk_weights = topk_weights * self.routed_scaling_factor
-        return topk_indices, topk_weights.to(hidden_states.dtype)
+        return topk_indices, topk_weights
 
 
 class QEffGlmMoeDsaMoE(QEffMoEBlockMixin, GlmMoeDsaMoE):
@@ -451,6 +467,9 @@ class QEffGlmMoeDsaMoE(QEffMoEBlockMixin, GlmMoeDsaMoE):
 
     def route(self, x: torch.Tensor):
         return self.gate(x), None
+
+    def execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:
+        return super().execute_moe_flavour(x, routing).to(x.dtype)
 
     def apply_shared_experts(self, out: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
         return out + self.shared_experts(residual.view(out.shape[0], -1)).view_as(out)
