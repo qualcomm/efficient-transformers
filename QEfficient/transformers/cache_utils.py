@@ -32,6 +32,15 @@ from QEfficient.customop import (
     glm_int_mod,
     glm_paged_scatter,
 )
+from QEfficient.customop.utils import (
+    ctx_gather_block_range_kv_dp,
+    ctx_gather_blocked_kv_dp,
+    ctx_gather_paged_kv_dp,
+    ctx_gather_paged_kv_heads,
+    ctx_paged_scatter_dp,
+    ctx_paged_scatter_page,
+    m3_ctx_scatter,
+)
 
 
 # HybridCache and HybridChunkedCache were removed from transformers in 5.3+.
@@ -588,6 +597,100 @@ class QEffDynamicLayer(CacheLayerMixin):
             block_id = block_id.unsqueeze(-1)
             self.keys = CtxScatterFuncPagedAttention.apply(self.keys, block_id, ctx_indices, key_states)
             self.values = CtxScatterFuncPagedAttention.apply(self.values, block_id, ctx_indices, value_states)
+    def write_only_paged_attention_dp(self, key_states, value_states, cache_kwargs):
+        """Write GQA K/V into a physical page pool with rows ordered [DP, CP, Hkv]."""
+        if self.keys is None or self.values is None:
+            raise ValueError("Paged GQA requires preallocated physical key and value pools.")
+        self._mark_initialized(self.keys)
+        position_ids = cache_kwargs.get("position_ids")
+        block_table = cache_kwargs.get("block_table")
+        dp = int(cache_kwargs.get("attn_dp", 1))
+        cp = int(cache_kwargs.get("attn_cp", 1))
+        page_block_size = int(cache_kwargs.get("page_block_size", self.keys.shape[2]))
+        batch, num_kv_heads, seq_len, head_dim = key_states.shape
+        if batch % dp:
+            raise ValueError("Paged GQA batch size must be divisible by attn_dp.")
+        batch_local = batch // dp
+        rows = dp * cp * num_kv_heads
+        if tuple(self.keys.shape[1:]) != (rows, page_block_size, head_dim):
+            raise ValueError(
+                f"Paged GQA key cache must have tail shape {(rows, page_block_size, head_dim)}, "
+                f"got {tuple(self.keys.shape[1:])}."
+            )
+        if tuple(self.values.shape) != tuple(self.keys.shape):
+            raise ValueError("Paged GQA key and value cache shapes must match.")
+        if block_table is None or block_table.ndim != 3 or tuple(block_table.shape[:2]) != (dp, batch_local):
+            raise ValueError(f"Paged GQA block_table must have shape [{dp}, {batch_local}, pages].")
+
+        position_dp = position_ids.view(dp, batch_local, seq_len).permute(1, 0, 2)
+        logical_page = torch.div(position_dp, page_block_size, rounding_mode="trunc")
+        logical_page_group = torch.div(logical_page, cp, rounding_mode="trunc")
+        owner_cp = logical_page - logical_page_group * cp
+        if (
+            not torch.onnx.is_in_onnx_export()
+            and not torch._dynamo.is_compiling()
+            and int(logical_page_group.max()) >= block_table.shape[-1]
+        ):
+            raise ValueError("Paged GQA block_table is too short for the requested position_ids.")
+        table = block_table.permute(1, 0, 2)
+        physical_page = torch.gather(table, 2, logical_page_group.to(torch.int64))
+        physical_page = physical_page.unsqueeze(2).unsqueeze(3).expand(batch_local, dp, cp, num_kv_heads, seq_len)
+        cp_index = torch.arange(cp, device=key_states.device).view(1, 1, cp, 1, 1)
+        row_live = (owner_cp.unsqueeze(2).unsqueeze(3) == cp_index).expand_as(physical_page)
+        invalid_page = torch.full_like(physical_page, torch.iinfo(torch.int32).max)
+        block_id = torch.where(row_live, physical_page, invalid_page).reshape(batch_local, rows, seq_len)
+        address = (
+            (position_dp - logical_page * page_block_size)
+            .to(torch.int32)
+            .unsqueeze(2)
+            .unsqueeze(3)
+            .expand(batch_local, dp, cp, num_kv_heads, seq_len)
+            .reshape(batch_local, rows, seq_len)
+        )
+        key_updates = (
+            key_states.view(dp, batch_local, num_kv_heads, seq_len, head_dim)
+            .permute(1, 0, 2, 3, 4)
+            .unsqueeze(2)
+            .expand(batch_local, dp, cp, num_kv_heads, seq_len, head_dim)
+            .reshape(batch_local, rows, seq_len, head_dim)
+        )
+        value_updates = (
+            value_states.view(dp, batch_local, num_kv_heads, seq_len, head_dim)
+            .permute(1, 0, 2, 3, 4)
+            .unsqueeze(2)
+            .expand(batch_local, dp, cp, num_kv_heads, seq_len, head_dim)
+            .reshape(batch_local, rows, seq_len, head_dim)
+        )
+        is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
+        page_aligned = dp == 1 and cp == 1 and seq_len % page_block_size == 0
+        if page_aligned and not is_export:
+            page_aligned = bool(
+                torch.all(position_ids[:, 0] % page_block_size == 0).item()
+                and torch.all(position_ids[:, 1:] == position_ids[:, :-1] + 1).item()
+            )
+        if page_aligned:
+            num_pages = seq_len // page_block_size
+            logical_pages = (position_ids[:, ::page_block_size] // page_block_size).to(torch.int64)
+            physical_pages = torch.gather(block_table[0].to(torch.int64), 1, logical_pages).to(torch.int32)
+            for batch_idx in range(batch):
+                page_ids = physical_pages[batch_idx].view(num_pages, 1).expand(num_pages, num_kv_heads)
+                key_pages = (
+                    key_states[batch_idx]
+                    .reshape(num_kv_heads, num_pages, page_block_size, head_dim)
+                    .permute(1, 0, 2, 3)
+                )
+                value_pages = (
+                    value_states[batch_idx]
+                    .reshape(num_kv_heads, num_pages, page_block_size, head_dim)
+                    .permute(1, 0, 2, 3)
+                )
+                self.keys = ctx_paged_scatter_page(self.keys, page_ids, key_pages)
+                self.values = ctx_paged_scatter_page(self.values, page_ids, value_pages)
+            return self.keys, self.values
+        self.keys = ctx_paged_scatter_dp(self.keys, block_id.to(torch.int32), address, key_updates)
+        self.values = ctx_paged_scatter_dp(self.values, block_id.to(torch.int32), address, value_updates)
+        return self.keys, self.values
+
 
     def write_only(self, key_states, value_states, cache_kwargs):
         """
@@ -1260,6 +1363,10 @@ class QEffDynamicCache(Cache):
         """
         self.append_new_layers(layer_idx)
         return self.layers[layer_idx].write_only_paged_attention(key_states, value_states, cache_kwargs)
+
+    def write_only_paged_attention_dp(self, key_states, value_states, layer_idx, cache_kwargs):
+        self.append_new_layers(layer_idx)
+        return self.layers[layer_idx].write_only_paged_attention_dp(key_states, value_states, cache_kwargs)
 
     def write_only(self, key_states, value_states, layer_idx, cache_kwargs):
         """
@@ -2341,3 +2448,621 @@ class QEffGemma4DynamicLayer(QEffDynamicLayer):
 
         v_out = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(v_out, dtype=v_out.dtype), v_out)
         return k_out, v_out
+
+
+class QEffQwen4ExpDynamicCache(Cache):
+    """Decode cache for Qwen4-Exp's separate GDN, PLE, and QSA states.
+
+    The upstream cache combines these states behind a dynamic cache object.  QEff
+    export needs each retained buffer to be an explicit tensor input/output, so
+    this adapter keeps the legacy tuple ordering while exposing named state lists.
+    """
+
+    def __init__(self, config):
+        super().__init__(layers=[])
+        self.config = config
+        self.layer_types = [
+            "qwen_sparse_attention" if layer_type == "full_attention" else layer_type
+            for layer_type in config.layer_types
+        ]
+        self.gdn_conv_states = [None] * len(self.layer_types)
+        self.gdn_recurrent_states = [None] * len(self.layer_types)
+        self.ple_conv_states = [None] * len(self.layer_types)
+        self.qsa_key_states = [None] * len(self.layer_types)
+        self.qsa_value_states = [None] * len(self.layer_types)
+        self.qsa_index_states = [None] * len(self.layer_types)
+        self.qsa_partial_states = [None] * len(self.layer_types)
+
+    def __len__(self):
+        return len(self.layer_types)
+
+    def _is_linear(self, layer_idx: int) -> bool:
+        return self.layer_types[layer_idx] == "linear_attention"
+
+    def _has_ple(self, layer_idx: int) -> bool:
+        return layer_idx + 1 in getattr(self.config, "ple_layer_ids", [])
+
+    def __getitem__(self, layer_idx: int):
+        if self._is_linear(layer_idx):
+            state = (self.gdn_conv_states[layer_idx], self.gdn_recurrent_states[layer_idx])
+            return state + ((self.ple_conv_states[layer_idx],) if self._has_ple(layer_idx) else ())
+        return (
+            self.qsa_key_states[layer_idx],
+            self.qsa_value_states[layer_idx],
+            self.qsa_index_states[layer_idx],
+            self.qsa_partial_states[layer_idx],
+        )
+
+    def update_gdn_state(self, layer_idx: int, conv_state: torch.Tensor, recurrent_state: torch.Tensor):
+        """Replace the decode buffers for a linear-attention layer."""
+        self.gdn_conv_states[layer_idx] = conv_state
+        self.gdn_recurrent_states[layer_idx] = recurrent_state
+
+    def update_ple_state(self, layer_idx: int, conv_state: torch.Tensor):
+        """Replace the PLE short-convolution buffer for one layer."""
+        self.ple_conv_states[layer_idx] = conv_state
+
+    def update_qsa_state(
+        self,
+        layer_idx: int,
+        key_state: torch.Tensor,
+        value_state: torch.Tensor,
+        index_state: torch.Tensor,
+        partial_state: torch.Tensor,
+    ):
+        """Replace QSA's independent retained buffers without aliasing inputs."""
+        self.qsa_key_states[layer_idx] = key_state
+        self.qsa_value_states[layer_idx] = value_state
+        self.qsa_index_states[layer_idx] = index_state
+        self.qsa_partial_states[layer_idx] = partial_state
+
+    @classmethod
+    def from_legacy_cache(cls, config, past_key_values=None):
+        cache = cls(config)
+        if past_key_values is None:
+            return cache
+        for layer_idx, state in enumerate(past_key_values):
+            if cache._is_linear(layer_idx):
+                cache.gdn_conv_states[layer_idx], cache.gdn_recurrent_states[layer_idx] = state[:2]
+                if cache._has_ple(layer_idx) and len(state) > 2:
+                    cache.ple_conv_states[layer_idx] = state[2]
+            else:
+                (
+                    cache.qsa_key_states[layer_idx],
+                    cache.qsa_value_states[layer_idx],
+                    cache.qsa_index_states[layer_idx],
+                    cache.qsa_partial_states[layer_idx],
+                ) = state
+        return cache
+
+    def to_legacy_cache(self):
+        return tuple(self[layer_idx] for layer_idx in range(len(self)))
+
+    def get_seq_length(self, layer_idx=None, cache_position=None):
+        del cache_position
+        if layer_idx is not None and not self._is_linear(layer_idx):
+            state = self.qsa_key_states[layer_idx]
+            return 0 if state is None else state.shape[-2]
+        for candidate_idx, layer_type in enumerate(self.layer_types):
+            if layer_type == "qwen_sparse_attention" and self.qsa_key_states[candidate_idx] is not None:
+                return self.qsa_key_states[candidate_idx].shape[-2]
+        return 0
+
+    def has_previous_state(self, layer_idx=None, state_idx=0):
+        if layer_idx is None or not self._is_linear(layer_idx):
+            return False
+        states = (
+            self.gdn_conv_states[layer_idx],
+            self.gdn_recurrent_states[layer_idx],
+            self.ple_conv_states[layer_idx],
+        )
+        return states[state_idx] is not None
+
+    def reorder_cache(self, beam_idx):
+        for states in (
+            self.gdn_conv_states,
+            self.gdn_recurrent_states,
+            self.ple_conv_states,
+            self.qsa_key_states,
+            self.qsa_value_states,
+            self.qsa_index_states,
+            self.qsa_partial_states,
+        ):
+            for layer_idx, state in enumerate(states):
+                if state is not None:
+                    states[layer_idx] = state.index_select(0, beam_idx.to(state.device))
+def read_kv_cache_with_indices(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    token_indices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather selected key/value slices from a flat [batch, heads, ctx_len, head_dim] cache.
+
+    token_indices: int32 tensor of shape [batch, heads, n_tokens] where invalid entries are 0.
+    Returns selected_k, selected_v both of shape [batch, heads, n_tokens, head_dim].
+    """
+    return ctx_gather_blocked_kv(key_cache, token_indices), ctx_gather_blocked_kv(value_cache, token_indices)
+
+
+def update_and_read_index_key_cache(
+    index_key_cache: torch.Tensor,
+    position_ids: torch.Tensor,
+    idx_k: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Scatter idx_k into index_key_cache at position_ids, then read all ctx_len index keys.
+
+    Future positions (beyond max position_id) are masked with INT32_MAX (ONNX export) or 0 (eager).
+    Returns (gathered_index_keys [batch, 1, ctx_len, head_dim], updated_index_key_cache).
+    """
+    if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
+        index_key_cache = m3_ctx_scatter(index_key_cache, position_ids.to(torch.int32), idx_k)
+    else:
+        index_key_cache = index_key_cache.clone()
+        batch_idx = torch.arange(index_key_cache.shape[0], device=index_key_cache.device).view(-1, 1, 1)
+        head_idx = torch.arange(index_key_cache.shape[1], device=index_key_cache.device).view(1, -1, 1)
+        index_key_cache[batch_idx, head_idx, position_ids.long().unsqueeze(1)] = idx_k
+    batch, _, ctx_len, _ = index_key_cache.shape
+    ctx_indices = torch.arange(ctx_len, device=index_key_cache.device)[None, None, :]
+    gather_limit = position_ids.max(1, keepdim=True).values.unsqueeze(1)
+    invalid_idx = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
+    ctx_indices = torch.where(ctx_indices > gather_limit, invalid_idx, ctx_indices).to(torch.int32)
+    ctx_indices = ctx_indices.expand(batch, 1, ctx_len)
+    return ctx_gather_blocked_kv(index_key_cache, ctx_indices), index_key_cache
+
+
+def scatter_kv_into_cache(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    position_ids: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Write key_states and value_states into the flat KV cache at position_ids."""
+    pid = position_ids.to(torch.int32)
+    return ctx_scatter(key_cache, pid, key_states), ctx_scatter(value_cache, pid, value_states)
+
+
+
+
+class QEffMiniMaxSparseCache(QEffDynamicCache):
+    """
+    QEffDynamicCache extended with per-layer index key caches for MiniMax-M3 sparse attention.
+
+    Dense layers use the inherited write_only() / update() interface unchanged.
+    Sparse layers additionally use update_index_key_cache() and read_kv_with_block_indices().
+    """
+
+    def __init__(self, ddp_cache_data=None, *args, **kwargs):
+        super().__init__(ddp_cache_data, *args, **kwargs)
+        self.index_keys: dict[int, Optional[torch.Tensor]] = {}
+
+    @staticmethod
+    def _use_cache_custom_op() -> bool:
+        return torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling()
+
+    @staticmethod
+    def _cache_call(op, args, eager):
+        if QEffMiniMaxSparseCache._use_cache_custom_op():
+            return op(*args) if not hasattr(op, "apply") else op.apply(*args)
+        return eager(*args)
+
+    @staticmethod
+    def ctx_scatter(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+        """data [B, H, T, D][b, h, position_ids[b, s]] = updates."""
+
+        def eager(data, position_ids, updates):
+            out = data.clone()
+            b = torch.arange(data.shape[0]).view(-1, 1, 1)
+            h = torch.arange(data.shape[1]).view(1, -1, 1)
+            out[b, h, position_ids.long().unsqueeze(1)] = updates
+            return out
+
+        return QEffMiniMaxSparseCache._cache_call(m3_ctx_scatter, (data, position_ids.to(torch.int32), updates), eager)
+
+    @staticmethod
+    def paged_scatter(data, block_id, addr, updates):
+        """data [P, R, T, D][block_id, r, addr] = updates [B, R, S, D]."""
+
+        def eager(data, block_id, addr, updates):
+            out = data.clone()
+            rows = torch.arange(updates.shape[1]).view(1, -1, 1).expand_as(block_id)
+            valid = block_id != torch.iinfo(torch.int32).max
+            out[block_id[valid].long(), rows[valid], addr[valid].long()] = updates[valid]
+            return out
+
+        return QEffMiniMaxSparseCache._cache_call(ctx_paged_scatter_dp, (data, block_id, addr, updates), eager)
+
+    @staticmethod
+    def paged_scatter_page(data, block_id, updates):
+        """data [P, H, page, D][block_id[p, h], h] = updates [pages, H, page, D]."""
+
+        def eager(data, block_id, updates):
+            out = data.clone()
+            heads = torch.arange(updates.shape[1]).view(1, -1).expand_as(block_id)
+            valid = block_id != torch.iinfo(torch.int32).max
+            out[block_id[valid].long(), heads[valid]] = updates[valid]
+            return out
+
+        return QEffMiniMaxSparseCache._cache_call(ctx_paged_scatter_page, (data, block_id, updates), eager)
+
+    @staticmethod
+    def gather_paged_kv_dp(data, block_ids):
+        pages, rows = block_ids.shape
+
+        def eager(data, block_ids):
+            ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids).long()
+            out = data[ids, torch.arange(rows).view(1, rows)]
+            return out.permute(1, 0, 2, 3).reshape(1, rows, pages * data.shape[2], data.shape[3])
+
+        return QEffMiniMaxSparseCache._cache_call(ctx_gather_paged_kv_dp, (data, block_ids.to(torch.int32)), eager)
+
+    @staticmethod
+    def _gather_blocked(op, data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+        def eager(data, ctx_indices):
+            idx = torch.where(
+                ctx_indices == torch.iinfo(torch.int32).max, torch.zeros_like(ctx_indices), ctx_indices
+            ).long()
+            b = torch.arange(data.shape[0]).view(-1, 1, 1)
+            r = torch.arange(data.shape[1]).view(1, -1, 1)
+            return data[b, r, idx]
+
+        return QEffMiniMaxSparseCache._cache_call(op, (data, ctx_indices.to(torch.int32)), eager)
+
+    @staticmethod
+    def gather_blocked_kv_dp(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+        """Gather ``[B, rows, T, D]`` using per-row DP/CP indices."""
+        return QEffMiniMaxSparseCache._gather_blocked(ctx_gather_blocked_kv_dp, data, ctx_indices)
+
+    @staticmethod
+    def gather_blocked_kv(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+        """Gather ``[B, Hkv, T, D]`` using per-head indices."""
+        return QEffMiniMaxSparseCache._gather_blocked(ctx_gather_blocked_kv, data, ctx_indices)
+
+    @staticmethod
+    def gather_blocked_kv_blocks(data: torch.Tensor, block_ids: torch.Tensor, block_size: int) -> torch.Tensor:
+        """Gather complete contiguous blocks using one index per block."""
+        if data.shape[2] % block_size:
+            raise ValueError(f"cache length {data.shape[2]} must be divisible by block size {block_size}.")
+        blocked = data.reshape(data.shape[0], data.shape[1], data.shape[2] // block_size, block_size, data.shape[3])
+
+        def eager(blocked, block_ids):
+            ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids).long()
+            b = torch.arange(blocked.shape[0], device=blocked.device).view(-1, 1, 1)
+            r = torch.arange(blocked.shape[1], device=blocked.device).view(1, -1, 1)
+            return blocked[b, r, ids]
+
+        return QEffMiniMaxSparseCache._cache_call(
+            ctx_gather_block_range_kv_dp, (blocked, block_ids.to(torch.int32)), eager
+        )
+
+    @staticmethod
+    def gather_paged_kv_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        """Physical pages [P, H, page, D] at block_ids [pages, H] -> [1, H, pages*page, D]."""
+        pages, heads = block_ids.shape
+
+        def eager(data, block_ids):
+            valid = block_ids != torch.iinfo(torch.int32).max
+            ids = torch.where(valid, block_ids, torch.zeros_like(block_ids)).long()
+            out = data[ids, torch.arange(heads).view(1, heads)]
+            out = torch.where(valid[..., None, None], out, torch.zeros_like(out))
+            return out.permute(1, 0, 2, 3).reshape(1, heads, pages * data.shape[2], data.shape[3])
+
+        return QEffMiniMaxSparseCache._cache_call(ctx_gather_paged_kv_heads, (data, block_ids.to(torch.int32)), eager)
+
+    @staticmethod
+    def gather_paged_kv_batch_with_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        """block_ids [B, pages] shared by all heads -> [B, H, pages*page, D]."""
+        batch, num_pages = block_ids.shape
+        num_heads = data.shape[1]
+        outputs = []
+        for batch_idx in range(batch):
+            ids = block_ids[batch_idx].to(torch.int32).view(num_pages, 1).expand(num_pages, num_heads)
+            outputs.append(QEffMiniMaxSparseCache.gather_paged_kv_heads(data, ids))
+        return torch.cat(outputs, dim=0)
+
+    @staticmethod
+    def gather_paged_kv_selected_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        """block_ids [B, H, pages] -> [B, H, pages*page, D]."""
+        outputs = []
+        for batch_idx in range(block_ids.shape[0]):
+            ids = block_ids[batch_idx].transpose(0, 1).contiguous().to(torch.int32)
+            outputs.append(QEffMiniMaxSparseCache.gather_paged_kv_heads(data, ids))
+        return torch.cat(outputs, dim=0)
+
+    def write_only_sparse(self, key_states, value_states, layer_idx, cache_kwargs):
+        """Write sparse-layer KV states using paged block/address metadata.
+
+        When ``block_id`` and ``addr`` are present in ``cache_kwargs``, the
+        cache is expected to use the benchmark layout
+        ``[physical_blocks, rows, page_size, head_dim]`` and updates are
+        scattered with the paged cache custom op. Without paged metadata, the
+        inherited standard ``[batch, heads, ctx_len, head_dim]`` path is used.
+        """
+        self.append_new_layers(layer_idx)
+        layer = self.layers[layer_idx]
+        if layer.keys is None:
+            layer.keys = key_states
+            layer.values = value_states
+            layer._mark_initialized(layer.keys)
+        else:
+            layer._mark_initialized(layer.keys)
+            batch, nh, query_len, head_dim = key_states.shape
+
+            position_ids = cache_kwargs.get("position_ids")
+            dp = cache_kwargs.get("dp", 1)
+            batch_local = batch // dp
+            hkv = cache_kwargs.get("hkv", nh)
+            cp = cache_kwargs.get("cp", 1) or 1
+            if cp > 1:
+                rows = dp * hkv * cp
+                cache_shape = tuple(layer.keys.shape)
+                if tuple(layer.values.shape) != cache_shape:
+                    raise ValueError("CP sparse key and value cache shapes must match.")
+                if (
+                    layer.keys.ndim != 4
+                    or tuple(layer.keys.shape[:2]) != (batch_local, rows)
+                    or layer.keys.shape[3] != head_dim
+                ):
+                    raise ValueError(
+                        f"CP sparse cache shape {cache_shape} does not match "
+                        f"({batch_local}, {rows}, local_ctx_len, {head_dim})."
+                    )
+                local_ctx_len = layer.keys.shape[2]
+                key_dp = key_states.view(dp, batch_local, query_len, hkv, head_dim).permute(1, 0, 3, 2, 4)
+                value_dp = value_states.view(dp, batch_local, query_len, hkv, head_dim).permute(1, 0, 3, 2, 4)
+                key_updates = (
+                    key_dp.unsqueeze(2)
+                    .expand(batch_local, dp, cp, hkv, query_len, head_dim)
+                    .reshape(batch_local, rows, query_len, head_dim)
+                )
+                value_updates = (
+                    value_dp.unsqueeze(2)
+                    .expand(batch_local, dp, cp, hkv, query_len, head_dim)
+                    .reshape(batch_local, rows, query_len, head_dim)
+                )
+                position_ids_dp = position_ids.view(dp, batch_local, query_len).permute(1, 0, 2)
+                owner_cp = position_ids_dp // local_ctx_len
+                owner_valid = (owner_cp >= 0) & (owner_cp < cp)
+                local_pos = position_ids_dp - owner_cp * local_ctx_len
+                row_cp = torch.arange(rows, device=layer.keys.device).remainder(hkv * cp) // hkv
+                row_live = row_cp.view(1, dp, cp, hkv, 1) == owner_cp.view(batch_local, dp, 1, 1, query_len)
+                row_live = row_live & owner_valid.view(batch_local, dp, 1, 1, query_len)
+                row_live = row_live.expand(batch_local, dp, cp, hkv, query_len).reshape(batch_local, rows, query_len)
+                addr = (
+                    local_pos.view(batch_local, dp, 1, 1, query_len)
+                    .expand(batch_local, dp, cp, hkv, query_len)
+                    .reshape(batch_local, rows, query_len)
+                    .to(torch.int32)
+                )
+                batch_idx = torch.arange(batch_local, device=layer.keys.device).view(batch_local, 1, 1)
+                block_id = torch.where(
+                    row_live,
+                    batch_idx.expand(batch_local, rows, query_len),
+                    torch.iinfo(torch.int32).max,
+                ).to(torch.int32)
+
+                layer.keys = self.paged_scatter(layer.keys, block_id, addr, key_updates)
+                layer.values = self.paged_scatter(layer.values, block_id, addr, value_updates)
+                layer._mark_initialized(layer.keys)
+                return
+            rows = dp * hkv
+
+            cache_shape = tuple(layer.keys.shape)
+            if tuple(layer.values.shape) != cache_shape:
+                raise ValueError("Sparse key and value cache shapes must match.")
+            # key_states = key_states.reshape(batch_local, rows, query_len, head_dim)
+            # value_states = value_states.reshape(batch_local, rows, query_len, head_dim)
+            # layer.keys = layer.keys.reshape(batch_local, rows, -1, head_dim)
+            # layer.values = layer.values.reshape(batch_local, rows, -1, head_dim)
+
+            batch_idx = torch.arange(batch_local, device=key_states.device).view(batch_local, 1, 1)
+            block_id = batch_idx.expand(batch_local, rows, query_len).to(torch.int32)
+            addr = (
+                position_ids.view(dp, batch_local, query_len)
+                .permute(1, 0, 2)
+                .to(torch.int32)[:, :, None, :]
+                .expand(batch_local, dp, hkv, query_len)
+                .reshape(batch_local, rows, query_len)
+            )
+
+            if layer.keys.ndim != 4 or layer.values.ndim != 4:
+                raise ValueError("Paged sparse caches must have rank-4 key and value tensors.")
+            if key_states.ndim != 4 or value_states.ndim != 4:
+                raise ValueError("Paged sparse-cache updates must have rank-4 key and value tensors.")
+
+            block_id = block_id.to(dtype=torch.int32, device=layer.keys.device)
+            addr = addr.to(dtype=torch.int32, device=layer.keys.device)
+            layer.keys = self.paged_scatter(layer.keys, block_id, addr, key_states)
+            # layer.keys = layer.keys.reshape(cache_shape)
+            layer.values = self.paged_scatter(layer.values, block_id, addr, value_states)
+            # layer.values = layer.values.reshape(cache_shape)
+            layer._mark_initialized(layer.keys)
+
+    def update_index_key_cache(
+        self,
+        idx_k: torch.Tensor,
+        layer_idx: int,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Scatter idx_k into the index key cache and return all ctx_len gathered index keys."""
+        gathered, updated = update_and_read_index_key_cache(self.index_keys.get(layer_idx), position_ids, idx_k)
+        self.index_keys[layer_idx] = updated
+        return gathered
+
+    def read_kv_with_block_indices(
+        self,
+        layer_idx: int,
+        token_indices: torch.Tensor,
+        token_valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Gather K/V by block-sparse token indices. Returns (selected_k, selected_v, flat_valid)."""
+        if token_indices.ndim == 4:
+            flat_indices = token_indices.flatten(-2)
+            flat_valid = token_valid.flatten(-2)
+        else:
+            flat_indices = token_indices
+            flat_valid = token_valid
+        layer = self.layers[layer_idx]
+        selected_k, selected_v = read_kv_cache_with_indices(layer.keys, layer.values, flat_indices)
+        return selected_k, selected_v, flat_valid
+
+    def read_index_key_block_gp(
+        self,
+        layer_idx: int,
+        position_ids_dp: torch.Tensor,
+        start: int,
+        end: int,
+        cp: int,
+        hkv: int,
+        index_block_size: int,
+        cache_gp: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Gather one contiguous block [start:end] from the GP-layout index key cache.
+
+        The index key cache is expected to have shape
+        ``[B_local, rows, cache_slots, D]`` where ``rows = dp * cp * hkv`` and
+        ``cache_slots = ctx_len // cp``.
+
+        position_ids_dp:  ``[B_local, dp, QL]``
+        cache_gp:         Optional pre-reshaped GP-layout cache ``[B_local, rows, ctx_len, D]``.
+                          When provided it is used directly; otherwise ``self.index_keys[layer_idx]``
+                          is expected to already be in GP layout.
+        Returns:          ``[B_local, rows, end - start, D]``
+
+        For ``cp == 1`` the causal validity limit per row is the DP-lane's
+        maximum position_id.  For ``cp > 1`` the contiguous CP layout is
+        assumed and the per-way limit is computed accordingly.
+        """
+        if cache_gp is not None:
+            cache = cache_gp
+        else:
+            cache = self.index_keys.get(layer_idx)
+            if cache is None:
+                raise ValueError(f"No index key cache for layer {layer_idx}.")
+        batch_local, rows, _, _ = cache.shape
+        block_len = end - start
+
+        pos_max = position_ids_dp.max(dim=-1).values  # [B_local, dp]
+
+        # Map dp-lane pos_max → rows: row r belongs to dp-lane r // (cp * hkv).
+        dp_lane_per_row = torch.arange(rows, device=cache.device) // (cp * hkv)
+        pos_max_rows = pos_max[:, dp_lane_per_row]  # [B_local, rows]
+
+        if cp == 1:
+            gather_limit = pos_max_rows
+        else:
+            way = torch.arange(rows, device=cache.device).remainder(cp * hkv) // hkv
+            cycle_size = index_block_size * cp
+            way_start = way * index_block_size
+            offset_in_cycle = _remainder_with_symbolic_divisor(pos_max_rows, cycle_size)
+            offset_in_way = offset_in_cycle - way_start.unsqueeze(0)
+            offset_in_way = torch.where(
+                offset_in_way >= 0,
+                offset_in_way.clamp_max(index_block_size - 1),
+                torch.full_like(offset_in_way, -1),
+            )
+            gather_limit = (pos_max_rows // cycle_size) * index_block_size + offset_in_way
+
+        ctx_indices = torch.arange(start, end, device=cache.device).view(1, 1, block_len)
+        invalid_mask = ctx_indices > gather_limit.unsqueeze(-1)  # [B_local, rows, block_len]
+        invalid_idx = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
+        ctx_indices = torch.where(invalid_mask, invalid_idx, ctx_indices).to(torch.int32)
+        ctx_indices = ctx_indices.expand(batch_local, rows, block_len)
+        return ctx_gather_blocked_kv(cache, ctx_indices)
+
+    def read_blocked_k_dp(
+        self,
+        layer_idx: int,
+        cache_gp: torch.Tensor,
+        position_ids_dp: torch.Tensor,
+        start: int,
+        end: int,
+        index_block_size: int,
+        cp: int = 1,
+        hkv: int = 1,
+    ) -> torch.Tensor:
+        """Gather one contiguous block [start:end] from a GP-layout cache with DP-aware validity.
+
+        Mirrors ``_read_blocked_k_dp`` from the MSA decode benchmark.
+
+        cache_gp:         ``[B_local, rows, ctx_len, D]``  (GP-layout; rows = dp * cp * hkv)
+        position_ids_dp:  ``[B_local, dp, QL]``
+        Returns:          ``[B_local, rows, end - start, D]``
+
+        For ``cp == 1`` the per-row validity limit equals the maximum position_id of the
+        owning DP lane.  For ``cp > 1`` the contiguous CP layout is assumed and the
+        per-way limit is derived accordingly (same logic as read_index_key_block_gp).
+        """
+        batch_local, rows, _, _ = cache_gp.shape
+        block_len = end - start
+
+        pos_max = position_ids_dp.max(dim=-1).values  # [B_local, dp]
+
+        dp_lane_per_row = torch.arange(rows, device=cache_gp.device) // (cp * hkv)
+        pos_max_rows = pos_max[:, dp_lane_per_row]  # [B_local, rows]
+
+        if cp == 1:
+            gather_limit = pos_max_rows
+        else:
+            way = torch.arange(rows, device=cache_gp.device).remainder(cp * hkv) // hkv
+            cycle_size = index_block_size * cp
+            way_start = way * index_block_size
+            offset_in_cycle = _remainder_with_symbolic_divisor(pos_max_rows, cycle_size)
+            offset_in_way = offset_in_cycle - way_start.unsqueeze(0)
+            offset_in_way = torch.where(
+                offset_in_way >= 0,
+                offset_in_way.clamp_max(index_block_size - 1),
+                torch.full_like(offset_in_way, -1),
+            )
+            gather_limit = (pos_max_rows // cycle_size) * index_block_size + offset_in_way
+
+        ctx_indices = torch.arange(start, end, device=cache_gp.device).view(1, 1, block_len)
+        invalid_mask = ctx_indices > gather_limit.unsqueeze(-1)  # [B_local, rows, block_len]
+        invalid_idx = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
+        ctx_indices = torch.where(invalid_mask, invalid_idx, ctx_indices).to(torch.int32)
+        ctx_indices = ctx_indices.expand(batch_local, rows, block_len)
+        return ctx_gather_blocked_kv_dp(cache_gp, ctx_indices)
+
+    @classmethod
+    def from_legacy_cache(
+        cls,
+        past_key_values: Optional[Tuple] = None,
+        index_keys: Optional[dict] = None,
+    ) -> "QEffMiniMaxSparseCache":
+        """Build from a per-layer tuple cache.
+
+        Each layer entry is either a 2-tuple ``(key, value)`` for dense layers or a
+        3-tuple ``(key, value, index_key)`` for sparse layers.  The legacy
+        ``index_keys`` dict is accepted for backward-compat but the inline
+        3-tuple form takes precedence.
+        """
+        cache = cls()
+        if past_key_values is not None:
+            for i, layer_tuple in enumerate(past_key_values):
+                if len(layer_tuple) == 3:
+                    key_states, value_states, index_key = layer_tuple
+                    cache.index_keys[i] = index_key
+                else:
+                    key_states, value_states = layer_tuple
+                cache.layers.append(QEffDynamicLayer.from_tensors(key_states, value_states))
+        if index_keys is not None:
+            cache.index_keys.update(index_keys)
+        return cache
+
+    def to_legacy_cache(self) -> Tuple:
+        """Return per-layer tuples; sparse layers carry a 3-tuple ``(key, value, index_key)``."""
+        layers = []
+        for i, layer in enumerate(self.layers):
+            if i in self.index_keys and self.index_keys[i] is not None:
+                layers.append((layer.keys, layer.values, self.index_keys[i]))
+            else:
+                layers.append((layer.keys, layer.values))
+        return tuple(layers)
+
+    def to_kv_only_cache(self) -> Tuple:
+        """Return per-layer 2-tuples ``(key, value)`` only, without index keys."""
+        return tuple((layer.keys, layer.values) for layer in self.layers)
+
+    def get_index_keys_tuple(self) -> Tuple:
+        """Return index keys as a flat tuple ordered by layer index."""
+        return tuple(self.index_keys[i] for i in sorted(self.index_keys.keys()))
