@@ -130,6 +130,46 @@ class TestQuantizationTransformImportability:
         assert isinstance(model.compatible, FP8BlockWiseDequantLinear)
         assert type(model.incompatible) is torch.nn.Linear
 
+    def test_fp8_blockwise_replacement_skips_unscaled_deepseek_v4_compressor_projections(self):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
+            FP8BlockWiseDequantLinear,
+            QEffFP8Config,
+            _get_model_specific_fp8_exclusions,
+            _replace_with_fp8_dequant_linear_and_experts_if_qwen,
+        )
+
+        model = torch.nn.Module()
+        model.config = SimpleNamespace(model_type="deepseek_v4")
+        model.regular_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn = torch.nn.Module()
+        model.self_attn.compressor = torch.nn.Module()
+        model.self_attn.compressor.kv_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn.compressor.gate_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn.compressor.indexer = torch.nn.Module()
+        model.self_attn.compressor.indexer.kv_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn.compressor.indexer.gate_proj = torch.nn.Linear(128, 128, bias=False)
+
+        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
+            model,
+            modules_to_not_convert=_get_model_specific_fp8_exclusions(model),
+            quantization_config=QEffFP8Config(
+                quant_method="fp8",
+                activation_scheme="dynamic",
+                fmt="e4m3",
+                scale_fmt="ue8m0",
+                weight_block_size=[128, 128],
+            ),
+        )
+
+        assert has_been_replaced
+        assert isinstance(model.regular_proj, FP8BlockWiseDequantLinear)
+        assert type(model.self_attn.compressor.kv_proj) is torch.nn.Linear
+        assert type(model.self_attn.compressor.gate_proj) is torch.nn.Linear
+        assert type(model.self_attn.compressor.indexer.kv_proj) is torch.nn.Linear
+        assert type(model.self_attn.compressor.indexer.gate_proj) is torch.nn.Linear
+
     def test_fp8_quantizer_dequantizes_deepseek_experts_before_merging(self):
         from transformers.conversion_mapping import WeightConverter, get_checkpoint_conversion_mapping
         from transformers.integrations.finegrained_fp8 import Fp8Dequantize
