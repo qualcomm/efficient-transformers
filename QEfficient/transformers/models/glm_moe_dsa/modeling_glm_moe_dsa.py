@@ -20,6 +20,7 @@ from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
     GlmMoeDsaIndexer,
     GlmMoeDsaModel,
     GlmMoeDsaMoE,
+    GlmMoeDsaRMSNorm,
     GlmMoeDsaRotaryEmbedding,
     GlmMoeDsaTopkRouter,
     apply_rotary_pos_emb_interleave,
@@ -113,6 +114,16 @@ class QEffGlmMoeDsaRotaryEmbedding(GlmMoeDsaRotaryEmbedding):
             self.cos_cached[position_ids].to(dtype=self.cos_cached.dtype),
             self.sin_cached[position_ids].to(dtype=self.sin_cached.dtype),
         )
+
+
+class QEffGlmMoeDsaRMSNorm(GlmMoeDsaRMSNorm):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        # GLM DSA RMSNorm needs FP32 accumulation; lowering this to BF16 causes measurable accuracy deviation.
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
 
 
 class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
