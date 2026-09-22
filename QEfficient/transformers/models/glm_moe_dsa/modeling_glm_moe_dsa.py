@@ -183,21 +183,43 @@ class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
 
 def _expand_glm_moe_dsa_kv(module: nn.Module, kv_nope: torch.Tensor, k_rot: torch.Tensor):
     batch_size, _, seq_length, _ = kv_nope.shape
-    key_shape = (batch_size, seq_length, -1, module.qk_nope_head_dim + module.v_head_dim)
-    kv_nope = module.kv_b_proj(kv_nope).view(key_shape).transpose(1, 2)
+    key_shape = (batch_size, seq_length, module.num_heads, module.qk_nope_head_dim + module.v_head_dim)
+    kv_nope = kv_nope[:, 0]
+    kv_nope = module.kv_b_proj(kv_nope).reshape(key_shape).transpose(1, 2)
     k_nope, value_states = torch.split(kv_nope, [module.qk_nope_head_dim, module.v_head_dim], dim=-1)
-    k_rot = k_rot.expand(-1, k_nope.shape[1], -1, -1)
+    k_rot = k_rot[:, 0].unsqueeze(1)
+    k_rot = k_rot.expand(batch_size, module.num_heads, seq_length, module.qk_rope_head_dim)
     key_states = torch.cat((k_nope, k_rot), dim=-1)
     return key_states, value_states
 
 
+def split_glm_moe_dsa_q_b_proj(
+    weight: torch.Tensor,
+    num_heads: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build QEff query projection weights from upstream fused query weight."""
+    q_up, q_rope = weight.T.view(-1, num_heads, qk_nope_head_dim + qk_rope_head_dim).split(
+        [qk_nope_head_dim, qk_rope_head_dim],
+        dim=-1,
+    )
+    return (
+        q_up.reshape(-1, num_heads * qk_nope_head_dim).unsqueeze(0).contiguous(),
+        q_rope.reshape(-1, num_heads * qk_rope_head_dim).unsqueeze(0).contiguous(),
+    )
+
+
 class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
     def __qeff_init__(self):
-        q_up, q_rope = self.q_b_proj.weight.T.view(-1, self.num_heads, self.qk_head_dim).split(
-            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        q_up, q_rope = split_glm_moe_dsa_q_b_proj(
+            self.q_b_proj.weight,
+            self.num_heads,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
         )
-        self.q_up = nn.Parameter(q_up.reshape(-1, self.num_heads * self.qk_nope_head_dim).unsqueeze(0).detach())
-        self.q_rope = nn.Parameter(q_rope.reshape(-1, self.num_heads * self.qk_rope_head_dim).unsqueeze(0).detach())
+        self.q_up = nn.Parameter(q_up.detach())
+        self.q_rope = nn.Parameter(q_rope.detach())
 
     def forward(
         self,
@@ -215,9 +237,9 @@ class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
         batch_size, seq_length = hidden_states.shape[:-1]
 
         q_resid = self.q_a_layernorm(self.q_a_proj(hidden_states))
-        q_pass = torch.bmm(q_resid, self.q_up)
+        q_pass = torch.matmul(q_resid, self.q_up)
         q_pass = q_pass.view(batch_size, seq_length, self.num_heads, self.qk_nope_head_dim).transpose(1, 2)
-        q_rot = torch.bmm(q_resid, self.q_rope)
+        q_rot = torch.matmul(q_resid, self.q_rope)
         q_rot = q_rot.view(batch_size, seq_length, self.num_heads, self.qk_rope_head_dim).transpose(1, 2)
 
         compressed_kv = self.kv_a_proj_with_mqa(hidden_states)

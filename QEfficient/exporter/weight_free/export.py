@@ -19,10 +19,21 @@ from accelerate import init_empty_weights
 
 from QEfficient.exporter.weight_free.checkpoint_key_resolver import promote_initializers_and_build_spec
 from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path, save_weight_spec
-from QEfficient.utils import load_json
-from QEfficient.utils.checkpoint_utils import read_weight_map, resolve_checkpoint_dir
+from QEfficient.utils import load_json, resolve_torch_dtype
+from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
+from QEfficient.utils.export_profiler import (
+    PROFILER,
+    dynamo_phase_report,
+    loop_unroll_budget,
+    maybe_cprofile,
+    torch_export_internals_timed,
+)
 from QEfficient.utils.logging_utils import QEFFLogger
-from QEfficient.utils.torch_patches import dynamo_invoke_subgraph_fallback_env, preserve_subfunction_source_lines
+from QEfficient.utils.torch_patches import (
+    dynamo_invoke_subgraph_fallback_env,
+    isolate_invoke_subgraph_cache,
+    preserve_subfunction_source_lines,
+)
 
 logger = QEFFLogger.get_logger("INFRA")
 
@@ -60,12 +71,27 @@ def _resolve_weight_free_config(qeff_model):
 
 
 def _resolve_weight_free_target_dtype(qeff_model) -> torch.dtype:
-    for config in _iter_weight_free_configs(qeff_model):
+    configs = list(_iter_weight_free_configs(qeff_model))
+    if not configs and qeff_model is not None:
+        configs = [qeff_model]
+    target_dtype = None
+    dtype_config = None
+    for config in configs:
         for attr in ("dtype", "torch_dtype"):
             dtype = getattr(config, attr, None)
             if isinstance(dtype, torch.dtype):
-                return dtype
-    return torch.float32
+                target_dtype = dtype
+                dtype_config = config
+                break
+        if target_dtype is not None:
+            break
+    if dtype_config is None and configs:
+        dtype_config = configs[0]
+    target_dtype = resolve_torch_dtype(target_dtype, default=torch.float32)
+    if dtype_config is not None:
+        dtype_config.torch_dtype = target_dtype
+        dtype_config.dtype = target_dtype
+    return target_dtype
 def _build_qeff_quantization_config(config_cls, quantization_config: dict):
     """Construct a QEff quantization config from checkpoint metadata."""
     config_kwargs = dict(quantization_config)
@@ -96,14 +122,24 @@ def _restore_non_persistent_buffers(model: torch.nn.Module, preserved_buffers: d
         module._buffers[buffer_name] = buffer
 
 
+def _uses_qwen35_structure(model: torch.nn.Module) -> bool:
+    """Return whether ``model`` uses the Qwen3.5 text/MoE structure.
+
+    Qwen3.8 uses the Qwen3.5 MoE structure. Its generated GDN buffers must
+    remain on the meta device while Dynamo traces the weight-free graph;
+    their concrete values are restored directly into ONNX initializers later.
+    """
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    return model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
+
+
 def _restore_embedded_initializers(onnx_program, preserved_buffers: dict[str, torch.Tensor]) -> None:
     """Replace meta ONNX initializers for generated buffers with their captured values."""
     for name, tensor in preserved_buffers.items():
         initializer = onnx_program.model.graph.initializers.get(name)
         if initializer is not None:
-            serialized_tensor = tensor.contiguous().view(torch.int16) if tensor.dtype == torch.bfloat16 else tensor
             initializer.const_value = ir.Tensor(
-                serialized_tensor,
+                tensor,
                 dtype=initializer.dtype,
                 shape=initializer.shape,
                 name=name,
@@ -134,20 +170,33 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
         )
 
         # quantization_config may be a plain dict (AutoConfig.from_pretrained) or a proper
-        # config object (QEFFAutoModelForCausalLM.from_pretrained).  Normalise to an object.
+        # config object (QEFFAutoModelForCausalLM.from_pretrained). Determine the quantization
+        # type first so model-specific weight-free paths can bypass the ordinary quantizer.
         if isinstance(quant_config, dict):
             quant_type = quant_config.get("quant_method") or quant_config.get("quant_type")
+        else:
+            quant_method = getattr(quant_config, "quant_method", None) or getattr(quant_config, "quant_type", None)
+            quant_type = quant_method.value if hasattr(quant_method, "value") else quant_method
+
+        model_type = getattr(qeff_model.model.config, "model_type", None)
+        if quant_type == "fp8" and model_type == "glm_moe_dsa":
+            # The GLM checkpoint transform dequantizes FP8 weights into the floating-point
+            # parameters already present on the meta model. Running the generic FP8 quantizer
+            # would change the module/initializer contract, while to_empty() would discard
+            # generated RoPE parameters such as sin_cached and cos_cached.
+            qeff_model.model = qeff_model.model.to(dtype=target_dtype)
+            return qeff_model
+
+        # Normalize dictionary metadata only for paths that use the ordinary quantizer.
+        if isinstance(quant_config, dict):
             config_cls = QEFF_AUTO_QUANTIZATION_CONFIG_MAPPING.get(quant_type)
             if config_cls is None:
                 raise NotImplementedError(
                     f"Weight-free export is not implemented for quantization type '{quant_type}'. Supported: mxfp4"
                 )
             quant_config = _build_qeff_quantization_config(config_cls, quant_config)
-        else:
-            quant_method = getattr(quant_config, "quant_method", None) or getattr(quant_config, "quant_type", None)
-            quant_type = quant_method.value if hasattr(quant_method, "value") else quant_method
 
-        if quant_type == "fp8" and getattr(qeff_model.model.config, "model_type", None) == "deepseek_v4":
+        if quant_type == "fp8" and model_type == "deepseek_v4":
             preserved_buffers = _preserve_non_persistent_buffers(qeff_model.model)
             qeff_model.model = qeff_model.model.to(dtype=target_dtype)
             qeff_model.model.to_empty(device="meta")
@@ -166,11 +215,16 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
             quantizer._process_model_before_weight_loading(qeff_model.model)
         preserved_buffers = _preserve_non_persistent_buffers(qeff_model.model)
         qeff_model.model.to_empty(device="meta")
-        _restore_non_persistent_buffers(qeff_model.model, preserved_buffers)
+        if _uses_qwen35_structure(qeff_model.model):
+            qeff_model._weight_free_embedded_buffers = preserved_buffers
+        else:
+            _restore_non_persistent_buffers(qeff_model.model, preserved_buffers)
     else:
         qeff_model.model = qeff_model.model.to(dtype=target_dtype)
 
     return qeff_model
+
+
 
 
 def _prune_unused_fake_initializers(onnx_program) -> None:
@@ -231,34 +285,35 @@ def _materialize_lifted_attention_mask_zero_initializers(onnx_program) -> bool:
     onnx_program.apply_weights(replacements)
     return True
 
+def _materialize_computed_initializers(onnx_program, qeff_model) -> None:
+    """Materialize model-generated constants before serializing a meta graph."""
+    from torch.onnx._internal.exporter._core import TorchTensor
+
+    get_initializers = getattr(qeff_model.model, "get_weightfree_computed_initializers", None)
+    if not callable(get_initializers):
+        return
+    for name, value in get_initializers().items():
+        initializer = onnx_program.model.graph.initializers.get(name)
+        if initializer is not None:
+            initializer.const_value = TorchTensor(value.detach().cpu().contiguous(), name=name)
+
 
 def _prepared_checkpoint_hash(
     model_ref: str,
     target_dtype: torch.dtype,
     active_group_transform_id: str,
-    moe_prefill_flavour: str,
-    moe_prefill_num_pipeline_stages: int | None = None,
-    moe_prefill_num_parallelized_experts: int | None = None,
     plan_payload: dict | None = None,
 ) -> str:
     """Return a 12-char content-addressable hash for the prepared checkpoint.
 
-    Encodes what was done to the weights so that different model flavours
-    (dense vs MoE, decode vs expert_parallel, different P/E values) always
-    hash to different prepared directories and never overwrite each other.
-
-    Two expert_parallel exports of the same model and dtype but with
-    different P or E/P values produce differently-packed tensors; including
-    num_pipeline_stages and num_parallelized_experts ensures they land in
-    separate prepared directories.
+    The plan fingerprint describes exactly what is written, so it is the only
+    weight-layout input. MoE export flavour, P and E/P are deliberately absent:
+    every flavour reads the same canonical tensors.
     """
     content = {
         "model_ref": model_ref,
         "target_dtype": str(target_dtype),
         "active_group": active_group_transform_id,
-        "moe_flavour": moe_prefill_flavour,
-        "moe_num_pipeline_stages": str(moe_prefill_num_pipeline_stages),
-        "moe_num_parallelized_experts": str(moe_prefill_num_parallelized_experts),
         "plan": plan_payload or {},
     }
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:12]
@@ -289,47 +344,11 @@ def _prepare_checkpoint_for_weight_free_export(
     from QEfficient.utils.cache import QEFF_CHECKPOINT_HOME
 
     source_dir = resolve_checkpoint_dir(model_ref)
-    hash_params = qeff_model.hash_params
-    config = getattr(qeff_model.model, "config", None)
-    if getattr(config, "model_type", None) == "deepseek_v4":
-        from QEfficient.exporter.weight_free.checkpoint_transforms import DeepseekV4CheckpointTransform
-
-        if DeepseekV4CheckpointTransform.is_applicable(read_weight_map(source_dir)):
-            prepared_hash = _prepared_checkpoint_hash(
-                model_ref=model_ref,
-                target_dtype=target_dtype,
-                active_group_transform_id=DeepseekV4CheckpointTransform.TRANSFORM_ID,
-                moe_prefill_flavour=hash_params.get("moe_prefill_flavour", "none"),
-                moe_prefill_num_pipeline_stages=hash_params.get("moe_prefill_num_pipeline_stages"),
-                moe_prefill_num_parallelized_experts=hash_params.get("moe_prefill_num_parallelized_experts"),
-                plan_payload={
-                    "transform": DeepseekV4CheckpointTransform.TRANSFORM_ID,
-                    "num_hidden_layers": getattr(config, "num_hidden_layers", None),
-                },
-            )
-            prepared_out = (
-                QEFF_CHECKPOINT_HOME.expanduser() / f"{source_dir.name}-qeff-prepared-{prepared_hash}"
-                if QEFF_CHECKPOINT_HOME
-                else source_dir.parent / f"{source_dir.name}-qeff-prepared-{prepared_hash}"
-            )
-            DeepseekV4CheckpointTransform.apply(
-                source_dir,
-                prepared_out,
-                target_dtype=target_dtype,
-                num_hidden_layers=getattr(config, "num_hidden_layers", None),
-                moe_prefill_num_pipeline_stages=(
-                    hash_params.get("moe_prefill_num_pipeline_stages")
-                    if hash_params.get("moe_prefill_flavour") == "expert_parallel"
-                    else None
-                ),
-                moe_prefill_num_parallelized_experts=(
-                    hash_params.get("moe_prefill_num_parallelized_experts")
-                    if hash_params.get("moe_prefill_flavour") == "expert_parallel"
-                    else None
-                ),
-            )
-            return str(prepared_out)
-
+    hash_params = dict(qeff_model.hash_params)
+    text_config = getattr(qeff_model.model.config, "text_config", None) or qeff_model.model.config
+    orig_kv_heads = getattr(text_config, "orig_kv_heads", None)
+    if orig_kv_heads is not None:
+        hash_params["orig_kv_heads"] = int(orig_kv_heads)
     prep_pipeline = CheckpointTransformPipeline(transforms=qeff_model._checkpoint_transforms)
     plan, active_group_id = prep_pipeline.build_plan(
         source_dir,
@@ -349,9 +368,6 @@ def _prepare_checkpoint_for_weight_free_export(
         model_ref=model_ref,
         target_dtype=target_dtype,
         active_group_transform_id=active_group_id,
-        moe_prefill_flavour=moe_prefill_flavour,
-        moe_prefill_num_pipeline_stages=hash_params.get("moe_prefill_num_pipeline_stages"),
-        moe_prefill_num_parallelized_experts=hash_params.get("moe_prefill_num_parallelized_experts"),
         plan_payload=plan_payload,
     )
     prepared_name = source_dir.name + f"-qeff-prepared-{prepared_hash}"
@@ -439,45 +455,66 @@ def export_weight_free_onnx(
     # experts), not the decoder block class, so the classes export_wrapper already
     # resolved remain correct.
 
+    PROFILER.reset()
     meta_example_inputs = _to_meta(example_inputs)
     model_ref = meta_qeff_model.hash_params["pretrained_model_name_or_path"]
 
     meta_qeff_model.model.requires_grad_(False)
-    with dynamo_invoke_subgraph_fallback_env(), preserve_subfunction_source_lines():
-        onnx_program = torch.onnx.export(
-            meta_qeff_model.model,
-            args=(),
-            f=None,
-            kwargs=meta_example_inputs,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=None,
-            dynamic_shapes=dynamic_shapes,
-            **export_kwargs,
-        )
+    PROFILER.note("loop_unroll_budget", loop_unroll_budget(meta_qeff_model.model))
+    PROFILER.note("export_kwargs", {k: v for k, v in export_kwargs.items() if k != "custom_translation_table"})
+    with PROFILER.stage("torch.onnx.export (capture + decompose + translate)"):
+        with (
+            dynamo_invoke_subgraph_fallback_env(),
+            isolate_invoke_subgraph_cache(),
+            preserve_subfunction_source_lines(),
+            torch_export_internals_timed(),
+            maybe_cprofile(Path(onnx_path).parent),
+        ):
+            onnx_program = torch.onnx.export(
+                meta_qeff_model.model,
+                args=(),
+                f=None,
+                kwargs=meta_example_inputs,
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=None,
+                dynamic_shapes=dynamic_shapes,
+                **export_kwargs,
+            )
+    dynamo_phase_report()
     if onnx_program is None:
         raise RuntimeError("torch.onnx.export returned None for weight-free dynamo export")
     _restore_embedded_initializers(onnx_program, getattr(meta_qeff_model, "_weight_free_embedded_buffers", {}))
 
-    prep_start = time.perf_counter()
-    prepared_model_ref = _prepare_checkpoint_for_weight_free_export(meta_qeff_model, model_ref, target_dtype)
-    prep_duration_seconds = time.perf_counter() - prep_start
+    with PROFILER.stage("checkpoint preparation"):
+        prep_start = time.perf_counter()
+        if meta_qeff_model._use_original_checkpoint:
+            from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
+
+            prepared_model_ref = str(resolve_checkpoint_dir(model_ref))
+            logger.info("Using original checkpoint directly for weight-free export: %s", prepared_model_ref)
+        else:
+            prepared_model_ref = _prepare_checkpoint_for_weight_free_export(meta_qeff_model, model_ref, target_dtype)
+        prep_duration_seconds = time.perf_counter() - prep_start
     logger.info(
         "Weight-free checkpoint preparation completed in %.2fs: %s",
         prep_duration_seconds,
         prepared_model_ref,
     )
 
-    spec = promote_initializers_and_build_spec(
-        onnx_program=onnx_program,
-        model_ref=prepared_model_ref,
-        model_name=qeff_model.model_name,
-        qeff_model=meta_qeff_model,
-    )
-    _materialize_lifted_attention_mask_zero_initializers(onnx_program)
-    _prune_unused_fake_initializers(onnx_program)
-    onnx_program.save(str(onnx_path))
-    save_weight_spec(resolve_weight_spec_path(onnx_path), spec)
+    with PROFILER.stage("weight spec build"):
+        spec = promote_initializers_and_build_spec(
+            onnx_program=onnx_program,
+            model_ref=prepared_model_ref,
+            model_name=qeff_model.model_name,
+            qeff_model=meta_qeff_model,
+        )
+    with PROFILER.stage("prune + save raw ONNX"):
+        _prune_unused_fake_initializers(onnx_program)
+        _materialize_computed_initializers(onnx_program, meta_qeff_model)
+        _materialize_lifted_attention_mask_zero_initializers(onnx_program)
+        onnx_program.save(str(onnx_path))
+        save_weight_spec(resolve_weight_spec_path(onnx_path), spec)
 
     return meta_qeff_model, onnx_transform_kwargs
 
@@ -501,11 +538,16 @@ def link_prepared_checkpoint_dir(onnx_path: Path, weight_spec_path: Path) -> Non
     it consumes the embedded weight spec.
     """
     spec = load_weight_spec(Path(weight_spec_path))
-    prepared_out = Path(spec.model_id)
+    prepared_out = Path(spec.model_id).expanduser()
     symlink = Path(onnx_path).parent / prepared_out.name
-    if prepared_out.exists() and not symlink.exists():
+    if prepared_out.exists():
+        prepared_out = prepared_out.resolve()
+        if symlink.is_symlink() and symlink.resolve(strict=False) != prepared_out:
+            symlink.unlink()
+        if symlink.exists():
+            return
         try:
-            symlink.symlink_to(prepared_out)
+            symlink.symlink_to(prepared_out, target_is_directory=prepared_out.is_dir())
         except OSError as exc:
             logger.warning(
                 "Could not create symlink %s -> %s: %s. "

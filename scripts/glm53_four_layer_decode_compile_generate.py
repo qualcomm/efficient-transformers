@@ -103,11 +103,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ctx-len", type=int, default=2048 + 128)
     parser.add_argument("--generation-len", type=int, default=None)
     parser.add_argument("--compile-dir", default=None)
+    parser.add_argument("--export-dir", default=None)
     parser.add_argument("--num-cores", type=int, default=16)
     parser.add_argument("--device-id", type=int, nargs="*", default=None)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--skip-generate", action="store_true")
+    parser.add_argument("--weight-free", action="store_true")
+    parser.add_argument("--export-only", action="store_true")
+    parser.add_argument("--use-onnx-subfunctions", action="store_true")
     return parser.parse_args()
 
 
@@ -194,6 +198,10 @@ def compare_tokens(hf_tokens: torch.Tensor, qeff_tokens: np.ndarray, prompt_len:
 
 def main() -> None:
     args = parse_args()
+    if args.export_only and not args.weight_free:
+        raise ValueError("--export-only is supported only with --weight-free.")
+    if args.weight_free and not args.export_only:
+        raise ValueError("GLM-5.3 weight-free compile/generate is out of scope; pass --export-only.")
     generation_len = args.generation_len if args.generation_len is not None else args.ctx_len - args.prompt_len
     if generation_len <= 0:
         raise ValueError("generation_len must be positive. Increase ctx_len or lower prompt_len.")
@@ -209,13 +217,13 @@ def main() -> None:
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
 
-    install_partial_fp8_dequant_patch()
-
     config = AutoConfig.from_pretrained(args.model_id, cache_dir=args.hf_cache)
     config.num_hidden_layers = args.num_layers
     config.use_cache = True
     config.torch_dtype = torch.float32
     config.dtype = torch.float32
+    if args.weight_free and config.num_hidden_layers != 4:
+        raise ValueError("GLM-5.3 weight-free export is currently supported only with --num-layers 4.")
 
     print(
         json.dumps(
@@ -238,6 +246,47 @@ def main() -> None:
     attention_mask = torch.ones_like(input_ids)
     print(json.dumps({"event": "prompt", "prompt": prompt, "token_count": int(input_ids.shape[1])}), flush=True)
 
+    qaic_config = {"mla_absorption": {"cache_compressed": True}}
+    if args.weight_free:
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            config=config,
+            cache_dir=args.hf_cache,
+            torch_dtype=torch.float32,
+            weight_free=True,
+            qaic_config=qaic_config,
+        )
+        qeff_model.model.eval()
+        print(
+            json.dumps({"event": "qeff_initialized", "model_class": qeff_model.model.__class__.__name__}),
+            flush=True,
+        )
+        export_dir = (
+            Path(args.export_dir) if args.export_dir is not None else Path(args.qeff_home) / "weight_free_export"
+        )
+        onnx_path = qeff_model.export(
+            export_dir=str(export_dir),
+            prefill_only=False,
+            offload_pt_weights=False,
+            use_onnx_subfunctions=args.use_onnx_subfunctions,
+        )
+        weight_spec_path = getattr(qeff_model, "weight_spec_path", None)
+        weight_spec_path_str = str(weight_spec_path) if weight_spec_path is not None else None
+        print(
+            json.dumps(
+                {
+                    "event": "weight_free_export_done",
+                    "onnx_path": str(onnx_path),
+                    "onnx_exists": Path(onnx_path).is_file(),
+                    "weight_spec_path": weight_spec_path_str,
+                    "weight_spec_exists": bool(weight_spec_path_str and Path(weight_spec_path_str).is_file()),
+                }
+            ),
+            flush=True,
+        )
+        return
+
+    install_partial_fp8_dequant_patch()
     hf_model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         config=config,
@@ -246,7 +295,6 @@ def main() -> None:
         device_map="cpu",
     ).eval()
 
-    qaic_config = {"mla_absorption": {"cache_compressed": True}}
     qeff_model = QEFFAutoModelForCausalLM(
         copy.deepcopy(hf_model).eval(),
         pretrained_model_name_or_path=args.model_id,
