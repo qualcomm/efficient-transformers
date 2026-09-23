@@ -394,8 +394,8 @@ def main(defaults: dict[str, object] | None = None) -> None:
     )
     print(f"ONNX_PATH={onnx_path}")
 
-    npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
-    print(f"NPI_PATH={npi_path}")
+    # npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
+    # print(f"NPI_PATH={npi_path}")
 
     if args.export_only:
         return
@@ -417,7 +417,8 @@ def main(defaults: dict[str, object] | None = None) -> None:
             use_onnx_subfunctions=False,
             mxint8_kv_cache=False,
             mxfp6_matmul=True,
-            node_precision_info=str(npi_path),
+            user_tiled=True,
+            # node_precision_info=str(npi_path),
             dynamo=True,
         )
     )
@@ -443,7 +444,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
         "model_id": args.model_id,
         "prefill_prompt": args.prefill_prompt,
         "onnx_path": str(onnx_path),
-        "npi_path": str(npi_path),
+        # "npi_path": str(npi_path),
         "qpc_path": str(qpc_path),
         "generated_texts": exec_info.generated_texts,
         "generated_ids": [ids.tolist() if hasattr(ids, "tolist") else ids for ids in exec_info.generated_ids],
