@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import math
 import os
 import random
 from pathlib import Path
@@ -28,7 +27,7 @@ DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_QEFF_HOME = "/home/ochougul/efficient-transformers/artifacts/glm53_decode_only"
 
 
-def install_partial_fp8_dequant_patch() -> None:
+def install_partial_fp8_dequant_patch(weight_block_size: tuple[int, int] = (128, 128)) -> None:
     """Allow reduced-layer CPU loads when an FP8 scale grid has a partial edge block.
 
     The real checkpoint is valid, but loading only the first few layers can expose
@@ -61,11 +60,15 @@ def install_partial_fp8_dequant_patch() -> None:
         if rows % scale_rows == 0 and cols % scale_cols == 0:
             return original_dequantize_one(self, quantized, scales, output_dtype=output_dtype)
 
-        block_m = math.ceil(rows / scale_rows)
-        block_n = math.ceil(cols / scale_cols)
+        block_m, block_n = weight_block_size
         padded_rows = scale_rows * block_m
         padded_cols = scale_cols * block_n
-        if padded_rows < rows or padded_cols < cols:
+        if (
+            padded_rows < rows
+            or padded_cols < cols
+            or rows <= (scale_rows - 1) * block_m
+            or cols <= (scale_cols - 1) * block_n
+        ):
             return original_dequantize_one(self, quantized, scales, output_dtype=output_dtype)
 
         if output_dtype is None:
@@ -147,6 +150,73 @@ def tokens_from_qeff_output(exec_info: Any) -> np.ndarray:
     return generated_ids
 
 
+def run_hf_decode_only(model: torch.nn.Module, input_ids: torch.Tensor, generation_len: int) -> torch.Tensor:
+    """Run greedy HF generation using only single-token forward passes."""
+    past_key_values = None
+    outputs = None
+    prompt_len = input_ids.shape[1]
+
+    for position in range(prompt_len):
+        cache_position = torch.tensor([position], dtype=torch.long)
+        outputs = model(
+            input_ids=input_ids[:, position : position + 1],
+            attention_mask=torch.ones((input_ids.shape[0], position + 1), dtype=torch.long),
+            position_ids=cache_position.unsqueeze(0),
+            cache_position=cache_position,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+        past_key_values = outputs.past_key_values
+
+    if outputs is None:
+        raise ValueError("Decode-only HF generation requires at least one prompt token.")
+
+    generated = []
+    next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    for step in range(generation_len):
+        generated.append(next_token)
+        if step == generation_len - 1:
+            break
+        position = prompt_len + step
+        cache_position = torch.tensor([position], dtype=torch.long)
+        outputs = model(
+            input_ids=next_token,
+            attention_mask=torch.ones((input_ids.shape[0], position + 1), dtype=torch.long),
+            position_ids=cache_position.unsqueeze(0),
+            cache_position=cache_position,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+        past_key_values = outputs.past_key_values
+        next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+    return torch.cat((input_ids, *generated), dim=1)
+
+
+def compile_weight_free_decode_only(qeff_model, onnx_path: Path, compile_dir: Path, ctx_len: int, num_cores: int):
+    """Compile the validated single-token GLM weight-free specialization."""
+    custom_io = {}
+    for layer_idx in range(qeff_model.model.config.num_hidden_layers):
+        for cache_name in (f"compressed_kv.{layer_idx}", f"k_pe.{layer_idx}"):
+            custom_io[cache_name] = "float16"
+            custom_io[f"{cache_name}_RetainedState"] = "float16"
+    for cache_idx, _ in enumerate(qeff_model.model.get_indexer_cache_layers(qeff_model.model.config)):
+        cache_name = f"indexer_key.{cache_idx}"
+        custom_io[cache_name] = "float16"
+        custom_io[f"{cache_name}_RetainedState"] = "float16"
+
+    return qeff_model._compile(
+        onnx_path=str(onnx_path),
+        compile_dir=str(compile_dir),
+        specializations=[{"_graph_name": "Decode", "batch_size": 1, "seq_len": 1, "ctx_len": ctx_len}],
+        custom_io=custom_io,
+        prefill_only=False,
+        retained_state=True,
+        convert_to_fp16=True,
+        aic_num_cores=num_cores,
+    )
+
+
 def compare_tokens(hf_tokens: torch.Tensor, qeff_tokens: np.ndarray, prompt_len: int) -> dict[str, Any]:
     hf_np = hf_tokens.detach().cpu().numpy()
     qeff_np = np.asarray(qeff_tokens)
@@ -200,8 +270,6 @@ def main() -> None:
     args = parse_args()
     if args.export_only and not args.weight_free:
         raise ValueError("--export-only is supported only with --weight-free.")
-    if args.weight_free and not args.export_only:
-        raise ValueError("GLM-5.3 weight-free compile/generate is out of scope; pass --export-only.")
     generation_len = args.generation_len if args.generation_len is not None else args.ctx_len - args.prompt_len
     if generation_len <= 0:
         raise ValueError("generation_len must be positive. Increase ctx_len or lower prompt_len.")
@@ -247,6 +315,8 @@ def main() -> None:
     print(json.dumps({"event": "prompt", "prompt": prompt, "token_count": int(input_ids.shape[1])}), flush=True)
 
     qaic_config = {"mla_absorption": {"cache_compressed": True}}
+    hf_model = None
+    onnx_path = None
     if args.weight_free:
         qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
             args.model_id,
@@ -284,34 +354,43 @@ def main() -> None:
             ),
             flush=True,
         )
-        return
+        if args.export_only:
+            return
+    else:
+        install_partial_fp8_dequant_patch()
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            config=config,
+            cache_dir=args.hf_cache,
+            torch_dtype=torch.float32,
+            device_map="cpu",
+        ).eval()
 
-    install_partial_fp8_dequant_patch()
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        args.model_id,
-        config=config,
-        cache_dir=args.hf_cache,
-        torch_dtype=torch.float32,
-        device_map="cpu",
-    ).eval()
-
-    qeff_model = QEFFAutoModelForCausalLM(
-        copy.deepcopy(hf_model).eval(),
-        pretrained_model_name_or_path=args.model_id,
-        qaic_config=qaic_config,
-    )
-    print(json.dumps({"event": "qeff_initialized", "model_class": qeff_model.model.__class__.__name__}), flush=True)
+        qeff_model = QEFFAutoModelForCausalLM(
+            copy.deepcopy(hf_model).eval(),
+            pretrained_model_name_or_path=args.model_id,
+            qaic_config=qaic_config,
+        )
+        print(
+            json.dumps({"event": "qeff_initialized", "model_class": qeff_model.model.__class__.__name__}),
+            flush=True,
+        )
 
     compile_dir = Path(args.compile_dir) if args.compile_dir is not None else Path(args.qeff_home) / "compile"
-    qpc_path = qeff_model.compile(
-        compile_dir=str(compile_dir),
-        prefill_seq_len=1,
-        ctx_len=args.ctx_len,
-        batch_size=1,
-        num_cores=args.num_cores,
-        prefill_only=False,
-        offload_pt_weights=False,
-    )
+    if args.weight_free:
+        qpc_path = compile_weight_free_decode_only(
+            qeff_model, Path(onnx_path), compile_dir, args.ctx_len, args.num_cores
+        )
+    else:
+        qpc_path = qeff_model.compile(
+            compile_dir=str(compile_dir),
+            prefill_seq_len=1,
+            ctx_len=args.ctx_len,
+            batch_size=1,
+            num_cores=args.num_cores,
+            prefill_only=False,
+            offload_pt_weights=False,
+        )
     print(
         json.dumps({"event": "compile_done", "qpc_path": str(qpc_path), "onnx_path": str(qeff_model.onnx_path)}),
         flush=True,
@@ -330,14 +409,26 @@ def main() -> None:
     qeff_generated = tokens_from_qeff_output(exec_info)
     print(json.dumps({"event": "qeff_generate_done", "shape": list(qeff_generated.shape)}), flush=True)
 
-    hf_generated = hf_model.generate(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        max_new_tokens=generation_len,
-        do_sample=False,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    print(json.dumps({"event": "hf_generate_done", "shape": list(hf_generated.shape)}), flush=True)
+    if args.weight_free:
+        install_partial_fp8_dequant_patch()
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            config=config,
+            cache_dir=args.hf_cache,
+            torch_dtype=torch.float32,
+            device_map="cpu",
+        ).eval()
+        hf_generated = run_hf_decode_only(hf_model, input_ids, generation_len)
+        print(json.dumps({"event": "hf_decode_only_done", "shape": list(hf_generated.shape)}), flush=True)
+    else:
+        hf_generated = hf_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=generation_len,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        print(json.dumps({"event": "hf_generate_done", "shape": list(hf_generated.shape)}), flush=True)
     print(
         json.dumps({"event": "token_compare", **compare_tokens(hf_generated, qeff_generated, args.prompt_len)}),
         flush=True,
