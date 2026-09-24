@@ -91,27 +91,37 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
         *,
         cumulative_length: int = 0,
     ) -> None:
+        self._folded_row_cache = bool(getattr(config, "qeff_sliding_folded_row_cache", True))
+        logical_cache_len = int(
+            getattr(config, "qeff_sliding_cache_ctx_len", getattr(config, "max_position_embeddings", 0))
+        )
+        if logical_cache_len <= 0:
+            logical_cache_len = sliding_window_kv.shape[2]
+        self.sliding_window = min(config.sliding_window, logical_cache_len)
         expected = (
-            sliding_window_kv.shape[0],
-            config.num_key_value_heads,
-            sliding_window_kv.shape[2],
-            config.head_dim,
+            (1, sliding_window_kv.shape[1], self.sliding_window, config.head_dim)
+            if self._folded_row_cache
+            else (
+                sliding_window_kv.shape[0],
+                config.num_key_value_heads,
+                sliding_window_kv.shape[2],
+                config.head_dim,
+            )
         )
         if sliding_window_kv.ndim != 4 or tuple(sliding_window_kv.shape) != expected:
             raise ValueError(f"sliding_window_kv must have shape {expected}.")
-        if not 0 <= cumulative_length <= sliding_window_kv.shape[2]:
+        if not 0 <= cumulative_length <= logical_cache_len:
             raise ValueError("cumulative_length is outside the cache capacity.")
-        self.sliding_window = config.sliding_window
         self.sliding_window_kv = sliding_window_kv
         self.cumulative_length = cumulative_length
-        self.max_cache_len = sliding_window_kv.shape[2]
+        self.max_cache_len = logical_cache_len
         self.is_initialized = True
         self.device = sliding_window_kv.device
         self.dtype = sliding_window_kv.dtype
 
     @property
     def max_batch_size(self) -> int:
-        return self.sliding_window_kv.shape[0]
+        return self.sliding_window_kv.shape[1] if self._folded_row_cache else self.sliding_window_kv.shape[0]
 
     def lazy_initialization(self, key_states: torch.Tensor, value_states: torch.Tensor) -> None:
         if key_states.shape[0] != self.max_batch_size or key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
@@ -143,7 +153,8 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
             raise ValueError("QEffSlidingCache.update requires position_ids in cache_kwargs.")
         if position_ids.shape != key_states.shape[:1] + key_states.shape[2:3]:
             raise ValueError("position_ids must have shape [batch, query_length].")
-        if key_states.shape[0] != self.max_batch_size or key_states.shape[1] != self.sliding_window_kv.shape[1]:
+        expected_num_heads = 1 if self._folded_row_cache else self.sliding_window_kv.shape[1]
+        if key_states.shape[0] != self.max_batch_size or key_states.shape[1] != expected_num_heads:
             raise ValueError("KV update batch/head dimensions do not match the allocated cache.")
         if key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
             raise ValueError("KV update head_dim does not match the allocated cache.")
@@ -160,14 +171,31 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
                 position_ids.min().item() < 0 or position_ids.max().item() >= self.max_cache_len
             ):
                 raise ValueError("position_ids exceed the allocated QEff sliding cache capacity.")
-        self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, position_ids, key_states)
+        if self._folded_row_cache:
+            self.sliding_window_kv = ctx_scatter_folded_rows(
+                self.sliding_window_kv,
+                torch.remainder(position_ids, self.sliding_window).to(torch.int32),
+                key_states,
+            )
+        else:
+            self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, position_ids, key_states)
         self.cumulative_length += key_states.shape[2]
 
-        context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
-        context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
-        valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
         invalid_index = torch.iinfo(torch.int32).max if _is_export_capture() else 0
-        gathered = ctx_gather_blocked_kv(self.sliding_window_kv, torch.where(valid, context_indices, invalid_index))
+        if self._folded_row_cache:
+            context_indices, valid = _folded_sliding_window_context_indices(position_ids, self.sliding_window)
+            safe_indices = torch.where(
+                valid,
+                context_indices,
+                torch.full_like(context_indices, invalid_index),
+            )
+            gathered = ctx_gather_folded_rows(self.sliding_window_kv, safe_indices).squeeze(0).unsqueeze(1)
+            valid = valid.unsqueeze(1)
+        else:
+            context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
+            context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
+            valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
+            gathered = ctx_gather_blocked_kv(self.sliding_window_kv, torch.where(valid, context_indices, invalid_index))
         gathered = torch.where(valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
         return gathered, gathered
 
@@ -176,17 +204,22 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
         self.cumulative_length = 0
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
-        self.sliding_window_kv = self.sliding_window_kv.index_select(0, beam_idx.to(self.device))
+        dim = 1 if self._folded_row_cache else 0
+        self.sliding_window_kv = self.sliding_window_kv.index_select(dim, beam_idx.to(self.device))
 
     def crop(self, max_length: int) -> None:
         if max_length != self.cumulative_length:
             raise NotImplementedError("QEffSlidingCache does not support cropping fixed retained state.")
 
     def batch_repeat_interleave(self, repeats: int) -> None:
-        self.sliding_window_kv = self.sliding_window_kv.repeat_interleave(repeats, dim=0)
+        dim = 1 if self._folded_row_cache else 0
+        self.sliding_window_kv = self.sliding_window_kv.repeat_interleave(repeats, dim=dim)
 
     def batch_select_indices(self, indices: torch.Tensor) -> None:
-        self.sliding_window_kv = self.sliding_window_kv[indices]
+        if self._folded_row_cache:
+            self.sliding_window_kv = self.sliding_window_kv.index_select(1, indices.to(self.device))
+        else:
+            self.sliding_window_kv = self.sliding_window_kv[indices]
 
 
 class QEffHCACacheLayer(CacheLayerMixin):
@@ -1863,12 +1896,21 @@ class QEffDeepseekV4Cache(Cache):
         device: torch.device | str = "cpu",
     ) -> tuple[tuple[torch.Tensor, ...], ...]:
         common = {"device": device, "dtype": dtype}
+        config.qeff_sliding_folded_row_cache = True
+        config.qeff_sliding_cache_ctx_len = ctx_len
         layers = []
         for layer_type in config.layer_types:
-            sliding = torch.zeros(batch_size, config.num_key_value_heads, ctx_len, config.head_dim, **common)
             if layer_type == "sliding_attention":
+                sliding = torch.zeros(
+                    1,
+                    batch_size,
+                    min(config.sliding_window, ctx_len),
+                    config.head_dim,
+                    **common,
+                )
                 layers.append((sliding,))
                 continue
+            sliding = torch.zeros(batch_size, config.num_key_value_heads, ctx_len, config.head_dim, **common)
             ratio = config.compress_rates[layer_type]
             capacity = (ctx_len + ratio - 1) // ratio
             if layer_type == "heavily_compressed_attention":

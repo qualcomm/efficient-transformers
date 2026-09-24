@@ -4646,14 +4646,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 )
                 parallel_layout = csa_dp_layout or hca_dp_layout
                 folded_row_cache = (
-                    bool(getattr(self.model.config, "qeff_csa_folded_row_cache", False))
-                    if layer_type == "compressed_sparse_attention"
-                    else bool(getattr(self.model.config, "qeff_hca_folded_row_cache", False))
+                    bool(getattr(self.model.config, "qeff_sliding_folded_row_cache", True))
+                    if layer_type == "sliding_attention"
+                    else (
+                        bool(getattr(self.model.config, "qeff_csa_folded_row_cache", False))
+                        if layer_type == "compressed_sparse_attention"
+                        else bool(getattr(self.model.config, "qeff_hca_folded_row_cache", False))
+                    )
                 )
                 for state_name, state in zip(state_names, layer_state):
                     example_inputs["past_key_values"][layer_idx].append(state)
                     state_axes = {}
-                    if not parallel_layout:
+                    if folded_row_cache and "sliding_window_kv" in state_name:
+                        state_axes[1] = "full_batch_size" if self.continuous_batching else "batch_size"
+                    elif not parallel_layout:
                         state_axes[0] = "full_batch_size" if self.continuous_batching else "batch_size"
                     if "sliding_window_kv" in state_name:
                         if not folded_row_cache:
