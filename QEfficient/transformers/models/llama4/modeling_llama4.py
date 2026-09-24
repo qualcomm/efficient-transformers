@@ -523,10 +523,25 @@ class QEffLlama4TextAttention(Llama4TextAttention):
                 "position_ids": chunk_position_ids,
             }
             if comp_ctx_lengths is not None:
-                attention_mask = attention_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
-                cache_kwargs["CCL"] = attention_mask.shape[-1]
+                ccl_width_tensor = torch._shape_as_tensor(comp_ctx_lengths)[-1]
+                cache_kwargs["CCL"] = comp_ctx_lengths.shape[-1]
 
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+            if comp_ctx_lengths is not None:
+                # QAIC does not support a dynamic Slice end. Keep the mask
+                # shape aligned with the updated cache and mask the CCL tail.
+                attention_mask = attention_mask[..., : key_states.shape[-2]]
+                context_indices = torch.arange(
+                    attention_mask.shape[-1], dtype=comp_ctx_lengths.dtype, device=attention_mask.device
+                )
+                valid_context = (context_indices < ccl_width_tensor).view(1, 1, 1, -1)
+                invalid_context = (
+                    torch.ones_like(attention_mask)
+                    if attention_mask.dtype == torch.bool
+                    else torch.full_like(attention_mask, torch.finfo(attention_mask.dtype).min)
+                )
+                attention_mask = torch.where(valid_context, attention_mask, invalid_context)
 
         attention_interface: Callable = eager_attention_forward
 
