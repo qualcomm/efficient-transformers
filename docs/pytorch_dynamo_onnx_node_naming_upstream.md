@@ -77,6 +77,12 @@ The full upstream validation after installing or building the PyTorch worktree
 must run the new focused `test_api.py` and `test_core.py` tests, then
 `spin quicklint`.
 
+On 2026-09-25, a full sparse-checkout expansion was started to prepare that
+build but was stopped before dependency initialization because it was fetching
+the complete filtered PyTorch source tree too slowly for this validation
+session. The worktree was restored to its original sparse paths and remains
+clean at `cd76cc9`. This does not replace the required current-main test run.
+
 ## Local Function Follow-up
 
 Current PyTorch `main` still does not preserve single-use nested regions as
