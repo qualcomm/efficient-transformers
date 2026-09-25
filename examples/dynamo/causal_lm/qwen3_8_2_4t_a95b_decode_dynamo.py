@@ -50,7 +50,6 @@ def parse_args():
     parser.add_argument("--prefill-seq-len", type=int, default=1)
     parser.add_argument("--ctx-len", type=int, default=262144)
     parser.add_argument("--generation-len", type=int, default=100)
-    parser.add_argument("--write-io", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--num-cores", type=int, default=4)
     parser.add_argument("--num-devices", type=int, default=4)
     parser.add_argument("--device-ids", type=int, nargs="*", default=None)
@@ -221,9 +220,8 @@ def main():
     output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=[args.prompt] * args.batch_size,
-        device_id=args.device_ids,
+        device_ids=args.device_ids,
         generation_len=args.generation_len,
-        write_io=args.write_io,
     )
     print(output.generated_ids)
     print(output.generated_texts)
