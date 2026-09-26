@@ -377,6 +377,19 @@ class QAICInferenceSession:
         except Exception as cleanup_error:
             warn(f"Failed to unload QAIC program after execution error: {cleanup_error}", RuntimeWarning)
 
+    def _release_program_after_run_failure(self) -> None:
+        """Release device resources while preserving the original execution error."""
+        try:
+            self.deactivate()
+        except Exception as cleanup_error:
+            warn(f"Failed to deactivate QAIC program after execution error: {cleanup_error}", RuntimeWarning)
+
+        try:
+            if self.program.unload() != qaicrt.QStatus.QS_SUCCESS:
+                warn("Failed to unload QAIC program after execution error", RuntimeWarning)
+        except Exception as cleanup_error:
+            warn(f"Failed to unload QAIC program after execution error: {cleanup_error}", RuntimeWarning)
+
     def set_buffers(self, buffers: Dict[str, np.ndarray]):
         """
         Provide buffer mapping for input and output
