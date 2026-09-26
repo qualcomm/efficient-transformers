@@ -132,9 +132,6 @@ class QEffDynamicLayer(CacheLayerMixin):
     def get_seq_length(self) -> int:
         return self.keys.shape[-2] if self.keys is not None else 0
 
-    def get_max_length(self) -> int:
-        return -1
-
     def get_max_cache_shape(self) -> int:
         return -1
 
