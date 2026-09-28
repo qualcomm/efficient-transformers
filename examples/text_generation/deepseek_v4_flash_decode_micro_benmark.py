@@ -24,6 +24,8 @@ MICROBENCH_DEFAULTS = {
     "hca_compressed_kv_cp": 2,
     "hca_attn_blocks": 8,
     "hw_version": "ai100",
+    "ffn_blocking_mode": "token",
+    "ffn_token_block_size": 1,
 }
 
 
