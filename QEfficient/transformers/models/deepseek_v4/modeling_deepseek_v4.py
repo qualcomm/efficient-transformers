@@ -2007,6 +2007,17 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
         self.up_proj = nn.Parameter(self.gate_up_proj[:, self.expert_dim :, :].transpose(1, 2).detach().clone())
         self.down_proj = nn.Parameter(self.down_proj.transpose(1, 2).detach().clone())
         delattr(self, "gate_up_proj")
+        self.ffn_token_block_size = None
+        self.ffn_weight_block_size = None
+
+    def configure_ffn_blocking(
+        self,
+        mode: str = "default",
+        token_block_size: int | None = None,
+        weight_block_size: int | None = None,
+    ) -> None:
+        self.ffn_token_block_size = token_block_size if mode in {"token", "token_weight"} else None
+        self.ffn_weight_block_size = weight_block_size if mode in {"weight", "token_weight"} else None
 
     def forward(
         self,
@@ -2014,17 +2025,51 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
         top_k_index: torch.Tensor,
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
+        token_block_size = self.ffn_token_block_size
+        if token_block_size is not None and token_block_size < hidden_states.shape[0]:
+            outputs = []
+            for start in range(0, hidden_states.shape[0], token_block_size):
+                end = min(start + token_block_size, hidden_states.shape[0])
+                outputs.append(
+                    self._forward_token_tile(hidden_states[start:end], top_k_index[start:end], top_k_weights[start:end])
+                )
+            return torch.cat(outputs, dim=0)
+        return self._forward_token_tile(hidden_states, top_k_index, top_k_weights)
+
+    def _forward_token_tile(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
-        gate_proj = self.gate_proj[top_k_index.flatten()]
-        up_proj = self.up_proj[top_k_index.flatten()]
-        down_proj = self.down_proj[top_k_index.flatten()]
         expert_in = hidden_states.unsqueeze(1).expand(-1, self.top_k, -1).contiguous().view(-1, 1, hidden_dim)
-        gate = torch.bmm(expert_in, gate_proj)
-        up = torch.bmm(expert_in, up_proj)
-        gate = gate.float().clamp(max=self.limit).to(gate.dtype)
-        up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
-        activated = self.act_fn(gate) * up
-        expert_out = torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
+        flat_indices = top_k_index.flatten()
+
+        if self.ffn_weight_block_size is None:
+            gate_proj = self.gate_proj[flat_indices]
+            up_proj = self.up_proj[flat_indices]
+            down_proj = self.down_proj[flat_indices]
+            gate = torch.bmm(expert_in, gate_proj)
+            up = torch.bmm(expert_in, up_proj)
+            gate = gate.float().clamp(max=self.limit).to(gate.dtype)
+            up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
+            activated = self.act_fn(gate) * up
+            expert_out = torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
+        else:
+            expert_out = hidden_states.new_zeros(num_tokens, self.top_k, hidden_dim)
+            for start in range(0, self.expert_dim, self.ffn_weight_block_size):
+                end = min(start + self.ffn_weight_block_size, self.expert_dim)
+                gate_proj = self.gate_proj[:, :, start:end][flat_indices]
+                up_proj = self.up_proj[:, :, start:end][flat_indices]
+                down_proj = self.down_proj[:, start:end, :][flat_indices]
+                gate = torch.bmm(expert_in, gate_proj)
+                up = torch.bmm(expert_in, up_proj)
+                gate = gate.float().clamp(max=self.limit).to(gate.dtype)
+                up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
+                activated = self.act_fn(gate) * up
+                expert_out += torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
+
         expert_out = expert_out * top_k_weights.unsqueeze(-1)
         return torch.einsum("tkh->th", expert_out)
 

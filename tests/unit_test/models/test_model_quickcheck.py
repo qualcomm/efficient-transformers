@@ -286,16 +286,29 @@ def test_deepseek_v4_csa_dp_cp_indexer_cache_layout_decodes():
 
 
 def test_deepseek_v4_example_parallel_layout_controls():
-    from examples.text_generation.deepseek_v4_flash_decode import configure_qeff_parallel_layout
+    from examples.text_generation.deepseek_v4_flash_decode import (
+        build_ffn_blocking_config,
+        configure_qeff_parallel_layout,
+    )
     from examples.text_generation.deepseek_v4_flash_decode_micro_benmark import MICROBENCH_DEFAULTS
 
     assert MICROBENCH_DEFAULTS["attn_dp"] == 16
     assert MICROBENCH_DEFAULTS["indexer_cp"] == 16
     assert MICROBENCH_DEFAULTS["num_hidden_layers"] == 4
-    assert MICROBENCH_DEFAULTS["num_kv_blocks"] == 4
-    assert MICROBENCH_DEFAULTS["hca_compressed_kv_cp"] == 1
-    assert MICROBENCH_DEFAULTS["hca_attn_blocks"] == 16
+    assert MICROBENCH_DEFAULTS["num_kv_blocks"] == 16
+    assert MICROBENCH_DEFAULTS["hca_compressed_kv_cp"] == 2
+    assert MICROBENCH_DEFAULTS["hca_attn_blocks"] == 8
     assert MICROBENCH_DEFAULTS["hw_version"] == "ai100"
+    assert MICROBENCH_DEFAULTS["ffn_blocking_mode"] == "token"
+    assert MICROBENCH_DEFAULTS["ffn_token_block_size"] == 1
+
+    assert build_ffn_blocking_config(
+        Namespace(ffn_blocking_mode="default", ffn_token_block_size=None, ffn_weight_block_size=None)
+    ) == {
+        "ffn_blocking_mode": "default",
+        "ffn_token_block_size": None,
+        "ffn_weight_block_size": None,
+    }
 
     config = _tiny_deepseek_v4_config()
     configure_qeff_parallel_layout(
@@ -524,6 +537,37 @@ def test_deepseek_v4_three_layer_decode_parity():
         hf_cache = hf_output.past_key_values
         qeff_cache = qeff_output.past_key_values
         torch.testing.assert_close(hf_output.logits, qeff_output.logits, atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.llm_model
+def test_deepseek_v4_ffn_blocking_uses_qaic_config():
+    config = _tiny_deepseek_v4_config()
+    config.torch_dtype = torch.float32
+    torch.manual_seed(0)
+    qeff = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    experts = qeff.model.model.layers[0].mlp.experts
+    hidden_states = torch.randn(3, config.hidden_size)
+    top_k_index = torch.tensor([[0, 1], [2, 3], [1, 2]])
+    top_k_weights = torch.tensor([[0.4, 0.6], [0.3, 0.7], [0.5, 0.5]])
+
+    with torch.no_grad():
+        expected = experts(hidden_states, top_k_index, top_k_weights)
+
+    qeff.transform(
+        ctx_len=8,
+        seq_len=1,
+        qaic_config={
+            "ffn_blocking_mode": "token_weight",
+            "ffn_token_block_size": 1,
+            "ffn_weight_block_size": 4,
+        },
+    )
+
+    assert experts.ffn_token_block_size == 1
+    assert experts.ffn_weight_block_size == 4
+    with torch.no_grad():
+        actual = experts(hidden_states, top_k_index, top_k_weights)
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.llm_model

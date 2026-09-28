@@ -261,6 +261,24 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
         help="HCA dense compressed-attention tiles; defaults to the hardware attention-core count.",
     )
     parser.add_argument("--hw-version", choices=tuple(HW_CORES_PER_DEVICE), default="ai100")
+    parser.add_argument(
+        "--ffn-blocking-mode",
+        choices=("default", "token", "weight", "token_weight"),
+        default="default",
+        help="Routed-expert FFN blocking mode. The default preserves the unblocked graph.",
+    )
+    parser.add_argument(
+        "--ffn-token-block-size",
+        type=int,
+        default=None,
+        help="Token tile size for token or token_weight FFN blocking.",
+    )
+    parser.add_argument(
+        "--ffn-weight-block-size",
+        type=int,
+        default=None,
+        help="Intermediate-dimension tile size for weight or token_weight FFN blocking.",
+    )
     parser.add_argument("--prefill-prompt", default=PREFILL_PROMPT)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--automation", action="store_true")
@@ -269,6 +287,15 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     if defaults:
         parser.set_defaults(**defaults)
     return parser.parse_args()
+
+
+def build_ffn_blocking_config(args: argparse.Namespace) -> dict[str, int | str | None]:
+    """Build the compile-time routed-expert FFN blocking configuration."""
+    return {
+        "ffn_blocking_mode": args.ffn_blocking_mode,
+        "ffn_token_block_size": args.ffn_token_block_size,
+        "ffn_weight_block_size": args.ffn_weight_block_size,
+    }
 
 
 def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
@@ -370,6 +397,12 @@ def main(defaults: dict[str, object] | None = None) -> None:
     config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
     batch_size = args.batch_size
     configure_qeff_parallel_layout(config, args)
+    qaic_config = build_ffn_blocking_config(args)
+    print(
+        "FFN blocking: "
+        f"mode={args.ffn_blocking_mode}, token_block_size={args.ffn_token_block_size}, "
+        f"weight_block_size={args.ffn_weight_block_size}"
+    )
 
     print("Building the QEfficient model in weight-free mode")
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
@@ -380,6 +413,15 @@ def main(defaults: dict[str, object] | None = None) -> None:
         weight_free=True,
     )
     qeff_model.model.to(dtype=torch.float32)
+    qeff_model.transform(
+        ctx_len=args.ctx_len,
+        seq_len=1,
+        bs=batch_size,
+        num_devices=len(args.device_group),
+        qaic_config=qaic_config,
+        prefill_only=False,
+        num_cores=args.num_cores,
+    )
 
     print("Exporting the one-token decode graph through qeff_model.export()")
     onnx_path = Path(
@@ -390,6 +432,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
             dynamo=True,
             export_batch_size=batch_size,
             cache_ctx_len=args.ctx_len,
+            qaic_config=qaic_config,
         )
     )
     print(f"ONNX_PATH={onnx_path}")
@@ -418,6 +461,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
             mxint8_kv_cache=False,
             mxfp6_matmul=True,
             user_tiled=True,
+            qaic_config=qaic_config,
             # node_precision_info=str(npi_path),
             dynamo=True,
         )
