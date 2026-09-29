@@ -24,6 +24,8 @@ from QEfficient.transformers.cache_utils import (
     QEffDynamicCache,
     QEffDynamicLayer,
     QEffEncoderDecoderCache,
+    glm_dsa_gather_cache,
+    glm_dsa_scatter_cache,
 )
 
 # ---------------------------------------------------------------------------
@@ -548,6 +550,41 @@ class TestCacheScatterGatherNumericalCorrectness:
         assert k_out[0, 0, 2, 0].item() == pytest.approx(2.0, abs=1e-5)
 
 
+def test_glm_dsa_folded_cache_scatter_gather_round_trip():
+    cache = torch.zeros((2, 2, 4, 3), dtype=torch.float32)
+    positions = torch.tensor([[0], [3]], dtype=torch.int32)
+    updates = torch.tensor([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]])
+
+    cache = glm_dsa_scatter_cache(cache, positions, updates, dp=1, cp=2)
+    selected = torch.tensor([[0], [3]], dtype=torch.int32)
+    gathered, valid = glm_dsa_gather_cache(cache, selected, torch.ones_like(selected, dtype=torch.bool), dp=1, cp=2)
+
+    logical = gathered.reshape(2, 2, 1, 3)
+    logical_valid = valid.reshape(2, 2, 1)
+    torch.testing.assert_close(logical[0][logical_valid[0]], updates[0])
+    torch.testing.assert_close(logical[1][logical_valid[1]], updates[1])
+
+
+def test_glm_dsa_folded_cache_multi_token_prefill_round_trip():
+    batch_size, dp, cp, query_length, context_length, dim = 4, 2, 2, 2, 8, 3
+    cache = torch.zeros((batch_size // dp, dp * cp, context_length // cp, dim), dtype=torch.float32)
+    positions = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=torch.int32)
+    updates = torch.arange(batch_size * query_length * dim, dtype=torch.float32).reshape(batch_size, query_length, dim)
+
+    cache = glm_dsa_scatter_cache(cache, positions, updates, dp=dp, cp=cp)
+    selected = positions.unsqueeze(-1)
+    gathered, valid = glm_dsa_gather_cache(
+        cache,
+        selected,
+        torch.ones_like(selected, dtype=torch.bool),
+        dp=dp,
+        cp=cp,
+    )
+
+    logical = gathered.sum(dim=2).permute(1, 0, 2, 3, 4).reshape(batch_size, query_length, 1, dim)
+    logical_valid = valid.any(dim=2).permute(1, 0, 2, 3).reshape(batch_size, query_length, 1)
+    assert logical_valid.all()
+    torch.testing.assert_close(logical.squeeze(2), updates)
 # ---------------------------------------------------------------------------
 # Tests: write_only_paged_attention must reject writes larger than one block
 # ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ from QEfficient.customop.fp8_dequantize import (
     FP8DequantizePerAxisDynamo,
     FP8DequantizePerTensorDynamo,
 )
+from QEfficient.customop.glm_dsa import GlmFoldedRowGather, GlmIntDiv, GlmIntMod, GlmPagedScatter, GlmSparseScatter
 from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
 from QEfficient.customop.rms_norm import CustomRMSNorm
 
@@ -573,6 +574,66 @@ def fp8_dequantize_blocked_op(
 @fp8_dequantize_blocked_op.register_fake
 def _(weight: torch.Tensor, scale: torch.Tensor, row_block_size: int, col_block_size: int) -> torch.Tensor:
     return torch.empty(weight.shape, dtype=scale.dtype, device=weight.device)
+@torch.library.custom_op("qefficient::glm_folded_row_gather", mutates_args=())
+def glm_folded_row_gather_op(data: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    safe = torch.where(indices == torch.iinfo(torch.int32).max, 0, indices).long()
+    return data.gather(2, safe.unsqueeze(-1).expand(*safe.shape, data.shape[-1]))
+
+
+@glm_folded_row_gather_op.register_fake
+def _(data: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    return torch.empty((*indices.shape, data.shape[-1]), dtype=data.dtype, device=data.device)
+
+
+@torch.library.custom_op("qefficient::glm_paged_scatter", mutates_args=())
+def glm_paged_scatter_op(
+    data: torch.Tensor,
+    block_id: torch.Tensor,
+    address: torch.Tensor,
+    updates: torch.Tensor,
+) -> torch.Tensor:
+    result = data.clone()
+    batch, rows, seq_len = updates.shape[:3]
+    row = torch.arange(rows, device=data.device).view(1, rows, 1).expand(batch, rows, seq_len)
+    result[block_id.long(), row, address.long()] = updates
+    return result
+
+
+@glm_paged_scatter_op.register_fake
+def _(data: torch.Tensor, block_id: torch.Tensor, address: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(data)
+
+
+@torch.library.custom_op("qefficient::glm_sparse_scatter", mutates_args=())
+def glm_sparse_scatter_op(data: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    result = data.clone()
+    result[indices[..., 0].long(), indices[..., 1].long(), indices[..., 2].long()] = updates
+    return result
+
+
+@glm_sparse_scatter_op.register_fake
+def _(data: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(data)
+
+
+@torch.library.custom_op("qefficient::glm_int_div", mutates_args=())
+def glm_int_div_op(values: torch.Tensor, divisor: int) -> torch.Tensor:
+    return torch.div(values, divisor, rounding_mode="floor")
+
+
+@glm_int_div_op.register_fake
+def _(values: torch.Tensor, divisor: int) -> torch.Tensor:
+    return torch.empty_like(values)
+
+
+@torch.library.custom_op("qefficient::glm_int_mod", mutates_args=())
+def glm_int_mod_op(values: torch.Tensor, divisor: int) -> torch.Tensor:
+    return torch.remainder(values, divisor)
+
+
+@glm_int_mod_op.register_fake
+def _(values: torch.Tensor, divisor: int) -> torch.Tensor:
+    return torch.empty_like(values)
 
 
 # ---------------------------------------------------------------------------
@@ -605,4 +666,9 @@ DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.ctx_gather_3d_generalized.default: get_dynamo_onnxscript_func(CtxGather3D),
     torch.ops.qefficient.ctx_chunk_scatter_batch.default: get_dynamo_onnxscript_func(CtxChunkScatterBatch),
     torch.ops.qefficient.ctx_gather_blocked_kv_batch.default: get_dynamo_onnxscript_func(CtxGatherBlockedKVBatch),
+    torch.ops.qefficient.glm_folded_row_gather.default: get_dynamo_onnxscript_func(GlmFoldedRowGather),
+    torch.ops.qefficient.glm_paged_scatter.default: get_dynamo_onnxscript_func(GlmPagedScatter),
+    torch.ops.qefficient.glm_sparse_scatter.default: get_dynamo_onnxscript_func(GlmSparseScatter),
+    torch.ops.qefficient.glm_int_div.default: get_dynamo_onnxscript_func(GlmIntDiv),
+    torch.ops.qefficient.glm_int_mod.default: get_dynamo_onnxscript_func(GlmIntMod),
 }

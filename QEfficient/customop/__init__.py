@@ -40,6 +40,16 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
 # load time.  These ops must be registered before any model forward pass that
 # uses select_interface, which evaluates torch.ops.qefficient.<op> eagerly.
 from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE  # noqa: F401
+from QEfficient.customop.glm_dsa import (
+    GlmFoldedRowGatherFunc,
+    GlmPagedScatterFunc,
+    GlmSparseScatterFunc,
+    glm_folded_row_gather,
+    glm_int_div,
+    glm_int_mod,
+    glm_paged_scatter,
+    glm_sparse_scatter,
+)
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, GemmaCustomRMSNormAIC
 from QEfficient.customop.utils import (
     ctx_chunk_scatter_batch,
@@ -95,6 +105,9 @@ __all__ = [
     "CtxGatherFuncCB",
     "CtxGatherFuncBlockedKVCB",
     "CtxGatherFuncCB3D",
+    "GlmFoldedRowGatherFunc",
+    "GlmPagedScatterFunc",
+    "GlmSparseScatterFunc",
     # Interface functions (dynamo-aware, prefer these at call sites)
     "ctx_scatter",
     "ctx_scatter_3d",
@@ -117,4 +130,9 @@ __all__ = [
     "ctx_gather_cb",
     "ctx_gather_blocked_kv_cb",
     "ctx_gather_cb_3d",
+    "glm_folded_row_gather",
+    "glm_paged_scatter",
+    "glm_sparse_scatter",
+    "glm_int_div",
+    "glm_int_mod",
 ]
