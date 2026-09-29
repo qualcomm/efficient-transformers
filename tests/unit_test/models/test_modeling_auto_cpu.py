@@ -55,6 +55,8 @@ from QEfficient.transformers.models.modeling_auto import (
     _QEffAutoModelForImageTextToTextDualQPC,
     _QEFFAutoModelForImageTextToTextSingleQPC,
 )
+from QEfficient.utils.constants import WAV2VEC2_MAX_SEQ_LEN
+from QEfficient.utils.export_utils import convert_dynamic_axes_to_dynamic_shapes
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1161,6 +1163,29 @@ class TestQEFFAutoModelForSpeechSeq2Seq:
 @pytest.mark.cpu_only
 class TestQEFFAutoModelForCTC:
     """Tests for QEFFAutoModelForCTC (Wav2Vec2 and similar CTC models)."""
+
+    def test_wav2vec2_audio_shape_uses_raw_sample_bound(self):
+        """Dynamo shape constraints must accept the 30-second raw audio example."""
+        _, wav2vec_config = make_tiny_wav2vec2()
+        dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes({"input_values": {1: "seq_len"}}, wav2vec_config)
+
+        assert dynamic_shapes["input_values"][1].max == WAV2VEC2_MAX_SEQ_LEN
+
+    def test_text_sequence_shape_keeps_model_position_bound(self):
+        """The audio special case must not widen ordinary model sequence dimensions."""
+        _, text_config = make_tiny_gpt2()
+        dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes({"input_ids": {1: "seq_len"}}, text_config)
+
+        assert dynamic_shapes["input_ids"][1].max == text_config.max_position_embeddings
+
+    def test_wav2vec2_positional_conv_weight_is_materialized(self):
+        """Dynamo export must not retain the parametrized positional-convolution weight."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model)
+        conv = qeff.model.wav2vec2.encoder.pos_conv_embed.conv
+
+        assert not hasattr(conv, "parametrizations")
+        assert qeff.hash_params["wav2vec2_export_version"] == 2
 
     def test_init_sets_use_cache_true(self):
         """__init__ sets model.base_model.config.use_cache=True."""
