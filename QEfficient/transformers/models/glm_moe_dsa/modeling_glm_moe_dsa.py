@@ -5,7 +5,9 @@
 #
 # -----------------------------------------------------------------------------
 
+from dataclasses import asdict, dataclass
 from functools import partial
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -28,8 +30,10 @@ from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
 
+from QEfficient.blocking.attention_blocking import generic_blocked_attention_interface
+from QEfficient.blocking.glm_attention import blocked_glm_dsa_topk, glm_attention_strategy
 from QEfficient.customop import ctx_gather_3d, ctx_scatter_3d
-from QEfficient.transformers.cache_utils import QEffDynamicCompressedKVRopeCache
+from QEfficient.transformers.cache_utils import QEffDynamicCompressedKVRopeCache, glm_dsa_scatter_cache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.transformers.moe import (
     MoEFlavour,
@@ -40,7 +44,172 @@ from QEfficient.transformers.moe import (
     delete_module_attrs,
     silu_glu_mlp,
 )
-from QEfficient.utils.constants import MAX_POSITION_EMBEDDINGS, MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.constants import MAX_POSITION_EMBEDDINGS
+
+
+@dataclass(frozen=True)
+class GlmAttentionLayerConfig:
+    attention_type: str
+    indexer_type: str
+    blocking_mode: str
+    absorption: bool
+    online: bool
+    cache_compressed: bool
+    num_kv_blocks: int
+    par_num_split: int
+    dsa_topk: int
+    indexer_dp: int
+    indexer_cp: int
+    indexer_kvp: int
+    attn_dp: int
+    attn_cp: int
+    attn_kvp: int
+    indexer_num_blocks: int
+    num_cores_per_device: int
+    indexer_local_context: int
+    indexer_block_width: int
+    indexer_tokens_per_core: int
+    indexer_block_topk: int
+
+    def to_hash_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def resolve_glm_attention_layer_configs(
+    config: GlmMoeDsaConfig,
+    qaic_config: dict[str, Any] | None,
+    *,
+    batch_size: int,
+    context_length: int,
+    num_devices: int,
+    num_cores: int,
+) -> tuple[GlmAttentionLayerConfig, ...]:
+    """Resolve and validate the production attention plan for every GLM layer."""
+    qaic_config = qaic_config or {}
+    layer_types = list(getattr(config, "layer_types", []) or [])
+    if not layer_types:
+        layer_types = ["deepseek_sparse_attention"] * config.num_hidden_layers
+    if len(layer_types) < config.num_hidden_layers:
+        raise ValueError("config.layer_types must contain one entry per GLM attention layer.")
+    indexer_types = list(getattr(config, "indexer_types", []) or ["full"] * config.num_hidden_layers)
+    if len(indexer_types) < config.num_hidden_layers:
+        raise ValueError("config.indexer_types must contain one entry per GLM attention layer.")
+
+    blocking_mode = str(qaic_config.get("blocking_mode", "none") or "none")
+    allowed_dense_modes = {"none", "par", "prefill_par", "prefill_par_online"}
+    if blocking_mode not in allowed_dense_modes:
+        raise ValueError(
+            f"GLM dense MLA does not support blocking_mode={blocking_mode!r}; "
+            f"expected one of {sorted(allowed_dense_modes)}."
+        )
+    absorption_config = qaic_config.get("mla_absorption") or {}
+    absorption = bool(absorption_config.get("absorption", False))
+    online = bool(absorption_config.get("online", False))
+    cache_compressed = bool(absorption_config.get("cache_compressed", True))
+    if online and not absorption:
+        raise ValueError("GLM online MLA requires mla_absorption['absorption']=True.")
+    if blocking_mode == "prefill_par_online" and not online:
+        raise ValueError("blocking_mode='prefill_par_online' requires online MLA absorption.")
+
+    explicit_dsa_tuning = any(
+        key in qaic_config
+        for key in (
+            "dsa_topk",
+            "indexer_dp",
+            "indexer_cp",
+            "indexer_kvp",
+            "attn_dp",
+            "attn_cp",
+            "attn_kvp",
+            "indexer_num_blocks",
+            "num_cores_per_device",
+        )
+    )
+    configured_topk = int(getattr(config, "index_topk", 2048))
+    dsa_topk = int(qaic_config.get("dsa_topk", min(configured_topk, context_length)))
+    indexer_dp = int(qaic_config.get("indexer_dp", 1))
+    indexer_cp = int(qaic_config.get("indexer_cp", num_devices if explicit_dsa_tuning else 1))
+    indexer_kvp = int(qaic_config.get("indexer_kvp", 1))
+    attn_dp = int(qaic_config.get("attn_dp", num_devices if explicit_dsa_tuning else 1))
+    attn_cp = int(qaic_config.get("attn_cp", 1))
+    attn_kvp = int(qaic_config.get("attn_kvp", 1))
+    indexer_num_blocks = int(qaic_config.get("indexer_num_blocks", num_cores if explicit_dsa_tuning else 1))
+    num_cores_per_device = int(qaic_config.get("num_cores_per_device", num_cores if explicit_dsa_tuning else 1))
+    num_kv_blocks = int(qaic_config.get("num_kv_blocks", 1))
+    par_num_split = int(qaic_config.get("par_num_split", num_cores_per_device))
+
+    positive_values = {
+        "batch_size": batch_size,
+        "context_length": context_length,
+        "num_devices": num_devices,
+        "num_kv_blocks": num_kv_blocks,
+        "par_num_split": par_num_split,
+        "dsa_topk": dsa_topk,
+        "indexer_dp": indexer_dp,
+        "indexer_cp": indexer_cp,
+        "attn_dp": attn_dp,
+        "attn_cp": attn_cp,
+        "indexer_num_blocks": indexer_num_blocks,
+        "num_cores_per_device": num_cores_per_device,
+    }
+    invalid = [name for name, value in positive_values.items() if value <= 0]
+    if invalid:
+        raise ValueError(f"GLM attention values must be positive: {invalid}.")
+    if indexer_kvp != 1 or attn_kvp != 1:
+        raise ValueError("GLM DSA supports only indexer_kvp=1 and attn_kvp=1.")
+    for name, dp, cp in (("indexer", indexer_dp, indexer_cp), ("attention", attn_dp, attn_cp)):
+        if explicit_dsa_tuning and dp * cp != num_devices:
+            raise ValueError(f"GLM DSA {name}_dp * {name}_cp must equal num_devices ({num_devices}).")
+        if batch_size % dp:
+            raise ValueError(f"GLM DSA batch_size must be divisible by {name}_dp.")
+        if context_length % cp:
+            raise ValueError(f"GLM DSA context_length must be divisible by {name}_cp.")
+    if dsa_topk > context_length:
+        raise ValueError("GLM dsa_topk cannot exceed context_length.")
+    if explicit_dsa_tuning and dsa_topk % num_cores_per_device:
+        raise ValueError("GLM dsa_topk must be divisible by num_cores_per_device.")
+    indexer_local_context = context_length // indexer_cp
+    if explicit_dsa_tuning and indexer_local_context % (indexer_num_blocks * num_cores_per_device):
+        raise ValueError("GLM indexer local context must be divisible by indexer_num_blocks * num_cores_per_device.")
+    indexer_block_width = indexer_local_context // indexer_num_blocks
+    indexer_tokens_per_core = indexer_block_width // num_cores_per_device
+    indexer_block_topk = min(dsa_topk, indexer_block_width)
+
+    resolved = []
+    for layer_idx in range(config.num_hidden_layers):
+        layer_type = layer_types[layer_idx]
+        is_dsa = layer_type == "deepseek_sparse_attention"
+        if not is_dsa and layer_type not in {"full_attention", "dense_attention"}:
+            raise ValueError(f"Unsupported GLM layer_types[{layer_idx}]={layer_type!r}.")
+        indexer_type = indexer_types[layer_idx]
+        if is_dsa and indexer_type not in {"full", "shared"}:
+            raise ValueError(f"Unsupported GLM indexer_types[{layer_idx}]={indexer_type!r}.")
+        resolved.append(
+            GlmAttentionLayerConfig(
+                attention_type="dsa" if is_dsa else "dense_mla",
+                indexer_type=indexer_type,
+                blocking_mode="dsa" if is_dsa else blocking_mode,
+                absorption=True if is_dsa else absorption,
+                online=False if is_dsa else online,
+                cache_compressed=True if is_dsa else cache_compressed,
+                num_kv_blocks=num_kv_blocks,
+                par_num_split=par_num_split,
+                dsa_topk=dsa_topk,
+                indexer_dp=indexer_dp,
+                indexer_cp=indexer_cp,
+                indexer_kvp=indexer_kvp,
+                attn_dp=attn_dp,
+                attn_cp=attn_cp,
+                attn_kvp=attn_kvp,
+                indexer_num_blocks=indexer_num_blocks,
+                num_cores_per_device=num_cores_per_device,
+                indexer_local_context=indexer_local_context,
+                indexer_block_width=indexer_block_width,
+                indexer_tokens_per_core=indexer_tokens_per_core,
+                indexer_block_topk=indexer_block_topk,
+            )
+        )
+    return tuple(resolved)
 
 
 def _trim_live_context_for_pytorch(
@@ -57,11 +226,21 @@ def _trim_live_context_for_pytorch(
 
 
 class QEffDynamicGlmMoeDsaIndexerLayer:
-    def __init__(self, indexer_key: torch.Tensor):
+    def __init__(self, indexer_key: torch.Tensor, layout_config: GlmAttentionLayerConfig | None = None):
         self.indexer_key = indexer_key
+        self.layout_config = layout_config
 
     def update_indexer(self, indexer_key: torch.Tensor, cache_kwargs: dict[str, torch.Tensor]) -> torch.Tensor:
         position_ids = cache_kwargs["position_ids"].to(torch.int32)
+        if self.layout_config is not None and (self.layout_config.indexer_dp > 1 or self.layout_config.indexer_cp > 1):
+            self.indexer_key = glm_dsa_scatter_cache(
+                self.indexer_key,
+                position_ids,
+                indexer_key,
+                dp=self.layout_config.indexer_dp,
+                cp=self.layout_config.indexer_cp,
+            )
+            return self.indexer_key
         self.indexer_key = ctx_scatter_3d(self.indexer_key, position_ids, indexer_key)
 
         ctx_len = self.indexer_key.shape[1]
@@ -75,24 +254,27 @@ class QEffDynamicGlmMoeDsaIndexerLayer:
 
 
 class QEffDynamicGlmMoeDsaIndexerCache:
-    def __init__(self, full_layer_indices: tuple[int, ...]):
+    def __init__(self, full_layer_indices: tuple[int, ...], layer_configs=None):
         self.full_layer_indices = tuple(full_layer_indices)
         self.layer_to_cache_idx = {layer_idx: cache_idx for cache_idx, layer_idx in enumerate(self.full_layer_indices)}
         self.layers: list[QEffDynamicGlmMoeDsaIndexerLayer] = []
+        self.layer_configs = layer_configs
 
-    def add_new(self, indexer_key: torch.Tensor) -> None:
-        self.layers.append(QEffDynamicGlmMoeDsaIndexerLayer(indexer_key))
+    def add_new(self, indexer_key: torch.Tensor, layer_idx: int) -> None:
+        layout_config = self.layer_configs[layer_idx] if self.layer_configs is not None else None
+        self.layers.append(QEffDynamicGlmMoeDsaIndexerLayer(indexer_key, layout_config))
 
     @classmethod
     def from_legacy_cache(
         cls,
         indexer_key_cache: list[torch.Tensor] | None,
         full_layer_indices: tuple[int, ...],
+        layer_configs=None,
     ) -> "QEffDynamicGlmMoeDsaIndexerCache":
-        cache = cls(full_layer_indices)
+        cache = cls(full_layer_indices, layer_configs)
         if indexer_key_cache is not None:
-            for indexer_key in indexer_key_cache:
-                cache.add_new(indexer_key)
+            for layer_idx, indexer_key in zip(full_layer_indices, indexer_key_cache):
+                cache.add_new(indexer_key, layer_idx)
         return cache
 
     def update_indexer(
@@ -165,6 +347,26 @@ class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
         if indexer_key_cache is not None:
             cache_kwargs = {"position_ids": position_ids}
             k = indexer_key_cache.update_indexer(k, self.layer_idx, cache_kwargs)
+            cache_layer = indexer_key_cache.layers[indexer_key_cache.layer_to_cache_idx[self.layer_idx]]
+            layer_config = cache_layer.layout_config
+            if layer_config is not None and (layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1):
+                weights = self.weights_proj(hidden_states.to(self.weights_proj.weight.dtype)).float()
+                weights = weights * (self.n_heads**-0.5)
+                return blocked_glm_dsa_topk(
+                    q,
+                    weights,
+                    k,
+                    attention_mask,
+                    position_ids,
+                    scale=self.softmax_scale,
+                    dp=layer_config.indexer_dp,
+                    cp=layer_config.indexer_cp,
+                    num_blocks=layer_config.indexer_num_blocks,
+                    num_cores_per_device=layer_config.num_cores_per_device,
+                    tokens_per_core=layer_config.indexer_tokens_per_core,
+                    block_topk=layer_config.indexer_block_topk,
+                    final_topk=layer_config.dsa_topk,
+                )
             attention_mask, (k,) = _trim_live_context_for_pytorch(position_ids, attention_mask, k)
 
         scores = torch.matmul(q.float(), k.transpose(-1, -2).float().unsqueeze(1)) * self.softmax_scale
@@ -210,16 +412,87 @@ def split_glm_moe_dsa_q_b_proj(
     )
 
 
+def derive_glm_mla_parameters(
+    q_b_weight: torch.Tensor,
+    kv_b_weight: torch.Tensor,
+    *,
+    num_heads: int,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+) -> dict[str, torch.Tensor]:
+    """Materialize all checkpoint-independent projections used by GLM MLA graphs."""
+    q_up, q_rope = split_glm_moe_dsa_q_b_proj(q_b_weight, num_heads, qk_nope_head_dim, qk_rope_head_dim)
+    k_up, v_up = kv_b_weight.T.view(-1, num_heads, qk_nope_head_dim + v_head_dim).split(
+        [qk_nope_head_dim, v_head_dim], dim=-1
+    )
+    k_up = k_up.reshape(-1, num_heads * qk_nope_head_dim).unsqueeze(0).contiguous()
+    v_up = v_up.reshape(-1, num_heads * v_head_dim).unsqueeze(0).contiguous()
+    per_head_q_up = q_up.squeeze(0).view(q_lora_rank, num_heads, qk_nope_head_dim).transpose(0, 1)
+    per_head_k_up = k_up.squeeze(0).view(kv_lora_rank, num_heads, qk_nope_head_dim).transpose(0, 1).transpose(1, 2)
+    per_head_v_up = v_up.squeeze(0).view(kv_lora_rank, num_heads, v_head_dim).transpose(0, 1)
+    return {
+        "q_up": q_up,
+        "q_rope": q_rope,
+        "k_up": k_up,
+        "v_up": v_up,
+        "per_head_q_up": per_head_q_up.unsqueeze(0).contiguous(),
+        "per_head_k_up": per_head_k_up.unsqueeze(0).contiguous(),
+        "per_head_k_up_normal": per_head_k_up.transpose(1, 2).unsqueeze(0).contiguous(),
+        "per_head_v_up": per_head_v_up.unsqueeze(0).contiguous(),
+        "fusedqk": torch.bmm(per_head_q_up, per_head_k_up)
+        .reshape(-1, num_heads, q_lora_rank, kv_lora_rank)
+        .contiguous(),
+    }
+
+
 class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
     def __qeff_init__(self):
-        q_up, q_rope = split_glm_moe_dsa_q_b_proj(
+        derived = derive_glm_mla_parameters(
             self.q_b_proj.weight,
-            self.num_heads,
-            self.qk_nope_head_dim,
-            self.qk_rope_head_dim,
+            self.kv_b_proj.weight,
+            num_heads=self.num_heads,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
         )
-        self.q_up = nn.Parameter(q_up.detach())
-        self.q_rope = nn.Parameter(q_rope.detach())
+        for name, tensor in derived.items():
+            setattr(self, name, nn.Parameter(tensor.detach().clone()))
+        layer_types = list(getattr(self.config, "layer_types", []) or [])
+        layer_type = layer_types[self.layer_idx] if self.layer_idx < len(layer_types) else "deepseek_sparse_attention"
+        indexer_types = list(getattr(self.config, "indexer_types", []) or [])
+        indexer_type = indexer_types[self.layer_idx] if self.layer_idx < len(indexer_types) else "full"
+        self.glm_attention_config = GlmAttentionLayerConfig(
+            attention_type="dsa" if layer_type == "deepseek_sparse_attention" else "dense_mla",
+            indexer_type=indexer_type,
+            blocking_mode="dsa" if layer_type == "deepseek_sparse_attention" else "none",
+            absorption=layer_type == "deepseek_sparse_attention",
+            online=False,
+            cache_compressed=True,
+            num_kv_blocks=1,
+            par_num_split=1,
+            dsa_topk=int(getattr(self.config, "index_topk", 2048)),
+            indexer_dp=1,
+            indexer_cp=1,
+            indexer_kvp=1,
+            attn_dp=1,
+            attn_cp=1,
+            attn_kvp=1,
+            indexer_num_blocks=1,
+            num_cores_per_device=1,
+            indexer_local_context=int(getattr(self.config, "max_position_embeddings", 1)),
+            indexer_block_width=int(getattr(self.config, "max_position_embeddings", 1)),
+            indexer_tokens_per_core=int(getattr(self.config, "max_position_embeddings", 1)),
+            indexer_block_topk=min(
+                int(getattr(self.config, "index_topk", 2048)),
+                int(getattr(self.config, "max_position_embeddings", 1)),
+            ),
+        )
+        self.qeff_attention_strategy = glm_attention_strategy
 
     def forward(
         self,
@@ -233,61 +506,23 @@ class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
         batch_index: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-        del kwargs
-        batch_size, seq_length = hidden_states.shape[:-1]
-
-        q_resid = self.q_a_layernorm(self.q_a_proj(hidden_states))
-        q_pass = torch.matmul(q_resid, self.q_up)
-        q_pass = q_pass.view(batch_size, seq_length, self.num_heads, self.qk_nope_head_dim).transpose(1, 2)
-        q_rot = torch.matmul(q_resid, self.q_rope)
-        q_rot = q_rot.view(batch_size, seq_length, self.num_heads, self.qk_rope_head_dim).transpose(1, 2)
-
-        compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
-        kv_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_pass = self.kv_a_layernorm(kv_pass).view(batch_size, 1, seq_length, self.kv_lora_rank)
-        k_rot = k_rot.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
-
-        cos, sin = position_embeddings
-        q_rot, k_rot = apply_rotary_pos_emb_interleave(q_rot, k_rot, cos, sin)
-
-        cache_kwargs = {"position_ids": position_ids, "batch_index": batch_index}
-        if compressed_kvs is not None:
-            kv_pass = compressed_kvs.update_ckv(kv_pass, self.layer_idx, cache_kwargs)
-            k_rot = compressed_kvs.update_k_pe(k_rot, self.layer_idx, cache_kwargs)
-            attention_mask, (kv_pass, k_rot) = _trim_live_context_for_pytorch(
-                position_ids, attention_mask, kv_pass, k_rot
-            )
-
-        query_states = torch.cat((q_pass, q_rot), dim=-1)
-        key_states, value_states = _expand_glm_moe_dsa_kv(self, kv_pass, k_rot)
-
-        if self.indexer is not None:
-            topk_indices = self.indexer(
-                hidden_states,
-                q_resid,
-                position_embeddings,
-                attention_mask[:, 0, :, :],
-                position_ids,
-                indexer_key_cache=indexer_key_cache,
-            )
-        else:
-            if prev_topk_indices is None:
-                raise ValueError("Shared DSA layers require top-k indices from a previous full indexer layer.")
-            topk_indices = prev_topk_indices
-
-        index_mask = topk_indices.new_ones((batch_size, seq_length, key_states.shape[2]), dtype=torch.bool)
-        index_mask = index_mask.scatter(-1, topk_indices.long(), torch.zeros_like(topk_indices, dtype=torch.bool))
-        index_mask = index_mask.unsqueeze(1)
-        attention_mask = attention_mask | index_mask
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
-        mask_value = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype)
-        attn_weights = torch.where(attention_mask, mask_value, attn_weights)
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        attn_output = attn_output.transpose(1, 2).contiguous().reshape(batch_size, seq_length, -1)
-        attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights, topk_indices
+        return generic_blocked_attention_interface(
+            module=self,
+            attention_mask=attention_mask,
+            scaling=self.scaling,
+            layer_idx=self.layer_idx,
+            blocking_config=getattr(self, "attn_blocking_config", None),
+            batch_index=batch_index,
+            position_ids=position_ids,
+            auxiliary_state={
+                "hidden_states": hidden_states,
+                "position_embeddings": position_embeddings,
+                "compressed_kvs": compressed_kvs,
+                "indexer_key_cache": indexer_key_cache,
+                "prev_topk_indices": prev_topk_indices,
+            },
+            **kwargs,
+        )
 
 
 class QEffGlmMoeDsaDecoderLayer(GlmMoeDsaDecoderLayer):
@@ -369,11 +604,14 @@ class QEffGlmMoeDsaModel(GlmMoeDsaModel):
         compressed_cache = None
         indexer_cache = None
         if compressed_kvs is not None:
-            compressed_cache = QEffDynamicCompressedKVRopeCache.from_legacy_cache(compressed_kvs)
+            layer_configs = tuple(layer.self_attn.glm_attention_config for layer in self.layers)
+            compressed_cache = QEffDynamicCompressedKVRopeCache.from_legacy_cache(compressed_kvs, layer_configs)
         if indexer_key_cache is not None:
+            layer_configs = tuple(layer.self_attn.glm_attention_config for layer in self.layers)
             indexer_cache = QEffDynamicGlmMoeDsaIndexerCache.from_legacy_cache(
                 indexer_key_cache,
                 self._qeff_indexer_cache_layers,
+                layer_configs,
             )
 
         if cache_position is None:
@@ -381,9 +619,17 @@ class QEffGlmMoeDsaModel(GlmMoeDsaModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0).expand(inputs_embeds.shape[0], -1)
 
-        target_len = (
-            compressed_cache.layers[0].ckv.shape[-2] if compressed_cache is not None else inputs_embeds.shape[1]
-        )
+        target_len = inputs_embeds.shape[1]
+        if compressed_cache is not None:
+            target_len = max(
+                layer.ckv.shape[-2]
+                * (
+                    layer.layout_config.attn_cp
+                    if layer.layout_config is not None and layer.layout_config.attention_type == "dsa"
+                    else 1
+                )
+                for layer in compressed_cache.layers
+            )
         causal_mask = _create_causal_mask(position_ids=position_ids, target_length=target_len)
         if attention_mask is not None:
             padding_mask = attention_mask[:, None, None, :].to(torch.bool)
@@ -574,27 +820,108 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         )
 
     def get_dummy_pkv_cache(self, config, batch_size, seq_len):
-        num_kv_heads = 1
-        cache_shape_1 = (batch_size, num_kv_heads, seq_len, config.kv_lora_rank)
-        cache_shape_2 = (batch_size, num_kv_heads, seq_len, config.qk_rope_head_dim)
-        return tuple(
-            (
-                torch.zeros(cache_shape_1, dtype=config.torch_dtype),
-                torch.zeros(cache_shape_2, dtype=config.torch_dtype),
+        caches = []
+        for layer_idx in range(config.num_hidden_layers):
+            layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
+            if layer_config.attention_type == "dsa" and (layer_config.attn_dp > 1 or layer_config.attn_cp > 1):
+                prefix = (batch_size // layer_config.attn_dp, layer_config.attn_dp * layer_config.attn_cp)
+                local_context = seq_len // layer_config.attn_cp
+            else:
+                prefix = (batch_size, 1)
+                local_context = seq_len
+            caches.append(
+                (
+                    torch.zeros((*prefix, local_context, config.kv_lora_rank), dtype=config.torch_dtype),
+                    torch.zeros((*prefix, local_context, config.qk_rope_head_dim), dtype=config.torch_dtype),
+                )
             )
-            for _ in range(config.num_hidden_layers)
-        )
+        return tuple(caches)
 
     def get_dummy_indexer_cache(self, config, batch_size, seq_len):
-        return tuple(
-            torch.zeros((batch_size, seq_len, config.index_head_dim), dtype=config.torch_dtype)
-            for layer_idx in self.get_indexer_cache_layers(config)
-        )
+        caches = []
+        for layer_idx in self.get_indexer_cache_layers(config):
+            layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
+            if layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
+                shape = (
+                    batch_size // layer_config.indexer_dp,
+                    layer_config.indexer_dp * layer_config.indexer_cp,
+                    seq_len // layer_config.indexer_cp,
+                    config.index_head_dim,
+                )
+            else:
+                shape = (batch_size, seq_len, config.index_head_dim)
+            caches.append(torch.zeros(shape, dtype=config.torch_dtype))
+        return tuple(caches)
+
+    def get_export_example_dimensions(
+        self,
+        *,
+        batch_size: int,
+        seq_len: int,
+        full_batch_size: int,
+        continuous_batching: bool,
+    ) -> dict[str, int | bool]:
+        """Keep trace sequence length independent from compile-sized retained states."""
+        compile_batch_size = int(getattr(self, "_qeff_compile_batch_size", batch_size))
+        compile_seq_len = int(getattr(self, "_qeff_compile_seq_len", seq_len))
+        compile_context_length = int(getattr(self, "_qeff_compile_context_length", seq_len))
+        return {
+            "batch_size": max(batch_size, compile_batch_size),
+            "full_batch_size": max(full_batch_size, compile_batch_size) if continuous_batching else full_batch_size,
+            "seq_len": compile_seq_len,
+            "cache_context_length": compile_context_length,
+            "dynamic_seq_len": False,
+        }
+
+    def get_glm_cache_dynamic_axes(self, continuous_batching: bool = False):
+        batch_symbol = "full_batch_size" if continuous_batching else "batch_size"
+        compressed_axes = []
+        for layer_idx, layer in enumerate(self.model.layers[: self.config.num_hidden_layers]):
+            layer_config = layer.self_attn.glm_attention_config
+            if layer_config.attention_type == "dsa" and (layer_config.attn_dp > 1 or layer_config.attn_cp > 1):
+                compressed_axes.append(
+                    {
+                        0: (f"glm_attn_batch_local_{layer_idx}" if layer_config.attn_dp > 1 else batch_symbol),
+                        2: f"glm_attn_ctx_local_{layer_idx}" if layer_config.attn_cp > 1 else "ctx_len",
+                    }
+                )
+            else:
+                compressed_axes.append({0: batch_symbol, 2: "ctx_len"})
+        indexer_axes = {
+            layer_idx: (
+                {
+                    0: (
+                        f"glm_indexer_batch_local_{layer_idx}"
+                        if self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_dp > 1
+                        else batch_symbol
+                    ),
+                    2: (
+                        f"glm_indexer_ctx_local_{layer_idx}"
+                        if self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_cp > 1
+                        else "ctx_len"
+                    ),
+                }
+                if self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_dp > 1
+                or self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_cp > 1
+                else {0: batch_symbol, 1: "ctx_len"}
+            )
+            for layer_idx in self.get_indexer_cache_layers(self.config)
+        }
+        return compressed_axes, indexer_axes
 
     @staticmethod
     def get_indexer_cache_layers(config) -> tuple[int, ...]:
+        layer_types = list(getattr(config, "layer_types", []) or [])
+        if not layer_types:
+            layer_types = ["deepseek_sparse_attention"] * config.num_hidden_layers
+        indexer_types = list(getattr(config, "indexer_types", []) or ["full"] * config.num_hidden_layers)
         return tuple(
             layer_idx
-            for layer_idx, indexer_type in enumerate(config.indexer_types[: config.num_hidden_layers])
-            if indexer_type != "shared"
+            for layer_idx, (layer_type, indexer_type) in enumerate(
+                zip(
+                    layer_types[: config.num_hidden_layers],
+                    indexer_types[: config.num_hidden_layers],
+                )
+            )
+            if layer_type == "deepseek_sparse_attention" and indexer_type != "shared"
         )

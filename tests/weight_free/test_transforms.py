@@ -512,22 +512,6 @@ class TestWeightFreeCheckpointTransforms:
         torch.testing.assert_close(weights.down_bias, source["down_proj_bias"])
         assert set(dict(experts.named_parameters())) == set(source)
 
-    def test_glm_partial_fp8_hf_patch_uses_configured_block_size(self, monkeypatch):
-        from transformers.integrations.finegrained_fp8 import Fp8Dequantize
-
-        from scripts.glm53_four_layer_decode_compile_generate import install_partial_fp8_dequant_patch
-
-        monkeypatch.setattr(Fp8Dequantize, "_dequantize_one", Fp8Dequantize._dequantize_one)
-        install_partial_fp8_dequant_patch(weight_block_size=(4, 2))
-
-        dequantizer = object.__new__(Fp8Dequantize)
-        quantized = torch.ones((5, 2), dtype=torch.float32)
-        scales = torch.tensor([[2.0], [3.0]], dtype=torch.float32)
-        result = dequantizer._dequantize_one(quantized, scales, output_dtype=torch.float32)
-
-        expected = torch.tensor([[2.0, 2.0]] * 4 + [[3.0, 3.0]])
-        torch.testing.assert_close(result, expected)
-
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"

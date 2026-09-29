@@ -1974,8 +1974,8 @@ def blocked_kv_mla_attention_forward(
 
         skip_future = None
         if skip_kv:
-            skip_future = (start_index > current_position).all()
-            # Eager mode Only
+            skip_future = (torch.full_like(current_position, start_index) > current_position).all()
+            # Eager mode only; avoid extracting a Python scalar while compiling or tracing.
             if not torch.onnx.is_in_onnx_export() and not torch.jit.is_tracing() and not torch._dynamo.is_compiling():
                 if skip_future.item():
                     break

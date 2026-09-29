@@ -27,6 +27,11 @@ from QEfficient.customop import (
     ctx_scatter_3d,
     ctx_scatter_cb,
     ctx_scatter_cb_3d,
+    glm_folded_row_gather,
+    glm_int_div,
+    glm_int_mod,
+    glm_paged_scatter,
+    glm_sparse_scatter,
 )
 
 
@@ -788,13 +793,90 @@ class QEffDynamicLayer(CacheLayerMixin):
         return k_out, v_out
 
 
+def glm_dsa_scatter_cache(cache, position_ids, updates, *, dp: int, cp: int):
+    """Scatter logical ``[B,S,D]`` updates into ``[B/DP,DP*CP,T/CP,D]``."""
+    batch, seq_len, dim = updates.shape
+    if batch % dp:
+        raise ValueError("GLM DSA batch size must be divisible by DP.")
+    batch_local = batch // dp
+    if cache.ndim != 4 or cache.shape[:2] != (batch_local, dp * cp):
+        raise ValueError("GLM DSA cache must use [B/DP,DP*CP,T/CP,D].")
+    updates = updates.view(batch_local, dp, seq_len, dim)
+    positions = position_ids.view(batch_local, dp, seq_len).to(torch.int32)
+    if seq_len == 1:
+        owner = glm_int_mod(positions, cp).to(torch.int32)
+        row_base = torch.arange(dp, device=updates.device, dtype=torch.int32).view(1, dp, 1)
+        row_ids = row_base + owner if cp == 1 else row_base * cp + owner
+        batch_ids = torch.arange(batch_local, device=updates.device, dtype=torch.int32).view(batch_local, 1, 1)
+        batch_ids = batch_ids.expand_as(row_ids)
+        addresses = glm_int_div(positions, cp).to(torch.int32)
+        indices = torch.stack((batch_ids, row_ids, addresses), dim=-1)
+        return glm_sparse_scatter(cache, indices, updates)
+
+    owner = glm_int_mod(positions, cp).to(torch.int32)
+    addresses = glm_int_div(positions, cp).to(torch.int32)
+    block_id = torch.arange(batch_local, device=updates.device, dtype=torch.int32).view(batch_local, 1, 1)
+    rows = []
+    for row in range(dp * cp):
+        dp_idx, cp_idx = divmod(row, cp)
+        cache_row = cache[:, row : row + 1]
+        update_row = updates[:, dp_idx : dp_idx + 1]
+        live = (owner[:, dp_idx : dp_idx + 1] == cp_idx).unsqueeze(-1)
+        scattered = glm_paged_scatter(
+            cache_row,
+            block_id.expand(batch_local, 1, seq_len),
+            addresses[:, dp_idx : dp_idx + 1],
+            torch.where(live, update_row, torch.zeros_like(update_row)),
+        )
+        rows.append(torch.where(live.any(dim=2, keepdim=True), scattered, cache_row))
+    return torch.cat(rows, dim=1)
+
+
+def glm_dsa_gather_cache(cache, indices, valid, *, dp: int, cp: int):
+    """Gather logical indices from a folded GLM DSA retained state."""
+    batch, gather_len = indices.shape
+    batch_local = batch // dp
+    if cache.ndim != 4 or cache.shape[:2] != (batch_local, dp * cp):
+        raise ValueError("GLM DSA cache must use [B/DP,DP*CP,T/CP,D].")
+    indices = indices.view(batch_local, dp, gather_len).to(torch.int32)
+    valid = valid.view(batch_local, dp, gather_len)
+    owner = glm_int_mod(indices, cp).to(torch.int32)
+    local_indices = glm_int_div(indices, cp).to(torch.int32)
+    cp_rows = torch.arange(cp, device=cache.device, dtype=torch.int32).view(1, 1, cp, 1)
+    row_valid = valid.unsqueeze(2) & (owner.unsqueeze(2) == cp_rows)
+    local_indices = local_indices.unsqueeze(2).expand(batch_local, dp, cp, gather_len)
+    invalid = torch.full_like(local_indices, torch.iinfo(torch.int32).max)
+    gather_indices = torch.where(row_valid, local_indices, invalid).reshape(batch_local, dp * cp, gather_len)
+    gathered = glm_folded_row_gather(cache, gather_indices)
+    gathered = torch.where(row_valid.reshape(batch_local, dp * cp, gather_len).unsqueeze(-1), gathered, 0)
+    return gathered.view(batch_local, dp, cp, gather_len, -1), row_valid
+
+
 class QEffDynamicCompressedKVRopeLayer:
-    def __init__(self, ckv, k_pe):
+    def __init__(self, ckv, k_pe, layout_config=None):
         self.ckv = ckv
         self.k_pe = k_pe
+        self.layout_config = layout_config
+
+    @property
+    def is_folded_dsa(self):
+        return (
+            self.layout_config is not None
+            and self.layout_config.attention_type == "dsa"
+            and (self.layout_config.attn_dp > 1 or self.layout_config.attn_cp > 1)
+        )
 
     def update_ckv(self, compressed_kv, cache_kwargs):
         position_ids = cache_kwargs.get("position_ids")
+        if self.is_folded_dsa:
+            self.ckv = glm_dsa_scatter_cache(
+                self.ckv,
+                position_ids,
+                compressed_kv.squeeze(1),
+                dp=self.layout_config.attn_dp,
+                cp=self.layout_config.attn_cp,
+            )
+            return self.ckv
         batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value form the kwargs
 
         if batch_index is not None:
@@ -821,6 +903,15 @@ class QEffDynamicCompressedKVRopeLayer:
 
     def update_k_pe(self, k_pe_cache, cache_kwargs):
         position_ids = cache_kwargs.get("position_ids")
+        if self.is_folded_dsa:
+            self.k_pe = glm_dsa_scatter_cache(
+                self.k_pe,
+                position_ids,
+                k_pe_cache.squeeze(1),
+                dp=self.layout_config.attn_dp,
+                cp=self.layout_config.attn_cp,
+            )
+            return self.k_pe
         batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value form the kwargs
 
         if batch_index is not None:
@@ -926,8 +1017,8 @@ class QEffDynamicCompressedKVRopeCache:
     ):
         self.layers = []
 
-    def add_new(self, ckv, k_pe, layer_idx):
-        self.layers.append(QEffDynamicCompressedKVRopeLayer(ckv, k_pe))
+    def add_new(self, ckv, k_pe, layer_idx, layout_config=None):
+        self.layers.append(QEffDynamicCompressedKVRopeLayer(ckv, k_pe, layout_config))
 
     def update_ckv(self, ckv, layer_idx, cache_kwargs):
         return self.layers[layer_idx].update_ckv(ckv, cache_kwargs)
@@ -950,12 +1041,13 @@ class QEffDynamicCompressedKVRopeCache:
         return self.layers[layer_idx].write_only_k_pe(k_pe, cache_kwargs)
 
     @classmethod
-    def from_legacy_cache(cls, past_key_values):
+    def from_legacy_cache(cls, past_key_values, layer_configs=None):
         cache = cls()
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
                 ckv, k_pe = past_key_values[layer_idx]
-                cache.add_new(ckv, k_pe, layer_idx)
+                layout_config = layer_configs[layer_idx] if layer_configs is not None else None
+                cache.add_new(ckv, k_pe, layer_idx, layout_config)
         return cache
 
     def to_legacy_cache(

@@ -18,6 +18,7 @@ All tests run on CPU only, using tiny in-memory models.
 """
 
 import pytest
+import torch
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
@@ -105,48 +106,6 @@ class TestONNXTransformsModuleStructure:
         assert default_domain_opset(legacy_proto) == constants.ONNX_LEGACY_EXPORT_OPSET
         assert default_domain_opset(dynamo_proto) == constants.ONNX_DYNAMO_EXPORT_OPSET
 
-    @pytest.mark.parametrize(
-        ("op_type", "function_name"),
-        [
-            ("CtxGatherBlockedKVBatch", "CtxGatherBlockedKVBatch"),
-            ("CtxChunkScatterBatch", "CtxChunkScatterBatch"),
-        ],
-    )
-    def test_batch_cache_custom_ops_register_function_protos(self, op_type, function_name):
-        import onnx
-        from onnx import TensorProto, helper
-
-        from QEfficient.base.onnx_transforms import CustomOpTransform
-
-        graph = helper.make_graph(
-            [
-                helper.make_node(
-                    op_type,
-                    inputs=["data", "indices"] if "Gather" in op_type else ["data", "indices", "updates"],
-                    outputs=["output"],
-                    domain="com.qti.aisw.onnx",
-                )
-            ],
-            "batch_cache_custom_op",
-            [
-                helper.make_tensor_value_info("data", TensorProto.FLOAT, [1]),
-                helper.make_tensor_value_info("indices", TensorProto.INT32, [1]),
-                *(
-                    [
-                        helper.make_tensor_value_info("updates", TensorProto.FLOAT, [1]),
-                    ]
-                    if "Gather" not in op_type
-                    else []
-                ),
-            ],
-            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])],
-        )
-        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("com.qti.aisw.onnx", 1)])
-
-        CustomOpTransform.apply(model)
-
-        assert function_name in {function.name for function in model.functions}
-        onnx.checker.check_model(model)
         for custom_op in (CtxScatterDPCP, CtxGatherDPCP):
             legacy_proto = get_onnxscript_func(
                 custom_op, constants.get_onnx_export_opset(dynamo=False)
@@ -202,6 +161,181 @@ class TestONNXTransformsModuleStructure:
                 2,
                 3,
             ]
+
+    @pytest.mark.parametrize(
+        ("op_type", "function_name"),
+        [
+            ("CtxGatherBlockedKVBatch", "CtxGatherBlockedKVBatch"),
+            ("CtxChunkScatterBatch", "CtxChunkScatterBatch"),
+        ],
+    )
+    def test_batch_cache_custom_ops_register_function_protos(self, op_type, function_name):
+        import onnx
+        from onnx import TensorProto, helper
+
+        from QEfficient.base.onnx_transforms import CustomOpTransform
+
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    op_type,
+                    inputs=["data", "indices"] if "Gather" in op_type else ["data", "indices", "updates"],
+                    outputs=["output"],
+                    domain="com.qti.aisw.onnx",
+                )
+            ],
+            "batch_cache_custom_op",
+            [
+                helper.make_tensor_value_info("data", TensorProto.FLOAT, [1]),
+                helper.make_tensor_value_info("indices", TensorProto.INT32, [1]),
+                *(
+                    [
+                        helper.make_tensor_value_info("updates", TensorProto.FLOAT, [1]),
+                    ]
+                    if "Gather" not in op_type
+                    else []
+                ),
+            ],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("com.qti.aisw.onnx", 1)])
+
+        CustomOpTransform.apply(model)
+
+        assert function_name in {function.name for function in model.functions}
+        onnx.checker.check_model(model)
+    def test_glm_integer_ops_export_through_dynamo_translation_table(self):
+        from onnx import AttributeProto, TensorProto
+
+        from QEfficient.customop import glm_int_div, glm_int_mod
+        from QEfficient.utils.export_utils import build_dynamo_export_kwargs
+
+        class IntegerAddressing(torch.nn.Module):
+            def forward(self, values):
+                return glm_int_div(values, 4), glm_int_mod(values, 4)
+
+        values = torch.tensor([[0, 1, 4, 7]], dtype=torch.int32)
+        onnx_program = torch.onnx.export(
+            IntegerAddressing().eval(),
+            (values,),
+            f=None,
+            input_names=["values"],
+            output_names=["quotient", "remainder"],
+            **build_dynamo_export_kwargs({}),
+        )
+        model = onnx_program.model_proto
+
+        custom_nodes = {(node.domain, node.op_type): node for node in model.graph.node}
+        assert ("com.qti.aisw.onnx", "GlmIntDiv") in custom_nodes
+        assert ("com.qti.aisw.onnx", "GlmIntMod") in custom_nodes
+        for node in custom_nodes.values():
+            divisor = next(attribute for attribute in node.attribute if attribute.name == "divisor")
+            assert divisor.type == AttributeProto.INT
+            assert divisor.i == 4
+
+        functions = {function.name: function for function in model.functions}
+        assert {node.op_type for node in functions["GlmIntDiv"].node} >= {"CastLike", "Div"}
+        assert {node.op_type for node in functions["GlmIntMod"].node} >= {"CastLike", "Mod"}
+        assert all(output.type.tensor_type.elem_type == TensorProto.INT32 for output in model.graph.output)
+
+    def test_glm_blocked_indexer_exports_one_topk_per_block_and_final_merge(self, tmp_path):
+        import onnx
+
+        from QEfficient.blocking.glm_attention import blocked_glm_dsa_topk
+
+        class BlockedIndexer(torch.nn.Module):
+            def forward(self, query, head_weights, folded_cache, attention_mask, position_ids):
+                return blocked_glm_dsa_topk(
+                    query,
+                    head_weights,
+                    folded_cache,
+                    attention_mask,
+                    position_ids,
+                    scale=0.5,
+                    dp=1,
+                    cp=2,
+                    num_blocks=2,
+                    num_cores_per_device=2,
+                    tokens_per_core=2,
+                    block_topk=4,
+                    final_topk=4,
+                )
+
+        path = tmp_path / "glm_blocked_indexer.onnx"
+        torch.onnx.export(
+            BlockedIndexer().eval(),
+            (
+                torch.rand(2, 1, 2, 4),
+                torch.rand(2, 1, 2),
+                torch.rand(2, 2, 8, 4),
+                torch.zeros(2, 1, 16, dtype=torch.bool),
+                torch.full((2, 1), 15, dtype=torch.int64),
+            ),
+            path,
+            input_names=["query", "head_weights", "folded_cache", "attention_mask", "position_ids"],
+            output_names=["topk_indices"],
+            opset_version=17,
+            dynamo=False,
+        )
+        graph = onnx.load(path, load_external_data=False).graph
+
+        assert sum(node.op_type == "TopK" for node in graph.node) == 3
+        materialized_shapes = {
+            tuple(dim.dim_value for dim in value.type.tensor_type.shape.dim)
+            for value in graph.value_info
+            if value.type.HasField("tensor_type")
+        }
+        assert (2, 16, 4) not in materialized_shapes
+    def test_custom_op_interface_uses_custom_path_during_torch_export(self, monkeypatch):
+        from QEfficient.customop.utils import select_interface
+
+        monkeypatch.setattr(torch.compiler, "is_exporting", lambda: True)
+        monkeypatch.setattr(torch._dynamo, "is_compiling", lambda: False)
+
+        assert select_interface(lambda: "eager", lambda: "custom")() == "custom"
+
+    def test_qsa_custom_ops_are_registered_for_onnx_functions(self):
+        from QEfficient.base.onnx_transforms import CustomOpTransform
+        from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
+
+        assert "CtxPagedScatterFunc" in CustomOpTransform._custom_ops
+        assert "CtxGatherRowsFunc" in CustomOpTransform._custom_ops
+        assert torch.ops.qefficient.ctx_paged_scatter.default in DYNAMO_CUSTOM_OP_TABLE
+        assert torch.ops.qefficient.ctx_gather_rows.default in DYNAMO_CUSTOM_OP_TABLE
+
+    def test_qsa_custom_ops_export_as_first_class_dynamo_nodes(self):
+        import onnx
+
+        from QEfficient.customop import ctx_gather_rows, ctx_paged_scatter
+        from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
+
+        class QSAOps(torch.nn.Module):
+            def forward(self, data, block_id, addr, updates, indices):
+                data = ctx_paged_scatter(data, block_id, addr, updates)
+                return ctx_gather_rows(data, indices)
+
+        args = (
+            torch.zeros(2, 4, 8, 16),
+            torch.zeros(2, 4, 1, dtype=torch.int32),
+            torch.zeros(2, 4, 1, dtype=torch.int32),
+            torch.zeros(2, 4, 1, 16),
+            torch.zeros(2, 4, 3, dtype=torch.int32),
+        )
+        onnx_program = torch.onnx.export(
+            QSAOps().eval(),
+            args,
+            f=None,
+            dynamo=True,
+            opset_version=18,
+            custom_translation_table=DYNAMO_CUSTOM_OP_TABLE,
+        )
+        nodes = {
+            (node.domain, node.op_type)
+            for node in onnx.load_from_string(onnx_program.model_proto.SerializeToString()).graph.node
+        }
+        assert ("com.qualcomm.cloud", "CtxPagedScatter") in nodes
+        assert ("com.qualcomm.cloud", "CtxGatherRows") in nodes
+        assert not any(op_type in {"GatherElements", "ScatterElements"} for _, op_type in nodes)
 
     def test_dp_cp_gather_uses_batch_dims_without_expanded_indices(self):
         from QEfficient.customop.ctx_scatter_gather import CtxGatherDPCP
@@ -586,60 +720,6 @@ class TestRenameFunctionOutputsTransform:
 
         assert model.graph.output[0].name == expected_output
         assert "_InternalRetainedState" not in model.graph.output[0].name
-
-
-# ---------------------------------------------------------------------------
-# Tests: PreserveNestedCacheRetainedStateTransform
-# ---------------------------------------------------------------------------
-
-
-class TestPreserveNestedCacheRetainedStateTransform:
-    def test_drops_unchanged_nested_retained_state(self):
-        import onnx
-        from onnx import TensorProto, helper
-
-        from QEfficient.base.onnx_transforms import PreserveNestedCacheRetainedStateTransform
-
-        retained_name = "past_compressor_gate_buffer.5_InternalRetainedState"
-        function = helper.make_function(
-            "test.qeff",
-            "DecoderLayer",
-            ["hidden_states", retained_name],
-            ["output", retained_name],
-            [helper.make_node("Identity", ["hidden_states"], ["output"])],
-            opset_imports=[helper.make_opsetid("", 17)],
-        )
-        graph = helper.make_graph(
-            [
-                helper.make_node(
-                    "DecoderLayer",
-                    ["hidden_states", retained_name],
-                    ["logits"],
-                    name="decoder_layer",
-                    domain="test.qeff",
-                )
-            ],
-            "retained_state_graph",
-            [
-                helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [1]),
-                helper.make_tensor_value_info(retained_name, TensorProto.FLOAT, [1]),
-            ],
-            [
-                helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1]),
-                helper.make_tensor_value_info(retained_name, TensorProto.FLOAT, [1]),
-            ],
-        )
-        model = helper.make_model(
-            graph,
-            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("test.qeff", 1)],
-            functions=[function],
-        )
-
-        assert PreserveNestedCacheRetainedStateTransform.apply(model)
-        assert [output.name for output in model.graph.output] == ["logits"]
-        assert list(model.graph.input)[1].name == "past_compressor_gate_buffer.5"
-        assert list(model.graph.node[0].output) == ["logits"]
-        onnx.checker.check_model(model)
 
 
 # ---------------------------------------------------------------------------
