@@ -25,11 +25,9 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Encoder,
     Wav2Vec2EncoderStableLayerNorm,
-    Wav2Vec2FeatureEncoder,
     Wav2Vec2GroupNormConvLayer,
     Wav2Vec2Model,
     Wav2Vec2PositionalConvEmbedding,
-    Wav2Vec2SamePadLayer,
 )
 
 
