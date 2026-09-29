@@ -172,7 +172,15 @@ TORCH_TO_NUMPY_DTYPE_MAP = {
 
 
 def _disable_unsupported_weight_free(kwargs: dict, qeff_auto_class_name: str) -> None:
-    """Remove unsupported weight-free mode from non-CausalLM wrappers."""
+    """Remove weight-free mode from wrappers that do not implement it."""
+
+    supported_classes = {
+        "QEFFAutoModelForSpeechSeq2Seq",
+        "QEFFAutoModelForCTC",
+    }
+
+    if qeff_auto_class_name in supported_classes:
+        return
 
     if not kwargs.pop("weight_free", False):
         return

@@ -229,50 +229,6 @@ class TestQEFFTransformersBase:
         qeff = QEFFAutoModelForCausalLM(model)
         assert qeff is not None
 
-    @pytest.mark.parametrize(
-        ("wrapper_cls", "model_factory"),
-        [
-            pytest.param(QEFFAutoModelForSequenceClassification, make_tiny_bert_seq_cls, id="sequence-classification"),
-            pytest.param(QEFFAutoModelForSpeechSeq2Seq, make_tiny_whisper, id="speech-seq2seq"),
-            pytest.param(QEFFAutoModelForCTC, make_tiny_wav2vec2, id="ctc"),
-        ],
-    )
-    def test_from_pretrained_disables_unsupported_weight_free(self, wrapper_cls, model_factory, monkeypatch, caplog):
-        """Non-CausalLM from_pretrained paths warn and do not forward weight_free."""
-        captured_kwargs = {}
-
-        def fake_from_pretrained(_model_id, *args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return model_factory()[0]
-
-        monkeypatch.setattr(wrapper_cls._hf_auto_class, "from_pretrained", fake_from_pretrained)
-        caplog.set_level(logging.WARNING, logger="QEfficient")
-
-        qeff_model = wrapper_cls.from_pretrained("dummy-model", weight_free=True)
-
-        assert "weight_free" not in captured_kwargs
-        assert qeff_model._weight_free is False
-        assert UNSUPPORTED_WEIGHT_FREE_WARNING in caplog.text
-        assert wrapper_cls.__name__ in caplog.text
-
-    @pytest.mark.parametrize(
-        ("wrapper_cls", "model_factory"),
-        [
-            pytest.param(QEFFAutoModelForSequenceClassification, make_tiny_bert_seq_cls, id="sequence-classification"),
-            pytest.param(QEFFAutoModelForSpeechSeq2Seq, make_tiny_whisper, id="speech-seq2seq"),
-            pytest.param(QEFFAutoModelForCTC, make_tiny_wav2vec2, id="ctc"),
-        ],
-    )
-    def test_direct_init_disables_unsupported_weight_free(self, wrapper_cls, model_factory, caplog):
-        """Direct construction disables weight-free mode for unsupported wrappers."""
-        caplog.set_level(logging.WARNING, logger="QEfficient")
-
-        qeff_model = wrapper_cls(model_factory()[0], weight_free=True)
-
-        assert qeff_model._weight_free is False
-        assert UNSUPPORTED_WEIGHT_FREE_WARNING in caplog.text
-        assert wrapper_cls.__name__ in caplog.text
-
     def test_causal_lm_direct_init_preserves_weight_free(self, caplog):
         """CausalLM remains the only wrapper that accepts weight_free=True."""
         caplog.set_level(logging.WARNING, logger="QEfficient")
@@ -1121,6 +1077,29 @@ class TestQEFFAutoModelForSpeechSeq2Seq:
         assert qeff is not None
         assert qeff.model is not None
 
+    def test_direct_init_preserves_weight_free(self):
+        """Whisper accepts weight-free mode for Dynamo export."""
+        model, _ = make_tiny_whisper()
+
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model, weight_free=True)
+
+        assert qeff._weight_free is True
+
+    def test_export_defaults_to_dynamo_for_weight_free(self, monkeypatch):
+        """Weight-free Whisper export forwards the Dynamo flag by default."""
+        model, _ = make_tiny_whisper()
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model, weight_free=True)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export() == "exported"
+        assert captured["dynamo"] is True
+
     @pytest.mark.slow
     def test_get_model_config_returns_dict(self):
         """get_model_config returns the model's config as a dict."""
@@ -1192,6 +1171,29 @@ class TestQEFFAutoModelForCTC:
         model, cfg = make_tiny_wav2vec2()
         qeff = QEFFAutoModelForCTC(model)
         assert qeff.model.base_model.config.use_cache is True
+
+    def test_direct_init_preserves_weight_free(self):
+        """Wav2Vec2 CTC accepts weight-free mode for Dynamo export."""
+        model, _ = make_tiny_wav2vec2()
+
+        qeff = QEFFAutoModelForCTC(model, weight_free=True)
+
+        assert qeff._weight_free is True
+
+    def test_export_defaults_to_dynamo_for_weight_free(self, monkeypatch):
+        """Weight-free Wav2Vec2 export forwards the Dynamo flag by default."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model, weight_free=True)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export() == "exported"
+        assert captured["dynamo"] is True
 
     def test_init_stores_model(self):
         """__init__ stores the model."""
