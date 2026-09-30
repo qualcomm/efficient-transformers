@@ -142,6 +142,40 @@ def test_deepseek_v4_unweighted_rms_norm_uses_custom_op_mapping():
     torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("blocked_csa", [False, True])
+def test_deepseek_v4_prefill_matches_token_by_token_decode(blocked_csa):
+    config = _tiny_deepseek_v4_config()
+    config.torch_dtype = torch.float32
+    config.qeff_csa_prefill_blocked = blocked_csa
+    torch.manual_seed(0)
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    prefill_cache = QEffDeepseekV4Cache.get_dummy_cache(config, batch_size=1, ctx_len=8, dtype=torch.float32)
+    decode_cache = QEffDeepseekV4Cache.get_dummy_cache(config, batch_size=1, ctx_len=8, dtype=torch.float32)
+    input_ids = torch.tensor([[3, 7, 11, 5]])
+    position_ids = torch.arange(input_ids.shape[1], dtype=torch.int64).unsqueeze(0)
+
+    with torch.no_grad():
+        prefill_output = qeff_model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=prefill_cache,
+            use_cache=True,
+        )
+        for token_idx in range(input_ids.shape[1]):
+            decode_output = qeff_model(
+                input_ids=input_ids[:, token_idx : token_idx + 1],
+                position_ids=position_ids[:, token_idx : token_idx + 1],
+                past_key_values=decode_cache,
+                use_cache=True,
+            )
+            decode_cache = decode_output.past_key_values
+
+    torch.testing.assert_close(prefill_output.logits, decode_output.logits, atol=2e-4, rtol=2e-4)
+    for prefill_layer, decode_layer in zip(prefill_output.past_key_values, decode_cache):
+        for prefill_state, decode_state in zip(prefill_layer, decode_layer):
+            torch.testing.assert_close(prefill_state, decode_state, atol=2e-4, rtol=2e-4)
+
+
 @pytest.mark.parametrize(
     ("layer_type", "has_compressed_key"),
     [
@@ -499,6 +533,26 @@ def test_deepseek_v4_hca_dp_export_uses_requested_capture_layout(monkeypatch):
     assert hca_cache[3].shape == (1, 2, 4, config.head_dim)
     assert captured["dynamic_axes"]["past_sliding_window_kv.0"] == {}
     assert captured["dynamic_axes"]["past_actual_compressed_kv.0"] == {}
+
+
+def test_deepseek_v4_prefill_export_uses_requested_sequence_length(monkeypatch):
+    config = _tiny_deepseek_v4_config()
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    captured = {}
+
+    def fake_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["example_inputs"] = example_inputs
+        captured["dynamic_axes"] = dynamic_axes
+        return "unused.onnx"
+
+    monkeypatch.setattr(qeff_model, "_export", fake_export)
+    qeff_model.export(prefill_only=True, prefill_seq_len=4, export_batch_size=1, cache_ctx_len=8, dynamo=False)
+
+    assert captured["example_inputs"]["input_ids"].shape == (1, 4)
+    assert captured["example_inputs"]["position_ids"].shape == (1, 4)
+    assert captured["dynamic_axes"]["input_ids"] == {}
+    assert captured["dynamic_axes"]["position_ids"] == {}
+    assert qeff_model.model.config.qeff_csa_prefill_blocked is True
 
 
 @pytest.mark.llm_model

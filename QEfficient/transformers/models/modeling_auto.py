@@ -4402,8 +4402,15 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     self.hash_params["retain_full_kv"] = True
         #######################################################################
 
+        is_deepseek_v4 = getattr(self.model.config, "model_type", None) == "deepseek_v4"
         bs: int = export_batch_size or constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+        if is_deepseek_v4 and prefill_only:
+            if prefill_seq_len is None or prefill_seq_len < 1:
+                raise ValueError("DeepSeek V4 prefill export requires prefill_seq_len to be positive.")
+            seq_len = prefill_seq_len
+        if is_deepseek_v4:
+            self.model.config.qeff_csa_prefill_blocked = bool(prefill_only)
         fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
         if bs < 1:
             raise ValueError("export_batch_size must be at least 1.")
@@ -4538,17 +4545,19 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         ##################################
 
-        is_deepseek_v4 = getattr(self.model.config, "model_type", None) == "deepseek_v4"
-        query_seq_len = 1 if is_deepseek_v4 else seq_len
+        query_seq_len = seq_len if is_deepseek_v4 and prefill_only else (1 if is_deepseek_v4 else seq_len)
         example_inputs = {
             "input_ids": torch.zeros((bs, query_seq_len), dtype=torch.int64),
             "position_ids": torch.arange(query_seq_len, dtype=torch.int64).view(1, query_seq_len).repeat(bs, 1),
             "past_key_values": [[] for _ in range(self.num_layers)],
         }
-        dynamic_axes = {
-            "input_ids": {0: "batch_size"} if is_deepseek_v4 else {0: "batch_size", 1: "seq_len"},
-            "position_ids": {0: "batch_size"} if is_deepseek_v4 else {0: "batch_size", 1: "seq_len"},
-        }
+        if is_deepseek_v4:
+            dynamic_axes = {"input_ids": {}, "position_ids": {}}
+        else:
+            dynamic_axes = {
+                "input_ids": {0: "batch_size", 1: "seq_len"},
+                "position_ids": {0: "batch_size", 1: "seq_len"},
+            }
 
         if getattr(self, "dflash_dlm", None):
             target_seq_len = (qaic_config or {}).get("dflash_target_seq_len", seq_len)
