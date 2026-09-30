@@ -5796,12 +5796,10 @@ def test_glm_export_uses_trace_length_one_and_compile_sized_mixed_caches(tmp_pat
     assert example_inputs["compressed_kvs"][1][0].shape == (1, 16, 4096, config.kv_lora_rank)
     assert example_inputs["indexer_key_cache"][0].shape == (16, 16, 256, config.index_head_dim)
     assert captured["dynamic_axes"]["compressed_kv.1"] == {
-        0: "glm_attn_batch_local_1",
         2: "ctx_len",
     }
     assert captured["dynamic_axes"]["indexer_key.1"] == {
         0: "batch_size",
-        2: "glm_indexer_ctx_local_1",
     }
     assert "compressed_kv.0_RetainedState" in captured["output_names"]
     assert "indexer_key.1_RetainedState" in captured["output_names"]

@@ -860,11 +860,7 @@ class QEffDynamicCompressedKVRopeLayer:
 
     @property
     def is_folded_dsa(self):
-        return (
-            self.layout_config is not None
-            and self.layout_config.attention_type == "dsa"
-            and (self.layout_config.attn_dp > 1 or self.layout_config.attn_cp > 1)
-        )
+        return self.layout_config is not None and self.layout_config.attention_type == "dsa"
 
     def update_ckv(self, compressed_kv, cache_kwargs):
         position_ids = cache_kwargs.get("position_ids")
