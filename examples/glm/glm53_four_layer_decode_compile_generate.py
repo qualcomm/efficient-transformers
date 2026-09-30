@@ -29,6 +29,7 @@ DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_QEFF_HOME = "/home/ochougul/efficient-transformers/artifacts/glm53_decode_only"
 
 ATTENTION_PRESETS = {
+    "baseline": {},
     "dense": {
         "blocking_mode": "none",
         "mla_absorption": {"absorption": False, "online": False, "cache_compressed": True},
@@ -46,18 +47,6 @@ ATTENTION_PRESETS = {
         "num_kv_blocks": 2,
         "par_num_split": 16,
         "mla_absorption": {"absorption": True, "online": False, "cache_compressed": True},
-    },
-    "dense_prefill_parallel": {
-        "blocking_mode": "prefill_par",
-        "num_kv_blocks": 2,
-        "par_num_split": 16,
-        "mla_absorption": {"absorption": True, "online": False, "cache_compressed": True},
-    },
-    "dense_prefill_parallel_online": {
-        "blocking_mode": "prefill_par_online",
-        "num_kv_blocks": 2,
-        "par_num_split": 16,
-        "mla_absorption": {"absorption": True, "online": True, "cache_compressed": True},
     },
     "dsa_cp1": {
         "indexer_dp": 1,
@@ -79,7 +68,7 @@ ATTENTION_PRESETS = {
         "indexer_num_blocks": 1,
         "num_cores_per_device": 16,
     },
-    "dsa_ts16": {
+    "dsa_ts16_smoke": {
         "indexer_dp": 1,
         "indexer_cp": 16,
         "indexer_kvp": 1,
@@ -94,7 +83,7 @@ ATTENTION_PRESETS = {
 DEFAULT_RUNTIME_CONFIG = {"batch_size": 1, "ctx_len": 2048 + 128, "num_devices": 1}
 PRESET_RUNTIME_DEFAULTS = {
     "dsa_cp2": {"num_devices": 2},
-    "dsa_ts16": {"batch_size": 16, "ctx_len": 4096, "num_devices": 16},
+    "dsa_ts16_smoke": {"batch_size": 16, "ctx_len": 4096, "num_devices": 16},
 }
 DEFAULT_GENERATION_LEN = 32
 
@@ -187,6 +176,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-free", action="store_true")
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
+    parser.add_argument("--cache-io-dtype", choices=("float16", "mxint8"), default="float16")
     parser.add_argument("--attention-preset", choices=sorted(ATTENTION_PRESETS), default="dsa_cp1")
     parser.add_argument(
         "--attention-qaic-json",
@@ -281,6 +271,25 @@ def tokens_from_qeff_output(exec_info: Any) -> np.ndarray:
     return generated_ids
 
 
+def serialize_qeff_perf_metrics(exec_info: Any, batch_size: int) -> dict[str, float | None]:
+    """Return JSON-safe QEff generation metrics, including aggregate decode token latency."""
+    metrics = getattr(exec_info, "perf_metrics", None)
+    if metrics is None:
+        return {}
+
+    serialized = {
+        field: float(value)
+        for field in ("prefill_time", "decode_perf", "total_perf", "total_time")
+        if (value := getattr(metrics, field, None)) is not None
+    }
+    if "decode_perf" in serialized:
+        aggregate_decode_perf = serialized["decode_perf"] * batch_size
+        serialized["decode_token_latency_ms_per_token"] = (
+            1000.0 / aggregate_decode_perf if aggregate_decode_perf > 0 else None
+        )
+    return serialized
+
+
 def run_hf_decode_only(model: torch.nn.Module, input_ids: torch.Tensor, generation_len: int) -> torch.Tensor:
     """Run greedy HF generation using only single-token forward passes."""
     past_key_values = None
@@ -332,17 +341,18 @@ def compile_weight_free_decode_only(
     batch_size: int,
     num_devices: int,
     num_cores: int,
+    cache_io_dtype: str,
 ):
     """Compile the validated single-token GLM weight-free specialization."""
     custom_io = {}
     for layer_idx in range(qeff_model.model.config.num_hidden_layers):
         for cache_name in (f"compressed_kv.{layer_idx}", f"k_pe.{layer_idx}"):
-            custom_io[cache_name] = "float16"
-            custom_io[f"{cache_name}_RetainedState"] = "float16"
+            custom_io[cache_name] = cache_io_dtype
+            custom_io[f"{cache_name}_RetainedState"] = cache_io_dtype
     for cache_idx, _ in enumerate(qeff_model.model.get_indexer_cache_layers(qeff_model.model.config)):
         cache_name = f"indexer_key.{cache_idx}"
-        custom_io[cache_name] = "float16"
-        custom_io[f"{cache_name}_RetainedState"] = "float16"
+        custom_io[cache_name] = cache_io_dtype
+        custom_io[f"{cache_name}_RetainedState"] = cache_io_dtype
 
     return qeff_model._compile(
         onnx_path=str(onnx_path),
@@ -354,6 +364,8 @@ def compile_weight_free_decode_only(
         convert_to_fp16=True,
         mdp_ts_num_devices=num_devices,
         aic_num_cores=num_cores,
+        mxint8_kv_cache=cache_io_dtype == "mxint8",
+        allow_mxint8_mdp_io=cache_io_dtype == "mxint8",
     )
 
 
@@ -476,6 +488,7 @@ def main() -> None:
                 "prompt_len": args.prompt_len,
                 "ctx_len": args.ctx_len,
                 "generation_len": generation_len,
+                "cache_io_dtype": args.cache_io_dtype,
                 "qeff_home": os.environ["QEFF_HOME"],
                 "attention_preset": args.attention_preset,
                 "qaic_config": qaic_config,
@@ -572,6 +585,7 @@ def main() -> None:
             args.batch_size,
             args.num_devices,
             args.num_cores,
+            args.cache_io_dtype,
         )
     else:
         qpc_path = qeff_model.compile(
@@ -601,6 +615,8 @@ def main() -> None:
     )
     qeff_generated = tokens_from_qeff_output(exec_info)
     print(json.dumps({"event": "qeff_generate_done", "shape": list(qeff_generated.shape)}), flush=True)
+    perf_metrics = serialize_qeff_perf_metrics(exec_info, args.batch_size)
+    print(json.dumps({"event": "qeff_perf_metrics", **perf_metrics}), flush=True)
 
     if args.weight_free:
         install_partial_fp8_dequant_patch()
@@ -631,8 +647,10 @@ def main() -> None:
                     "model_id": args.model_id,
                     "attention_preset": args.attention_preset,
                     "qaic_config": qaic_config,
+                    "cache_io_dtype": args.cache_io_dtype,
                     "onnx_path": str(qeff_model.onnx_path),
                     "qpc_path": str(qpc_path),
+                    "perf_metrics": perf_metrics,
                     "token_comparison": result,
                 },
                 indent=2,

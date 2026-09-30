@@ -70,6 +70,7 @@ class GlmAttentionLayerConfig:
     indexer_block_width: int
     indexer_tokens_per_core: int
     indexer_block_topk: int
+    attention_tokens_per_core: int
 
     def to_hash_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -83,6 +84,8 @@ def resolve_glm_attention_layer_configs(
     context_length: int,
     num_devices: int,
     num_cores: int,
+    seq_len: int = 1,
+    prefill_only: bool = False,
 ) -> tuple[GlmAttentionLayerConfig, ...]:
     """Resolve and validate the production attention plan for every GLM layer."""
     qaic_config = qaic_config or {}
@@ -110,11 +113,19 @@ def resolve_glm_attention_layer_configs(
         raise ValueError("GLM online MLA requires mla_absorption['absorption']=True.")
     if blocking_mode == "prefill_par_online" and not online:
         raise ValueError("blocking_mode='prefill_par_online' requires online MLA absorption.")
+    if blocking_mode == "par" and seq_len != 1:
+        raise ValueError("GLM blocking_mode='par' is a decode-only topology and requires seq_len=1.")
+    if blocking_mode in {"prefill_par", "prefill_par_online"}:
+        if not prefill_only or seq_len <= 1:
+            raise ValueError(
+                f"GLM blocking_mode={blocking_mode!r} requires prefill_only=True and a multi-token seq_len."
+            )
+        if not cache_compressed:
+            raise ValueError(f"GLM blocking_mode={blocking_mode!r} requires compressed MLA cache.")
 
     explicit_dsa_tuning = any(
         key in qaic_config
         for key in (
-            "dsa_topk",
             "indexer_dp",
             "indexer_cp",
             "indexer_kvp",
@@ -126,7 +137,7 @@ def resolve_glm_attention_layer_configs(
         )
     )
     configured_topk = int(getattr(config, "index_topk", 2048))
-    dsa_topk = int(qaic_config.get("dsa_topk", min(configured_topk, context_length)))
+    dsa_topk = min(configured_topk, context_length)
     indexer_dp = int(qaic_config.get("indexer_dp", 1))
     indexer_cp = int(qaic_config.get("indexer_cp", num_devices if explicit_dsa_tuning else 1))
     indexer_kvp = int(qaic_config.get("indexer_kvp", 1))
@@ -168,12 +179,17 @@ def resolve_glm_attention_layer_configs(
         raise ValueError("GLM dsa_topk cannot exceed context_length.")
     if explicit_dsa_tuning and dsa_topk % num_cores_per_device:
         raise ValueError("GLM dsa_topk must be divisible by num_cores_per_device.")
+    if num_kv_blocks > context_length:
+        raise ValueError("GLM num_kv_blocks cannot exceed context_length.")
+    if blocking_mode != "none" and par_num_split > max(1, context_length // num_kv_blocks):
+        raise ValueError("GLM par_num_split cannot exceed the dense MLA KV block width.")
     indexer_local_context = context_length // indexer_cp
     if explicit_dsa_tuning and indexer_local_context % (indexer_num_blocks * num_cores_per_device):
         raise ValueError("GLM indexer local context must be divisible by indexer_num_blocks * num_cores_per_device.")
     indexer_block_width = indexer_local_context // indexer_num_blocks
     indexer_tokens_per_core = indexer_block_width // num_cores_per_device
     indexer_block_topk = min(dsa_topk, indexer_block_width)
+    attention_tokens_per_core = dsa_topk // num_cores_per_device
 
     resolved = []
     for layer_idx in range(config.num_hidden_layers):
@@ -207,6 +223,7 @@ def resolve_glm_attention_layer_configs(
                 indexer_block_width=indexer_block_width,
                 indexer_tokens_per_core=indexer_tokens_per_core,
                 indexer_block_topk=indexer_block_topk,
+                attention_tokens_per_core=attention_tokens_per_core,
             )
         )
     return tuple(resolved)
@@ -491,6 +508,7 @@ class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
                 int(getattr(self.config, "index_topk", 2048)),
                 int(getattr(self.config, "max_position_embeddings", 1)),
             ),
+            attention_tokens_per_core=int(getattr(self.config, "index_topk", 2048)),
         )
         self.qeff_attention_strategy = glm_attention_strategy
 
@@ -878,35 +896,27 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         compressed_axes = []
         for layer_idx, layer in enumerate(self.model.layers[: self.config.num_hidden_layers]):
             layer_config = layer.self_attn.glm_attention_config
-            if layer_config.attention_type == "dsa" and (layer_config.attn_dp > 1 or layer_config.attn_cp > 1):
-                compressed_axes.append(
-                    {
-                        0: (f"glm_attn_batch_local_{layer_idx}" if layer_config.attn_dp > 1 else batch_symbol),
-                        2: f"glm_attn_ctx_local_{layer_idx}" if layer_config.attn_cp > 1 else "ctx_len",
-                    }
-                )
+            if layer_config.attention_type == "dsa":
+                axes = {}
+                if layer_config.attn_dp == 1:
+                    axes[0] = batch_symbol
+                if layer_config.attn_cp == 1:
+                    axes[2] = "ctx_len"
+                compressed_axes.append(axes)
             else:
                 compressed_axes.append({0: batch_symbol, 2: "ctx_len"})
-        indexer_axes = {
-            layer_idx: (
-                {
-                    0: (
-                        f"glm_indexer_batch_local_{layer_idx}"
-                        if self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_dp > 1
-                        else batch_symbol
-                    ),
-                    2: (
-                        f"glm_indexer_ctx_local_{layer_idx}"
-                        if self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_cp > 1
-                        else "ctx_len"
-                    ),
-                }
-                if self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_dp > 1
-                or self.model.layers[layer_idx].self_attn.glm_attention_config.indexer_cp > 1
-                else {0: batch_symbol, 1: "ctx_len"}
-            )
-            for layer_idx in self.get_indexer_cache_layers(self.config)
-        }
+        indexer_axes = {}
+        for layer_idx in self.get_indexer_cache_layers(self.config):
+            layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
+            if layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
+                axes = {}
+                if layer_config.indexer_dp == 1:
+                    axes[0] = batch_symbol
+                if layer_config.indexer_cp == 1:
+                    axes[2] = "ctx_len"
+                indexer_axes[layer_idx] = axes
+            else:
+                indexer_axes[layer_idx] = {0: batch_symbol, 1: "ctx_len"}
         return compressed_axes, indexer_axes
 
     @staticmethod

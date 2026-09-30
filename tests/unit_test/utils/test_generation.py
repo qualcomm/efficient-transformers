@@ -209,6 +209,11 @@ class TestGenerationModuleImportability:
         assert VisionLanguageGeneration is not None
 
 
+@pytest.mark.parametrize("name", ["indexer_key.0", "indexer_key.0_RetainedState"])
+def test_glm_indexer_cache_is_retained_state(name):
+    assert is_retained_state_name(name)
+
+
 # ---------------------------------------------------------------------------
 # Tests: PerfMetrics dataclass
 # ---------------------------------------------------------------------------

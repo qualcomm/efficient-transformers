@@ -58,7 +58,15 @@ def _kv_layer_sort_key(item: Tuple[str, int]) -> Tuple[int, str]:
 def is_retained_state_name(name: str) -> bool:
     """Return True when an I/O binding participates in retained-state cache flow."""
     base_name = name.rsplit("/", 1)[-1]
-    return base_name.startswith(("past_", "conv_state.", "recurrent_state.", "compressed_", "k_pe"))
+    retained_state_prefixes = (
+        "past_",
+        "conv_state.",
+        "recurrent_state.",
+        "compressed_",
+        "k_pe",
+        "indexer_key.",
+    )
+    return base_name.startswith(retained_state_prefixes)
 
 
 class KvDmaHandoff:
