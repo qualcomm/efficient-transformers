@@ -5,10 +5,11 @@ Ticket: <https://jira-dc.qualcomm.com/jira/browse/QRANIUMSW-64771>
 ## Access Status
 
 On 2026-10-01, the local shell was redirected to Qualcomm SSO when requesting
-the JIRA REST endpoint. The ticket's title, fields, description, comments, and
-attachments were therefore not retrieved. Add those details from an
-authenticated JIRA session before treating this note as a complete ticket
-summary.
+the JIRA REST endpoint. A subsequent Bearer-token request also returned an SSO
+redirect (`HTTP 302`) with no ticket JSON. The ticket's title, fields,
+description, comments, and attachments were therefore not retrieved. Add those
+details from an authenticated JIRA session before treating this note as a
+complete ticket summary.
 
 ## Confirmed Local Evidence
 
