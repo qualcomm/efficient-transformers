@@ -102,14 +102,58 @@ compiler-generated helper and retained-state identifiers must either be
 represented in the QEff MDP model or deliberately ignored/translated before
 set-intersection validation.
 
-## Next Investigation
+## Confirmed Root Cause And Fix
 
-1. Reproduce the reporter's full 92-layer export and both MDP-generation
-   steps using the same QEff/QAIC revisions.
-2. Compute the exact difference between compiler-dump `nodeList` values and
-   the ONNX/QEff MDP node set, grouped by identifier class.
-3. Confirm the intended mapping for `_ones_lower` and `recurrent_state.N`.
-4. Make a minimal MDP-generator change only after deciding whether each class
-   should be matched, translated, or excluded from the node-set comparison.
-5. Validate that the generated TS16 x PP6 configuration is accepted by
-   `qaic-compile` and does not omit required partition nodes.
+`generate_disagg_mdp_partition_config()` built its MDP node list from
+`NodeProto.name` only. The missing ticket identifiers are not ONNX nodes:
+
+- `recurrent_state.N` is a retained-state graph input.
+- `model.layers.N.linear_attn._ones_lower` is a layer-scoped ONNX initializer.
+
+Both are valid compiler partition entries. They were absent before the
+intersection, so `INTERSECTION` discarded them and reported them as unmatched.
+The issue is independent of semantic Dynamo node naming.
+
+The minimal generator fix:
+
+1. Recognizes layer indices in dotted `model.layers.N...` names and retained
+   state names.
+2. Adds retained-state graph inputs and layer-scoped initializers immediately
+   before the first emitted node for the corresponding decoder layer.
+3. Continues to exclude weight-free parameter graph inputs, which are external
+   model data rather than compiler partition nodes.
+4. Keeps unmatched compiler-generated names visible in the warning; it does
+   not silence arbitrary name mismatches.
+
+## Safe Reproduction And Validation
+
+The local reproducer `repro/repro_QRANIUMSW-64771.py` builds a minimal ONNX
+graph and compiler dump containing these two classes. It requires no model
+weights, QAIC hardware, or QPC output. Before the fix, its expected MDP entries
+are absent; after the fix it prints:
+
+```text
+QRANIUMSW-64771 regression check passed
+```
+
+The focused regression test is:
+
+```bash
+pytest -q tests/unit_test/base/test_modeling_qeff_base.py::TestMdpExternalGraphValues::test_intersection_keeps_layer_scoped_initializers_and_retained_states
+```
+
+It verifies retained states and layer initializers land in their matching
+pipeline partitions, preserves their order before the decoder callsite, keeps
+an external weight input excluded, and still warns for a deliberately unknown
+compiler-only name.
+
+The attached JIRA compiler dump was also compared in memory with the available
+16-layer Qwen ONNX. Before the fix, 24 relevant dump entries were missing: 12
+retained-state inputs and 12 `_ones_lower` initializers. After the fix, all 121
+entries relevant to layers 0 through 15 were represented in the QEff MDP.
+
+## Remaining Validation
+
+Run the reporter's full 92-layer export and TS16 x PP6 MDP compile using the
+same QEff/QAIC revisions. That remains a hardware and multi-terabyte-storage
+validation; it is intentionally not part of the safe development loop.
