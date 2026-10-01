@@ -76,6 +76,27 @@ while preserving PyTorch ↔ ONNX ↔ on-device parity.
 - Report handoff evidence in reviewer-friendly terms: commands run, pass/fail results,
   artifact paths when relevant, known gaps, and hardware/cache limitations.
 
+## Subagent workflow
+- When delegation is requested, keep the main agent responsible for requirements,
+  dependency ordering, decisions, and final synthesis.
+- Default feature flow: `architect -> planner -> executor -> verifier`. Use `tester`
+  when tests must be added and `parity_verifier` for numerical/runtime parity. Skip
+  `architect` for narrow changes; do not add separate HLD and LLD stages.
+- Parallelize independent read-heavy work such as code exploration, test discovery,
+  log analysis, and review. Do not parallelize dependent parity gates or overlapping
+  production edits.
+- Use one executor for each production-file scope. Concurrent writers require separate
+  worktrees and disjoint ownership.
+- Reuse an existing subagent for follow-up experiments when it already has the relevant
+  context instead of spawning a replacement.
+- Every subagent request must state the goal, measurable acceptance criteria, checkout
+  and environment, constraints/non-goals, stop conditions, and required output.
+- Keep raw logs and bulky artifacts outside the main conversation; return concise
+  findings with commands, metrics, and artifact paths.
+- For parity work, gate stages in order: HF vs QEff PyTorch, then ONNXRuntime, then
+  compile, then QAIC. Establish a baseline, vary one factor per experiment, and report
+  PASS, FAIL, BLOCKED, or INCONCLUSIVE with the first divergence and exact metrics.
+
 ## Required user inputs
 - Ask the user for the virtualenv path only when there is a real need to execute
   Python-dependent commands, such as `python`, `pip`, `pytest`, `ruff`, or
@@ -126,6 +147,9 @@ Use a skill when the task matches its description. Open the `SKILL.md` for the f
   including module mappers, external method mappers, mutators, bespoke transforms,
   registration, and transform tests.
   (`skills_studio/skills/qeff-transform-authoring/SKILL.md`)
+- `qeff-glm-moe-dsa-export` — Enable or debug GLM-MoE-DSA Dynamo ONNX export,
+  FP8 weight-free checkpoint preparation, and decode parity.
+  (`skills_studio/skills/qeff-glm-moe-dsa-export/SKILL.md`)
 - `qeff-pr-reviewer` — Review a PR, branch, or diff in this repo as the senior
   maintainer would: catch AI-slop, design-correctness violations (Auto class,
   transform registration, hash plumbing), and CONTRIBUTING.md test/example/doc gaps.
