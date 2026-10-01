@@ -1,71 +1,115 @@
-# QRANIUMSW-64771: Qwen3.8 QPC Constant Packaging
+# QRANIUMSW-64771: Missing Nodes in Qwen3.8 MDP Generation
 
 Ticket: <https://jira-dc.qualcomm.com/jira/browse/QRANIUMSW-64771>
 
-## Access Status
+## Ticket Metadata
 
-On 2026-10-01, the local shell was redirected to Qualcomm SSO when requesting
-the JIRA REST endpoint. A subsequent Bearer-token request also returned an SSO
-redirect (`HTTP 302`) with no ticket JSON. The ticket's title, fields,
-description, comments, and attachments were therefore not retrieved. Add those
-details from an authenticated JIRA session before treating this note as a
-complete ticket summary.
+| Field | Value |
+| --- | --- |
+| Summary | Missing nodes in MDP generation of Qwen3.8 2.4T |
+| Status | Open |
+| Priority | P1 |
+| Component | `MODEL_ONBOARDING` |
+| Label | `onboarding` |
+| Reporter | Chulhee Lee |
+| Assignee | Anuj Gupta |
+| Created | 2026-09-30 12:22:34 -0700 |
+| Updated | 2026-09-30 15:45:40 -0700 |
 
-## Confirmed Local Evidence
+The ticket was fetched through the authenticated tools endpoint on 2026-10-01.
+There were no ticket comments at that time.
 
-This record is associated with the Qwen3.8-2.4T-A95B 16-layer weight-free
-decode compile investigated locally. It uses:
+## Reported Problem
 
-```text
-dtype:              float16
-layers:             16
-weight-free:        enabled
-ONNX subfunctions:  enabled
-blocking:           kv_headpar
-num_kv_blocks:      8
-headpar_split:      4
-replicate KV heads: enabled
-devices:            16
-cores/device:       4
-ctx_len:            262144
-prefill_seq_len:    1
-```
-
-The Dynamo ONNX export and the rebuilt weight-free checkpoint preparation
-completed. QAIC then emitted 16 compiled decode functions, `Decode_slice00`
-through `Decode_slice15`. Each function's QPC `constants.bin` was about
-568.5 GB:
+The report concerns a Qwen3.8-2.4T weight-free Dynamo ONNX export with ONNX
+subfunctions, intended for a TS16 x PP6 deployment. When QEfficient generates
+an MDP configuration from the compiler dump, nodes in that dump cannot be
+found in the QEff MDP representation:
 
 ```text
-568,525,212,116 bytes per slice
+WARNING - QEfficient.compile.mdp_generator - 138 compiler-dump nodes not found
+in QEff MDP (compiler may have renamed them). Examples:
+['model.layers.32.linear_attn._ones_lower', 'recurrent_state.42',
+ 'model.layers.46.linear_attn._ones_lower', 'recurrent_state.78',
+ 'model.layers.10.linear_attn._ones_lower']
 ```
 
-The compiler's planned `programqpc.bin` offset after all 16 slices was about
-9.10 TB. The compile failed while writing `constants.bin` once the workspace
-filled, with:
+The reporter states that the generated MDP file omits many nodes present in the
+compiler-generated original MDP dump and that using the result then causes a
+compile error.
+
+## Reporter Reproduction
+
+The reporter first generates a compiler MDP dump with `qaic-compile` against a
+weight-free ONNX model, using retained state and ONNX subfunctions:
+
+```bash
+/opt/qti-aic/exec/qaic-compile \
+  -m=../Qwen3_5MoeForCausalLM/Qwen3_5MoeForCausalLM-77ec2736ade84c5b/Qwen3_5MoeForCausalLM.onnx \
+  -aic-hw -convert-to-fp16 -aic-num-cores=4 \
+  -aic-binary-dir=./partition_temp_qpc \
+  -aic-perf-metrics -aic-perf-warnings -stats-level=50 -ddr-stats \
+  -sub-functions -retained-state \
+  -custom-IO-list-file=../Qwen3_5MoeForCausalLM/Qwen3_5MoeForCausalLM-77ec2736ade84c5b/qpc-0f8ab6e0154ed8d9/custom_io.yaml \
+  -network-specialization-config=../Qwen3_5MoeForCausalLM/Qwen3_5MoeForCausalLM-77ec2736ade84c5b/qpc-0f8ab6e0154ed8d9/specializations.json \
+  -mdp-dump-partition-config=./mdp_dump_partition.json
+```
+
+They then call `generate_disagg_mdp_config()` with:
+
+```python
+generate_disagg_mdp_config(
+    onnx_path=".../Qwen3_5MoeForCausalLM.onnx",
+    compile_dir=Path("qpcs"),
+    mdp_ts_num_devices=96,
+    mdp_num_partitions=6,
+    mdp_strategy=MdpStrategy.INTERSECTION,
+    mdp_compiler_dump_path=".../mdp_dump_partition.json",
+    num_cores=4,
+    num_layers=92,
+)
+```
+
+## Attached Compiler Dump
+
+Attachment: `mdp_dump_partition.json` (20,776 bytes).
+
+The attached dump has two partitions and 311 node references. It contains a
+mix of already-semantic operation names, semantic layer helper names, and
+generated retained-state names. Examples:
 
 ```text
-Failure while writing constants.bin to QPC.
+/model/layers.0/QEffQwen3_5MoeLinearDecoderLayer__node_invoke_subgraph__2
+model.layers.0.linear_attn._ones_lower
+recurrent_state.0
+/lm_head/linear__node_linear
 ```
 
-This was not a Dynamo export, ONNX correctness, or numerical-parity failure.
-`ctx_len` affects retained KV-state capacity, but the dominant artifact size is
-the repeated model constants materialized for all 16 compiled MDP slices.
+The layer-specific `_ones_lower` helper names do not have the slash-prefixed
+ONNX naming convention used by the semantic Dynamo name transform. The
+`recurrent_state.N` values are compiler/runtime retained-state identifiers,
+not ordinary ONNX operator names. Both categories require explicit treatment
+in the MDP node-matching logic; semantic `NodeProto.name` normalization alone
+cannot guarantee those identifiers are present in the QEff ONNX node set.
 
-## Related Checkpoint Cache Incident
+## Relationship to QEff Naming Work
 
-An earlier 16-layer run failed before compilation because its prepared
-weight-free checkpoint had a completion sentinel but was incomplete: its index
-referenced 42 shards while only 12 existed. Removing that prepared directory
-allowed a correct rebuild with all 42 required shards. This is a separate
-checkpoint-cache validation issue, not the QPC packaging failure described
-above.
+`DynamoSemanticNodeNameTransform` addresses generic Dynamo node names such as
+`node_linear` by promoting `pkg.torch.onnx.name_scopes` into `NodeProto.name`.
+It improves trace and MDP matching for ordinary ONNX operators and top-level
+subfunction callsites. This ticket demonstrates the remaining boundary:
+compiler-generated helper and retained-state identifiers must either be
+represented in the QEff MDP model or deliberately ignored/translated before
+set-intersection validation.
 
-## Open Questions
+## Next Investigation
 
-- Is duplication of approximately 568.5 GB of constants per MDP decode slice
-  expected for this compiler configuration?
-- Can the compiler share or deduplicate immutable constants across the 16
-  slices while preserving device placement and runtime semantics?
-- What QPC storage estimate should users apply before attempting this class of
-  multi-device compile?
+1. Reproduce the reporter's full 92-layer export and both MDP-generation
+   steps using the same QEff/QAIC revisions.
+2. Compute the exact difference between compiler-dump `nodeList` values and
+   the ONNX/QEff MDP node set, grouped by identifier class.
+3. Confirm the intended mapping for `_ones_lower` and `recurrent_state.N`.
+4. Make a minimal MDP-generator change only after deciding whether each class
+   should be matched, translated, or excluded from the node-set comparison.
+5. Validate that the generated TS16 x PP6 configuration is accepted by
+   `qaic-compile` and does not omit required partition nodes.
