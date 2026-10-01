@@ -20,6 +20,12 @@ from QEfficient.utils import create_json
 logger = logging.getLogger(__name__)
 
 _MAX_INLINABLE_NODES = 100
+_LAYER_NAME_RE = re.compile(r"(?:^|[/.])layers\.(\d+)(?=$|[/.])")
+_GPT2_LAYER_NAME_RE = re.compile(r"(?:^|/)h\.(\d+)(?=$|/)")
+_SUBFUNCTION_LAYER_NAME_RE = re.compile(r"(?:^|/)layer_(\d+)(?=$|/)")
+_RETAINED_STATE_NAME_RE = re.compile(
+    r"^(?:past_key|past_value|compressed_kv|k_pe|conv_state|recurrent_state)\.(\d+)(?:_|$)"
+)
 
 
 class MdpStrategy(str, Enum):
@@ -281,19 +287,10 @@ def _get_layer_num(node_name: str) -> Optional[int]:
                            prefixed with the layer index it belongs to, e.g.
                            "layer_3//model/embed_tokens/Gather")
     """
-    for part in node_name.split("/"):
-        if part.startswith("layers."):
-            suffix = part[len("layers.") :]
-            if suffix.isdigit():
-                return int(suffix)
-        elif part.startswith("h."):
-            suffix = part[len("h.") :]
-            if suffix.isdigit():
-                return int(suffix)
-        elif part.startswith("layer_"):
-            suffix = part[len("layer_") :]
-            if suffix.isdigit():
-                return int(suffix)
+    for pattern in (_LAYER_NAME_RE, _GPT2_LAYER_NAME_RE, _SUBFUNCTION_LAYER_NAME_RE, _RETAINED_STATE_NAME_RE):
+        match = pattern.search(node_name)
+        if match:
+            return int(match.group(1))
     return None
 
 
@@ -509,12 +506,27 @@ def generate_disagg_mdp_partition_config(
     inlined_functions = {f.name for f in model.functions} - non_inlined_functions
     local_functions = {f.name: f for f in model.functions}
 
+    # The compiler MDP dump includes retained-state graph inputs and layer-scoped
+    # initializers (for example Qwen linear-attention's `_ones_lower`) as
+    # partitionable names. They are graph values rather than NodeProto entries,
+    # so collect them explicitly while excluding external parameter inputs.
+    external_values_by_layer: Dict[int, List[str]] = {}
+    for graph_input in model.graph.input:
+        match = _RETAINED_STATE_NAME_RE.match(graph_input.name)
+        if match:
+            external_values_by_layer.setdefault(int(match.group(1)), []).append(graph_input.name)
+    for initializer in model.graph.initializer:
+        layer_num = _get_layer_num(initializer.name)
+        if layer_num is not None:
+            external_values_by_layer.setdefault(layer_num, []).append(initializer.name)
+
     # Single pass: assign main-graph nodes by layer index.  Inlined call-sites
     # are expanded in topological position so nodeList order matches the ONNX
     # topsort — required by the compiler's SplitPlanMerge.
     partitions: List[List[str]] = [[] for _ in range(num_partitions)]
     current_layer_partition = 0
     seen_first_layer = False
+    emitted_external_value_layers: Set[int] = set()
 
     for node in model.graph.node:
         if not node.name:
@@ -533,6 +545,10 @@ def generate_disagg_mdp_partition_config(
             current_layer_partition = partition_idx
         else:
             partition_idx = 0 if not seen_first_layer else current_layer_partition
+
+        if layer_num is not None and layer_num not in emitted_external_value_layers:
+            partitions[partition_idx].extend(external_values_by_layer.get(layer_num, []))
+            emitted_external_value_layers.add(layer_num)
 
         if node.op_type in inlined_functions:
             # Expand the call-site inline: emit sub-nodes at this topological position.
