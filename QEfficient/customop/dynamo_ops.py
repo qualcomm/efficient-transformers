@@ -595,7 +595,8 @@ def glm_paged_scatter_op(
     result = data.clone()
     batch, rows, seq_len = updates.shape[:3]
     row = torch.arange(rows, device=data.device).view(1, rows, 1).expand(batch, rows, seq_len)
-    result[block_id.long(), row, address.long()] = updates
+    valid = block_id != torch.iinfo(torch.int32).max
+    result[block_id[valid].long(), row[valid], address[valid].long()] = updates[valid]
     return result
 
 

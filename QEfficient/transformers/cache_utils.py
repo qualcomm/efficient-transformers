@@ -31,7 +31,6 @@ from QEfficient.customop import (
     glm_int_div,
     glm_int_mod,
     glm_paged_scatter,
-    glm_sparse_scatter,
 )
 
 
@@ -801,55 +800,59 @@ def glm_dsa_scatter_cache(cache, position_ids, updates, *, dp: int, cp: int):
     batch_local = batch // dp
     if cache.ndim != 4 or cache.shape[:2] != (batch_local, dp * cp):
         raise ValueError("GLM DSA cache must use [B/DP,DP*CP,T/CP,D].")
-    updates = updates.view(batch_local, dp, seq_len, dim)
-    positions = position_ids.view(batch_local, dp, seq_len).to(torch.int32)
-    if seq_len == 1:
-        owner = glm_int_mod(positions, cp).to(torch.int32)
-        row_base = torch.arange(dp, device=updates.device, dtype=torch.int32).view(1, dp, 1)
-        row_ids = row_base + owner if cp == 1 else row_base * cp + owner
-        batch_ids = torch.arange(batch_local, device=updates.device, dtype=torch.int32).view(batch_local, 1, 1)
-        batch_ids = batch_ids.expand_as(row_ids)
-        addresses = glm_int_div(positions, cp).to(torch.int32)
-        indices = torch.stack((batch_ids, row_ids, addresses), dim=-1)
-        return glm_sparse_scatter(cache, indices, updates)
+    updates_dp = updates.view(dp, batch_local, seq_len, dim).permute(1, 0, 2, 3)
+    positions_dp = position_ids.view(dp, batch_local, seq_len).permute(1, 0, 2).to(torch.int32)
+    rows = dp * cp
+    updates_rows = (
+        updates_dp.unsqueeze(2).expand(batch_local, dp, cp, seq_len, dim).reshape(batch_local, rows, seq_len, dim)
+    )
 
-    owner = glm_int_mod(positions, cp).to(torch.int32)
-    addresses = glm_int_div(positions, cp).to(torch.int32)
+    owner = glm_int_mod(positions_dp, cp).unsqueeze(2).expand(batch_local, dp, cp, seq_len)
+    row_owner = torch.arange(cp, device=updates.device, dtype=torch.int32).view(1, 1, cp, 1)
+    row_live = (owner == row_owner).reshape(batch_local, rows, seq_len)
     block_id = torch.arange(batch_local, device=updates.device, dtype=torch.int32).view(batch_local, 1, 1)
-    rows = []
-    for row in range(dp * cp):
-        dp_idx, cp_idx = divmod(row, cp)
-        cache_row = cache[:, row : row + 1]
-        update_row = updates[:, dp_idx : dp_idx + 1]
-        live = (owner[:, dp_idx : dp_idx + 1] == cp_idx).unsqueeze(-1)
-        scattered = glm_paged_scatter(
-            cache_row,
-            block_id.expand(batch_local, 1, seq_len),
-            addresses[:, dp_idx : dp_idx + 1],
-            torch.where(live, update_row, torch.zeros_like(update_row)),
-        )
-        rows.append(torch.where(live.any(dim=2, keepdim=True), scattered, cache_row))
-    return torch.cat(rows, dim=1)
+    block_id = block_id.expand(batch_local, rows, seq_len)
+    block_id = torch.where(
+        row_live,
+        block_id,
+        torch.full_like(block_id, torch.iinfo(torch.int32).max),
+    )
+    addresses = (
+        glm_int_div(positions_dp, cp)
+        .unsqueeze(2)
+        .expand(batch_local, dp, cp, seq_len)
+        .reshape(batch_local, rows, seq_len)
+        .to(torch.int32)
+    )
+    return glm_paged_scatter(cache, block_id, addresses, updates_rows)
 
 
 def glm_dsa_gather_cache(cache, indices, valid, *, dp: int, cp: int):
     """Gather logical indices from a folded GLM DSA retained state."""
-    batch, gather_len = indices.shape
+    batch = indices.shape[0]
+    selection_shape = indices.shape[1:]
     batch_local = batch // dp
     if cache.ndim != 4 or cache.shape[:2] != (batch_local, dp * cp):
         raise ValueError("GLM DSA cache must use [B/DP,DP*CP,T/CP,D].")
-    indices = indices.view(batch_local, dp, gather_len).to(torch.int32)
-    valid = valid.view(batch_local, dp, gather_len)
-    owner = glm_int_mod(indices, cp).to(torch.int32)
-    local_indices = glm_int_div(indices, cp).to(torch.int32)
-    cp_rows = torch.arange(cp, device=cache.device, dtype=torch.int32).view(1, 1, cp, 1)
+    indices = indices.view(dp, batch_local, *selection_shape).permute(1, 0, *range(2, 2 + len(selection_shape)))
+    valid = valid.view(dp, batch_local, *selection_shape).permute(1, 0, *range(2, 2 + len(selection_shape)))
+    safe_indices = torch.where(valid, indices, torch.zeros_like(indices)).to(torch.int64)
+    local_slots = cache.shape[2]
+    global_context = local_slots * cp
+    logical_positions = torch.arange(global_context, device=cache.device, dtype=torch.int32)
+    owner_table = glm_int_mod(logical_positions, cp)
+    address_table = glm_int_div(logical_positions, cp)
+    owner = owner_table[safe_indices]
+    local_indices = address_table[safe_indices]
+    cp_rows = torch.arange(cp, device=cache.device, dtype=torch.int32).view(1, 1, cp, *([1] * len(selection_shape)))
     row_valid = valid.unsqueeze(2) & (owner.unsqueeze(2) == cp_rows)
-    local_indices = local_indices.unsqueeze(2).expand(batch_local, dp, cp, gather_len)
+    local_indices = local_indices.unsqueeze(2).expand(batch_local, dp, cp, *selection_shape)
     invalid = torch.full_like(local_indices, torch.iinfo(torch.int32).max)
-    gather_indices = torch.where(row_valid, local_indices, invalid).reshape(batch_local, dp * cp, gather_len)
+    gather_indices = torch.where(row_valid, local_indices, invalid).reshape(batch_local, dp * cp, -1)
     gathered = glm_folded_row_gather(cache, gather_indices)
-    gathered = torch.where(row_valid.reshape(batch_local, dp * cp, gather_len).unsqueeze(-1), gathered, 0)
-    return gathered.view(batch_local, dp, cp, gather_len, -1), row_valid
+    gathered = gathered.reshape(batch_local, dp, cp, *selection_shape, cache.shape[-1])
+    gathered = torch.where(row_valid.unsqueeze(-1), gathered, 0)
+    return gathered, row_valid
 
 
 class QEffDynamicCompressedKVRopeLayer:

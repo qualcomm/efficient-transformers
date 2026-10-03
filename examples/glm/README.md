@@ -4,7 +4,8 @@
 and DSA attention configurations. It supports weight-free ONNX export, QAIC compilation, and decode generation.
 
 `glm53_four_layer_prefill_compile.py` exports and compiles a separate multi-token prefill-only graph for dense
-prefill-parallel modes. Use it for disaggregated-serving experiments where prefill and decode run as separate QPCs.
+prefill-parallel or folded DSA modes. Use it for disaggregated-serving experiments where prefill and decode run as
+separate QPCs.
 
 ## Setup
 
@@ -85,6 +86,19 @@ python examples/glm/glm53_four_layer_prefill_compile.py \
 Use `dense_prefill_parallel_online` for the online prefill variant. This script intentionally uses a regular loaded
 model path. Weight-free disaggregated compile is currently blocked by the core export/compile contract.
 
+Run the folded DSA prefill path with:
+
+```bash
+python examples/glm/glm53_four_layer_prefill_compile.py \
+  --attention-preset dsa_prefill_cp1 \
+  --prefill-seq-len 512 \
+  --ctx-len 65536 \
+  --qeff-home "$QEFF_HOME"
+```
+
+The DSA preset computes per-query Top-K indices in query blocks, gathers selected compressed-KV and RoPE rows from
+the folded cache, and evaluates sparse MLA with KV blocking and online-softmax accumulation.
+
 ## Passing custom `qaic_config`
 
 Use `--attention-qaic-json` to shallow-merge a JSON object over the selected preset. For example, this selects the
@@ -119,8 +133,10 @@ The dense benchmark modes accept these fields:
 }
 ```
 
-The prefill script accepts `blocking_mode=prefill_par` and `blocking_mode=prefill_par_online` through its presets and
-requires `prefill_only=True` with a multi-token `seq_len`.
+The prefill script accepts `blocking_mode=prefill_par` and `blocking_mode=prefill_par_online` through its dense
+presets. Its `dsa_prefill_cp1` preset additionally uses `indexer_ql_chunk`, `indexer_q_block_size`,
+`indexer_topk_blocking`, `indexer_prefill_parallel`, `sparse_q_block_size`, and `sparse_kv_num_blocks`. All prefill
+presets require `prefill_only=True` with a multi-token `seq_len`.
 
 DSA topology is controlled independently for the indexer and sparse attention:
 

@@ -5869,6 +5869,68 @@ def test_glm_cp2_folded_decode_matches_cp1_sparse_attention():
         torch.testing.assert_close(cp2_outputs.logits, cp1_outputs.logits, atol=1e-5, rtol=1e-5)
 
 
+@pytest.mark.parametrize(("batch_size", "dp", "cp"), [(1, 1, 1), (1, 1, 2), (2, 2, 1)])
+def test_glm_folded_dsa_prefill_matches_hf_and_preserves_shared_indexer(batch_size, dp, cp):
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+
+    from QEfficient.transformers.models.pytorch_transforms import BlockingAttentionTransform
+
+    config = _tiny_glm_moe_dsa_config()
+    torch.manual_seed(31)
+    hf_model = GlmMoeDsaForCausalLM(config).eval()
+    qeff_model = _tiny_glm_moe_dsa_qeff_model(hf_model)
+    qaic_config = {
+        "indexer_dp": dp,
+        "indexer_cp": cp,
+        "indexer_kvp": 1,
+        "attn_dp": dp,
+        "attn_cp": cp,
+        "attn_kvp": 1,
+        "indexer_num_blocks": 1,
+        "num_cores_per_device": 2,
+        "indexer_ql_chunk": 4,
+        "indexer_q_block_size": 4,
+        "indexer_topk_blocking": 2,
+        "indexer_prefill_parallel": True,
+        "sparse_q_block_size": 4,
+        "sparse_kv_num_blocks": 2,
+    }
+    qeff_model, transformed = BlockingAttentionTransform.apply(
+        qeff_model,
+        None,
+        qaic_config=qaic_config,
+        batch_size=batch_size,
+        context_length=8,
+        num_devices=dp * cp,
+        num_cores=2,
+        seq_len=4,
+        prefill_only=True,
+    )
+    assert transformed
+
+    input_ids = torch.tensor([[1, 5, 7, 9]], dtype=torch.long).expand(batch_size, -1)
+    position_ids = torch.arange(input_ids.shape[1], dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+    with torch.no_grad():
+        hf_logits = hf_model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids, dtype=torch.bool),
+            position_ids=position_ids,
+        ).logits[:, -1]
+        qeff_outputs = qeff_model(
+            input_ids=input_ids,
+            attention_mask=torch.ones((batch_size, 8), dtype=torch.bool),
+            position_ids=position_ids,
+            compressed_kvs=list(qeff_model.get_dummy_pkv_cache(config, batch_size=batch_size, seq_len=8)),
+            indexer_key_cache=list(qeff_model.get_dummy_indexer_cache(config, batch_size=batch_size, seq_len=8)),
+            use_cache=True,
+        )
+
+    torch.testing.assert_close(qeff_outputs.logits.squeeze(1), hf_logits, atol=1e-5, rtol=1e-5)
+    compressed_kvs, indexer_key_cache = qeff_outputs.past_key_values
+    assert len(compressed_kvs) == config.num_hidden_layers
+    assert len(indexer_key_cache) == 3
+
+
 @pytest.mark.parametrize(
     "mla_absorption",
     [
