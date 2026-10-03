@@ -19,6 +19,7 @@ All tests run on CPU only, using tiny in-memory models.
 
 import pytest
 import torch
+from unittest.mock import patch
 
 from QEfficient.transformers.models.pytorch_transforms import (
     CustomOpsTransform,
@@ -283,6 +284,46 @@ def make_tiny_qwen3_5_moe():
         layer_types=["full_attention", "linear_attention"],
     )
     return Qwen3_5MoeForCausalLM(cfg).eval(), cfg
+
+
+def make_tiny_qwen4_exp():
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForCausalLM
+
+    cfg = Qwen4ExpTextConfig(
+        vocab_size=32,
+        eos_token_id=0,
+        hidden_size=16,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+        num_experts=2,
+        num_experts_per_tok=1,
+        hc_count=2,
+        hc_lowrank=4,
+        ple_layer_ids=[2],
+        ple_embed_dim=16,
+        ple_conv_kernel_size=2,
+        ngram_size=2,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=2,
+        split_ngram_parts=1,
+        indexer_n_heads=1,
+        indexer_kv_heads=1,
+        indexer_head_dim=8,
+        indexer_budget=4,
+        indexer_compress_ratio=2,
+        max_position_embeddings=8,
+        layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+    )
+    return Qwen4ExpForCausalLM(cfg).eval(), cfg
 
 
 def make_tiny_gptbigcode():
@@ -666,6 +707,134 @@ class TestQwen3_5MoEAccuracy:
         with torch.no_grad():
             out = model(**qeff_inputs)
         assert torch.isfinite(out.logits).all(), "Qwen3.5-MoE combined transforms must produce finite logits"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Qwen4-Exp
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.transforms
+class TestQwen4ExpDecode:
+    """Qwen4-Exp uses explicit decode states and host-provided PLE embeddings."""
+
+    def _transform_and_inputs(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpForCausalLM
+
+        model, config = make_tiny_qwen4_exp()
+        model, applied = KVCacheTransform.apply(model)
+        assert applied
+        assert isinstance(model, QEffQwen4ExpForCausalLM)
+        inputs = model.get_dummy_inputs(batch_size=1)
+        return model, config, inputs
+
+    def test_qwen4_exp_schedule_and_retained_state_abi(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import qeff_prepare_qwen4_exp_mrope
+
+        model, config, inputs = self._transform_and_inputs()
+        assert [layer.layer_type for layer in model.model.layers] == [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "qwen_sparse_attention",
+        ]
+        expected_names = [
+            "gdn_conv_state.0",
+            "gdn_recurrent_state.0",
+            "gdn_conv_state.1",
+            "gdn_recurrent_state.1",
+            "ple_conv_state.1",
+            "gdn_conv_state.2",
+            "gdn_recurrent_state.2",
+            "qsa_key_state.3",
+            "qsa_value_state.3",
+            "qsa_index_state.3",
+            "qsa_partial_state.3",
+        ]
+        assert model.get_retained_state_names() == expected_names
+        assert model.get_onnx_past_key_value_names(1) == expected_names[2:5]
+        assert model.get_onnx_past_key_value_names(3) == expected_names[7:]
+        assert model.get_output_names()[1:] == [f"{name}_RetainedState" for name in expected_names]
+        assert set(expected_names) <= set(model.get_onnx_dynamic_axes())
+        assert inputs["ngram_embeddings"].shape == (1, 1, config.ple_embed_dim)
+        assert inputs["past_key_values"][0][1].dtype == torch.float32
+        assert inputs["past_key_values"][3][3].dtype == inputs["ngram_embeddings"].dtype
+        assert isinstance(model.model.sin_cached, torch.nn.Parameter)
+        assert isinstance(model.model.cos_cached, torch.nn.Parameter)
+        mrope_position_ids = inputs["position_ids"][1:]
+        cos, sin = qeff_prepare_qwen4_exp_mrope(
+            model.model.cos_cached,
+            model.model.sin_cached,
+            mrope_position_ids,
+            config.rope_parameters.get("mrope_section", [11, 11, 10]),
+        )
+        assert cos.shape == sin.shape == (1, 1, config.head_dim)
+        shifted_cos, _ = qeff_prepare_qwen4_exp_mrope(
+            model.model.cos_cached,
+            model.model.sin_cached,
+            mrope_position_ids + 1,
+            config.rope_parameters.get("mrope_section", [11, 11, 10]),
+        )
+        assert not torch.equal(cos, shifted_cos)
+
+    def test_qwen4_exp_decode_accepts_legacy_cache_and_masks_future_qsa_slots(self):
+        model, config, inputs = self._transform_and_inputs()
+        legacy = tuple(tuple(state.clone() for state in layer) for layer in inputs["past_key_values"])
+        gdn = model.model.layers[0].linear_attn
+        qsa = model.model.layers[3].self_attn
+        with (
+            patch.object(gdn, "forward", wraps=gdn.forward) as gdn_forward,
+            patch.object(qsa, "forward", wraps=qsa.forward) as qsa_forward,
+        ):
+            output = model(
+                input_ids=inputs["input_ids"],
+                ngram_embeddings=inputs["ngram_embeddings"],
+                position_ids=inputs["position_ids"],
+                past_key_values=legacy,
+            )
+        assert output.logits.shape == (1, 1, config.vocab_size)
+        assert isinstance(output.past_key_values, tuple)
+        assert gdn_forward.call_args.kwargs["position_embeddings"] is not None
+        assert qsa_forward.call_args.args[1][0].shape[-1] == config.head_dim
+
+        cache = model.qeff_cache_from_legacy(legacy)
+        cache.qsa_value_states[3][:, :, 7].fill_(1000)
+        hidden_states = model.model.embed_tokens(inputs["input_ids"])
+        position_embeddings = model.model.rotary_emb(hidden_states, inputs["position_ids"][1:])
+        cache.position_ids = inputs["position_ids"][1:]
+        with_future, _ = model.model.layers[3].self_attn(hidden_states, position_embeddings, past_key_values=cache)
+        cache = model.qeff_cache_from_legacy(legacy)
+        cache.position_ids = inputs["position_ids"][1:]
+        without_future, _ = model.model.layers[3].self_attn(hidden_states, position_embeddings, past_key_values=cache)
+        torch.testing.assert_close(with_future, without_future)
+
+    def test_qwen4_exp_host_ngram_lookup_matches_reference_hash_and_tracks_history(self, tmp_path):
+        """The host lookup follows upstream PLE IDs without retaining a table in QEff."""
+        import json
+
+        from safetensors.torch import save_file
+
+        from QEfficient.transformers.models.qwen4_exp.host_ngram import HostNGramHistory, ShardedNGramLookup
+
+        model, config = make_tiny_qwen4_exp()
+        reference = model.model.layers[1].ple.ple_embedding
+        with torch.no_grad():
+            reference.ngram_embedding.weight.copy_(
+                torch.arange(reference.ngram_embedding.weight.numel(), dtype=torch.float32).view_as(
+                    reference.ngram_embedding.weight
+                )
+            )
+        table_key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight"
+        save_file({table_key: reference.ngram_embedding.weight}, tmp_path / "table.safetensors")
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {table_key: "table.safetensors"}}))
+        history = HostNGramHistory(config.ngram_size, config.eos_token_id)
+        lookup = ShardedNGramLookup(config, tmp_path)
+        input_ids = torch.tensor([[3]])
+        expected = reference(input_ids, past_key_values=None)
+        actual = lookup.lookup(input_ids, history)
+        torch.testing.assert_close(actual, expected)
+        assert actual.shape == (1, 1, config.ple_embed_dim)
+        assert history.token_ids.tolist() == [[3]]
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,23 @@ from transformers.models.mistral3.modeling_mistral3 import (
 )
 from transformers.models.pixtral.modeling_pixtral import PixtralVisionModel
 
+try:
+    from transformers.models.pixtral.modeling_pixtral import position_ids_in_meshgrid
+except ImportError:
+
+    def position_ids_in_meshgrid(patch_embeds_list, max_width):
+        """Transformers 5.18 Pixtral's device-local axial position meshgrid."""
+        del max_width
+        position_ids = []
+        for patch in patch_embeds_list:
+            hpos_ids, wpos_ids = torch.meshgrid(
+                torch.arange(patch.shape[-2], device=patch.device),
+                torch.arange(patch.shape[-1], device=patch.device),
+                indexing="ij",
+            )
+            position_ids.append(torch.stack([hpos_ids.flatten(), wpos_ids.flatten()], dim=-1))
+        return torch.cat(position_ids, dim=0)
+
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.logging_utils import QEFFLogger
