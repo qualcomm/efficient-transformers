@@ -96,6 +96,116 @@ def blocked_glm_dsa_topk(
     return torch.gather(candidate_indices, -1, selected).reshape(batch_size, query_length, final_topk).to(torch.int32)
 
 
+def blocked_glm_dsa_prefill_topk(
+    query: torch.Tensor,
+    head_weights: torch.Tensor,
+    folded_key_cache: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    position_ids: torch.Tensor,
+    *,
+    scale: float,
+    dp: int,
+    cp: int,
+    num_blocks: int,
+    num_cores_per_device: int,
+    query_chunk_size: int,
+    query_block_size: int,
+    topk_blocking: int,
+    parallel: bool,
+    final_topk: int,
+) -> torch.Tensor:
+    """Build one blocked DSA Top-K list for every prefill query token."""
+    batch_size, query_length, num_heads, head_dim = query.shape
+    batch_local = batch_size // dp
+    local_context = folded_key_cache.shape[2]
+    block_width = local_context // num_blocks
+    if block_width % num_cores_per_device:
+        raise ValueError("GLM DSA prefill indexer block width must be divisible by num_cores_per_device.")
+    tokens_per_core = block_width // num_cores_per_device
+    keys = folded_key_cache.view(
+        batch_local,
+        dp,
+        cp,
+        num_blocks,
+        num_cores_per_device,
+        tokens_per_core,
+        head_dim,
+    )
+    query = query.view(dp, batch_local, query_length, num_heads, head_dim).permute(1, 0, 2, 3, 4).float()
+    head_weights = head_weights.view(dp, batch_local, query_length, num_heads).permute(1, 0, 2, 3).float()
+    position_ids = position_ids.view(dp, batch_local, query_length).permute(1, 0, 2)
+    if attention_mask is not None:
+        attention_mask = attention_mask.view(dp, batch_local, query_length, -1).permute(1, 0, 2, 3)
+
+    cp_ids = torch.arange(cp, device=query.device, dtype=torch.int64).view(cp, 1, 1)
+    core_offsets = (
+        torch.arange(num_cores_per_device, device=query.device, dtype=torch.int64).view(1, num_cores_per_device, 1)
+        * tokens_per_core
+    )
+    token_offsets = torch.arange(tokens_per_core, device=query.device, dtype=torch.int64).view(1, 1, tokens_per_core)
+    output_chunks = []
+    topk = min(final_topk, local_context * cp)
+
+    for query_chunk_start in range(0, query_length, query_chunk_size):
+        query_chunk_end = min(query_chunk_start + query_chunk_size, query_length)
+        query_blocks = []
+        for query_block_start in range(query_chunk_start, query_chunk_end, query_block_size):
+            query_block_end = query_block_start + query_block_size
+            query_block = query[:, :, query_block_start:query_block_end]
+            weight_block = head_weights[:, :, query_block_start:query_block_end]
+            position_block = position_ids[:, :, query_block_start:query_block_end]
+            mask_block = attention_mask[:, :, query_block_start:query_block_end] if attention_mask is not None else None
+            score_blocks = []
+            index_blocks = []
+            for block_idx in range(num_blocks):
+                block_keys = keys[:, :, :, block_idx].reshape(
+                    batch_local,
+                    dp,
+                    cp * num_cores_per_device,
+                    tokens_per_core,
+                    head_dim,
+                )
+                head_scores = torch.einsum("bpqhd,bpltd->bpqlht", query_block, block_keys.float()) * scale
+                scores = (F.relu(head_scores) * weight_block.unsqueeze(3).unsqueeze(-1)).sum(dim=-2)
+
+                local_ids = block_idx * block_width + core_offsets + token_offsets
+                global_ids = local_ids * cp + cp_ids
+                global_ids = global_ids.reshape(1, 1, 1, cp * num_cores_per_device, tokens_per_core)
+                global_ids = global_ids.expand(
+                    batch_local,
+                    dp,
+                    query_block_size,
+                    cp * num_cores_per_device,
+                    tokens_per_core,
+                )
+                invalid = global_ids > position_block.unsqueeze(-1).unsqueeze(-1)
+                flat_ids = global_ids.reshape(batch_local, dp, query_block_size, -1)
+                if mask_block is not None:
+                    invalid = invalid | torch.gather(mask_block, -1, flat_ids).reshape_as(invalid)
+                score_blocks.append(
+                    scores.reshape(batch_local, dp, query_block_size, -1).masked_fill(
+                        invalid.reshape(batch_local, dp, query_block_size, -1), float("-inf")
+                    )
+                )
+                index_blocks.append(flat_ids)
+
+            candidate_scores = torch.cat(score_blocks, dim=-1)
+            candidate_indices = torch.cat(index_blocks, dim=-1)
+            sub_blocks = topk_blocking if parallel else 1
+            query_sub_block_size = query_block_size // sub_blocks
+            selected_blocks = []
+            for sub_block_idx in range(sub_blocks):
+                sub_start = sub_block_idx * query_sub_block_size
+                sub_end = sub_start + query_sub_block_size
+                selected = torch.topk(candidate_scores[:, :, sub_start:sub_end], k=topk, dim=-1).indices
+                selected_blocks.append(torch.gather(candidate_indices[:, :, sub_start:sub_end], -1, selected))
+            query_blocks.append(torch.cat(selected_blocks, dim=2))
+        output_chunks.append(torch.cat(query_blocks, dim=2))
+
+    output = torch.cat(output_chunks, dim=2)
+    return output.permute(1, 0, 2, 3).reshape(batch_size, query_length, topk).to(torch.int32)
+
+
 def _trim_live_context(
     position_ids: torch.Tensor | None, attention_mask: torch.Tensor | None, *states: torch.Tensor
 ) -> tuple[torch.Tensor | None, tuple[torch.Tensor, ...]]:
@@ -385,9 +495,155 @@ def _glm_tiled_sparse_mla_attention(
     return torch.matmul(output, module.per_head_v_up[0]).transpose(1, 2).contiguous(), None
 
 
+def _glm_tiled_sparse_mla_attention_prefill(
+    *,
+    module,
+    query_latent: torch.Tensor,
+    query_rope: torch.Tensor,
+    ckv_cache: torch.Tensor,
+    k_pe_cache: torch.Tensor,
+    topk_indices: torch.Tensor,
+    valid_topk: torch.Tensor,
+    layer_config,
+) -> tuple[torch.Tensor, None]:
+    """Run query-blocked sparse MLA prefill directly from folded retained caches."""
+    batch_size, num_query_heads, query_length, kv_lora_rank = query_latent.shape
+    dp = layer_config.attn_dp
+    cp = layer_config.attn_cp
+    cores = layer_config.num_cores_per_device
+    selected_per_query = topk_indices.shape[-1]
+    output_chunks = []
+
+    for query_start in range(0, query_length, layer_config.sparse_q_block_size):
+        query_end = min(query_start + layer_config.sparse_q_block_size, query_length)
+        query_chunk = query_end - query_start
+        if query_chunk % cores:
+            raise ValueError("Every GLM DSA sparse prefill query block must be divisible by num_cores_per_device.")
+        queries_per_core = query_chunk // cores
+        latent_chunk = query_latent[:, :, query_start:query_end].transpose(1, 2)
+        latent_chunk = latent_chunk.reshape(batch_size, cores, queries_per_core, num_query_heads, kv_lora_rank)
+        rope_chunk = query_rope[:, :, query_start:query_end].transpose(1, 2)
+        rope_chunk = rope_chunk.reshape(batch_size, cores, queries_per_core, num_query_heads, query_rope.shape[-1])
+        query = (
+            torch.cat((latent_chunk, rope_chunk), dim=-1)
+            .float()
+            .unsqueeze(1)
+            .expand(
+                batch_size,
+                cp,
+                cores,
+                queries_per_core,
+                num_query_heads,
+                kv_lora_rank + query_rope.shape[-1],
+            )
+        )
+
+        running_max = running_sum = running_output = None
+        for kv_block_idx in range(layer_config.sparse_kv_num_blocks):
+            kv_start = selected_per_query * kv_block_idx // layer_config.sparse_kv_num_blocks
+            kv_end = selected_per_query * (kv_block_idx + 1) // layer_config.sparse_kv_num_blocks
+            topk_block = topk_indices[:, query_start:query_end, kv_start:kv_end]
+            valid_block = valid_topk[:, query_start:query_end, kv_start:kv_end]
+            ckv_block, row_valid = glm_dsa_gather_cache(
+                ckv_cache,
+                topk_block,
+                valid_block,
+                dp=dp,
+                cp=cp,
+            )
+            rope_block, _ = glm_dsa_gather_cache(
+                k_pe_cache,
+                topk_block,
+                valid_block,
+                dp=dp,
+                cp=cp,
+            )
+            block_width = kv_end - kv_start
+            ckv_block = (
+                ckv_block.permute(1, 0, 2, 3, 4, 5)
+                .reshape(
+                    batch_size,
+                    cp,
+                    cores,
+                    queries_per_core,
+                    block_width,
+                    kv_lora_rank,
+                )
+                .float()
+            )
+            rope_block = (
+                rope_block.permute(1, 0, 2, 3, 4, 5)
+                .reshape(
+                    batch_size,
+                    cp,
+                    cores,
+                    queries_per_core,
+                    block_width,
+                    query_rope.shape[-1],
+                )
+                .float()
+            )
+            row_valid = row_valid.permute(1, 0, 2, 3, 4).reshape(
+                batch_size,
+                cp,
+                cores,
+                queries_per_core,
+                block_width,
+            )
+            key_block = torch.cat((ckv_block, rope_block), dim=-1)
+            scores = torch.matmul(query, key_block.transpose(-1, -2)) * module.scaling
+            valid_mask = row_valid.unsqueeze(-2)
+            scores = scores.masked_fill(~valid_mask, -65504.0)
+            block_max = scores.max(dim=-1).values
+            exp_scores = torch.exp(scores - block_max.unsqueeze(-1))
+            exp_scores = torch.where(valid_mask, exp_scores, torch.zeros_like(exp_scores))
+            block_sum = exp_scores.sum(dim=-1)
+            block_output = torch.matmul(exp_scores, ckv_block)
+
+            if running_max is None:
+                running_max = block_max
+                running_sum = block_sum
+                running_output = block_output
+            else:
+                merged_max = torch.maximum(running_max, block_max)
+                old_scale = torch.exp(running_max - merged_max)
+                new_scale = torch.exp(block_max - merged_max)
+                running_sum = old_scale * running_sum + new_scale * block_sum
+                running_output = old_scale.unsqueeze(-1) * running_output + new_scale.unsqueeze(-1) * block_output
+                running_max = merged_max
+
+        global_max = running_max.max(dim=1).values
+        cp_scale = torch.exp(running_max - global_max.unsqueeze(1))
+        denominator = (cp_scale * running_sum).sum(dim=1)
+        numerator = (cp_scale.unsqueeze(-1) * running_output).sum(dim=1)
+        latent_output = numerator / denominator.clamp_min(1.0).unsqueeze(-1)
+        latent_output = latent_output.reshape(batch_size, query_chunk, num_query_heads, kv_lora_rank)
+        output_chunks.append(
+            torch.einsum(
+                "bqhr,hrv->bqhv",
+                latent_output.to(module.per_head_v_up.dtype),
+                module.per_head_v_up[0],
+            ).reshape(batch_size, query_chunk, -1)
+        )
+
+    return torch.cat(output_chunks, dim=1), None
+
+
 def _project_inputs(module, hidden_states, position_embeddings):
     batch_size, seq_len = hidden_states.shape[:2]
-    q_resid = module.q_a_layernorm(module.q_a_proj(hidden_states))
+    if seq_len > 256:
+        num_chunks = math.ceil(seq_len / 256)
+        base_chunk = seq_len // num_chunks
+        extra_tokens = seq_len % num_chunks
+        q_chunks = []
+        chunk_start = 0
+        for chunk_idx in range(num_chunks):
+            chunk_end = chunk_start + base_chunk + int(chunk_idx < extra_tokens)
+            q_chunks.append(module.q_a_layernorm(module.q_a_proj(hidden_states[:, chunk_start:chunk_end])))
+            chunk_start = chunk_end
+        q_resid = torch.cat(q_chunks, dim=1)
+    else:
+        q_resid = module.q_a_layernorm(module.q_a_proj(hidden_states))
     q_nope = torch.matmul(q_resid, module.q_up)
     q_nope = q_nope.view(batch_size, seq_len, module.num_heads, module.qk_nope_head_dim).transpose(1, 2)
     q_rope = torch.matmul(q_resid, module.q_rope)
@@ -553,14 +809,28 @@ def glm_attention_strategy(
             raise ValueError("Shared DSA layers require Top-K indices from a previous full-indexer layer.")
         topk_indices = previous_topk
     if folded_dsa:
-        if topk_indices.shape[1] != 1:
-            raise ValueError("Folded GLM DSA attention currently supports single-token decode only.")
         compressed_kvs.update_ckv(compressed_kv, module.layer_idx, cache_kwargs)
         compressed_kvs.update_k_pe(key_rope, module.layer_idx, cache_kwargs)
-        valid_topk = topk_indices.to(position_ids.dtype) <= position_ids[:, -1:]
+        if attention_mask is None:
+            valid_topk = topk_indices.to(position_ids.dtype) <= position_ids.unsqueeze(-1)
+        else:
+            valid_topk = ~torch.gather(attention_mask[:, 0], -1, topk_indices.long())
+        cache_layer = compressed_kvs.layers[module.layer_idx]
+        query_latent = torch.einsum("bsd,hdk->bhsk", q_resid, module.fusedqk[0])
+        if topk_indices.shape[1] > 1:
+            output, weights = _glm_tiled_sparse_mla_attention_prefill(
+                module=module,
+                query_latent=query_latent,
+                query_rope=q_rope,
+                ckv_cache=cache_layer.ckv,
+                k_pe_cache=cache_layer.k_pe,
+                topk_indices=topk_indices,
+                valid_topk=valid_topk,
+                layer_config=layer_config,
+            )
+            return module.o_proj(output), weights, topk_indices
         decode_topk = topk_indices[:, 0]
         decode_valid = valid_topk[:, 0]
-        cache_layer = compressed_kvs.layers[module.layer_idx]
         sparse_ckv, row_valid = glm_dsa_gather_cache(
             cache_layer.ckv,
             decode_topk,
@@ -575,7 +845,6 @@ def glm_attention_strategy(
             dp=layer_config.attn_dp,
             cp=layer_config.attn_cp,
         )
-        query_latent = torch.einsum("bsd,hdk->bhsk", q_resid, module.fusedqk[0])
         output, weights = _glm_tiled_sparse_mla_attention(
             module=module,
             query_latent=query_latent,

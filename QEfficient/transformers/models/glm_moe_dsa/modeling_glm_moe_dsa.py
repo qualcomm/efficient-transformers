@@ -31,7 +31,11 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
 
 from QEfficient.blocking.attention_blocking import generic_blocked_attention_interface
-from QEfficient.blocking.glm_attention import blocked_glm_dsa_topk, glm_attention_strategy
+from QEfficient.blocking.glm_attention import (
+    blocked_glm_dsa_prefill_topk,
+    blocked_glm_dsa_topk,
+    glm_attention_strategy,
+)
 from QEfficient.customop import ctx_gather_3d, ctx_scatter_3d
 from QEfficient.transformers.cache_utils import QEffDynamicCompressedKVRopeCache, glm_dsa_scatter_cache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
@@ -65,6 +69,12 @@ class GlmAttentionLayerConfig:
     attn_cp: int
     attn_kvp: int
     indexer_num_blocks: int
+    indexer_ql_chunk: int
+    indexer_q_block_size: int
+    indexer_topk_blocking: int
+    indexer_prefill_parallel: bool
+    sparse_q_block_size: int
+    sparse_kv_num_blocks: int
     num_cores_per_device: int
     indexer_local_context: int
     indexer_block_width: int
@@ -133,6 +143,12 @@ def resolve_glm_attention_layer_configs(
             "attn_cp",
             "attn_kvp",
             "indexer_num_blocks",
+            "indexer_ql_chunk",
+            "indexer_q_block_size",
+            "indexer_topk_blocking",
+            "indexer_prefill_parallel",
+            "sparse_q_block_size",
+            "sparse_kv_num_blocks",
             "num_cores_per_device",
         )
     )
@@ -145,6 +161,12 @@ def resolve_glm_attention_layer_configs(
     attn_cp = int(qaic_config.get("attn_cp", 1))
     attn_kvp = int(qaic_config.get("attn_kvp", 1))
     indexer_num_blocks = int(qaic_config.get("indexer_num_blocks", num_cores if explicit_dsa_tuning else 1))
+    indexer_ql_chunk = int(qaic_config.get("indexer_ql_chunk", 128))
+    indexer_q_block_size = int(qaic_config.get("indexer_q_block_size", 32))
+    indexer_topk_blocking = int(qaic_config.get("indexer_topk_blocking", 16))
+    indexer_prefill_parallel = bool(qaic_config.get("indexer_prefill_parallel", False))
+    sparse_q_block_size = int(qaic_config.get("sparse_q_block_size", 128))
+    sparse_kv_num_blocks = int(qaic_config.get("sparse_kv_num_blocks", 1))
     num_cores_per_device = int(qaic_config.get("num_cores_per_device", num_cores if explicit_dsa_tuning else 1))
     num_kv_blocks = int(qaic_config.get("num_kv_blocks", 1))
     par_num_split = int(qaic_config.get("par_num_split", num_cores_per_device))
@@ -161,6 +183,11 @@ def resolve_glm_attention_layer_configs(
         "attn_dp": attn_dp,
         "attn_cp": attn_cp,
         "indexer_num_blocks": indexer_num_blocks,
+        "indexer_ql_chunk": indexer_ql_chunk,
+        "indexer_q_block_size": indexer_q_block_size,
+        "indexer_topk_blocking": indexer_topk_blocking,
+        "sparse_q_block_size": sparse_q_block_size,
+        "sparse_kv_num_blocks": sparse_kv_num_blocks,
         "num_cores_per_device": num_cores_per_device,
     }
     invalid = [name for name, value in positive_values.items() if value <= 0]
@@ -181,6 +208,8 @@ def resolve_glm_attention_layer_configs(
         raise ValueError("GLM dsa_topk must be divisible by num_cores_per_device.")
     if num_kv_blocks > context_length:
         raise ValueError("GLM num_kv_blocks cannot exceed context_length.")
+    if sparse_kv_num_blocks > dsa_topk:
+        raise ValueError("GLM sparse_kv_num_blocks cannot exceed dsa_topk.")
     if blocking_mode != "none" and par_num_split > max(1, context_length // num_kv_blocks):
         raise ValueError("GLM par_num_split cannot exceed the dense MLA KV block width.")
     indexer_local_context = context_length // indexer_cp
@@ -190,6 +219,23 @@ def resolve_glm_attention_layer_configs(
     indexer_tokens_per_core = indexer_block_width // num_cores_per_device
     indexer_block_topk = min(dsa_topk, indexer_block_width)
     attention_tokens_per_core = dsa_topk // num_cores_per_device
+    has_dsa = any(layer_type == "deepseek_sparse_attention" for layer_type in layer_types[: config.num_hidden_layers])
+    if has_dsa and seq_len > 1:
+        if not prefill_only:
+            raise ValueError("GLM DSA multi-token execution requires prefill_only=True.")
+        if indexer_ql_chunk % indexer_q_block_size:
+            raise ValueError("GLM indexer_q_block_size must divide indexer_ql_chunk.")
+        if seq_len % indexer_q_block_size:
+            raise ValueError("GLM prefill seq_len must be divisible by indexer_q_block_size.")
+        if indexer_prefill_parallel:
+            if indexer_q_block_size % indexer_topk_blocking:
+                raise ValueError("GLM indexer_topk_blocking must divide indexer_q_block_size.")
+        elif indexer_q_block_size % num_cores_per_device:
+            raise ValueError("GLM indexer_q_block_size must be divisible by num_cores_per_device.")
+        if seq_len % num_cores_per_device:
+            raise ValueError("GLM DSA prefill seq_len must be divisible by num_cores_per_device.")
+        if sparse_q_block_size % num_cores_per_device:
+            raise ValueError("GLM sparse_q_block_size must be divisible by num_cores_per_device.")
 
     resolved = []
     for layer_idx in range(config.num_hidden_layers):
@@ -218,6 +264,12 @@ def resolve_glm_attention_layer_configs(
                 attn_cp=attn_cp,
                 attn_kvp=attn_kvp,
                 indexer_num_blocks=indexer_num_blocks,
+                indexer_ql_chunk=indexer_ql_chunk,
+                indexer_q_block_size=indexer_q_block_size,
+                indexer_topk_blocking=indexer_topk_blocking,
+                indexer_prefill_parallel=indexer_prefill_parallel,
+                sparse_q_block_size=sparse_q_block_size,
+                sparse_kv_num_blocks=sparse_kv_num_blocks,
                 num_cores_per_device=num_cores_per_device,
                 indexer_local_context=indexer_local_context,
                 indexer_block_width=indexer_block_width,
@@ -249,7 +301,11 @@ class QEffDynamicGlmMoeDsaIndexerLayer:
 
     def update_indexer(self, indexer_key: torch.Tensor, cache_kwargs: dict[str, torch.Tensor]) -> torch.Tensor:
         position_ids = cache_kwargs["position_ids"].to(torch.int32)
-        if self.layout_config is not None and (self.layout_config.indexer_dp > 1 or self.layout_config.indexer_cp > 1):
+        if self.layout_config is not None and (
+            self.layout_config.indexer_prefill_parallel
+            or self.layout_config.indexer_dp > 1
+            or self.layout_config.indexer_cp > 1
+        ):
             self.indexer_key = glm_dsa_scatter_cache(
                 self.indexer_key,
                 position_ids,
@@ -366,9 +422,31 @@ class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
             k = indexer_key_cache.update_indexer(k, self.layer_idx, cache_kwargs)
             cache_layer = indexer_key_cache.layers[indexer_key_cache.layer_to_cache_idx[self.layer_idx]]
             layer_config = cache_layer.layout_config
-            if layer_config is not None and (layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1):
+            if layer_config is not None and (
+                layer_config.indexer_prefill_parallel
+                or layer_config.indexer_dp > 1
+                or layer_config.indexer_cp > 1
+            ):
                 weights = self.weights_proj(hidden_states.to(self.weights_proj.weight.dtype)).float()
                 weights = weights * (self.n_heads**-0.5)
+                if seq_len > 1:
+                    return blocked_glm_dsa_prefill_topk(
+                        q,
+                        weights,
+                        k,
+                        attention_mask,
+                        position_ids,
+                        scale=self.softmax_scale,
+                        dp=layer_config.indexer_dp,
+                        cp=layer_config.indexer_cp,
+                        num_blocks=layer_config.indexer_num_blocks,
+                        num_cores_per_device=layer_config.num_cores_per_device,
+                        query_chunk_size=layer_config.indexer_ql_chunk,
+                        query_block_size=layer_config.indexer_q_block_size,
+                        topk_blocking=layer_config.indexer_topk_blocking,
+                        parallel=layer_config.indexer_prefill_parallel,
+                        final_topk=layer_config.dsa_topk,
+                    )
                 return blocked_glm_dsa_topk(
                     q,
                     weights,
@@ -500,6 +578,12 @@ class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
             attn_cp=1,
             attn_kvp=1,
             indexer_num_blocks=1,
+            indexer_ql_chunk=128,
+            indexer_q_block_size=32,
+            indexer_topk_blocking=16,
+            indexer_prefill_parallel=False,
+            sparse_q_block_size=128,
+            sparse_kv_num_blocks=1,
             num_cores_per_device=1,
             indexer_local_context=int(getattr(self.config, "max_position_embeddings", 1)),
             indexer_block_width=int(getattr(self.config, "max_position_embeddings", 1)),
@@ -859,7 +943,11 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         caches = []
         for layer_idx in self.get_indexer_cache_layers(config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
-            if layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
+            if (
+                layer_config.indexer_prefill_parallel
+                or layer_config.indexer_dp > 1
+                or layer_config.indexer_cp > 1
+            ):
                 shape = (
                     batch_size // layer_config.indexer_dp,
                     layer_config.indexer_dp * layer_config.indexer_cp,
@@ -908,7 +996,11 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         indexer_axes = {}
         for layer_idx in self.get_indexer_cache_layers(self.config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
-            if layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
+            if (
+                layer_config.indexer_prefill_parallel
+                or layer_config.indexer_dp > 1
+                or layer_config.indexer_cp > 1
+            ):
                 axes = {}
                 if layer_config.indexer_dp == 1:
                     axes[0] = batch_symbol

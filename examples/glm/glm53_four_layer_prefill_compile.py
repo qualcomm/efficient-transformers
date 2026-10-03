@@ -41,6 +41,23 @@ PREFILL_ATTENTION_PRESETS = {
         "par_num_split": 16,
         "mla_absorption": {"absorption": True, "online": True, "cache_compressed": True},
     },
+    "dsa_prefill_cp1": {
+        "mla_absorption": {"absorption": True, "online": False, "cache_compressed": True},
+        "indexer_dp": 1,
+        "indexer_cp": 1,
+        "indexer_kvp": 1,
+        "attn_dp": 1,
+        "attn_cp": 1,
+        "attn_kvp": 1,
+        "indexer_num_blocks": 1,
+        "num_cores_per_device": 16,
+        "indexer_ql_chunk": 128,
+        "indexer_q_block_size": 32,
+        "indexer_topk_blocking": 16,
+        "indexer_prefill_parallel": True,
+        "sparse_q_block_size": 128,
+        "sparse_kv_num_blocks": 1,
+    },
 }
 
 
@@ -105,7 +122,11 @@ def main() -> None:
 
     config = AutoConfig.from_pretrained(args.model_id, cache_dir=args.hf_cache)
     config.num_hidden_layers = args.num_layers
-    config.layer_types = ["full_attention"] * args.num_layers
+    if args.attention_preset.startswith("dense"):
+        config.layer_types = ["full_attention"] * args.num_layers
+    else:
+        config.layer_types = list(config.layer_types[: args.num_layers])
+        config.indexer_types = list(config.indexer_types[: args.num_layers])
     config.use_cache = True
     config.torch_dtype = torch.float32
     config.dtype = torch.float32
