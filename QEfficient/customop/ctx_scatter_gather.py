@@ -120,10 +120,8 @@ def CtxScatter3D(data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2]), exp_shape)
 
-    # keep index tensor types aligned for backend that require exact dtype match
-    batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
-    position_ids = ops.Cast(position_ids, to=onnxscript.INT32.dtype)
-    ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape)
+    # ONNX ScatterND requires its complete index tensor to use int64.
+    ctx_idx = ops.Expand(ops.Unsqueeze(ops.Cast(position_ids, to=onnxscript.INT64.dtype), [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
 
     return ops.ScatterND(data, indices, updates)
@@ -451,9 +449,7 @@ def CtxScatter3DInt(
 
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2]), exp_shape)
-    batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
-    position_ids = ops.Cast(position_ids, to=onnxscript.INT32.dtype)
-    ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape)
+    ctx_idx = ops.Expand(ops.Unsqueeze(ops.Cast(position_ids, to=onnxscript.INT64.dtype), [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
 
     return ops.ScatterND(data, indices, updates)
@@ -484,7 +480,7 @@ def CtxGather3D(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxsc
     batch_size = ops.Slice(ops.Shape(data), starts=[0], ends=[1], axes=[0])
     idx_seq_len = ops.Slice(ops.Shape(ctx_indices), starts=[1], ends=[2], axes=[0])
     expand_shape = ops.Concat(batch_size, idx_seq_len, axis=0)
-    ctx_indices = ops.Expand(ctx_indices, expand_shape)
+    ctx_indices = ops.Expand(ops.Cast(ctx_indices, to=onnxscript.INT64.dtype), expand_shape)
     ctx_indices = ops.Unsqueeze(ctx_indices, [-1])
     return ops.GatherND(data, ctx_indices, batch_dims=1)
 
