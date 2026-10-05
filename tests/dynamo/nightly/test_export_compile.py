@@ -5,14 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""
-Dynamo nightly export + compile tests.
-
-Mirrors tests/nightly_pipeline/causal_lm_models/test_export_compile.py but forces
-dynamo=True in the export step. Uses the same validated_models.json model list and
-pipeline_configs.json compile params so the dynamo nightly suite stays in sync with
-the regular nightly suite.
-"""
+"""Dynamo nightly export + compile tests."""
 
 from __future__ import annotations
 
@@ -23,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from QEfficient import QEFFAutoModelForCausalLM
+from tests.dynamo._helpers import DYNAMO
 from tests.nightly_pipeline.nightly_utils import pre_export_compile_utils
 
 _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "nightly_pipeline" / "configs"
@@ -38,11 +32,12 @@ test_models = _config["causal_lm_models"]
 @pytest.mark.on_qaic
 @pytest.mark.parametrize("model_name", test_models)
 def test_dynamo_export_compile_causal_lm(model_name, dynamo_causal_model_artifacts, get_pipeline_config):
-    """Full model export with dynamo=True + compile — mirrors regular nightly export/compile test."""
+    """Export with Dynamo and compile the resulting ONNX."""
     export_params, compile_params = pre_export_compile_utils(model_name, "causal_pipeline_configs", get_pipeline_config)
 
-    # Force dynamo export path
-    export_params = {**export_params, "dynamo": True}
+    # Force dynamo export path with ONNX subfunctions.
+    export_params = {**export_params, "dynamo": DYNAMO, "use_onnx_subfunctions": True}
+    compile_params = {**compile_params, "use_onnx_subfunctions": True}
 
     if model_name not in dynamo_causal_model_artifacts:
         dynamo_causal_model_artifacts[model_name] = {}
@@ -52,7 +47,7 @@ def test_dynamo_export_compile_causal_lm(model_name, dynamo_causal_model_artifac
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_name)
     loading_time = time.time() - load_start
 
-    print(f"\nExporting with dynamo=True: {model_name}")
+    print(f"\nExporting with dynamo={DYNAMO}: {model_name}")
     export_start = time.time()
     onnx_path = qeff_model.export(**export_params)
     export_time = time.time() - export_start

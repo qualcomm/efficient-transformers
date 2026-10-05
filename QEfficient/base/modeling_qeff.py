@@ -1163,8 +1163,6 @@ class QEFFBaseModel(ABC):
         qaic_config: Optional[dict] = None,
         **compiler_options,
     ):
-        # Apply the transformations that are dependent on compilation parameters
-        moe_batch_size = compiler_options.pop("moe_batch_size", bs)
         model_config = getattr(self.model, "config", None) or getattr(
             getattr(self.model, "model", None), "config", None
         )
@@ -1173,25 +1171,15 @@ class QEFFBaseModel(ABC):
             num_devices,
             qaic_config,
         )
-        if model_config:
-            blocking_config = build_transformer_blocking_config_for_transform(
-                model_config,
-                ctx_len=ctx_len,
-                seq_len=seq_len,
-                bs=bs,
-                num_devices=num_devices,
-                qaic_config=qaic_config,
-                **compiler_options,
-            )
-        else:
-            # without a model config, this is not a model that is possible to block
-            blocking_config = None
-
-        if blocking_config is not None:
-            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
-            self.hash_params["blocking_kwargs"] = blocking_config
-        else:
-            self.hash_params.pop("blocking_kwargs", None)
+        self._apply_attention_blocking_from_qaic(
+            ctx_len=ctx_len,
+            seq_len=seq_len,
+            bs=bs,
+            num_devices=num_devices,
+            qaic_config=qaic_config,
+            model_config=model_config,
+            **compiler_options,
+        )
         gated_delta_config = build_gated_delta_config_for_transform(seq_len=seq_len, qaic_config=qaic_config)
         self.model, gated_delta_transformed = GatedDeltaConfigTransform.apply(
             self.model, gated_delta_config=gated_delta_config
@@ -1205,6 +1193,9 @@ class QEFFBaseModel(ABC):
         else:
             self.hash_params.pop("qaic_config", None)
         self.hash_params["num_replicate_kv_heads"] = effective_num_replicate_kv_heads
+
+        # Apply the transformations that are dependent on compilation parameters
+        moe_batch_size = compiler_options.pop("moe_batch_size", bs)
 
         num_cores = compiler_options.get("num_cores", compiler_options.get("aic_num_cores"))
         if num_cores is None:
@@ -1230,6 +1221,44 @@ class QEFFBaseModel(ABC):
             prefill_seq_len=prefill_seq_len,
             hash_params=self.hash_params,
         )
+
+    def _apply_attention_blocking_from_qaic(
+        self,
+        ctx_len: Optional[int] = None,
+        seq_len: Optional[int] = None,
+        bs: Optional[int] = 1,
+        num_devices: int = 1,
+        qaic_config: Optional[dict] = None,
+        model_config=None,
+        **compiler_options,
+    ):
+        """Attach attention blocking config derived from qaic_config."""
+        if model_config is None:
+            model_config = getattr(self.model, "config", None) or getattr(
+                getattr(self.model, "model", None), "config", None
+            )
+        if model_config:
+            blocking_config = build_transformer_blocking_config_for_transform(
+                model_config,
+                ctx_len=ctx_len,
+                seq_len=seq_len,
+                bs=bs,
+                num_devices=num_devices,
+                qaic_config=qaic_config,
+                **compiler_options,
+            )
+        else:
+            # without a model config, this is not a model that is possible to block
+            blocking_config = None
+
+        if blocking_config is not None:
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
+            self.hash_params["blocking_kwargs"] = blocking_config
+        else:
+            self.hash_params.pop("blocking_kwargs", None)
+        if qaic_config is not None:
+            self.hash_params["qaic_config"] = qaic_config
+        return blocking_config
 
     @dump_qconfig
     def _compile(

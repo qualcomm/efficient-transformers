@@ -731,6 +731,18 @@ class TestQEffGPTOSSHybridCacheCorrectness:
         assert torch.isfinite(k_out).all()
         assert torch.isfinite(v_out).all()
 
+    def test_blocked_read_dispatch_uses_layer_cache(self):
+        cache = self._make()
+        k, v = _kv(ctx_len=16)
+        cache.update(k, v, layer_idx=1, cache_kwargs={"position_ids": _pids(16)})
+
+        cache_kwargs = {"position_ids": _pids(16)}
+        k_block = cache.read_only_blocked_K(4, 8, layer_idx=1, cache_kwargs=cache_kwargs)
+        v_block = cache.read_only_blocked_V(4, 8, layer_idx=1, cache_kwargs=cache_kwargs)
+
+        assert torch.equal(k_block, k[:, :, 4:8, :])
+        assert torch.equal(v_block, v[:, :, 4:8, :])
+
     def test_update_sliding_returns_finite(self):
         cache = self._make(sw=4)
         cache.append_new_layers(0)  # layer 0 is sliding_attention per _gptoss_cfg

@@ -203,6 +203,46 @@ class TestQEffDynamicLayerCorrectness:
             assert torch.equal(layer.keys[batch_idx, :, position], keys[batch_idx, :, 0])
             assert torch.equal(layer.values[batch_idx, :, position], values[batch_idx, :, 0])
 
+    def test_batch_fold_write_honors_continuous_batching_batch_index(self):
+        batch, heads, ctx_len, head_dim = 4, 2, 8, 4
+        layer = QEffDynamicLayer.from_tensors(
+            torch.zeros(batch, heads, ctx_len, head_dim),
+            torch.zeros(batch, heads, ctx_len, head_dim),
+        )
+        batch_index = torch.tensor([[2]])
+        positions = torch.tensor([[1]])
+        keys = torch.full((1, heads, 1, head_dim), 13.0)
+        values = torch.full((1, heads, 1, head_dim), 29.0)
+
+        layer.write_only_batch(keys, values, cache_kwargs={"position_ids": positions, "batch_index": batch_index})
+
+        assert torch.equal(layer.keys[2, :, 1], keys[0, :, 0])
+        assert torch.equal(layer.values[2, :, 1], values[0, :, 0])
+        assert torch.count_nonzero(layer.keys[0]) == 0
+        assert torch.count_nonzero(layer.keys[1]) == 0
+        assert torch.count_nonzero(layer.keys[3]) == 0
+
+    def test_batch_fold_read_honors_continuous_batching_batch_index(self):
+        batch, heads, ctx_len, head_dim = 4, 2, 8, 4
+        keys = torch.arange(batch * heads * ctx_len * head_dim, dtype=torch.float32).reshape(
+            batch, heads, ctx_len, head_dim
+        )
+        values = keys + 100
+        layer = QEffDynamicLayer.from_tensors(keys, values)
+        batch_index = torch.tensor([[2]])
+        cache_kwargs = {
+            "batch_index": batch_index,
+            "position_ids": torch.tensor([[1]], dtype=torch.int32),
+        }
+
+        key_block = layer.read_only_blocked_K_batch(0, 2, cache_kwargs)
+        value_block = layer.read_only_blocked_V_batch(0, 2, cache_kwargs)
+
+        expected_keys = keys[2:3, :, :2].reshape(1, heads, 2, head_dim)
+        expected_values = values[2:3, :, :2].reshape(1, heads, 2, head_dim)
+        assert torch.equal(key_block, expected_keys)
+        assert torch.equal(value_block, expected_values)
+
     def test_batch_fold_read_uses_folded_compute_view(self):
         batch, heads, ctx_len, head_dim = 3, 2, 8, 4
         keys = torch.arange(batch * heads * ctx_len * head_dim, dtype=torch.float32).reshape(

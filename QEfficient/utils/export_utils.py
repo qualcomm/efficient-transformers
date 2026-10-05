@@ -161,6 +161,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
     dynamic_shapes: Dict[str, Any] = {}
     past_keys: Dict[int, Any] = {}
     past_values: Dict[int, Any] = {}
+    conv_states: Dict[int, Any] = {}
+    recurrent_states: Dict[int, Any] = {}
     compressed_kv_layers: Dict[int, Any] = {}
     k_pe_layers: Dict[int, Any] = {}
 
@@ -170,6 +172,10 @@ def convert_dynamic_axes_to_dynamic_shapes(
             past_keys[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("past_value."):
             past_values[int(input_name.split(".")[1])] = resolved
+        elif input_name.startswith("conv_state."):
+            conv_states[int(input_name.split(".")[1])] = resolved
+        elif input_name.startswith("recurrent_state."):
+            recurrent_states[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("compressed_kv."):
             compressed_kv_layers[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("k_pe."):
@@ -177,10 +183,16 @@ def convert_dynamic_axes_to_dynamic_shapes(
         else:
             dynamic_shapes[input_name] = resolved
 
-    if past_keys or past_values:
-        max_layer = max(list(past_keys.keys()) + list(past_values.keys()))
+    if past_keys or past_values or conv_states or recurrent_states:
+        max_layer = max(
+            list(past_keys.keys()) + list(past_values.keys()) + list(conv_states.keys()) + list(recurrent_states.keys())
+        )
         dynamic_shapes["past_key_values"] = [
-            [past_keys.get(i, {}), past_values.get(i, {})] for i in range(max_layer + 1)
+            [
+                past_keys.get(i, conv_states.get(i, {})),
+                past_values.get(i, recurrent_states.get(i, {})),
+            ]
+            for i in range(max_layer + 1)
         ]
 
     if compressed_kv_layers or k_pe_layers:
