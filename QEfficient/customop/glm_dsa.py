@@ -17,7 +17,7 @@ ops = getattr(onnxscript, "opset17")
 
 @qeff_custom_op("com.qti.aisw.onnx", 1)
 def GlmFoldedRowGather(data: onnxscript.FLOAT, indices: onnxscript.INT32) -> onnxscript.FLOAT:
-    return ops.GatherND(data, ops.Unsqueeze(indices, [-1]), batch_dims=2)
+    return ops.GatherND(data, ops.Unsqueeze(ops.Cast(indices, to=7), [-1]), batch_dims=2)
 
 
 @qeff_custom_op("com.qti.aisw.onnx", 1)
