@@ -661,6 +661,10 @@ class QEffGlmMoeDsaDecoderLayer(GlmMoeDsaDecoderLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+        # Shared-indexer layers can pass ``prev_topk_indices`` through unchanged,
+        # but Dynamo invoke_subgraph regions forbid input-to-output aliasing.
+        if torch.compiler.is_compiling() and topk_indices is prev_topk_indices:
+            topk_indices = topk_indices.clone()
         return hidden_states, topk_indices
 
 
