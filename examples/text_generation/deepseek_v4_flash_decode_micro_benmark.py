@@ -28,7 +28,7 @@ DECODE_MICROBENCH_DEFAULTS = {
     "hca_attn_blocks": 8,
     "hw_version": "ai100",
     "ffn_blocking_mode": "token",
-    "ffn_token_block_size": 4,
+    "ffn_token_block_size": 1,
 }
 
 PREFILL_MICROBENCH_DEFAULTS = {
