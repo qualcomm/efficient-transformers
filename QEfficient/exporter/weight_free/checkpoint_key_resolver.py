@@ -6,6 +6,7 @@
 # ----------------------------------------------------------------------------
 
 import json
+import struct
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -281,6 +282,28 @@ def _named_state_keys(module: nn.Module, iterator_name: str) -> set[str]:
         return {name for name, _ in iterator()}
 
 
+def _safetensors_shapes(checkpoint_file: str) -> Dict[str, List[int]]:
+    """Return ``{key: shape}`` from a safetensors header without reading tensor data."""
+    with open(checkpoint_file, "rb") as handle:
+        (header_size,) = struct.unpack("<Q", handle.read(8))
+        header = json.loads(handle.read(header_size))
+    return {key: [int(dim) for dim in entry["shape"]] for key, entry in header.items() if key != "__metadata__"}
+
+
+def _check_stored_shape(name: str, graph_shape, checkpoint_key: str, stored_shape: List[int]) -> None:
+    """Fail the export when a graph weight input cannot bind to its stored tensor."""
+    try:
+        dims = [int(dim) for dim in graph_shape]
+    except (TypeError, ValueError):
+        return
+    if dims != stored_shape:
+        raise ValueError(
+            f"Weight input '{name}' expects shape {dims}, but checkpoint tensor '{checkpoint_key}' has shape "
+            f"{stored_shape}. Weight-free export requires the graph to consume weights in their stored layout; "
+            "express any layout change as graph ops instead of rewriting the checkpoint."
+        )
+
+
 def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name: str, qeff_model) -> WeightSpec:
     """Promote ONNX initializers to graph inputs and create the weight spec.
 
@@ -348,6 +371,7 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             pass  # no manifest → active_transform stays None, fallback to legacy aliases
 
     promoted_inputs: List[WeightSpecInput] = []
+    stored_shapes: Dict[str, Dict[str, List[int]]] = {}
 
     for name, init_value in list(model_ir.graph.initializers.items()):
         if name not in model_names:
@@ -365,6 +389,9 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             )
 
         checkpoint_file = checkpoint_index[checkpoint_key]
+        if checkpoint_file not in stored_shapes:
+            stored_shapes[checkpoint_file] = _safetensors_shapes(checkpoint_file)
+        _check_stored_shape(name, init_value.shape, checkpoint_key, stored_shapes[checkpoint_file][checkpoint_key])
         model_ir.graph.inputs.append(
             ir.Value(
                 name=name,

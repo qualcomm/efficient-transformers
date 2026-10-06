@@ -142,11 +142,12 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
 
         dense, _ = resolve_routing(routing, num_experts)
         if flavour is MoEFlavour.EXPERT_PARALLEL:
+            packed_weights = not quantized_experts and weights.gate.ndim == 4
             num_pipeline_stages = getattr(self, "num_pipeline_stages", None) or (
-                1 if quantized_experts else weights.gate.shape[1]
+                weights.gate.shape[1] if packed_weights else 1
             )
             num_parallelized_experts = getattr(self, "num_parallelized_experts", None) or (
-                num_experts if quantized_experts else weights.gate.shape[0]
+                weights.gate.shape[0] if packed_weights else num_experts
             )
             num_packed_chunks = self.expert_parallel_num_packed_chunks
             if quantized_experts:
