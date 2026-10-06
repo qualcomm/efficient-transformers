@@ -235,8 +235,6 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--hf-cache", type=Path, default=Path(DEFAULT_HF_CACHE))
     parser.add_argument("--artifact-root", type=Path, default=Path(DEFAULT_ARTIFACT_ROOT))
     parser.add_argument("--ctx-len", type=int, default=512)
-    parser.add_argument("--prefill-seq-len", type=int, default=32)
-    parser.add_argument("--prefill-only", action="store_true")
     parser.add_argument("--generation-len", type=int, default=250)
     parser.add_argument("--num-hidden-layers", type=int, default=43)
     parser.add_argument("--num-cores", "--compile-num-cores", dest="num_cores", type=int, default=12)
@@ -303,17 +301,16 @@ def build_ffn_blocking_config(args: argparse.Namespace) -> dict[str, int | str |
 def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
     """Apply the benchmark's shared folded decode controls to QEff cache layouts."""
     attention_dp = args.attn_dp or len(args.device_group)
-    csa_attention_dp = 1 if args.prefill_only else attention_dp
-    csa_indexer_cp = 1 if args.prefill_only else args.indexer_cp
-    csa_num_kv_blocks = 1 if args.prefill_only else args.num_kv_blocks
+    indexer_cp = args.indexer_cp
+    num_kv_blocks = args.num_kv_blocks
     attention_cores = HW_CORES_PER_DEVICE[args.hw_version]
     hca_compressed_kv_cp = args.hca_compressed_kv_cp
     hca_attn_blocks = args.hca_attn_blocks or attention_cores
     if attention_dp < 1:
         raise ValueError("attn_dp must be at least 1.")
-    if csa_indexer_cp < 1:
+    if indexer_cp < 1:
         raise ValueError("indexer_cp must be at least 1.")
-    if csa_num_kv_blocks < 1:
+    if num_kv_blocks < 1:
         raise ValueError("num_kv_blocks must be at least 1.")
     if hca_compressed_kv_cp < 1:
         raise ValueError("hca_compressed_kv_cp must be at least 1.")
@@ -327,33 +324,32 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
     for layer_type in config.layer_types:
         if layer_type == "compressed_sparse_attention":
             csa_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
-            if csa_attention_dp > 1:
-                if csa_capacity % csa_indexer_cp:
-                    raise ValueError("CSA compressed-cache capacity must be divisible by indexer_cp.")
-                csa_slots_per_cp = csa_capacity // csa_indexer_cp
-                if csa_slots_per_cp % csa_num_kv_blocks:
-                    raise ValueError("CSA CP-way slot count must be divisible by num_kv_blocks.")
-                if (csa_slots_per_cp // csa_num_kv_blocks) % attention_cores:
-                    raise ValueError("CSA KV-block width must be divisible by the hardware attention-core count.")
+            if csa_capacity % indexer_cp:
+                raise ValueError("CSA compressed-cache capacity must be divisible by indexer_cp.")
+            csa_slots_per_cp = csa_capacity // indexer_cp
+            if csa_slots_per_cp % num_kv_blocks:
+                raise ValueError("CSA CP-way slot count must be divisible by num_kv_blocks.")
+            if (csa_slots_per_cp // num_kv_blocks) % attention_cores:
+                raise ValueError("CSA KV-block width must be divisible by the hardware attention-core count.")
         if layer_type == "heavily_compressed_attention":
             hca_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
             if hca_capacity % hca_compressed_kv_cp:
                 raise ValueError("HCA compressed-cache capacity must be divisible by hca_compressed_kv_cp.")
             if (hca_capacity // hca_compressed_kv_cp) % hca_attn_blocks:
                 raise ValueError("HCA CP-way slot count must be divisible by hca_attn_blocks.")
-    config.qeff_csa_attention_dp = csa_attention_dp
-    config.qeff_csa_indexer_cp = csa_indexer_cp
-    config.qeff_csa_num_kv_blocks = csa_num_kv_blocks
+    config.qeff_csa_attention_dp = attention_dp
+    config.qeff_csa_indexer_cp = indexer_cp
+    config.qeff_csa_num_kv_blocks = num_kv_blocks
     config.qeff_csa_indexer_attention_cores = attention_cores
-    config.qeff_csa_folded_row_cache = not args.prefill_only
+    config.qeff_csa_folded_row_cache = True
     config.qeff_hca_attention_dp = attention_dp
     config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
     config.qeff_hca_attn_blocks = hca_attn_blocks
     config.qeff_hca_folded_row_cache = True
     print(
-        "QEff cache layout: "
-        f"batch_size={args.batch_size}, hca_attn_dp={attention_dp}, csa_attn_dp={csa_attention_dp}, "
-        f"csa_indexer_cp={csa_indexer_cp}, csa_num_kv_blocks={csa_num_kv_blocks}, "
+        "Folded decode layout: "
+        f"batch_size={args.batch_size}, attn_dp={attention_dp}, indexer_cp={indexer_cp}, "
+        f"num_kv_blocks={num_kv_blocks}, "
         f"hw_version={args.hw_version}, hca_compressed_kv_cp={hca_compressed_kv_cp}, "
         f"hca_attn_blocks={hca_attn_blocks}, csa_capacity={csa_capacity}, hca_capacity={hca_capacity}"
     )
@@ -363,8 +359,6 @@ def main(defaults: dict[str, object] | None = None) -> None:
     args = parse_args(defaults)
     if args.ctx_len < 2:
         raise ValueError("ctx_len must be at least 2.")
-    if not 1 <= args.prefill_seq_len <= args.ctx_len:
-        raise ValueError("prefill_seq_len must be in [1, ctx_len].")
     if not 1 <= args.generation_len < args.ctx_len:
         raise ValueError("generation_len must be in [1, ctx_len).")
     if args.num_hidden_layers < 1:
@@ -421,21 +415,19 @@ def main(defaults: dict[str, object] | None = None) -> None:
     qeff_model.model.to(dtype=torch.float32)
     qeff_model.transform(
         ctx_len=args.ctx_len,
-        seq_len=args.prefill_seq_len if args.prefill_only else 1,
+        seq_len=1,
         bs=batch_size,
         num_devices=len(args.device_group),
         qaic_config=qaic_config,
-        prefill_only=args.prefill_only,
+        prefill_only=False,
         num_cores=args.num_cores,
     )
 
-    export_mode = "prefill" if args.prefill_only else "one-token decode"
-    print(f"Exporting the {export_mode} graph through qeff_model.export()")
+    print("Exporting the one-token decode graph through qeff_model.export()")
     onnx_path = Path(
         qeff_model.export(
             export_dir=str(export_root),
-            prefill_only=args.prefill_only,
-            prefill_seq_len=args.prefill_seq_len,
+            prefill_only=False,
             use_onnx_subfunctions=False,
             dynamo=True,
             export_batch_size=batch_size,
@@ -453,21 +445,18 @@ def main(defaults: dict[str, object] | None = None) -> None:
 
     # Export FP32 weights, then lower only the non-NPI compiler path to FP16.
     qeff_model.model.config.torch_dtype = torch.float16
-    print(
-        f"Compiling {'prefill-only' if args.prefill_only else 'combined prefill/decode'} specialization: "
-        f"prefill_seq_len={args.prefill_seq_len}, ctx_len={args.ctx_len}"
-    )
+    print(f"Compiling combined prefill/decode specialization: seq_len=1, ctx_len={args.ctx_len}")
     qpc_path = Path(
         qeff_model.compile(
             onnx_path=str(onnx_path),
             compile_dir=str(compile_root),
-            prefill_seq_len=args.prefill_seq_len,
+            prefill_seq_len=1,
             ctx_len=args.ctx_len,
             batch_size=batch_size,
             num_cores=args.num_cores,
             num_devices=len(args.device_group),
             aic_hw_version=args.hw_version,
-            prefill_only=args.prefill_only,
+            prefill_only=False,
             use_onnx_subfunctions=False,
             mxint8_kv_cache=False,
             mxfp6_matmul=True,

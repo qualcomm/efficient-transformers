@@ -61,7 +61,7 @@ def _sliding_window_context_indices(
     False for positions before decoding began (only relevant during the first
     `sliding_window` decode steps).
     """
-    context_end = position_ids[:, -1].to(torch.int32).reshape(-1, 1, 1) + 1
+    context_end = position_ids[:, -1:].to(torch.int32).unsqueeze(1) + 1
     offsets = torch.arange(sliding_window, device=device, dtype=torch.int32).view(1, 1, -1)
     context_indices = offsets + context_end - sliding_window
     valid = context_indices >= 0
@@ -950,9 +950,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
                 raise ValueError(f"{prefix}_kv and {prefix}_gate must be provided together.")
             if projected_kv is None:
                 continue
-            expected_shape = (self.max_batch_size, key_states.shape[2], expected_dim)
+            expected_shape = (self.max_batch_size, 1, expected_dim)
             if tuple(projected_kv.shape) != expected_shape or projected_gate.shape != projected_kv.shape:
-                raise ValueError(f"{prefix} projections must both have shape {expected_shape}.")
+                raise ValueError(f"Decode-only {prefix} projections must both have shape {expected_shape}.")
             if self.uses_dp_layout:
                 setattr(
                     self,
@@ -1482,192 +1482,6 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         local_weights = torch.exp(local_scores - global_maximum.unsqueeze(-1)) / denominator.unsqueeze(-1)
         return attention_output.to(query.dtype).transpose(1, 2).contiguous(), local_weights.to(query.dtype)
 
-    def _csa_prefill_forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] | tuple[torch.Tensor, torch.Tensor],
-        position_ids: torch.Tensor,
-        past_key_values: "QEffDeepseekV4Cache",
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Run the CSA blocked prefill algorithm against QEff retained state.
-
-        This is the model-integrated form of the CSA prefill reference. It is
-        intentionally restricted to an empty, batch-major cache: HCA layers
-        continue through the established one-token decode path and CSA decode
-        retains the existing ping-pong implementation below.
-        """
-        layer = past_key_values.layers[self.layer_idx]
-        if not isinstance(layer, QEffCSACacheLayer):
-            raise TypeError("CSA prefill requires QEffCSACacheLayer.")
-        if layer.uses_dp_layout or layer.uses_folded_row_cache:
-            raise NotImplementedError("CSA blocked prefill currently requires the batch-major cache layout.")
-        if layer.cumulative_length:
-            raise NotImplementedError("CSA blocked prefill currently requires an empty retained cache.")
-
-        batch_size, seq_len, _ = hidden_states.shape
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-        cos, sin = position_embeddings[self.rope_layer_type]
-        q_residual = self.q_a_norm(self.q_a_proj(hidden_states)).to(hidden_states.dtype)
-        query = self.q_b_norm(self.q_b_proj(q_residual).view(*hidden_shape).transpose(1, 2))
-        query = qeff_apply_rotary_pos_emb(query, cos, sin)
-        key_value = (
-            self.kv_norm(self.kv_proj(hidden_states)).to(hidden_states.dtype).view(*hidden_shape).transpose(1, 2)
-        )
-        key_value = qeff_apply_rotary_pos_emb(key_value, cos, sin)
-
-        compressor = self.compressor
-        if compressor is None:
-            raise RuntimeError("CSA prefill requires the CSA compressor.")
-        indexer = compressor.indexer
-        projected_kv = compressor.kv_proj(hidden_states)
-        projected_gate = compressor.gate_proj(hidden_states)
-        indexer_kv = indexer.kv_proj(hidden_states)
-        indexer_gate = indexer.gate_proj(hidden_states)
-        past_key_values.update(
-            key_value,
-            key_value,
-            self.layer_idx,
-            {
-                "position_ids": position_ids,
-                "compressor_kv": projected_kv,
-                "compressor_gate": projected_gate,
-                "indexer_kv": indexer_kv,
-                "indexer_gate": indexer_gate,
-            },
-        )
-
-        ratio = layer.compression_size
-        full_blocks = seq_len // ratio
-        compressed_cache = layer.actual_compressed_kv
-        indexer_cache = layer.actual_indexer_compressed_kv
-        if full_blocks:
-            block_positions = position_ids[:, : full_blocks * ratio : ratio]
-            slots = torch.arange(ratio, device=hidden_states.device, dtype=torch.long).view(1, 1, -1)
-
-            compressor_kv = projected_kv[:, : full_blocks * ratio].view(batch_size, full_blocks, ratio, -1)
-            compressor_gate = projected_gate[:, : full_blocks * ratio].view(batch_size, full_blocks, ratio, -1)
-            previous_compressor_kv = torch.cat((torch.zeros_like(compressor_kv[:, :1]), compressor_kv[:, :-1]), dim=1)
-            previous_compressor_gate = torch.cat(
-                (torch.full_like(compressor_gate[:, :1], float("-inf")), compressor_gate[:, :-1]), dim=1
-            )
-            compressor_bias = F.embedding(slots, compressor.position_bias)
-            comp_values = torch.cat(
-                (previous_compressor_kv[..., : self.head_dim], compressor_kv[..., self.head_dim :]), dim=2
-            )
-            comp_weights = torch.cat(
-                (
-                    previous_compressor_gate[..., : self.head_dim] + compressor_bias[..., : self.head_dim],
-                    compressor_gate[..., self.head_dim :] + compressor_bias[..., self.head_dim :],
-                ),
-                dim=2,
-            ).softmax(dim=2, dtype=torch.float32)
-            compressed = compressor.kv_norm(torch.einsum("bnrd->bnd", comp_values * comp_weights.to(comp_values.dtype)))
-            comp_cos, comp_sin = compressor.rotary_emb(
-                compressed, position_ids=block_positions, layer_type=compressor.rope_layer_type
-            )
-            compressed = qeff_apply_rotary_pos_emb(compressed.unsqueeze(1), comp_cos, comp_sin).squeeze(1)
-            cache_positions = torch.div(block_positions, ratio, rounding_mode="floor")
-            layer.actual_compressed_kv = ctx_scatter(compressed_cache, cache_positions, compressed.unsqueeze(1))
-
-            index_kv = indexer_kv[:, : full_blocks * ratio].view(batch_size, full_blocks, ratio, -1)
-            index_gate = indexer_gate[:, : full_blocks * ratio].view(batch_size, full_blocks, ratio, -1)
-            previous_index_kv = torch.cat((torch.zeros_like(index_kv[:, :1]), index_kv[:, :-1]), dim=1)
-            previous_index_gate = torch.cat(
-                (torch.full_like(index_gate[:, :1], float("-inf")), index_gate[:, :-1]), dim=1
-            )
-            index_bias = F.embedding(slots, indexer.position_bias)
-            index_values = torch.cat(
-                (previous_index_kv[..., : indexer.head_dim], index_kv[..., indexer.head_dim :]), dim=2
-            )
-            index_weights = torch.cat(
-                (
-                    previous_index_gate[..., : indexer.head_dim] + index_bias[..., : indexer.head_dim],
-                    index_gate[..., indexer.head_dim :] + index_bias[..., indexer.head_dim :],
-                ),
-                dim=2,
-            )
-            index_weights = index_weights.softmax(dim=2, dtype=torch.float32)
-            index_compressed = indexer.kv_norm(
-                torch.einsum("bnrd->bnd", index_values * index_weights.to(index_values.dtype))
-            )
-            index_cos, index_sin = indexer.rotary_emb(
-                index_compressed, position_ids=block_positions, layer_type=indexer.rope_layer_type
-            )
-            index_compressed = qeff_apply_rotary_pos_emb(index_compressed.unsqueeze(1), index_cos, index_sin).squeeze(1)
-            layer.actual_indexer_compressed_kv = ctx_scatter(
-                indexer_cache, cache_positions, index_compressed.unsqueeze(1)
-            )
-            if not _is_export_capture():
-                layer.compressor_entry_count = full_blocks
-                layer.indexer_entry_count = full_blocks
-
-        chunk_size = min(self.sliding_window, seq_len)
-        outputs = []
-        compressed_capacity = layer.actual_compressed_kv.shape[2]
-        entry_indices = torch.arange(compressed_capacity, device=hidden_states.device).view(1, 1, -1)
-        for start in range(0, seq_len, chunk_size):
-            end = min(start + chunk_size, seq_len)
-            query_chunk = query[:, :, start:end]
-            positions_chunk = position_ids[:, start:end]
-            index_cos, index_sin = indexer.rotary_emb(
-                hidden_states[:, start:end], position_ids=positions_chunk, layer_type=indexer.rope_layer_type
-            )
-            index_query = (
-                indexer.q_b_proj(q_residual[:, start:end])
-                .view(batch_size, end - start, indexer.num_heads, indexer.head_dim)
-                .transpose(1, 2)
-            )
-            index_query = qeff_apply_rotary_pos_emb(index_query, index_cos, index_sin).transpose(1, 2)
-            index_scores = indexer.scorer(
-                index_query, layer.actual_indexer_compressed_kv[:, 0], hidden_states[:, start:end]
-            )
-            completed_entries = torch.div(positions_chunk + 1, ratio, rounding_mode="floor")
-            index_scores = index_scores.masked_fill(entry_indices >= completed_entries.unsqueeze(-1), float("-inf"))
-            top_k = min(indexer.index_topk, compressed_capacity)
-            top_indices = index_scores.topk(top_k, dim=-1).indices
-            valid = top_indices < completed_entries.unsqueeze(-1)
-            safe_indices = (
-                torch.where(valid, top_indices, torch.zeros_like(top_indices)).reshape(batch_size, -1).to(torch.int32)
-            )
-            gathered = ctx_gather_blocked_kv(layer.actual_compressed_kv, safe_indices.unsqueeze(1)).squeeze(1)
-            gathered = gathered.view(batch_size, end - start, top_k, self.head_dim)
-
-            chunk_outputs = []
-            for token_idx in range(end - start):
-                token_position = positions_chunk[:, token_idx : token_idx + 1]
-                context_indices, local_valid = _sliding_window_context_indices(
-                    token_position, self.sliding_window, hidden_states.device
-                )
-                local_key_value = ctx_gather_blocked_kv(
-                    layer.sliding_window_kv,
-                    torch.where(local_valid, context_indices, torch.zeros_like(context_indices)),
-                )
-                local_key_value = torch.where(
-                    local_valid.unsqueeze(-1), local_key_value, torch.zeros_like(local_key_value)
-                )
-                compressed_key = gathered[:, token_idx].unsqueeze(1)
-                compressed_mask = ~valid[:, token_idx].unsqueeze(1).unsqueeze(1)
-                token_output, _ = self._attention_forward(
-                    query_chunk[:, :, token_idx : token_idx + 1],
-                    local_key_value,
-                    ~local_valid.unsqueeze(1),
-                    compressed_key,
-                    compressed_mask,
-                )
-                token_output = qeff_apply_rotary_pos_emb(
-                    token_output.transpose(1, 2),
-                    cos[:, start + token_idx : start + token_idx + 1],
-                    -sin[:, start + token_idx : start + token_idx + 1],
-                ).transpose(1, 2)
-                chunk_outputs.append(token_output)
-            outputs.append(torch.cat(chunk_outputs, dim=2))
-
-        attention_output = torch.cat(outputs, dim=2)
-        grouped = attention_output.transpose(1, 2).reshape(*input_shape, self.config.o_groups, -1)
-        output = self.o_b_proj(self.o_a_proj(grouped).flatten(2))
-        return output, None
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1680,9 +1494,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         if past_key_values is not None and not isinstance(past_key_values, QEffDeepseekV4Cache):
             raise TypeError("QEffDeepseekV4Attention requires QEffDeepseekV4Cache.")
         if hidden_states.shape[1] != 1:
-            if self.layer_type != "compressed_sparse_attention" or past_key_values is None:
-                raise ValueError("Only CSA attention supports multi-token QEff prefill.")
-            return self._csa_prefill_forward(hidden_states, position_embeddings, position_ids, past_key_values)
+            raise ValueError("QEff attention is decode-only and requires query length 1.")
 
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -2403,8 +2215,10 @@ class QEffDeepseekV4Model(DeepseekV4Model):
             raise ValueError("Specify exactly one of input_ids or inputs_embeds.")
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+        if inputs_embeds.shape[1] != 1:
+            raise ValueError("DeepSeek V4 QEff integration is decode-only and requires one token per call.")
         if position_ids is None:
-            raise ValueError("DeepSeek V4 QEff integration requires explicit position_ids.")
+            raise ValueError("Decode-only DeepSeek V4 requires explicit position_ids.")
         if past_key_values is None:
             ctx_len = attention_mask.shape[-1] if attention_mask is not None else self.config.max_seq_len_cached
             if ctx_len is None:
@@ -2413,57 +2227,23 @@ class QEffDeepseekV4Model(DeepseekV4Model):
                 self.config, inputs_embeds.shape[0], ctx_len, inputs_embeds.dtype, inputs_embeds.device
             )
         cache = QEffDeepseekV4Cache.from_legacy_cache(self.config, past_key_values, position_ids)
+        _, valid = _sliding_window_context_indices(position_ids, self.config.sliding_window, position_ids.device)
+        causal_mask = ~valid.unsqueeze(1)
         hidden_states = inputs_embeds.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
+        position_embeddings = {
+            "main": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="main"),
+            "compress": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="compress"),
+        }
         for layer in self.layers:
-            if (
-                layer.self_attn.layer_type == "compressed_sparse_attention"
-                and hidden_states.shape[1] > 1
-                and getattr(self.config, "qeff_csa_prefill_blocked", False)
-            ):
-                position_embeddings = {
-                    "main": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="main"),
-                    "compress": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="compress"),
-                }
-                hidden_states = layer(
-                    hidden_states,
-                    position_embeddings=position_embeddings,
-                    position_ids=position_ids,
-                    attention_mask=None,
-                    input_ids=input_ids,
-                    past_key_values=cache,
-                    **kwargs,
-                )
-                continue
-
-            token_states = []
-            for token_idx in range(hidden_states.shape[1]):
-                token_positions = position_ids[:, token_idx : token_idx + 1]
-                token_input_ids = input_ids[:, token_idx : token_idx + 1] if input_ids is not None else None
-                _, valid = _sliding_window_context_indices(
-                    token_positions, self.config.sliding_window, token_positions.device
-                )
-                position_embeddings = {
-                    "main": self.rotary_emb(
-                        inputs_embeds[:, token_idx : token_idx + 1], position_ids=token_positions, layer_type="main"
-                    ),
-                    "compress": self.rotary_emb(
-                        inputs_embeds[:, token_idx : token_idx + 1],
-                        position_ids=token_positions,
-                        layer_type="compress",
-                    ),
-                }
-                token_states.append(
-                    layer(
-                        hidden_states[:, token_idx : token_idx + 1],
-                        position_embeddings=position_embeddings,
-                        position_ids=token_positions,
-                        attention_mask=~valid.unsqueeze(1),
-                        input_ids=token_input_ids,
-                        past_key_values=cache,
-                        **kwargs,
-                    )
-                )
-            hidden_states = torch.cat(token_states, dim=1)
+            hidden_states = layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                position_ids=position_ids,
+                attention_mask=causal_mask,
+                input_ids=input_ids,
+                past_key_values=cache,
+                **kwargs,
+            )
         hidden_states = self.norm(self.hc_head(hidden_states)).to(inputs_embeds.dtype)
         return MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
