@@ -28,16 +28,19 @@ The home directory is an NFS mount with a per-user quota. `df -h ~` shows the fr
 OSError: [Errno 122] Disk quota exceeded
 ```
 
-The run needs about 60 GB for the 7B (18 GB weights, 36 GB fp32 ONNX, a few GB of QPC), so point all three caches at the local disk. Find it with `df -h` and look for a `/dev/mapper/...` or `/dev/nvme...` filesystem with space, for example `/local/mnt`:
+The run needs about 60 GB for the 7B (18 GB weights, 36 GB fp32 ONNX, a few GB of QPC), so point all three caches at the local disk. Find it with `df -h` and look for a `/dev/mapper/...` or `/dev/nvme...` filesystem with space. On these servers it is `/local/mnt`, and the writable folder on it is `/local/mnt/workspace` (`drwxrwxrwt`, like `/tmp`); `/local/mnt` itself is root-owned, so `mkdir /local/mnt/<user>` is denied.
 
 ```csh
 set user = `whoami`
-mkdir -p /local/mnt/$user/hf /local/mnt/$user/qeff_cache /local/mnt/$user/qeff_logs
-setenv HF_HOME /local/mnt/$user/hf
-setenv QEFF_HOME /local/mnt/$user/qeff_cache
-setenv QEFF_LOG_PATH /local/mnt/$user/qeff_logs
+mkdir -p /local/mnt/workspace/$user/hf /local/mnt/workspace/$user/qeff_cache /local/mnt/workspace/$user/qeff_logs
+setenv HF_HOME /local/mnt/workspace/$user/hf
+setenv QEFF_HOME /local/mnt/workspace/$user/qeff_cache
+setenv QEFF_LOG_PATH /local/mnt/workspace/$user/qeff_logs
 setenv HF_HUB_ENABLE_HF_TRANSFER 1
+touch $HF_HOME/.w && rm $HF_HOME/.w && echo writable
 ```
+
+If the last line does not print `writable`, the paths are wrong and the run will fail with `PermissionError` inside `huggingface_hub`.
 
 | Variable | What goes there |
 |---|---|
@@ -47,7 +50,7 @@ setenv HF_HUB_ENABLE_HF_TRANSFER 1
 
 Make it permanent by adding the `setenv` lines to `~/.cshrc`. Shell variables like `$user` do not survive into a new login unless they are also in `.cshrc`, so write the real path there.
 
-If `mkdir` is denied on `/local/mnt`, ask the admin for a writable folder there. Avoid `/tmp` (tmpfs, it is RAM) and the project scratch mounts that are already near full.
+If there is no `workspace` folder, ask the admin for a writable folder on the local disk. Avoid `/tmp` (tmpfs, it is RAM) and the project scratch mounts that are already near full.
 
 ## 3. Clean up what already landed in home
 
