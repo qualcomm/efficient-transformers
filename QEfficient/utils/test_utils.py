@@ -532,6 +532,7 @@ class ModelConfig:
 
     EXTERNAL_MODELS = {
         "IFM/K2-Horizon-7B": {},
+        "IFM/K2-Horizon-0.9B": {},
         "hpcai-tech/grok-1": {
             "skip_hf_reference": True,
             "pytorch_hf_tokens_custom_case": [
