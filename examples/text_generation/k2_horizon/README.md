@@ -47,12 +47,12 @@ pip install -U pip
 pip install -e ".[test]"
 
 setenv HF_HUB_ENABLE_HF_TRANSFER 1
-setenv QEFF_HOME /path/with/space/qeff_cache
+setenv QEFF_HOME /path/with/space/qeff_cache   # a real directory on a disk with space, for example $HOME/qeff_cache
 ```
 
 If you use the SDK's own environment instead: `source /opt/qti-aic/dev/python/qeff/bin/activate` (bash) or `source /opt/qti-aic/dev/python/qeff/bin/activate.csh` (csh), then `pip install -e .` from the checkout.
 
-On csh, tcsh and zsh, quote the device list in every command below: `--device-group '[0]'` and `--device_group '[0]'`. Those shells treat `[0]` as a file pattern.
+Every command below quotes the device list, `'[0]'`. csh, tcsh and zsh treat a bare `[0]` as a file pattern and fail with `python: No match.` The quotes are harmless in bash.
 
 The model is remote code, so every load passes `trust_remote_code`. Without it transformers stops at an interactive prompt.
 
@@ -65,14 +65,14 @@ python examples/text_generation/k2_horizon/k2_horizon_inference.py \
     --model-name IFM/K2-Horizon-7B \
     --prompt "The capital of France is" \
     --prefill-seq-len 128 --ctx-len 4096 \
-    --num-cores 16 --device-group [0]
+    --num-cores 16 --device-group '[0]'
 ```
 
 The same thing through the CLI:
 
 ```bash
 python -m QEfficient.cloud.infer --model_name IFM/K2-Horizon-7B --trust_remote_code \
-    --batch_size 1 --prompt_len 128 --ctx_len 4096 --num_cores 16 --device_group [0] \
+    --batch_size 1 --prompt_len 128 --ctx_len 4096 --num_cores 16 --device_group '[0]' \
     --prompt "The capital of France is" --mos 1 --aic_enable_depth_first
 ```
 
@@ -111,7 +111,7 @@ Switch on the production precision and read the metrics that `generate()` prints
 ```bash
 python examples/text_generation/k2_horizon/k2_horizon_inference.py \
     --prefill-seq-len 128 --ctx-len 4096 --generation-len 256 \
-    --num-cores 16 --device-group [0] --mxfp6 --mxint8-kv-cache
+    --num-cores 16 --device-group '[0]' --mxfp6 --mxint8-kv-cache
 ```
 
 `perf_metrics` gives prefill time (time to first token), decode tokens per second, and total throughput. Repeat for the context lengths and batch sizes the customer cares about. Batching is set at compile time (`batch_size` or continuous batching with `full_batch_size` in `compile()`), see `examples/text_generation/continuous_batching.py`.
@@ -120,7 +120,7 @@ Precision on AI 100 Ultra: fp16 compute, MXFP6 weights (`--mxfp6`), MXINT8 KV ca
 
 ## Step 4: Performance per Watt and per Dollar
 
-- Watts: read card power from `/opt/qti-aic/tools/qaic-util -q` while a decode run is in progress, or use the SDK's device telemetry for a time series. Record idle power as well.
+- Watts: `/opt/qti-aic/tools/qaic-util -q` prints `Board power(Watts)` and `SOC power(Watts)` per device (board TDP cap is 150 W on the Ultra, SoC cap 31 W). Sample it while a decode run is in progress, for example `watch -n 1 /opt/qti-aic/tools/qaic-util -q` in a second terminal, and record idle power as well. Use board power for the per-card number.
 - Performance per Watt = decode tokens per second divided by the measured card power during decode.
 - Performance per Dollar = decode tokens per second divided by the card price (or hourly cost) used for the comparison. The price is an input, agree it with the customer.
 
