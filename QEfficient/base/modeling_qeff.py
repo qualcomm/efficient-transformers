@@ -1206,7 +1206,9 @@ class QEFFBaseModel(ABC):
         num_cores = compiler_options.get("num_cores", compiler_options.get("aic_num_cores"))
         if num_cores is None:
             num_cores = constants.DEFAULT_AIC_NUM_CORES
-        prefill_seq_len = compiler_options.get("prefill_seq_len", seq_len)
+        prefill_seq_len = compiler_options.get("prefill_seq_len")
+        if prefill_seq_len is None:
+            prefill_seq_len = seq_len
         mdp_num_partitions = compiler_options.get("mdp_num_partitions", 1)
         if mdp_num_partitions is None:
             mdp_num_partitions = 1

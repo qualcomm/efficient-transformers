@@ -366,6 +366,31 @@ class TestQEFFBaseModelTransformBlocking:
 
         assert captured_kwargs["num_devices"] == expected_moe_num_devices
 
+    def test_transform_uses_decode_seq_len_when_prefill_seq_len_is_missing(self, monkeypatch):
+        from QEfficient.base import modeling_qeff
+
+        model, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model)
+        captured_kwargs = {}
+
+        def fake_moe_apply(model, **kwargs):
+            captured_kwargs.update(kwargs)
+            return model, False
+
+        monkeypatch.setattr(modeling_qeff.OptimizedMoETransform, "apply", staticmethod(fake_moe_apply))
+
+        qeff.transform(
+            ctx_len=32,
+            seq_len=1,
+            bs=1,
+            num_devices=8,
+            qaic_config={"moe_config": {"flavour": "expert_parallel", "expert_parallel_chunk_size": 8}},
+            aic_num_cores=16,
+            prefill_only=False,
+        )
+
+        assert captured_kwargs["prefill_seq_len"] == 1
+
     def test_transform_rejects_invalid_mdp_num_partitions_for_moe_transform(self):
         model, _ = make_tiny_gpt2()
         qeff = QEFFAutoModelForCausalLM(model)
