@@ -374,11 +374,17 @@ class QEffFP8Config(QuantizationConfigMixin):
         self.weight_block_size = weight_block_size
 
 
-def _replace_with_fp8_dequant_linear_and_experts_if_qwen(
-    model, modules_to_not_convert=None, current_key_name=None, quantization_config=None, has_been_replaced=False
+def _replace_with_fp8_dequant_linear_and_experts(
+    model,
+    modules_to_not_convert=None,
+    current_key_name=None,
+    quantization_config=None,
+    has_been_replaced=False,
+    scale_dtype=None,
 ):
     current_key_name = [] if current_key_name is None else current_key_name
-    scale_dtype = getattr(quantization_config, "scale_dtype", torch.bfloat16)
+    if scale_dtype is None:
+        scale_dtype = getattr(quantization_config, "scale_dtype", torch.bfloat16)
 
     for name, child_module in model.named_children():
         current_key_name.append(name)
@@ -408,12 +414,13 @@ def _replace_with_fp8_dequant_linear_and_experts_if_qwen(
                 has_been_replaced = True
 
         if len(list(child_module.children())) > 0:
-            _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
+            _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts(
                 child_module,
                 modules_to_not_convert,
                 current_key_name,
                 quantization_config,
                 has_been_replaced=has_been_replaced,
+                scale_dtype=scale_dtype,
             )
 
         current_key_name.pop(-1)
@@ -448,6 +455,26 @@ def _squeeze_fp8_per_channel_scales(model: "torch.nn.Module") -> None:
                 module.register_buffer("weight_scale", module.weight_scale)
 
 
+def _cast_fp8_scale_dtypes(model: "torch.nn.Module", scale_dtype: torch.dtype) -> None:
+    """Restore FP8 scale buffers to the requested model dtype after checkpoint loading."""
+    scale_buffer_names = {
+        "weight_scale",
+        "input_scale",
+        "weight_scale_inv",
+        "gate_up_proj_scale_inv",
+        "down_proj_scale_inv",
+    }
+    for module in model.modules():
+        found_scale = False
+        for name in scale_buffer_names:
+            scale = getattr(module, name, None)
+            if scale is not None and scale.dtype != scale_dtype:
+                module._buffers[name] = scale.to(dtype=scale_dtype)
+            found_scale = found_scale or scale is not None
+        if found_scale:
+            module.scale_dtype = scale_dtype
+
+
 class QEffFP8Quantizer(CompressedTensorsHfQuantizer):
     def __init__(self, quantization_config, **kwargs):
         if not isinstance(quantization_config, QEffFP8Config):
@@ -463,6 +490,7 @@ class QEffFP8Quantizer(CompressedTensorsHfQuantizer):
             | set(self.quantization_config.ignored_layers if self.quantization_config.ignored_layers else [])
         )
         self.pre_quantized = kwargs.pop("pre_quantized", True)
+        self.scale_dtype = getattr(quantization_config, "scale_dtype", torch.bfloat16)
 
         if not self.pre_quantized and self.requires_calibration:
             raise ValueError(
@@ -474,13 +502,20 @@ class QEffFP8Quantizer(CompressedTensorsHfQuantizer):
     def validate_environment(self, *args, **kwargs):
         return True
 
+    def update_dtype(self, dtype):
+        if dtype is None:
+            return dtype
+        if dtype not in _SUPPORTED_SCALE_DTYPES:
+            raise ValueError(
+                f"FP8 models require a supported floating-point dtype, got {dtype}. "
+                f"Supported dtypes are {_SUPPORTED_SCALE_DTYPES}."
+            )
+        self.scale_dtype = dtype
+        return dtype
+
     def update_torch_dtype(self, torch_dtype):
-        # Allow fp32, fp16, and bf16 — do not force float32.
-        # FP8 weights stay in FP8; non-FP8 tensors (embed, layernorm, lm_head,
-        # scale buffers) load in whatever dtype the caller requested.
-        if torch_dtype not in [None, torch.float32, torch.float16, torch.bfloat16]:
-            logger.warning(f"Requested dtype {torch_dtype} is not supported, overriding to None")
-        return torch_dtype
+        """Keep compatibility with Transformers versions using the old hook name."""
+        return self.update_dtype(torch_dtype)
 
     def _process_model_before_weight_loading(self, model, **kwargs):
         if not self.modules_to_not_convert or "lm_head" not in self.modules_to_not_convert:
@@ -490,12 +525,15 @@ class QEffFP8Quantizer(CompressedTensorsHfQuantizer):
             f"activations quantization strategy = {self.quantization_config.activation_scheme}, will be ignored and the layers will be run with de-quantized weights"
         )
         if self.quantization_config.weight_block_size is not None:
-            model, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
-                model, self.modules_to_not_convert, quantization_config=self.quantization_config
+            model, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts(
+                model,
+                self.modules_to_not_convert,
+                quantization_config=self.quantization_config,
+                scale_dtype=self.scale_dtype,
             )
             return
 
-        scale_dtype = getattr(self.quantization_config, "scale_dtype", torch.bfloat16)
+        scale_dtype = self.scale_dtype
 
         def replace_linear_with_fp8_dequant_layer(module):
             for name, child_module in module.named_children():
@@ -514,6 +552,7 @@ class QEffFP8Quantizer(CompressedTensorsHfQuantizer):
         replace_linear_with_fp8_dequant_layer(model)
 
     def _process_model_after_weight_loading(self, model, **kwargs):
+        _cast_fp8_scale_dtypes(model, self.scale_dtype)
         _squeeze_fp8_per_channel_scales(model)
 
     def update_missing_keys_after_loading(self, model, missing_keys: List[str], prefix: str) -> List[str]:
@@ -757,6 +796,7 @@ class QEffCompressedTensorsFP8Quantizer(CompressedTensorsHfQuantizer):
                 | set(self.quantization_config.ignore if self.quantization_config.ignore else [])
             )
             self.pre_quantized = kwargs.pop("pre_quantized", True)
+            self.scale_dtype = getattr(self.quantization_config, "scale_dtype", torch.bfloat16)
 
             if not self.pre_quantized and self.requires_calibration:
                 raise ValueError(
@@ -770,14 +810,24 @@ class QEffCompressedTensorsFP8Quantizer(CompressedTensorsHfQuantizer):
             return super().validate_environment(*args, **kwargs)
         return True
 
-    def update_torch_dtype(self, torch_dtype):
+    def update_dtype(self, dtype):
         if self.is_pack_quantized(self.quantization_config):
-            return super().update_torch_dtype(torch_dtype)
+            return super().update_dtype(dtype)
 
-        # Allow fp32, fp16, and bf16 — do not force float32.
-        if torch_dtype not in [None, torch.float32, torch.float16, torch.bfloat16]:
-            logger.warning(f"Requested dtype {torch_dtype} is not supported, overriding to None")
-        return torch_dtype
+        if dtype is None:
+            return dtype
+        if dtype not in _SUPPORTED_SCALE_DTYPES:
+            raise ValueError(
+                f"FP8 models require a supported floating-point dtype, got {dtype}. "
+                f"Supported dtypes are {_SUPPORTED_SCALE_DTYPES}."
+            )
+        self.scale_dtype = dtype
+        self.quantization_config.scale_dtype = dtype
+        return dtype
+
+    def update_torch_dtype(self, torch_dtype):
+        """Keep compatibility with Transformers versions using the old hook name."""
+        return self.update_dtype(torch_dtype)
 
     def _process_model_before_weight_loading(self, model, **kwargs):
         if self.is_pack_quantized(self.quantization_config):
@@ -793,7 +843,7 @@ class QEffCompressedTensorsFP8Quantizer(CompressedTensorsHfQuantizer):
             f"activations quantization scheme = {self.quantization_config.input_activations_quantization_scheme.__dict__}, will be ignored and the layers will be run with de-quantized weights"
         )
 
-        scale_dtype = getattr(self.quantization_config, "scale_dtype", torch.bfloat16)
+        scale_dtype = self.scale_dtype
 
         def replace_linear_with_fp8_dequant_layer(module):
             for name, child_module in module.named_children():
@@ -816,6 +866,7 @@ class QEffCompressedTensorsFP8Quantizer(CompressedTensorsHfQuantizer):
         if self.is_pack_quantized(self.quantization_config):
             super()._process_model_after_weight_loading(model, **kwargs)
             return
+        _cast_fp8_scale_dtypes(model, self.scale_dtype)
         _squeeze_fp8_per_channel_scales(model)
 
     def update_missing_keys_after_loading(self, model, missing_keys: List[str], prefix: str) -> List[str]:
