@@ -449,6 +449,13 @@ from QEfficient.transformers.models.internvl.modeling_internvl import (
     QEffInternVisionEmbeddings,
     QEffInternVLModel,
 )
+from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import (
+    QEffK2HorizonAttention,
+    QEffK2HorizonDecoderLayer,
+    QEffK2HorizonForCausalLM,
+    QEffK2HorizonModel,
+    QEffK2HorizonRMSNorm,
+)
 from QEfficient.transformers.models.kimi_k25.modeling_kimi_k25 import (
     QEffKimiK25ForConditionalGeneration,
     QEffLearnable2DInterpPosEmbDivided_fixed,
@@ -1410,6 +1417,21 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
         "RMSNorm": {
             "forward": QEFFGrok1CustomRMSNormAIC.forward,
         },
+        # Mapping for the K2 Horizon dense models (IFM/K2-Horizon-*, remote code)
+        "K2HorizonForCausalLM": {
+            "forward": QEffK2HorizonForCausalLM.forward,
+            "get_submodules_for_export": QEffK2HorizonForCausalLM.get_submodules_for_export,
+        },
+        "K2HorizonModel": {
+            "forward": QEffK2HorizonModel.forward,
+            "__qeff_init__": QEffK2HorizonModel.__qeff_init__,
+        },
+        "K2HorizonDecoderLayer": {"forward": QEffK2HorizonDecoderLayer.forward},
+        "K2HorizonAttention": {
+            "forward": QEffK2HorizonAttention.forward,
+            "__qeff_init__": QEffK2HorizonAttention.__qeff_init__,
+        },
+        "K2HorizonRMSNorm": {"forward": QEffK2HorizonRMSNorm.forward},
         "KimiK25ForConditionalGeneration": {
             "_qeff_merge_input_ids_with_image_features": QEffKimiK25ForConditionalGeneration._qeff_merge_input_ids_with_image_features,
             "get_qeff_vision_encoder": QEffKimiK25ForConditionalGeneration.get_qeff_vision_encoder,
