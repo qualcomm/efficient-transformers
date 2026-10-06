@@ -8,8 +8,9 @@ How to compile and run `IFM/K2-Horizon-7B` on a server with Cloud AI 100 Ultra c
 |---|---|---|
 | HF PyTorch vs QEff PyTorch, full 36 layers (bf16) | CPU | Tokens match over 24 generated tokens |
 | HF vs QEff PyTorch vs ONNX Runtime, first 8 layers (fp32) | CPU | Tokens match |
-| ONNX export, full model | Server | To do |
-| Compile and run on AI 100 Ultra | Server | To do |
+| ONNX export, full model (fp32) | Server | Done |
+| Compile and run on AI 100 Ultra, fp16, 1 device, ctx 4096 | Server | Output matches the CPU reference. TTFT 0.2 s, decode 6.19 tokens/s |
+| MXFP6 + MXINT8, 1 and 4 devices | Server | To do |
 
 The wrapper covers the dense sizes (0.9B, 3.7B, 7B, 32B). The 36B and 375B MoVA sizes have routed value experts and a sparse MoE that are not mapped yet.
 
