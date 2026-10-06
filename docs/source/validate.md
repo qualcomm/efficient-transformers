@@ -39,7 +39,7 @@
 | **LlamaSwiftKVForCausalLM**  | swiftkv            | [Snowflake/Llama-3.1-SwiftKV-8B-Instruct](https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct)                                                  | ✔️          |
 | **Grok1ModelForCausalLM** ** |  grok-1②          | [hpcai-tech/grok-1](https://huggingface.co/hpcai-tech/grok-1)                                                  | ✕          |
 | **Glm4MoeForCausalLM**  |     GLM-4.5       | [zai-org/GLM-4.5](https://huggingface.co/zai-org/GLM-4.5)                                                  |          |
-| **K2HorizonForCausalLM** ② | K2 Horizon (dense) | [IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B) | ✕ |
+| **K2HorizonForCausalLM** | K2 Horizon② (dense) | [IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B) | ✕ |
 
 ---
 

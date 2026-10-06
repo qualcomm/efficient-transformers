@@ -7,13 +7,15 @@
 
 """
 QEff wrappers for the K2 Horizon family (IFM/K2-Horizon-*), a remote-code model
-whose dense sizes are Llama-style GQA decoders with a grouped RMSNorm and an
-optional post-attention gate. The upstream classes live in the Hub repo
-(modeling_k2_horizon.py), so these wrappers are wired by class name through
-KVCacheExternalModuleMapperTransform instead of by class object.
+whose dense sizes are Llama-style GQA decoders with a grouped RMSNorm. The
+upstream classes live in the Hub repo (modeling_k2_horizon.py), so these
+wrappers are wired by class name through KVCacheExternalModuleMapperTransform
+instead of by class object.
 
-Only the dense layers (K2HorizonAttention + K2HorizonMLP) are covered. The MoVA
-attention and sparse MoE blocks of the 36B/375B sizes are not mapped yet.
+Only the dense layers (K2HorizonAttention + K2HorizonMLP) are covered; MoVA/MoE
+configs are refused at transform time. The upstream attention gate and QK norm
+are config options that no published dense size enables; they are supported and
+covered by the dummy-layer test config.
 """
 
 import math
@@ -24,17 +26,16 @@ from torch import nn
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
-from QEfficient.blocking.attention_blocking import (
-    AttentionBlockingConfig,
-    BlockingMode,
-    generic_blocked_attention_interface,
-    past_key_value_update,
-)
+from QEfficient.blocking.attention_blocking import past_key_value_update
 from QEfficient.customop.rms_norm import CustomRMSNormFunc
 from QEfficient.customop.utils import select_interface
 from QEfficient.transformers.cache_utils import QEffDynamicCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.transformers.models.llama.modeling_llama import eager_attention_forward, qeff_apply_rotary_pos_emb
+from QEfficient.utils import constants
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 class QEffK2HorizonRMSNorm(nn.Module):
@@ -63,14 +64,14 @@ class QEffK2HorizonAttention(nn.Module):
     def __qeff_init__(self):
         if self.rope_head_dim != self.head_dim:
             raise NotImplementedError("K2 Horizon partial rotary (rope_head_dim != head_dim) is not supported yet")
+        if self.sliding_window is not None:
+            raise NotImplementedError("K2 Horizon sliding-window attention is not supported yet")
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None,
         position_ids: torch.LongTensor | None = None,
-        block_table: torch.LongTensor | None = None,
-        slot_id: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
@@ -95,43 +96,21 @@ class QEffK2HorizonAttention(nn.Module):
         key_states = key_states.view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        past_seen_tokens = past_key_values.get_seq_length(self.layer_idx) if past_key_values is not None else 0
         query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos_cached, sin_cached)
 
-        blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
-        use_blocking = blocking_config is not None and (blocking_config.mode != BlockingMode.NONE)
-        if use_blocking:
-            attn_output, attn_weights = generic_blocked_attention_interface(
-                module=self,
-                query=query_states,
-                key=key_states,
-                value=value_states,
-                attention_mask=attention_mask,
-                scaling=self.scaling,
-                layer_idx=self.layer_idx,
-                past_key_value=past_key_values,
-                blocking_config=blocking_config,
-                comp_ctx_length=comp_ctx_lengths,
-                batch_index=batch_index,
-                position_ids=position_ids,
-                block_table=block_table,
-                slot_id=slot_id,
-                past_seen_tokens=past_seen_tokens,
-            )
-        else:
-            key, value, attention_mask, _ = past_key_value_update(
-                module=self,
-                key=key_states,
-                value=value_states,
-                attention_mask=attention_mask,
-                past_key_value=past_key_values,
-                comp_ctx_lengths=comp_ctx_lengths,
-                batch_index=batch_index,
-                position_ids=position_ids,
-            )
-            attn_output, attn_weights = eager_attention_forward(
-                self, query_states, key, value, attention_mask, scaling=self.scaling, **kwargs
-            )
+        key, value, attention_mask, _ = past_key_value_update(
+            module=self,
+            key=key_states,
+            value=value_states,
+            attention_mask=attention_mask,
+            past_key_value=past_key_values,
+            comp_ctx_lengths=comp_ctx_lengths,
+            batch_index=batch_index,
+            position_ids=position_ids,
+        )
+        attn_output, attn_weights = eager_attention_forward(
+            self, query_states, key, value, attention_mask, scaling=self.scaling, **kwargs
+        )
 
         if self.gate_func is not None:
             gate = self.gate_proj(hidden_states).view(*input_shape, -1, self.head_dim)
@@ -152,8 +131,6 @@ class QEffK2HorizonDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        block_table: torch.LongTensor | None = None,
-        slot_id: torch.LongTensor | None = None,
         past_key_value: Cache | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
@@ -169,8 +146,6 @@ class QEffK2HorizonDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            block_table=block_table,
-            slot_id=slot_id,
             past_key_values=past_key_value,
             comp_ctx_lengths=comp_ctx_lengths,
             batch_index=batch_index,
@@ -193,11 +168,22 @@ class QEffK2HorizonDecoderLayer(nn.Module):
 
 class QEffK2HorizonModel(nn.Module):
     def __qeff_init__(self):
+        if getattr(self.config, "mova_num_experts", 0) or getattr(self.config, "num_experts", 0):
+            raise NotImplementedError(
+                "K2 Horizon MoVA/MoE sizes are not supported yet; only the dense models "
+                "(0.9B, 3.7B, 7B, 32B) are covered"
+            )
+        max_seq_len = min(self.config.max_position_embeddings, constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS)
+        if max_seq_len < self.config.max_position_embeddings:
+            logger.warning(
+                f"K2 Horizon rotary tables are capped at {max_seq_len} positions "
+                f"(config has {self.config.max_position_embeddings}); ctx_len must stay within the cap"
+            )
         rotary = self.rotary_emb
-        positions = torch.arange(self.config.max_position_embeddings, dtype=torch.int64).type_as(rotary.inv_freq)
+        positions = torch.arange(max_seq_len, dtype=torch.int64).type_as(rotary.inv_freq)
         freqs = torch.outer(positions, rotary.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        dtype = self.config.torch_dtype or torch.float32
+        dtype = self.embed_tokens.weight.dtype
         self.cos_cached = nn.Parameter((emb.cos() * rotary.attention_scaling).to(dtype))
         self.sin_cached = nn.Parameter((emb.sin() * rotary.attention_scaling).to(dtype))
 
@@ -206,8 +192,6 @@ class QEffK2HorizonModel(nn.Module):
         input_ids: torch.LongTensor = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        block_table: torch.LongTensor | None = None,
-        slot_id: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
@@ -253,8 +237,6 @@ class QEffK2HorizonModel(nn.Module):
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                block_table=block_table,
-                slot_id=slot_id,
                 past_key_value=past_key_values,
                 comp_ctx_lengths=comp_ctx_lengths,
                 batch_index=batch_index,
@@ -287,8 +269,6 @@ class QEffK2HorizonForCausalLM(nn.Module):
         input_ids: torch.LongTensor = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        block_table: torch.LongTensor | None = None,
-        slot_id: torch.LongTensor | None = None,
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         comp_ctx_lengths: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
@@ -304,8 +284,6 @@ class QEffK2HorizonForCausalLM(nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            block_table=block_table,
-            slot_id=slot_id,
             past_key_values=past_key_values,
             comp_ctx_lengths=comp_ctx_lengths,
             batch_index=batch_index,

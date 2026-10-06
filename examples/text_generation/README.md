@@ -25,6 +25,7 @@ Popular model families include:
 - Falcon, MPT, Phi-3
 - Granite, StarCoder
 - OLMo 2
+- K2 Horizon (dense sizes, remote code)
 
 ---
 
@@ -116,6 +117,25 @@ This example:
 - Uses sparse expert activation for efficiency
 - Works with Qwen, Mixtral, and other MoE models
 - Supports explicit ONNX subfunction enablement with `--use-onnx-subfunctions`
+
+---
+
+### Remote-code models: K2 Horizon
+`IFM/K2-Horizon-*` ships its model class as remote code, so pass `--trust-remote-code`. The dense sizes (0.9B, 3.7B, 7B, 32B) are supported; the MoVA/MoE sizes (36B-A4B, 375B-A23B) are refused at load.
+
+**Usage:**
+```bash
+python basic_inference.py \
+    --model-name IFM/K2-Horizon-7B \
+    --trust-remote-code \
+    --prompt "The capital of France is" \
+    --prefill-seq-len 128 \
+    --ctx-len 4096 \
+    --num-cores 16 \
+    --device-group '[0]'
+```
+
+The configs declare 524288 positions; the exported rotary tables are capped at `K2_HORIZON_MAX_POSITION_EMBEDDINGS` (65536), so keep `ctx_len` within that. Quote the device group in csh, tcsh and zsh.
 
 
 ## CLI Workflow
