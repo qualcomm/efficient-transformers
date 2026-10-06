@@ -274,6 +274,28 @@ class TestWeightFreeCheckpointTransforms:
 
         assert transform is GptOssMxfp4ExpertDequantSplitCheckpointTransform
 
+    def test_qwen3_original_layout_exposes_source_parameter_names(self):
+        from transformers import Qwen3MoeConfig
+
+        from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import QEffQwen3MoeExperts
+
+        experts = QEffQwen3MoeExperts(
+            Qwen3MoeConfig(num_experts=2, hidden_size=4, moe_intermediate_size=6, intermediate_size=6)
+        )
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+        parameter_names = {name for name, _ in experts.named_parameters()}
+
+        assert parameter_names == {
+            f"{expert}.{projection}.weight"
+            for expert in ("0", "1")
+            for projection in ("gate_proj", "up_proj", "down_proj")
+        }
+        assert tuple(weights.gate.shape) == (2, 4, 6)
+        assert tuple(weights.up.shape) == (2, 4, 6)
+        assert tuple(weights.down.shape) == (2, 6, 4)
+
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"

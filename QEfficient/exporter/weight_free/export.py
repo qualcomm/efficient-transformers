@@ -328,7 +328,13 @@ def export_weight_free_onnx(
         raise RuntimeError("torch.onnx.export returned None for weight-free dynamo export")
 
     prep_start = time.perf_counter()
-    prepared_model_ref = _prepare_checkpoint_for_weight_free_export(meta_qeff_model, model_ref, target_dtype)
+    if meta_qeff_model._use_original_checkpoint:
+        from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
+
+        prepared_model_ref = str(resolve_checkpoint_dir(model_ref))
+        logger.info("Using original checkpoint directly for weight-free export: %s", prepared_model_ref)
+    else:
+        prepared_model_ref = _prepare_checkpoint_for_weight_free_export(meta_qeff_model, model_ref, target_dtype)
     prep_duration_seconds = time.perf_counter() - prep_start
     logger.info(
         "Weight-free checkpoint preparation completed in %.2fs: %s",

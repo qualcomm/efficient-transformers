@@ -3929,6 +3929,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         max_seq_len_cached: int | None = None,
         layerwise: bool = False,
         weight_free: bool = False,
+        use_original_checkpoint: bool = False,
         *args,
         **kwargs,
     ):
@@ -3974,6 +3975,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             ``QEFF_CHECKPOINT_HOME`` environment variable if set, otherwise next
             to the source checkpoint under the Hugging Face cache.
 
+        use_original_checkpoint : bool, optional
+            If True, weight-free export references the source safetensors
+            directly and skips checkpoint preparation. This is currently an
+            opt-in path for model layouts that expose source checkpoint keys in
+            the graph, such as the unfused Qwen3-MoE expert weights. The source
+            tensor dtype must be supported by the target compiler and hardware.
+
         *args :
             Positional arguments passed directly to `cls._hf_auto_class.from_pretrained`.
         **kwargs :
@@ -3993,6 +4001,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         if weight_free:
             validate_dynamo_export_requirements("weight_free=True")
+        if use_original_checkpoint and not weight_free:
+            raise ValueError("use_original_checkpoint=True requires weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
         if kwargs.pop("full_batch_size", None):
@@ -4061,6 +4071,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             max_seq_len_cached=max_seq_len_cached,
             weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
             **kwargs,
         )
         if layerwise:

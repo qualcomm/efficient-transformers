@@ -1918,7 +1918,7 @@ class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
             if not getattr(module, "weights_transformed", False):
                 continue
             weights = getattr(module, "moe_weights", None)
-            if weights is None:
+            if weights is None or getattr(module, "_qeff_original_checkpoint_layout", False):
                 continue
 
             new_weights = unpack_moe_weights_from_expert_parallel(weights)

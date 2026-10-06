@@ -441,6 +441,11 @@ class QEFFBaseModel(ABC):
         # Flag for checking if weights are offloaded
         self._is_weights_offloaded: bool = False
         self._weight_free: bool = kwargs.get("weight_free", False)
+        self._use_original_checkpoint: bool = kwargs.get("use_original_checkpoint", False)
+        if self._use_original_checkpoint and not self._weight_free:
+            raise ValueError("use_original_checkpoint=True requires weight_free=True")
+        for module in self.model.modules():
+            module._qeff_use_original_checkpoint = self._use_original_checkpoint
         # Flag for checking if model has been transformed yet
         self.is_transformed: bool = False
 
