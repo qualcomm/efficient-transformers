@@ -24,6 +24,8 @@ One AI 100 Ultra card is 4 devices of 32 GB. The 7B needs about 18 GB in fp16 an
 
 ## Install
 
+bash:
+
 ```bash
 git clone -b k2-horizon-onboarding https://github.com/Nouman945/efficient-transformers.git
 cd efficient-transformers
@@ -33,6 +35,24 @@ pip install -U pip && pip install -e ".[test]"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export QEFF_HOME=/path/with/space/qeff_cache   # ONNX and QPC files go here
 ```
+
+csh or tcsh:
+
+```csh
+git clone -b k2-horizon-onboarding https://github.com/Nouman945/efficient-transformers.git
+cd efficient-transformers
+python3 -m venv qeff_env
+source qeff_env/bin/activate.csh
+pip install -U pip
+pip install -e ".[test]"
+
+setenv HF_HUB_ENABLE_HF_TRANSFER 1
+setenv QEFF_HOME /path/with/space/qeff_cache
+```
+
+If you use the SDK's own environment instead: `source /opt/qti-aic/dev/python/qeff/bin/activate` (bash) or `source /opt/qti-aic/dev/python/qeff/bin/activate.csh` (csh), then `pip install -e .` from the checkout.
+
+On csh, tcsh and zsh, quote the device list in every command below: `--device-group '[0]'` and `--device_group '[0]'`. Those shells treat `[0]` as a file pattern.
 
 The model is remote code, so every load passes `trust_remote_code`. Without it transformers stops at an interactive prompt.
 
