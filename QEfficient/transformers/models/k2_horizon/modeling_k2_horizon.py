@@ -117,7 +117,8 @@ class QEffK2HorizonAttention(nn.Module):
             if self.gate_func == "silu":
                 gate = F.silu(gate)
             else:
-                gate = F.softplus(gate, beta=math.log(2))
+                # softplus has no bf16 kernel on the compiler side, keep it in float32
+                gate = F.softplus(gate.float(), beta=math.log(2)).to(gate.dtype)
             attn_output = attn_output * gate
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
