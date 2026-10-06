@@ -63,6 +63,8 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     expert_num_ffn_blocks: int | None = None
     # Set by OptimizedMoEWeightsTransform after model-local canonicalization.
     weights_transformed: bool = False
+    # Optional token tiling for routed FFN execution. Disabled by default.
+    ffn_token_block_size: int | None = None
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -105,6 +107,16 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     def apply_shared_experts(self, out: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
         return out
 
+    def configure_ffn_blocking(
+        self,
+        mode: str = "default",
+        token_block_size: int | None = None,
+        weight_block_size: int | None = None,
+    ) -> None:
+        """Configure optional token tiling for routed expert execution."""
+        del weight_block_size
+        self.ffn_token_block_size = token_block_size if mode in {"token", "token_weight"} else None
+
     def get_supported_moe_flavours(self) -> tuple[MoEFlavour, ...]:
         if not hasattr(self, "supported_moe_flavours"):
             raise TypeError(f"{type(self).__name__} must explicitly define supported_moe_flavours")
@@ -112,6 +124,20 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
 
     # ---- orchestration (shared) ----------------------------------------------
     def execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:
+        token_block_size = getattr(self, "ffn_token_block_size", None)
+        if token_block_size is not None and token_block_size < x.shape[0]:
+            outputs = []
+            for start in range(0, x.shape[0], token_block_size):
+                end = min(start + token_block_size, x.shape[0])
+                if isinstance(routing, tuple):
+                    block_routing = tuple(value[start:end] for value in routing)
+                else:
+                    block_routing = routing[start:end]
+                outputs.append(self._execute_moe_flavour(x[start:end], block_routing))
+            return torch.cat(outputs, dim=0)
+        return self._execute_moe_flavour(x, routing)
+
+    def _execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:
         if not getattr(self, "weights_transformed", False):
             raise RuntimeError(
                 f"{type(self).__name__} weights are not transformed; run OptimizedMoEWeightsTransform before forward"

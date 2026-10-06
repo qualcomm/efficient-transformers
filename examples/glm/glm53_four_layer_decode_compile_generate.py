@@ -177,6 +177,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
     parser.add_argument("--cache-io-dtype", choices=("float16", "mxint8"), default="float16")
+    parser.add_argument(
+        "--ffn-blocking-mode",
+        choices=("default", "token"),
+        default="default",
+        help="Routed-expert FFN blocking mode. The default preserves the unblocked graph.",
+    )
+    parser.add_argument(
+        "--ffn-token-block-size",
+        type=int,
+        default=None,
+        help="Token tile size for token FFN blocking.",
+    )
     parser.add_argument("--attention-preset", choices=sorted(ATTENTION_PRESETS), default="dsa_cp1")
     parser.add_argument(
         "--attention-qaic-json",
@@ -443,6 +455,10 @@ def main() -> None:
     qaic_config = copy.deepcopy(ATTENTION_PRESETS[args.attention_preset])
     if args.attention_qaic_json:
         qaic_config.update(json.loads(args.attention_qaic_json))
+    if args.ffn_token_block_size is not None and args.ffn_token_block_size < 1:
+        raise ValueError("--ffn-token-block-size must be a positive integer.")
+    qaic_config["ffn_blocking_mode"] = args.ffn_blocking_mode
+    qaic_config["ffn_token_block_size"] = args.ffn_token_block_size
     os.environ.setdefault("HF_HUB_CACHE", args.hf_cache)
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
     os.environ.setdefault("QEFF_HOME", args.qeff_home)
