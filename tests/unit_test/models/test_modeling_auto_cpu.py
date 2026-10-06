@@ -45,6 +45,7 @@ from transformers import (
     WhisperForConditionalGeneration,
 )
 
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
 from QEfficient.transformers.models.modeling_auto import (
     MultimodalUtilityMixin,
     QEFFAutoModel,
@@ -778,6 +779,54 @@ class TestQEFFAutoModelForCausalLMExportPrefillSeqLen:
 
         assert export_seq_len >= ONNX_EXPORT_EXAMPLE_SEQ_LEN
         assert export_seq_len % num_packed_chunks == 0
+
+    @pytest.mark.parametrize("blocking_mode", [BlockingMode.KV, BlockingMode.KV_HEADPAR])
+    def test_kv_blocking_decode_keeps_single_token_export_shape(self, blocking_mode):
+        """KV blocking partitions cache data, not decode query tokens."""
+        qeff = self._make_specialized_qeff(model_type="qwen3_moe")
+        qeff.model.get_onnx_export_seq_len = lambda **kwargs: 1
+        qeff.hash_params["blocking_kwargs"] = AttentionBlockingConfig(
+            mode=blocking_mode,
+            num_kv_blocks=8,
+            ctx_len=CTX_LEN,
+        )
+
+        captured = self._capture_export(qeff, prefill_seq_len=1)
+
+        assert captured["example_inputs"]["input_ids"].shape[1] == 1
+
+    def test_query_blocking_pads_export_shape_to_query_block_count(self):
+        """Query-axis blocking still receives a divisible export sequence length."""
+        qeff = self._make_specialized_qeff(model_type="qwen3_moe")
+        qeff.model.get_onnx_export_seq_len = lambda **kwargs: 1
+        qeff.hash_params["blocking_kwargs"] = AttentionBlockingConfig(
+            mode=BlockingMode.QKV,
+            num_kv_blocks=8,
+            num_q_blocks=8,
+            ctx_len=CTX_LEN,
+        )
+
+        captured = self._capture_export(qeff, prefill_seq_len=1)
+
+        assert captured["example_inputs"]["input_ids"].shape[1] == 8
+
+    def test_paged_kv_export_uses_single_kv_block_shape(self):
+        """Paged KV attention exports one physical cache block per token input."""
+        qeff = self._make_specialized_qeff(model_type="qwen3_moe")
+        qeff.model.get_onnx_export_seq_len = lambda **kwargs: 1
+        qeff.hash_params["blocking_kwargs"] = AttentionBlockingConfig(
+            mode=BlockingMode.KV,
+            num_kv_blocks=8,
+            ctx_len=CTX_LEN,
+            paged_attention=True,
+        )
+
+        captured = self._capture_export(qeff, prefill_seq_len=1)
+
+        assert captured["example_inputs"]["input_ids"].shape[1] == 4
+        batch_size = captured["example_inputs"]["input_ids"].shape[0]
+        assert captured["example_inputs"]["block_table"].shape == (batch_size, 8)
+        assert captured["example_inputs"]["slot_id"].shape == (batch_size,)
 
     @pytest.mark.skip(
         reason="GPT-OSS non-chunked prefill-only export is disabled; requests are forced to chunked prefill."
