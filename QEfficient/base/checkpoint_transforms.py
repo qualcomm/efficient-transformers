@@ -30,7 +30,11 @@ from typing import Callable, Dict, List, Optional, Type
 import psutil
 import torch
 
-from QEfficient.utils.checkpoint_utils import copy_checkpoint_aux_files, read_weight_map, write_index
+from QEfficient.utils.checkpoint_utils import (
+    copy_checkpoint_aux_files,
+    read_weight_map,
+    write_index,
+)
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
@@ -489,6 +493,23 @@ def _manifest_matches(out: Path, expected: dict) -> bool:
         return False
 
 
+def _prepared_checkpoint_is_readable(out: Path) -> bool:
+    """Return True when every indexed prepared checkpoint shard is readable."""
+    try:
+        weight_map = read_weight_map(out)
+    except (OSError, json.JSONDecodeError, KeyError):
+        return False
+
+    if not weight_map:
+        return False
+
+    for shard_name in set(weight_map.values()):
+        shard_path = out / shard_name
+        if not shard_path.is_file() or not os.access(shard_path, os.R_OK):
+            return False
+    return True
+
+
 def _write_manifest(out: Path, manifest: dict) -> None:
     (out / CHECKPOINT_PREPARED_MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True))
 
@@ -827,7 +848,9 @@ class CheckpointTransformPipeline:
             plan_payload,
         )
         if (out / CHECKPOINT_PREPARED_SENTINEL).exists() and _manifest_matches(out, expected_manifest):
-            return out
+            if _prepared_checkpoint_is_readable(out):
+                return out
+            logger.warning("Prepared checkpoint at %s is incomplete or unreadable; rebuilding.", out)
 
         if out.exists():
             _clear_stale_prepared_dir(out, src)

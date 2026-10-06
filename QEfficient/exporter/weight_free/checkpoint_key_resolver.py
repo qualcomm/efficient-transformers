@@ -565,6 +565,7 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
     return WeightSpec(
         model_name=model_name,
         model_id=model_ref,
+        external_data_root=str(root) if root is not None else None,
         files=relative_checkpoint_files,
         inputs=promoted_inputs,
     )
