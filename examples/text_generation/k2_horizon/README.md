@@ -15,6 +15,8 @@ The wrapper covers the dense sizes (0.9B, 3.7B, 7B, 32B). The 36B and 375B MoVA 
 
 ## Prerequisites
 
+First time on a shared server (csh, home quota, local disk)? Do [SERVER_SETUP.md](SERVER_SETUP.md) first.
+
 - A server with Cloud AI 100 Ultra cards, Platform SDK and Apps SDK installed (`/opt/qti-aic` exists). Check the cards with `/opt/qti-aic/tools/qaic-util -q`.
 - Python 3.10 to 3.12. The repo pins `transformers==5.5.4`.
 - Internet access to Hugging Face. The model is public, no token needed.
