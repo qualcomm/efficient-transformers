@@ -296,6 +296,25 @@ class TestWeightFreeCheckpointTransforms:
         assert tuple(weights.up.shape) == (2, 4, 6)
         assert tuple(weights.down.shape) == (2, 6, 4)
 
+    def test_gpt_oss_original_layout_splits_fused_source_weights_in_forward(self):
+        from transformers import GptOssConfig
+
+        from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffGptOssExperts
+
+        experts = QEffGptOssExperts(GptOssConfig(num_local_experts=2, hidden_size=4, intermediate_size=6))
+        source = {name: parameter.detach().clone() for name, parameter in experts.named_parameters()}
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+
+        torch.testing.assert_close(weights.gate, source["gate_up_proj"][..., ::2])
+        torch.testing.assert_close(weights.up, source["gate_up_proj"][..., 1::2])
+        torch.testing.assert_close(weights.down, source["down_proj"])
+        torch.testing.assert_close(weights.gate_bias, source["gate_up_proj_bias"][..., ::2])
+        torch.testing.assert_close(weights.up_bias, source["gate_up_proj_bias"][..., 1::2])
+        torch.testing.assert_close(weights.down_bias, source["down_proj_bias"])
+        assert set(dict(experts.named_parameters())) == set(source)
+
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
