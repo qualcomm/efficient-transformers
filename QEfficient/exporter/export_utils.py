@@ -102,6 +102,7 @@ def export_onnx(
                 dynamic_axes=dynamic_axes,
                 opset_version=constants.ONNX_LEGACY_EXPORT_OPSET,
                 custom_opsets={"com.qti.aisw.onnx": 1},
+                verbose=True,
             )
     except Exception as e:
         raise RuntimeError("Exporting to ONNX failed. {}".format(e))
