@@ -875,7 +875,6 @@ def blocked_qkv_attention_forward_prefill_online(
 
     q_fold = query.reshape(B, num_cores, n_rep_per_core, QL, D)
     is_export = _is_export_or_trace()
-
     t_chunks = []
     for t_start in range(0, QL, ql_chunk):
         t_end = min(t_start + ql_chunk, QL)
