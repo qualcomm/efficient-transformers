@@ -39,7 +39,7 @@
 | **LlamaSwiftKVForCausalLM**  | swiftkv            | [Snowflake/Llama-3.1-SwiftKV-8B-Instruct](https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct)                                                  | ✔️          |
 | **Grok1ModelForCausalLM** ** |  grok-1②          | [hpcai-tech/grok-1](https://huggingface.co/hpcai-tech/grok-1)                                                  | ✕          |
 | **Glm4MoeForCausalLM**  |     GLM-4.5       | [zai-org/GLM-4.5](https://huggingface.co/zai-org/GLM-4.5)                                                  |          |
-| **K2HorizonForCausalLM** | K2 Horizon② (dense) | [IFM/K2-Horizon-0.9B](https://huggingface.co/IFM/K2-Horizon-0.9B)<br>[IFM/K2-Horizon-3.7B](https://huggingface.co/IFM/K2-Horizon-3.7B)<br>[IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B) | ✕ |
+| **K2HorizonForCausalLM** | K2 Horizon②④ (dense) | [IFM/K2-Horizon-0.9B](https://huggingface.co/IFM/K2-Horizon-0.9B)<br>[IFM/K2-Horizon-3.7B](https://huggingface.co/IFM/K2-Horizon-3.7B)<br>[IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B) | ✕ |
 
 ---
 
@@ -195,6 +195,8 @@ Models marked with `**` are currently not functional on the `main` and `release/
 ② Set `trust_remote_code=True` for end-to-end inference with vLLM.
 
 ③ Pass `disable_sliding_window` for few family models when using vLLM.
+
+④ K2-Horizon-0.9B is validated with fp16 weights and MXINT8 KV cache; MXFP6 weights degrade its output (first-layer sensitivity). The 3.7B and 7B take MXFP6.
 ```
 ---
 
