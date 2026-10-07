@@ -5,6 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
+import logging
 from typing import List, Optional, Tuple, Type, Union
 
 import torch
@@ -26,14 +27,13 @@ from transformers.models.gemma3.modeling_gemma3 import (
 )
 from transformers.utils import logging
 
+# logger = logging.getLogger(__name__)
 from QEfficient.customop.rms_norm import CustomRMSNorm
 from QEfficient.transformers.cache_utils import QEffSlidingWindowCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
-
-logger = logging.get_logger(__name__)
 
 
 class GemmaRMSNormFunc(torch.autograd.Function):
