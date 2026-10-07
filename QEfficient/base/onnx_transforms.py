@@ -1128,7 +1128,6 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
                     if old in node.name:
                         node.name = node.name.replace(old, new)
 
-
 class DeduplicateRepeatedSubgraphTransform(BaseOnnxTransform):
     """Collapse structurally identical repeated local functions emitted by dynamo export."""
 
@@ -1452,7 +1451,6 @@ class DeduplicateRepeatedSubgraphTransform(BaseOnnxTransform):
         tensor = copy.deepcopy(tensor)
         tensor.name = ""
         return tensor.data_type, tuple(tensor.dims), tensor.SerializeToString().hex()
-
 
 class AdapterWeightsToInputsTransform(BaseOnnxTransform):
     @classmethod
