@@ -20,7 +20,6 @@ import torch
 from torch import nn
 from torch.export import Dim
 
-from QEfficient.base.checkpoint_transforms import CHECKPOINT_LAYOUT_VERSION
 from QEfficient.base.onnx_transforms import (
     CustomOpTransform,
     DeduplicateRepeatedSubgraphTransform,
@@ -763,7 +762,6 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
         copy_of_hash_params["dynamo_node_name_version"] = 1
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
-        copy_of_hash_params["weight_free_checkpoint_layout_version"] = CHECKPOINT_LAYOUT_VERSION
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
         copy_of_hash_params["onnx_subfunction_version"] = 4
     # Generate hash from relevant parameters
