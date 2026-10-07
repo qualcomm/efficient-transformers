@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -15,16 +16,28 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpForCausalLM,
     Qwen4ExpTextAttention,
     Qwen4ExpTextDecoderLayer,
+    Qwen4ExpTextExperts,
     Qwen4ExpTextGatedDeltaNet,
     Qwen4ExpTextModel,
     Qwen4ExpTextPLELayer,
     Qwen4ExpTextRMSNormGated,
     Qwen4ExpTextRotaryEmbedding,
+    Qwen4ExpTextSparseMoeBlock,
+    Qwen4ExpTextTopKRouter,
     apply_rotary_pos_emb,
 )
 
 from QEfficient.customop.rms_norm import CustomRMSNormFunc
 from QEfficient.transformers.cache_utils import QEffQwen4ExpDynamicCache
+from QEfficient.transformers.moe import (
+    MoEFlavour,
+    MoEProfile,
+    MoEWeights,
+    QEffMoEBlockMixin,
+    build_canonical_expert_weights,
+    delete_module_attrs,
+    silu_glu_mlp,
+)
 from QEfficient.utils import constants
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 
@@ -74,23 +87,33 @@ class QEffQwen4ExpTextRotaryEmbedding(Qwen4ExpTextRotaryEmbedding):
         self.register_buffer("sin_cached", frequencies.sin().to(dtype), persistent=False)
 
 
-def _qeff_recompose_mrope(frequencies, mrope_section):
+def _qeff_recompose_mrope(frequencies, mrope_section, rotary_width):
     recomposed = frequencies[0].clone()
     for dimension, offset in enumerate((1, 2), start=1):
-        recomposed[..., slice(offset, mrope_section[dimension] * 3, 3)] = frequencies[
-            dimension, ..., slice(offset, mrope_section[dimension] * 3, 3)
-        ]
+        # ``partial_rotary_factor`` can make the cached frequency width smaller
+        # than the section's nominal interleaved endpoint (e.g. 32 vs 33).
+        # Bound the static slice by the model-owned cache width so ONNX never
+        # emits an out-of-range Slice endpoint for QAIC.
+        end = min(mrope_section[dimension] * 3, rotary_width)
+        target = slice(offset, end, 3)
+        recomposed[..., target] = frequencies[dimension, ..., target]
     return torch.cat((recomposed, recomposed), dim=-1)
 
 
-def qeff_prepare_qwen4_exp_mrope(cos_cached, sin_cached, position_ids, mrope_section, dtype=None):
+def qeff_prepare_qwen4_exp_mrope(
+    cos_cached, sin_cached, position_ids, mrope_section, dtype=None, rotary_width=None
+):
     """Index model-owned RoPE caches and apply Qwen4-Exp's MRoPE recomposition."""
-    safe_position_ids = position_ids.clamp_min(0)
+    # Avoid integer ``aten::clamp``/ONNX Clip, which QAIC does not accept for
+    # int64 tensors. Exporting the equivalent Where keeps MRoPE indexing safe.
+    safe_position_ids = torch.where(position_ids < 0, torch.zeros_like(position_ids), position_ids)
     flat_positions = safe_position_ids.reshape(-1)
     cos = cos_cached.index_select(0, flat_positions).reshape(*safe_position_ids.shape, cos_cached.shape[-1])
     sin = sin_cached.index_select(0, flat_positions).reshape(*safe_position_ids.shape, sin_cached.shape[-1])
-    cos = _qeff_recompose_mrope(cos, mrope_section)
-    sin = _qeff_recompose_mrope(sin, mrope_section)
+    if rotary_width is None:
+        rotary_width = min(sum(mrope_section), int(cos_cached.shape[-1]))
+    cos = _qeff_recompose_mrope(cos, mrope_section, rotary_width)
+    sin = _qeff_recompose_mrope(sin, mrope_section, rotary_width)
     if dtype is not None:
         cos, sin = cos.to(dtype=dtype), sin.to(dtype=dtype)
     return cos, sin
@@ -100,6 +123,83 @@ class QEffQwen4ExpTextRMSNormGated(Qwen4ExpTextRMSNormGated):
     def forward(self, hidden_states, gate):
         normed = CustomRMSNormFunc.apply(hidden_states, self.weight, self.variance_epsilon)
         return normed * F.silu(gate.float()).to(normed.dtype)
+
+
+class QEffQwen4ExpTextTopKRouter(Qwen4ExpTextTopKRouter):
+    """ONNX-friendly Qwen4-Exp router with stable HF routing semantics."""
+
+    def forward(self, hidden_states):
+        hidden_states = hidden_states.reshape(-1, self.hidden_dim)
+        router_logits = F.linear(hidden_states, self.weight)
+        router_probs = F.softmax(router_logits, dtype=torch.float32, dim=-1)
+        top_weights, top_indices = torch.topk(router_probs, self.top_k, dim=-1)
+        if self.norm_topk_prob:
+            top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+        return router_logits, top_weights.to(router_logits.dtype), top_indices
+
+
+class QEffQwen4ExpTextExperts(Qwen4ExpTextExperts):
+    """Canonical expert weights consumed by the shared QEff MoE dispatch."""
+
+    def __qeff_init__(self):
+        self.weights_transformed = False
+        self.expert_dim = self.intermediate_dim
+
+    def transform_weights(self) -> MoEWeights:
+        if getattr(self, "weights_transformed", False):
+            return self.moe_weights
+        self.moe_weights = build_canonical_expert_weights(
+            gate_up=self.gate_up_proj,
+            down=self.down_proj,
+            fused=True,
+            fused_split_dim=1,
+            transpose_gate_up=True,
+            transpose_down=True,
+            clone=True,
+        )
+        delete_module_attrs(self, "gate_up_proj", "down_proj")
+        self.weights_transformed = True
+        return self.moe_weights
+
+
+class QEffQwen4ExpTextSparseMoeBlock(QEffMoEBlockMixin, Qwen4ExpTextSparseMoeBlock):
+    """Qwen4-Exp MoE block using QEff routing and exportable dispatch."""
+
+    supported_moe_flavours = (
+        MoEFlavour.SIMPLE_LOOP,
+        MoEFlavour.DECODE_BMM,
+        MoEFlavour.EXPERT_PARALLEL,
+    )
+
+    def __qeff_init__(self):
+        super().__qeff_init__()
+        self.gate.__class__ = QEffQwen4ExpTextTopKRouter
+        self.experts.__class__ = QEffQwen4ExpTextExperts
+        self.experts.__qeff_init__()
+        self.top_k = self.gate.top_k
+        self.num_experts = self.gate.num_experts
+        # Keep the transformed model directly executable for PyTorch parity
+        # checks; OptimizedMoEWeightsTransform remains idempotent afterwards.
+        self.transform_weights()
+
+    def transform_weights(self) -> MoEWeights:
+        if getattr(self, "weights_transformed", False):
+            return self.moe_weights
+        self.moe_weights = self.experts.transform_weights()
+        self.weights_transformed = True
+        return self.moe_weights
+
+    @property
+    def moe_profile(self) -> MoEProfile:
+        return MoEProfile(expert_mlp=partial(silu_glu_mlp, act_fn=self.experts.act_fn))
+
+    def route(self, x: torch.Tensor):
+        _, top_weights, top_indices = self.gate(x)
+        return (top_indices, top_weights.to(x.dtype)), None
+
+    def apply_shared_experts(self, out: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        shared = self.shared_expert(residual)
+        return out + F.sigmoid(self.shared_expert_gate(residual)) * shared
 
 
 class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
@@ -138,6 +238,11 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
 
     def __qeff_init__(self):
         del self.ple_embedding
+        self.register_buffer(
+            "_qeff_conv_positions",
+            torch.arange(0, self.short_conv_state_len + 1, self.conv1d.dilation[0], dtype=torch.long),
+            persistent=False,
+        )
 
     def forward(self, hidden_states, ngram_embeddings, cache_params):
         if ngram_embeddings is None or ngram_embeddings.shape[:2] != hidden_states.shape[:2]:
@@ -146,14 +251,19 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
         key = self.norm_key(self.key_proj(embeddings)).unflatten(-1, (self.hc_count, self.hidden_size))
         query = self.norm_query(hidden_states).unflatten(-1, (self.hc_count, self.hidden_size))
         gate = (key * query).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
-        gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+        gate_abs = gate.abs()
+        gate_abs = torch.where(gate_abs < 1e-6, torch.full_like(gate_abs, 1e-6), gate_abs)
+        gate = gate_abs.sqrt() * gate.sign()
         values = (torch.sigmoid(gate) * self.value_proj(embeddings).unsqueeze(-2)).flatten(-2)
         state = cache_params.ple_conv_states[self.layer_idx]
         if state is None:
             raise ValueError(f"Missing PLE retained state for layer {self.layer_idx}")
         combined = torch.cat((state, self.norm_conv(values).transpose(1, 2)), dim=-1)
         cache_params.update_ple_state(self.layer_idx, combined[..., -self.short_conv_state_len :])
-        conv_output = F.silu(self.conv1d(combined.to(self.conv1d.weight.dtype))).to(values.dtype)
+        conv_input = combined.to(self.conv1d.weight.dtype).index_select(-1, self._qeff_conv_positions)
+        conv_weight = self.conv1d.weight.squeeze(1).unsqueeze(-1)
+        conv_output = torch.matmul(conv_input.unsqueeze(-2), conv_weight).squeeze(-1)
+        conv_output = F.silu(conv_output).to(values.dtype)
         return values + conv_output[..., -1:].transpose(1, 2)
 
 
@@ -198,7 +308,12 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             pooled_position_ids = rotary_position_ids.clone()
             pooled_position_ids[0] = (block * ratio).unsqueeze(-1)
             pooled_cos, pooled_sin = qeff_prepare_qwen4_exp_mrope(
-                cos_cached, sin_cached, pooled_position_ids, mrope_section, dtype=hidden_states.dtype
+                cos_cached,
+                sin_cached,
+                pooled_position_ids,
+                mrope_section,
+                dtype=hidden_states.dtype,
+                rotary_width=self._qeff_rotary_width,
             )
         else:
             pooled_cos, pooled_sin = cos, sin
@@ -219,7 +334,12 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         selected_valid = (blocks < complete[:, None]).unsqueeze(-1).expand(-1, -1, ratio).reshape(batch, -1)
         tail = complete[:, None] * ratio + torch.arange(ratio, device=positions.device)[None, :]
         tail_valid = tail <= positions[:, None]
-        selected = torch.cat((selected, tail), dim=-1).clamp_max(key_cache.shape[2] - 1)
+        selected = torch.cat((selected, tail), dim=-1)
+        selected = torch.where(
+            selected >= key_cache.shape[2],
+            torch.full_like(selected, key_cache.shape[2] - 1),
+            selected,
+        )
         selected_valid = torch.cat((selected_valid, tail_valid), dim=-1)
         gather = selected[:, None, :, None].expand(-1, key_cache.shape[1], -1, key_cache.shape[-1])
         keys = next_key.gather(2, gather).repeat_interleave(self.num_key_value_groups, dim=1)
@@ -227,9 +347,12 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         selected_keys, selected_values = keys, values
         logits = (query @ selected_keys.transpose(-1, -2)) / math.sqrt(self.head_dim)
         mask = selected_valid[:, None, None, :]
-        probabilities = (
-            logits * mask.to(logits.dtype) + (~mask).to(logits.dtype) * -3.0e4
-        ).float().softmax(-1).to(query.dtype)
+        masked_logits = torch.where(
+            mask,
+            logits,
+            torch.full_like(logits, MIN_MASKED_ATTENTION_VALUE),
+        )
+        probabilities = masked_logits.float().softmax(-1).to(query.dtype)
         output = (probabilities @ selected_values).reshape(batch, 1, -1)
         output = output * torch.sigmoid(gate.reshape(batch, 1, -1))
         past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, next_partial)
@@ -238,14 +361,9 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
 
 class QEffQwen4ExpTextDecoderLayer(Qwen4ExpTextDecoderLayer):
     def __qeff_init__(self):
-        if self.layer_type == "linear_attention":
-            self.linear_attn.__class__ = QEffQwen4ExpTextGatedDeltaNet
-        else:
+        if self.layer_type != "linear_attention":
             self.layer_type = "qwen_sparse_attention"
-            self.self_attn.__class__ = QEffQwen4ExpTextAttention
-        if self.ple is not None:
-            self.ple.__class__ = QEffQwen4ExpTextPLELayer
-            self.ple.__qeff_init__()
+            self.self_attn._qeff_rotary_width = self._qeff_rotary_width
 
     def forward(self, hidden_states, position_embeddings, past_key_values, ngram_embeddings=None):
         if self.ple is not None:
@@ -268,11 +386,19 @@ class QEffQwen4ExpTextDecoderLayer(Qwen4ExpTextDecoderLayer):
 class QEffQwen4ExpTextModel(Qwen4ExpTextModel):
     def __qeff_init__(self):
         self.rotary_emb = QEffQwen4ExpTextRotaryEmbedding(config=self.config)
-        self.sin_cached = torch.nn.Parameter(self.rotary_emb.sin_cached * self.rotary_emb.attention_scaling)
-        self.cos_cached = torch.nn.Parameter(self.rotary_emb.cos_cached * self.rotary_emb.attention_scaling)
+        partial_rotary_factor = self.config.rope_parameters.get("partial_rotary_factor", 1.0)
+        rotary_width = int(self.config.head_dim * partial_rotary_factor) // 2
+        self._qeff_rotary_width = rotary_width
+        # Keep the bounded, static RoPE tables on the model itself. Exported
+        # subfunctions then see the same model-owned constants and signature.
+        self.sin_cached = torch.nn.Parameter(
+            (self.rotary_emb.sin_cached * self.rotary_emb.attention_scaling).contiguous()
+        )
+        self.cos_cached = torch.nn.Parameter(
+            (self.rotary_emb.cos_cached * self.rotary_emb.attention_scaling).contiguous()
+        )
         for layer in self.layers:
-            layer.__class__ = QEffQwen4ExpTextDecoderLayer
-            layer.__qeff_init__()
+            layer._qeff_rotary_width = rotary_width
 
     def forward(
         self, input_ids=None, position_ids=None, past_key_values=None, ngram_embeddings=None, use_cache=True, **kwargs
@@ -300,7 +426,12 @@ class QEffQwen4ExpTextModel(Qwen4ExpTextModel):
         rotary_position_ids = position_ids[1:]
         mrope_section = self.config.rope_parameters.get("mrope_section", [11, 11, 10])
         cos, sin = qeff_prepare_qwen4_exp_mrope(
-            self.cos_cached, self.sin_cached, rotary_position_ids, mrope_section, dtype=hidden_states.dtype
+            self.cos_cached,
+            self.sin_cached,
+            rotary_position_ids,
+            mrope_section,
+            dtype=hidden_states.dtype,
+            rotary_width=self._qeff_rotary_width,
         )
         position_embeddings = (cos, sin, self.cos_cached, self.sin_cached, rotary_position_ids, mrope_section)
         for layer in self.layers:
@@ -458,11 +589,56 @@ class QEffQwen4ExpDecodeExportMixin:
         del kwargs
         return ["logits", *[f"{name}_RetainedState" for name in self._iter_retained_state_names()]]
 
+    def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs):
+        """Return decode-only specializations for the retained-state graph.
+
+        The exported graph accepts one token at a time. ``prefill_seq_len`` is
+        retained as a compile API input for the nominal PL, but it must not be
+        used as the graph sequence length because this wrapper has no prefill
+        implementation. The QSA index state uses the compressed context axis.
+        """
+        del prefill_seq_len, kwargs
+        batch_size = batch_size or 1
+        pooled_ctx_len = -(-ctx_len // self.config.indexer_compress_ratio)
+        specialization = {
+            "batch_size": batch_size,
+            "seq_len": 1,
+            "ctx_len": ctx_len,
+            "pooled_ctx_len": pooled_ctx_len,
+        }
+        return [dict(specialization), dict(specialization)]
+
+    def get_custom_io(self, **kwargs):
+        """Return FP16 custom I/O for every retained state input/output pair."""
+        del kwargs
+        return {
+            name: "float16"
+            for state_name in self._iter_retained_state_names()
+            for name in (state_name, f"{state_name}_RetainedState")
+        }
+
+    def get_export_seq_len(self):
+        """Return the single-token sequence length required by the decode graph."""
+        return 1
+
+    def prepare_export_inputs(self, example_inputs, dynamic_axes):
+        """Add host PLE input and the four-stream MRoPE position input."""
+        batch_size = example_inputs["input_ids"].shape[0]
+        dtype = self.config.torch_dtype
+        example_inputs["ngram_embeddings"] = torch.zeros(
+            (batch_size, 1, self.config.ple_embed_dim), dtype=dtype
+        )
+        example_inputs["position_ids"] = torch.zeros((4, batch_size, 1), dtype=torch.int64)
+        dynamic_axes["ngram_embeddings"] = {0: "batch_size", 1: "seq_len"}
+        dynamic_axes["position_ids"] = {1: "batch_size", 2: "seq_len"}
+        return example_inputs, dynamic_axes
+
 
 class QEffQwen4ExpForCausalLM(QEffQwen4ExpDecodeExportMixin, Qwen4ExpForCausalLM):
     def __qeff_init__(self):
-        self.model.__class__ = QEffQwen4ExpTextModel
-        self.model.__qeff_init__()
+        # Router logits and the auxiliary load-balancing loss are training-only
+        # outputs; keeping them disabled also avoids exporting torch.bincount.
+        self.config.output_router_logits = False
 
     def qeff_cache_from_legacy(self, past_key_values=None):
         return QEffQwen4ExpDynamicCache.from_legacy_cache(self.config, past_key_values)
