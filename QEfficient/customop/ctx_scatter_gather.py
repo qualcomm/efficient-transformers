@@ -752,3 +752,128 @@ class CtxGatherFuncPagedAttention(torch.autograd.Function):
         g: torch.Graph, data: torch.Value, block_indices: torch.Value, ctx_indices: torch.Value
     ) -> torch.Value:
         return g.onnxscript_op(CtxGatherPagedAttention, data, block_indices, ctx_indices).setTypeAs(data)
+
+
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def V4CtxScatter1D(
+    data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates: onnxscript.FLOAT
+) -> onnxscript.FLOAT:
+    """Scatter [B, S, D] updates into a [B, T, D] CSA prefill cache."""
+    batch_size = ops.Gather(ops.Shape(data), [0])
+    seq_len = ops.Gather(ops.Shape(position_ids), [1])
+    zero = ops.Constant(value_ints=[0])
+    one = ops.Constant(value_ints=[1])
+    exp_shape = ops.Concat(batch_size, seq_len, one, axis=0)
+    batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2]), exp_shape)
+    ctx_idx = ops.Cast(ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape), to=onnxscript.INT64.dtype)
+    return ops.ScatterND(data, ops.Concat(batch_idx, ctx_idx, axis=2), updates)
+
+
+class V4CtxScatter1DFunc(torch.autograd.Function):
+    """CSA prefill retained-state scatter matching the benchmark ABI."""
+
+    @staticmethod
+    def forward(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor):
+        result = data.clone()
+        batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1)
+        result[batch_idx, position_ids.to(torch.long)] = updates
+        return result
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, position_ids: torch.Value, updates: torch.Value) -> torch.Value:
+        return g.onnxscript_op(V4CtxScatter1D, data, position_ids, updates).setTypeAs(data)
+
+
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxGather1D(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxscript.FLOAT:
+    """Gather CSA prefill cache rows from a [B, T, D] tensor."""
+    return ops.GatherND(data, ops.Unsqueeze(ctx_indices, [-1]), batch_dims=1)
+
+
+class CtxGather1DFunc(torch.autograd.Function):
+    """CSA prefill retained-state gather matching the benchmark ABI."""
+
+    @staticmethod
+    def forward(data: torch.Tensor, ctx_indices: torch.Tensor):
+        safe_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+        batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1)
+        return data[batch_idx, safe_indices.to(torch.long)]
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, ctx_indices: torch.Value) -> torch.Value:
+        return g.onnxscript_op(CtxGather1D, data, ctx_indices).setTypeAs(data)
+
+
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CompressedAttn(
+    kv_cache: onnxscript.FLOAT,
+    topk_indices: onnxscript.INT32,
+    valid: onnxscript.BOOL,
+    query: onnxscript.FLOAT,
+    scale: onnxscript.FLOAT,
+    masked_logit: onnxscript.FLOAT,
+) -> onnxscript.FLOAT:
+    """CSA prefill fused gather, QK, softmax, and PV benchmark function."""
+    batch_size = ops.Gather(ops.Shape(kv_cache), [0])
+    sequence_length = ops.Gather(ops.Shape(topk_indices), [1])
+    top_k = ops.Gather(ops.Shape(topk_indices), [2])
+    head_dim = ops.Gather(ops.Shape(query), [3])
+    gathered = ops.GatherND(
+        kv_cache,
+        ops.Unsqueeze(ops.Reshape(topk_indices, ops.Concat(batch_size, ops.Mul(sequence_length, top_k), axis=0)), [-1]),
+        batch_dims=1,
+    )
+    gathered = ops.Reshape(gathered, ops.Concat(batch_size, sequence_length, top_k, head_dim, axis=0))
+    scores = ops.Mul(ops.Einsum(query, gathered, equation="bshd,bskd->bshk"), scale)
+    scores = ops.Where(ops.Unsqueeze(valid, [2]), scores, masked_logit)
+    probabilities = ops.Softmax(scores, axis=-1)
+    return ops.Einsum(probabilities, gathered, equation="bshk,bskd->bshd")
+
+
+class CompressedAttnFunc(torch.autograd.Function):
+    """CSA prefill fused compressed-cache attention matching the benchmark graph."""
+
+    @staticmethod
+    def forward(
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid: torch.Tensor,
+        query: torch.Tensor,
+        scale: torch.Tensor,
+        masked_logit: torch.Tensor,
+    ):
+        batch_size, sequence_length, _, _ = query.shape
+        top_k = topk_indices.shape[-1]
+        batch_idx = torch.arange(batch_size, device=kv_cache.device).view(-1, 1)
+        gathered = kv_cache[batch_idx, topk_indices.reshape(batch_size, -1).to(torch.long)].reshape(
+            batch_size, sequence_length, top_k, kv_cache.shape[-1]
+        )
+        scores = torch.matmul(query.float(), gathered.transpose(-1, -2).float()) * scale
+        scores = torch.where(valid.unsqueeze(2), scores, masked_logit)
+        return torch.matmul(torch.softmax(scores, dim=-1).to(gathered.dtype), gathered)
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(
+        g: torch.Graph,
+        kv_cache: torch.Value,
+        topk_indices: torch.Value,
+        valid: torch.Value,
+        query: torch.Value,
+        scale: torch.Value,
+        masked_logit: torch.Value,
+    ) -> torch.Value:
+        return g.onnxscript_op(CompressedAttn, kv_cache, topk_indices, valid, query, scale, masked_logit).setTypeAs(
+            query
+        )

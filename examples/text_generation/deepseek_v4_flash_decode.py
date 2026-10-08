@@ -51,6 +51,7 @@ TARGETED_HEAD_OUTPUTS = (
     "/lm_head/MatMul_output_0",
 )
 HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
+MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16}
 
 
 def parse_device_group(value: str) -> list[int]:
@@ -234,7 +235,24 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
     parser.add_argument("--hf-cache", type=Path, default=Path(DEFAULT_HF_CACHE))
     parser.add_argument("--artifact-root", type=Path, default=Path(DEFAULT_ARTIFACT_ROOT))
+    parser.add_argument(
+        "--model-dtype",
+        choices=tuple(MODEL_DTYPES),
+        default="float16",
+        help="Model and ONNX export dtype.",
+    )
     parser.add_argument("--ctx-len", type=int, default=512)
+    parser.add_argument("--prefill-seq-len", type=int, default=128)
+    parser.add_argument(
+        "--prefill-only",
+        action="store_true",
+        help="Export and compile the blocked CSA/HCA prefill graph instead of the one-token decode graph.",
+    )
+    parser.add_argument(
+        "--use-onnx-subfunctions",
+        action="store_true",
+        help="Export repeated decoder blocks as ONNX subfunctions.",
+    )
     parser.add_argument("--generation-len", type=int, default=250)
     parser.add_argument("--num-hidden-layers", type=int, default=43)
     parser.add_argument("--num-cores", "--compile-num-cores", dest="num_cores", type=int, default=12)
@@ -359,6 +377,8 @@ def main(defaults: dict[str, object] | None = None) -> None:
     args = parse_args(defaults)
     if args.ctx_len < 2:
         raise ValueError("ctx_len must be at least 2.")
+    if not 1 <= args.prefill_seq_len <= args.ctx_len:
+        raise ValueError("prefill_seq_len must be in [1, ctx_len].")
     if not 1 <= args.generation_len < args.ctx_len:
         raise ValueError("generation_len must be in [1, ctx_len).")
     if args.num_hidden_layers < 1:
@@ -395,6 +415,9 @@ def main(defaults: dict[str, object] | None = None) -> None:
     config.num_hidden_layers = args.num_hidden_layers
     config.layer_types = config.layer_types[: args.num_hidden_layers]
     config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
+    config.qeff_swa_prefill_only = args.prefill_only
+    config.qeff_csa_prefill_only = args.prefill_only
+    config.qeff_hca_prefill_only = args.prefill_only
     batch_size = args.batch_size
     configure_qeff_parallel_layout(config, args)
     qaic_config = build_ffn_blocking_config(args)
@@ -412,23 +435,27 @@ def main(defaults: dict[str, object] | None = None) -> None:
         local_files_only=args.local_files_only,
         weight_free=True,
     )
-    qeff_model.model.to(dtype=torch.float32)
+    model_dtype = MODEL_DTYPES[args.model_dtype]
+    qeff_model.model.to(dtype=model_dtype)
+    qeff_model.model.config.torch_dtype = model_dtype
     qeff_model.transform(
         ctx_len=args.ctx_len,
-        seq_len=1,
+        seq_len=args.prefill_seq_len if args.prefill_only else 1,
         bs=batch_size,
         num_devices=len(args.device_group),
         qaic_config=qaic_config,
-        prefill_only=False,
+        prefill_only=args.prefill_only,
         num_cores=args.num_cores,
     )
 
-    print("Exporting the one-token decode graph through qeff_model.export()")
+    graph_kind = "blocked DeepSeek V4 prefill" if args.prefill_only else "one-token decode"
+    print(f"Exporting the {graph_kind} graph through qeff_model.export()")
     onnx_path = Path(
         qeff_model.export(
             export_dir=str(export_root),
-            prefill_only=False,
-            use_onnx_subfunctions=False,
+            prefill_only=args.prefill_only,
+            prefill_seq_len=args.prefill_seq_len,
+            use_onnx_subfunctions=args.use_onnx_subfunctions,
             dynamo=True,
             export_batch_size=batch_size,
             cache_ctx_len=args.ctx_len,
@@ -443,21 +470,21 @@ def main(defaults: dict[str, object] | None = None) -> None:
     if args.export_only:
         return
 
-    # Export FP32 weights, then lower only the non-NPI compiler path to FP16.
-    qeff_model.model.config.torch_dtype = torch.float16
-    print(f"Compiling combined prefill/decode specialization: seq_len=1, ctx_len={args.ctx_len}")
+    print(
+        f"Compiling {graph_kind} specialization: seq_len={args.prefill_seq_len if args.prefill_only else 1}, ctx_len={args.ctx_len}"
+    )
     qpc_path = Path(
         qeff_model.compile(
             onnx_path=str(onnx_path),
             compile_dir=str(compile_root),
-            prefill_seq_len=1,
+            prefill_seq_len=args.prefill_seq_len if args.prefill_only else 1,
             ctx_len=args.ctx_len,
             batch_size=batch_size,
             num_cores=args.num_cores,
             num_devices=len(args.device_group),
             aic_hw_version=args.hw_version,
-            prefill_only=False,
-            use_onnx_subfunctions=False,
+            prefill_only=args.prefill_only,
+            use_onnx_subfunctions=args.use_onnx_subfunctions,
             mxint8_kv_cache=False,
             mxfp6_matmul=True,
             user_tiled=True,
@@ -470,7 +497,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
     print(f"SPECIALIZATIONS_PATH={qpc_path.parent / 'specializations.json'}")
     print(f"CUSTOM_IO_PATH={qpc_path.parent / 'custom_io.yaml'}")
 
-    if args.compile_only:
+    if args.compile_only or args.prefill_only:
         return
 
     print("Running qeff_model.generate()")

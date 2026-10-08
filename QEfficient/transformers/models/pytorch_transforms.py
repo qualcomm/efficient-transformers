@@ -9,6 +9,7 @@ import gc
 import warnings
 from collections.abc import Callable
 from types import MethodType
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
