@@ -484,6 +484,50 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert len(fn.output) == 1, f"Function with 1 scatter should not have outputs added, got {list(fn.output)}"
         assert not model.graph.node[0].output, "Function call must not be partially rewired"
 
+    def test_preserves_v4_retained_state_with_nested_subfunction(self):
+        retained_state = "past_local_kv_cache.0_InternalRetainedState"
+        state_input = "past_local_kv_cache.0"
+        function = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=[retained_state, "position_ids", "updates"],
+            outputs=[],
+            nodes=[
+                helper.make_node(
+                    "V4CtxScatter1D",
+                    inputs=[retained_state, "position_ids", "updates"],
+                    outputs=["updated_local_kv_cache"],
+                    domain="com.qualcomm.cloud",
+                )
+            ],
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("com.qualcomm.cloud", 1)],
+        )
+        call_node = helper.make_node(
+            "repeated_subgraph0",
+            inputs=[retained_state, "position_ids", "updates"],
+            outputs=[],
+        )
+        graph = helper.make_graph(
+            [call_node],
+            "test_graph",
+            [
+                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("position_ids", TensorProto.INT32, None),
+                helper.make_tensor_value_info("updates", TensorProto.FLOAT, None),
+            ],
+            [helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None)],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(function)
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert changed
+        assert list(model.functions[0].output) == ["updated_local_kv_cache"]
+        assert list(model.graph.node[0].input) == [state_input, "position_ids", "updates"]
+        assert list(model.graph.node[0].output) == [retained_state]
+        assert model.graph.input[0].name == state_input
+
 
 # ---------------------------------------------------------------------------
 # TestRenameRepeatedSubgraphTransform
