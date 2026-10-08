@@ -701,11 +701,9 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
 
     # Add subfunction-specific ONNX transforms based on export path
     if dynamo:
-        # Dynamo: repair retained cache outputs, collapse equivalent repeated functions, then assign semantic names.
+        # Dynamo: repair retained cache outputs, then assign semantic names.
         if PreserveNestedCacheRetainedStateTransform not in qeff_model._onnx_transforms:
             qeff_model._onnx_transforms.append(PreserveNestedCacheRetainedStateTransform)
-        if DeduplicateRepeatedSubgraphTransform not in qeff_model._onnx_transforms:
-            qeff_model._onnx_transforms.append(DeduplicateRepeatedSubgraphTransform)
         if RenameRepeatedSubgraphTransform not in qeff_model._onnx_transforms:
             qeff_model._onnx_transforms.append(RenameRepeatedSubgraphTransform)
     else:
