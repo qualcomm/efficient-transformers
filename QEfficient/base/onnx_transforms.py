@@ -311,6 +311,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         frozenset({"past_key", "past_value"}),
         frozenset({"conv_state", "recurrent_state"}),
     )
+    _RETAINED_STATE_INPUT_RE = re.compile(r"^past_.+_(?:Internal)?RetainedState$")
 
     # All scatter op_type names that write back a KV cache tensor.
     # Keep in sync with CustomOpTransform._custom_ops and the dynamo
@@ -325,6 +326,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             "CtxScatterDP",
             "CtxScatterFoldedRows",
             "CtxScatterDPCP",
+            "V4CtxScatter1D",
         }
     )
 
@@ -394,7 +396,9 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         graph = model.graph
         produced_names = {name for node in graph.node for name in node.output}
         dangling_retained_outputs = {
-            out.name for out in graph.output if out.name.endswith("_RetainedState") and out.name not in produced_names
+            out.name
+            for out in graph.output
+            if out.name.endswith(("_RetainedState", "_InternalRetainedState")) and out.name not in produced_names
         }
         if not dangling_retained_outputs:
             return False
@@ -478,6 +482,54 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                         node.output.append(desired_output)
                         changed = True
                     remaining_dangling_outputs.discard(desired_output)
+
+            # Some model-specific retained-state inputs (for example, DeepSeek
+            # V4's local KV cache) do not follow the shared state-kind naming
+            # convention above. Preserve those by resolving their scatter
+            # writers from the positional function inputs.
+            for input_index, retained_input in enumerate(node.input):
+                if retained_input not in remaining_dangling_outputs:
+                    continue
+                if cls._RETAINED_STATE_INPUT_RE.match(retained_input) is None:
+                    continue
+                if cls._STATE_INPUT_RE.match(retained_input) is not None:
+                    continue
+                if input_index >= len(fn.input):
+                    raise ValueError(
+                        f"Nested function '{fn.name}' has no input at position {input_index} for "
+                        f"retained-state input '{retained_input}'."
+                    )
+
+                function_input = fn.input[input_index]
+                writers = [
+                    fn_node
+                    for fn_node in fn.node
+                    if fn_node.op_type in cls._SCATTER_OP_TYPES
+                    and fn_node.input
+                    and fn_node.input[0] == function_input
+                    and fn_node.output
+                ]
+                if len(writers) != 1:
+                    writer_names = [
+                        f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
+                    ]
+                    raise ValueError(
+                        f"Could not uniquely resolve retained-state writer for '{retained_input}' in nested "
+                        f"function '{fn.name}': expected one CtxScatter* with data input '{function_input}', "
+                        f"found {len(writers)} ({writer_names})."
+                    )
+
+                scatter_output = writers[0].output[0]
+                if scatter_output not in fn.output:
+                    fn.output.append(scatter_output)
+                    changed = True
+
+                plain_input = re.sub(r"_(?:Internal)?RetainedState$", "", retained_input)
+                state_rename_map[retained_input] = plain_input
+                if retained_input not in node.output:
+                    node.output.append(retained_input)
+                    changed = True
+                remaining_dangling_outputs.discard(retained_input)
         retained_output_names = {output.name for output in graph.output if output.name.endswith("_RetainedState")}
         for graph_input in graph.input:
             match = cls._STATE_INPUT_RE.match(graph_input.name)
