@@ -28,7 +28,29 @@ DECODE_MICROBENCH_DEFAULTS = {
     "hca_attn_blocks": 8,
     "hw_version": "ai100",
     "ffn_blocking_mode": "token",
-    "ffn_token_block_size": 1,
+    "ffn_token_block_size": 4,
+}
+
+PREFILL_MICROBENCH_DEFAULTS = {
+    "prefill_only": True,
+    "prefill_seq_len": 1024,
+    "batch_size": 1,
+    "ctx_len": 1048576,
+    "num_hidden_layers": 4,
+    "num_cores": 16,
+    "device_group": [0],
+    "attn_dp": 1,
+    "indexer_cp": 1,
+    "num_kv_blocks": 1,
+    "hca_compressed_kv_cp": 1,
+    "hca_attn_blocks": 1,
+    "hw_version": "ai100",
+}
+
+MICROBENCH_DEFAULTS = DECODE_MICROBENCH_DEFAULTS
+MICROBENCH_DEFAULTS_BY_MODE = {
+    "decode": DECODE_MICROBENCH_DEFAULTS,
+    "prefill": PREFILL_MICROBENCH_DEFAULTS,
 }
 
 PREFILL_MICROBENCH_DEFAULTS = {
@@ -55,6 +77,14 @@ MICROBENCH_DEFAULTS_BY_MODE = {
     "decode": DECODE_MICROBENCH_DEFAULTS,
     "prefill": PREFILL_MICROBENCH_DEFAULTS,
 }
+
+
+def parse_microbench_mode() -> str:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--mode", choices=MICROBENCH_DEFAULTS_BY_MODE, default="decode")
+    args, remaining_args = parser.parse_known_args()
+    sys.argv = [sys.argv[0], *remaining_args]
+    return args.mode
 
 
 def parse_microbench_mode() -> str:
