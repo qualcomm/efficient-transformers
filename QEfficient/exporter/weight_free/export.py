@@ -20,7 +20,7 @@ from accelerate import init_empty_weights
 from QEfficient.exporter.weight_free.checkpoint_key_resolver import promote_initializers_and_build_spec
 from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path, save_weight_spec
 from QEfficient.utils import load_json
-from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
+from QEfficient.utils.checkpoint_utils import read_weight_map, resolve_checkpoint_dir
 from QEfficient.utils.logging_utils import QEFFLogger
 from QEfficient.utils.torch_patches import dynamo_invoke_subgraph_fallback_env, preserve_subfunction_source_lines
 
@@ -289,6 +289,35 @@ def _prepare_checkpoint_for_weight_free_export(
 
     source_dir = resolve_checkpoint_dir(model_ref)
     hash_params = qeff_model.hash_params
+    config = getattr(qeff_model.model, "config", None)
+    if getattr(config, "model_type", None) == "deepseek_v4":
+        from QEfficient.exporter.weight_free.checkpoint_transforms import DeepseekV4CheckpointTransform
+
+        if DeepseekV4CheckpointTransform.is_applicable(read_weight_map(source_dir)):
+            prepared_hash = _prepared_checkpoint_hash(
+                model_ref=model_ref,
+                target_dtype=target_dtype,
+                active_group_transform_id=DeepseekV4CheckpointTransform.TRANSFORM_ID,
+                moe_prefill_flavour=hash_params.get("moe_prefill_flavour", "none"),
+                moe_prefill_num_pipeline_stages=hash_params.get("moe_prefill_num_pipeline_stages"),
+                moe_prefill_num_parallelized_experts=hash_params.get("moe_prefill_num_parallelized_experts"),
+                plan_payload={
+                    "transform": DeepseekV4CheckpointTransform.TRANSFORM_ID,
+                    "num_hidden_layers": getattr(config, "num_hidden_layers", None),
+                },
+            )
+            prepared_out = (
+                QEFF_CHECKPOINT_HOME.expanduser() / f"{source_dir.name}-qeff-prepared-{prepared_hash}"
+                if QEFF_CHECKPOINT_HOME
+                else source_dir.parent / f"{source_dir.name}-qeff-prepared-{prepared_hash}"
+            )
+            DeepseekV4CheckpointTransform.apply(
+                source_dir,
+                prepared_out,
+                target_dtype=target_dtype,
+                num_hidden_layers=getattr(config, "num_hidden_layers", None),
+            )
+            return str(prepared_out)
 
     prep_pipeline = CheckpointTransformPipeline(transforms=qeff_model._checkpoint_transforms)
     plan, active_group_id = prep_pipeline.build_plan(

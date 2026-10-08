@@ -23,6 +23,7 @@ import torch
 from safetensors import safe_open
 
 from QEfficient.base.checkpoint_transforms import (
+    CHECKPOINT_PREPARED_SENTINEL,
     BaseCheckpointTransform,
     CheckpointPlanningContext,
     CheckpointStage,
@@ -32,7 +33,17 @@ from QEfficient.base.checkpoint_transforms import (
     TensorRef,
 )
 from QEfficient.transformers.quantizers.quantizer_utils import convert_moe_packed_tensors
-from QEfficient.utils.checkpoint_utils import safetensors_dtype_to_torch
+from QEfficient.utils.checkpoint_utils import (
+    atomic_save,
+    copy_checkpoint_aux_files,
+    read_weight_map,
+    safetensors_dtype_to_torch,
+    write_index,
+)
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
+_SENTINEL = CHECKPOINT_PREPARED_SENTINEL
 
 # ---------------------------------------------------------------------------
 # Canonical key mapping helpers
@@ -239,6 +250,7 @@ class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
     can reference the QEff model's parameter names directly.
     """
 
+    TRANSFORM_ID = "deepseek_v4_native_v1"
     EXPERT_RE = re.compile(r"^layers\.(\d+)\.ffn\.experts\.(\d+)\.(w1|w2|w3)\.(weight|scale)$")
 
     @staticmethod
