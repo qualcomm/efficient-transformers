@@ -529,3 +529,58 @@ HF PyTorch original == optimized weight-free QAIC == [112, 5, 3, 112]
 This is decode-only validation; the KV-head-parallel and replicated-KV cache
 layout has not yet been validated for the disaggregated prefill-to-decode
 handoff.
+
+## RoPE Subfunction Locality for TS16 x PP6
+
+### Performance Problem
+
+In the Dynamo ONNX graph, `QEffQwen3_5MoeTextModel.forward` previously
+gathered the position-specific RoPE `cos` and `sin` tensors before invoking
+any decoder layer. Every full-attention decoder subfunction then received the
+same already-gathered values. MDP could only place that root-graph gather in
+the first partition, so a TS16 x PP6 placement had to distribute its output to
+all partitions containing full-attention layers. The resulting startup PCI DMA
+is avoidable cross-partition traffic.
+
+### Implemented Direction
+
+The static `cos_cached` and `sin_cached` tables now cross the full-attention
+subfunction boundary. `QEffQwen3_5MoeFullAttentionDecoderLayer.forward`
+derives the rotary position IDs and calls `qeff_prepare_mrope_cos_sin` inside
+the function before calling `self_attn`. Linear/GDN decoder layers continue to
+receive `None` for this unused positional argument and do not acquire RoPE
+inputs.
+
+This keeps the `Gather` nodes consuming the RoPE-table function inputs inside
+each `QEffQwen3_5MoeFullAttentionDecoderLayer` function, allowing MDP to place
+the gather with that function rather than partition 0. The attention
+calculation still receives the same `(cos, sin)` tensors as before.
+
+### Validation
+
+The focused CPU regression test exports a tiny mixed Qwen3.5-MoE model with
+Dynamo ONNX subfunctions and asserts both graph properties:
+
+- every full-attention function has a `Gather` consuming its `cos_cached` or
+  `sin_cached` function input;
+- the root graph has no `Gather` consuming either RoPE table.
+
+Command and result:
+
+```bash
+pytest -q tests/unit_test/models/test_model_quickcheck.py \
+  -k 'qwen3_5_moe_subfunction_keeps_rope_gather_with_full_attention_layer or qwen3_5_moe_get_submodules_for_export_handles_fallback_and_headpar or qwen3_5_moe_decode_export_uses_static_token_axis'
+# 3 passed
+```
+
+A separate synthetic four-layer mixed-model subfunction QAIC run exported,
+compiled, and generated successfully after this change. Before a full
+92-layer TS16 x PP6 run, share the ONNX locality evidence with the performance
+owner and confirm the MDP placement eliminates the initial DMA fan-out.
+
+The fresh QAIC artifact is
+`.rope_subfunction_tiny_validation/Qwen3_5MoeForCausalLM/Qwen3_5MoeForCausalLM-b9b3e7114d7038ee/Qwen3_5MoeForCausalLM.onnx`.
+Its root call passes `model.cos_cached` and `model.sin_cached` to
+`QEffQwen3_5MoeFullAttentionDecoderLayer`; the function body gathers those
+arguments locally. The one-device QAIC execution generated `[112, 5, 3, 112]`,
+matching the established deterministic synthetic baseline.
