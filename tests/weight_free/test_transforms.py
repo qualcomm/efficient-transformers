@@ -501,6 +501,37 @@ class TestWeightFreeCheckpointTransforms:
         assert set(index) == set(tensors)
         assert all((out / shard_name).is_file() for shard_name in index.values())
 
+    def test_pipeline_splits_qwen_dim2_fused_experts_to_moe_weights(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        prefix = "model.language_model.layers.0.mlp.experts"
+        moe_prefix = "model.language_model.layers.0.mlp.moe_weights"
+        gate = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+        up = gate + 100
+        gate_up = torch.cat((gate, up), dim=2)
+        down = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        _write_safetensors_checkpoint(
+            src,
+            {
+                f"{prefix}.gate_up_proj": gate_up,
+                f"{prefix}.down_proj": down,
+            },
+        )
+
+        pipeline = CheckpointTransformPipeline([MoEFusedExpertSplitCheckpointTransform])
+        pipeline.apply(
+            src,
+            out,
+            target_dtype=torch.float32,
+            config=SimpleNamespace(num_experts=2),
+        )
+
+        tensors = _load_prepared_tensors(out)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.gate"], gate)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.up"], up)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.down"], down)
+
     def test_pipeline_splits_and_packs_fused_experts_in_one_task(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
@@ -908,6 +939,45 @@ class TestWeightFreeCheckpointTransforms:
     @pytest.mark.parametrize(
         ("onnx_name", "checkpoint_name"),
         [
+            ("model.vision_model.patch_embed.proj.weight", "model.visual.patch_embed.proj.weight"),
+            ("model.visual.patch_embed.proj.weight", "model.vision_model.patch_embed.proj.weight"),
+        ],
+    )
+    def test_resolver_accepts_vlm_vision_namespace_aliases(self, onnx_name, checkpoint_name):
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert find_checkpoint_key(onnx_name, {checkpoint_name: "model.safetensors"}, backbone) == checkpoint_name
+
+    def test_resolver_accepts_component_wrapper_prefix_for_root_parameter(self):
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert (
+            find_checkpoint_key(
+                "model.lm_head.weight",
+                {"lm_head.weight": "model.safetensors"},
+                backbone,
+            )
+            == "lm_head.weight"
+        )
+
+    def test_resolver_accepts_hf_model_prefix_for_component_parameter(self):
+        backbone = MagicMock()
+        backbone.base_model_prefix = ""
+
+        assert (
+            find_checkpoint_key(
+                "language_model.embed_tokens.weight",
+                {"model.language_model.embed_tokens.weight": "model.safetensors"},
+                backbone,
+            )
+            == "model.language_model.embed_tokens.weight"
+        )
+
+    @pytest.mark.parametrize(
+        ("onnx_name", "checkpoint_name"),
+        [
             ("model.layers.0.mlp.gate.weight", "model.layers.0.mlp.router.weight"),
             ("model.layers.0.mlp.router.weight", "model.layers.0.mlp.gate.weight"),
         ],
@@ -1207,6 +1277,30 @@ class TestRuntimeRequirements:
             QEFFAutoModelForCausalLM.from_pretrained("dummy-model", weight_free=True)
 
         assert calls == ["weight_free=True"]
+
+    def test_reorder_inputs_drops_output_only_dynamic_shapes(self):
+        from QEfficient.utils.export_utils import reorder_inputs_by_signature
+
+        class VisionModel:
+            def forward(self, pixel_values, image_grid_thw, image_idx):
+                return pixel_values, image_grid_thw
+
+        example_inputs = {
+            "pixel_values": object(),
+            "image_grid_thw": object(),
+            "image_idx": object(),
+        }
+        dynamic_shapes = {
+            "pixel_values": {0: "grid_height"},
+            "image_grid_thw": {0: "vision_batch_size"},
+            "deepstack_features": {1: "vision_batch_size"},
+        }
+
+        reordered_inputs, reordered_shapes = reorder_inputs_by_signature(VisionModel(), example_inputs, dynamic_shapes)
+
+        assert list(reordered_inputs) == ["pixel_values", "image_grid_thw", "image_idx"]
+        assert list(reordered_shapes) == ["pixel_values", "image_grid_thw", "image_idx"]
+        assert reordered_shapes["image_idx"] == {}
 
     def test_export_wrapper_validates_dynamo_requirements_before_export(self, monkeypatch, tmp_path):
         from QEfficient.utils.export_utils import export_wrapper

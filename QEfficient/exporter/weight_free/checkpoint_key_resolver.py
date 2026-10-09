@@ -87,6 +87,21 @@ def _router_gate_aliases(name: str) -> List[str]:
     return []
 
 
+def _vision_model_aliases(name: str) -> List[str]:
+    """Return equivalent namespaces for VLM vision tower parameters.
+
+    Qwen VL wrappers expose the HF ``visual`` module as ``vision_model`` so
+    the component can use the common VLM interface. That changes the
+    exported module name, while the checkpoint retains the HF ``visual``
+    namespace.
+    """
+    if name.startswith("model.vision_model."):
+        return [name.replace("model.vision_model.", "model.visual.", 1)]
+    if name.startswith("model.visual."):
+        return [name.replace("model.visual.", "model.vision_model.", 1)]
+    return []
+
+
 def _find_checkpoint_key(candidates: List[str], checkpoint_index: Dict[str, str], onnx_name: str) -> Optional[str]:
     """Return the unique matching checkpoint key, or fail on ambiguous matches."""
     seen: set = set()
@@ -131,9 +146,19 @@ def find_checkpoint_key(
     4. Legacy MoE weight aliases fallback for old checkpoints.
     """
     # 1. Universal HF prefix rules
-    candidates = [onnx_name]
+    candidates = [onnx_name, *_vision_model_aliases(onnx_name)]
     stripped = onnx_name.removeprefix("base_model.")
     candidates.append(stripped)
+    # Component wrappers can add a leading ``model.`` module while the HF
+    # checkpoint keeps top-level parameters (for example ``lm_head.weight``)
+    # at the root.
+    if stripped.startswith("model."):
+        candidates.append(stripped.removeprefix("model."))
+    else:
+        # Some component wrappers expose the HF backbone below ``model`` in
+        # the exported module, while the resolver receives names relative to
+        # that component (for example ``language_model.embed_tokens``).
+        candidates.append(f"model.{stripped}")
 
     prefix = getattr(backbone, "base_model_prefix", "")
     if prefix:

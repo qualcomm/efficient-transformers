@@ -22,10 +22,10 @@ import onnx
 import onnxruntime
 import pytest
 import torch
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 
 # ---------------------------------------------------------------------------
 # Worker-level model cache
@@ -95,6 +95,15 @@ WEIGHT_FREE_EMBEDDING_MODEL_PARAMS = [
     for model_type, (model_id, pooling) in sorted(WEIGHT_FREE_EMBEDDING_MODELS.items())
 ]
 
+WEIGHT_FREE_VLM_MODEL_PARAMS = [
+    pytest.param(
+        "qwen3_vl_moe",
+        "tiny-random/qwen3-vl-moe",
+        marks=pytest.mark.xdist_group(name="qaic-runtime-qwen3-vl-moe"),
+        id="qwen3-vl-moe",
+    ),
+]
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -151,6 +160,19 @@ def load_tokenizer(model_id: str) -> AutoTokenizer:
         load_hf_model(model_id)
     _, tokenizer = _HF_MODEL_CACHE[model_id]
     return tokenizer
+
+
+def load_weight_free_vlm_model(model_id: str) -> QEFFAutoModelForImageTextToText:
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    config.text_config.num_hidden_layers = 1
+    return QEFFAutoModelForImageTextToText.from_pretrained(
+        model_id,
+        config=config,
+        attn_implementation="eager",
+        kv_offload=True,
+        trust_remote_code=True,
+        weight_free=True,
+    )
 
 
 def exported_onnx_path(export_result) -> Path:

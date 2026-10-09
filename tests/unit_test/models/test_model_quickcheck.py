@@ -3235,6 +3235,41 @@ def test_qwen3_vl_moe_get_specializations_decouples_vision_batch_size():
     assert axes["lang"]["vision_embeds"][0] == "vision_batch_size"
 
 
+@pytest.mark.parametrize(("weight_free", "expected_batch_size"), [(False, 1), (True, 2)])
+def test_qwen3_vl_moe_dummy_inputs_use_weight_free_batch_size(weight_free, expected_batch_size):
+    from types import SimpleNamespace
+
+    from QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
+        QEffQwen3VLMoeForConditionalGeneration,
+    )
+
+    text_config = SimpleNamespace(
+        hidden_size=16,
+        num_attention_heads=4,
+        num_hidden_layers=1,
+        num_key_value_heads=2,
+    )
+    config = SimpleNamespace(
+        dtype=torch.float32,
+        text_config=text_config,
+        vision_config=SimpleNamespace(deepstack_visual_indexes=[0, 1, 2], out_hidden_size=8),
+    )
+    model = QEffQwen3VLMoeForConditionalGeneration.__new__(QEffQwen3VLMoeForConditionalGeneration)
+    model.config = config
+    model.model = SimpleNamespace(config=config, qaic_config=None)
+
+    inputs = model.get_dummy_inputs(
+        kv_offload=True,
+        batch_size=1,
+        prefill_seq_len=8,
+        weight_free=weight_free,
+    )
+
+    assert inputs["lang"]["input_ids"].shape[0] == expected_batch_size
+    assert inputs["lang"]["vision_embeds"].shape[0] == expected_batch_size
+    assert inputs["lang"]["deepstack_features"].shape[1] == expected_batch_size
+
+
 def test_qwen3_5_moe_get_specializations_strips_vision_symbols_for_comp_ctx_variants():
     from types import SimpleNamespace
 

@@ -574,7 +574,7 @@ def detect_group_transform(
     # Pre-stacked formats — delegate detection to each transform's is_applicable().
     # FusedExpertSplitCheckpointTransform handles both Mixtral fused and GraniteMoE
     # internally via _get_key_remap() — no hardcoded patterns needed here.
-    fused_cls = _find_transform_by_id("fused_expert_split_v1", transforms)
+    fused_cls = _find_transform_by_id("fused_expert_split_v2", transforms)
     if fused_cls is not None and fused_cls.is_applicable(weight_map):
         return fused_cls
 
@@ -610,6 +610,7 @@ def _find_transform_by_id(
         "gptoss_mxfp4_dequant_v1": GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         "gptoss_mxfp4_dequant_expert_parallel_v1": GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         "fused_expert_split_v1": FusedExpertSplitCheckpointTransform,
+        "fused_expert_split_v2": FusedExpertSplitCheckpointTransform,
         "moe_fused_expert_split_v1": FusedExpertSplitCheckpointTransform,
         "granite_moe_fused_split_v1": FusedExpertSplitCheckpointTransform,
         "dtype_conversion_v1": DtypeConversionCheckpointTransform,

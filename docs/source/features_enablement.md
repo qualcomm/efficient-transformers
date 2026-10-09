@@ -40,7 +40,9 @@ python -m QEfficient.cloud.infer --model_name gpt2 --batch_size 1 --prompt_len 3
 ---
 
 (id-weight-free-export)=
-## Weight-Free CausalLM Export
+## Weight-Free Export
+
+### CausalLM
 
 Weight-free export traces a CausalLM model with meta tensors and keeps model
 weights outside the ONNX graph. The export writes a `weight_spec.json` sidecar
@@ -74,6 +76,48 @@ inputs with the external checkpoint tensors. The helper resolves weights from an
 explicit `weights_root` argument first. If that is not provided, it checks
 `AIC_EXTERNAL_DATA_ROOT`, the ONNX export directory, and the original checkpoint
 location recorded in `weight_spec.json`.
+
+### Image-text-to-text models
+
+Weight-free VLM export is currently supported for Qwen3-VL-MoE in dual-QPC
+mode. The vision encoder and language decoder are exported and compiled as
+separate QPCs, and the vision outputs are passed to the language QPC during
+generation.
+
+```Python
+from QEfficient import QEFFAutoModelForImageTextToText
+
+model = QEFFAutoModelForImageTextToText.from_pretrained(
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    attn_implementation="eager",
+    kv_offload=True,
+    weight_free=True,
+)
+qpc_paths = model.compile(
+    batch_size=1,
+    prefill_seq_len=128,
+    ctx_len=4096,
+    height=354,
+    width=536,
+    num_cores=4,
+    use_onnx_subfunctions=True,
+)
+```
+
+The supported configuration and current limitations are:
+
+- Weight-free VLM export requires dual-QPC mode. Passing `kv_offload=False`
+  raises `NotImplementedError`. If `kv_offload` is omitted,
+  `weight_free=True` selects `kv_offload=True`.
+- Weight-free mode always uses the Dynamo (`torch.export`) ONNX export path
+  and validates the required Dynamo environment before building the model.
+- `weight_free=True` and `layerwise=True` are mutually exclusive.
+- Single-QPC weight-free export are not yet supported.
+
+
+See the
+[Qwen3-VL-MoE disaggregated weight-free example](../../examples/image_text_to_text/models/qwen3_vl_moe/qwen3_vl_moe_disagg_mode_weightfree.py)
+for separate vision, language-prefill, and language-decode QPC compilation.
 
 ---
 

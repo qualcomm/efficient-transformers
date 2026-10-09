@@ -33,9 +33,9 @@ from QEfficient.transformers.models.blueprint.modeling_blueprint import (
     QEffBlueprintForCausalLM,
     QEffBlueprintModel,
 )
-from torch import nn
 
 # Example imports for three representative models
+from torch import nn
 from transformers.models.blueprint.modeling_blueprint import (
     BlueprintAttention,
     BlueprintDecoderLayer,
