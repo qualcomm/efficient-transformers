@@ -528,6 +528,89 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert list(model.graph.node[0].output) == [retained_state]
         assert model.graph.input[0].name == state_input
 
+    def test_preserves_final_scatternd_cache_state_from_prefill_update_chain(self):
+        retained_state = "past_local_kv_cache.0_RetainedState"
+        state_input = "past_local_kv_cache.0"
+        function = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=[retained_state, "indices", "updates"],
+            outputs=[],
+            nodes=[
+                helper.make_node("Identity", inputs=[retained_state], outputs=["cache_view"]),
+                helper.make_node("ScatterND", inputs=["cache_view", "indices", "updates"], outputs=["cache_step_0"]),
+                helper.make_node("Identity", inputs=["cache_step_0"], outputs=["next_cache_view"]),
+                helper.make_node(
+                    "ScatterND", inputs=["next_cache_view", "indices", "updates"], outputs=["cache_step_1"]
+                ),
+            ],
+            opset_imports=[helper.make_opsetid("", 17)],
+        )
+        call_node = helper.make_node(
+            "repeated_subgraph0",
+            inputs=[retained_state, "indices", "updates"],
+            outputs=[],
+        )
+        graph = helper.make_graph(
+            [call_node],
+            "test_graph",
+            [
+                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("indices", TensorProto.INT64, None),
+                helper.make_tensor_value_info("updates", TensorProto.FLOAT, None),
+            ],
+            [helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None)],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(function)
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert changed
+        assert list(model.functions[0].output) == ["cache_step_1"]
+        assert list(model.graph.node[0].input) == [state_input, "indices", "updates"]
+        assert list(model.graph.node[0].output) == [retained_state]
+
+    def test_preserves_unchanged_prefill_retained_state(self):
+        retained_state = "past_compressor_kv_state.0_RetainedState"
+        state_input = "past_compressor_kv_state.0"
+        function = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=[retained_state, "hidden_states"],
+            outputs=[],
+            nodes=[
+                helper.make_node("Add", inputs=[retained_state, "hidden_states"], outputs=["output"]),
+            ],
+            opset_imports=[helper.make_opsetid("", 17)],
+        )
+        call_node = helper.make_node(
+            "repeated_subgraph0",
+            inputs=[retained_state, "hidden_states"],
+            outputs=["output"],
+        )
+        graph = helper.make_graph(
+            [call_node],
+            "test_graph",
+            [
+                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, None),
+            ],
+            [
+                helper.make_tensor_value_info("output", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(function)
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert changed
+        assert list(model.functions[0].output) == ["past_compressor_kv_state.0_RetainedState"]
+        assert list(model.graph.node[0].input) == [state_input, "hidden_states"]
+        assert list(model.graph.node[0].output) == ["output", retained_state]
+
 
 # ---------------------------------------------------------------------------
 # TestRenameRepeatedSubgraphTransform

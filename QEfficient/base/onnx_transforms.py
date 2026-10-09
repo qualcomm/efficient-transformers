@@ -283,6 +283,18 @@ class RenameFunctionOutputsTransform(BaseOnnxTransform):
                                 "k_pe.",
                                 "recurrent_state.",
                                 "conv_state.",
+                                "past_sliding_window_kv.",
+                                "past_local_kv_cache.",
+                                "past_compressor_kv_buffer.",
+                                "past_compressor_gate_buffer.",
+                                "past_compressor_kv_state.",
+                                "past_compressor_score_state.",
+                                "past_actual_compressed_kv.",
+                                "past_indexer_kv_buffer.",
+                                "past_indexer_gate_buffer.",
+                                "past_indexer_kv_cache.",
+                                "past_indexer_kv_state.",
+                                "past_indexer_score_state.",
                             ):
                                 if not base.startswith(token):
                                     continue
@@ -327,6 +339,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             "CtxScatterFoldedRows",
             "CtxScatterDPCP",
             "V4CtxScatter1D",
+            "ScatterND",
         }
     )
 
@@ -370,26 +383,81 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
         scatter_outputs: dict[str, str] = {}
         for state_kind, function_input in function_state_inputs.items():
-            writers = [
-                fn_node
-                for fn_node in fn.node
-                if fn_node.op_type in cls._SCATTER_OP_TYPES
-                and fn_node.input
-                and fn_node.input[0] == function_input
-                and fn_node.output
-            ]
-            if len(writers) != 1:
-                writer_names = [
-                    f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
-                ]
-                raise ValueError(
-                    f"Could not uniquely resolve the nested {state_kind}.{layer_idx} state writer in function "
-                    f"'{fn.name}': expected one CtxScatter* with data input '{function_input}', "
-                    f"found {len(writers)} ({writer_names})."
-                )
-            scatter_outputs[state_kind] = writers[0].output[0]
+            scatter_outputs[state_kind] = cls._resolve_retained_state_output(fn, function_input)
 
         return scatter_outputs
+
+    @classmethod
+    def _resolve_retained_state_output(cls, fn, function_input: str, *, allow_unchanged: bool = False) -> str:
+        """Return the final cache value derived from a nested-function input.
+
+        Decode cache updates normally have one scatter that directly consumes the
+        function input. Prefill may update the same cache repeatedly, with each
+        scatter consuming a view of the prior scatter result. In that case the
+        retained state must be the final scatter in the update chain. Cache
+        states that are unused by a prefill layer are returned unchanged.
+        """
+        producer_by_output = {output: fn_node for fn_node in fn.node for output in fn_node.output if output}
+        dependency_cache: dict[tuple[str, str], bool] = {}
+
+        def depends_on(value_name: str, ancestor_name: str, visiting: set[str] | None = None) -> bool:
+            cache_key = (value_name, ancestor_name)
+            if cache_key in dependency_cache:
+                return dependency_cache[cache_key]
+            if value_name == ancestor_name:
+                dependency_cache[cache_key] = True
+                return True
+
+            if visiting is None:
+                visiting = set()
+            if value_name in visiting:
+                dependency_cache[cache_key] = False
+                return False
+
+            producer = producer_by_output.get(value_name)
+            if producer is None:
+                dependency_cache[cache_key] = False
+                return False
+
+            visiting.add(value_name)
+            result = any(
+                input_name and depends_on(input_name, ancestor_name, visiting) for input_name in producer.input
+            )
+            visiting.remove(value_name)
+            dependency_cache[cache_key] = result
+            return result
+
+        writers = [
+            fn_node
+            for fn_node in fn.node
+            if fn_node.op_type in cls._SCATTER_OP_TYPES
+            and fn_node.input
+            and fn_node.output
+            and depends_on(fn_node.input[0], function_input)
+        ]
+        if not writers:
+            if allow_unchanged:
+                return function_input
+            raise ValueError(
+                f"Could not uniquely resolve a retained-state writer in nested function '{fn.name}': "
+                f"no cache scatter depends on '{function_input}'."
+            )
+
+        final_writers = [
+            writer
+            for writer in writers
+            if not any(other is not writer and depends_on(other.input[0], writer.output[0]) for other in writers)
+        ]
+        if len(final_writers) != 1:
+            writer_names = [
+                f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in final_writers
+            ]
+            raise ValueError(
+                f"Could not uniquely resolve the final retained-state writer in nested function '{fn.name}' "
+                f"for input '{function_input}': found {len(final_writers)} ({writer_names})."
+            )
+
+        return final_writers[0].output[0]
 
     @classmethod
     def apply(cls, model: ModelProto, kv_cache_prefix: str | None = None) -> bool:
@@ -501,25 +569,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                     )
 
                 function_input = fn.input[input_index]
-                writers = [
-                    fn_node
-                    for fn_node in fn.node
-                    if fn_node.op_type in cls._SCATTER_OP_TYPES
-                    and fn_node.input
-                    and fn_node.input[0] == function_input
-                    and fn_node.output
-                ]
-                if len(writers) != 1:
-                    writer_names = [
-                        f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
-                    ]
-                    raise ValueError(
-                        f"Could not uniquely resolve retained-state writer for '{retained_input}' in nested "
-                        f"function '{fn.name}': expected one CtxScatter* with data input '{function_input}', "
-                        f"found {len(writers)} ({writer_names})."
-                    )
-
-                scatter_output = writers[0].output[0]
+                scatter_output = cls._resolve_retained_state_output(fn, function_input, allow_unchanged=True)
                 if scatter_output not in fn.output:
                     fn.output.append(scatter_output)
                     changed = True

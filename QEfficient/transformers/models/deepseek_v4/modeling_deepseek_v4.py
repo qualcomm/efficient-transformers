@@ -1415,7 +1415,12 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             q_index = indexer.q_b_proj(residual_chunk).view(
                 batch_size, chunk_length, indexer.num_heads, indexer.head_dim
             )
-            q_index = self._csa_prefill_rotate(q_index, cos, sin, sequence_major=True)
+            q_index = self._csa_prefill_rotate(
+                q_index,
+                cos[:, start:end],
+                sin[:, start:end],
+                sequence_major=True,
+            )
             index_scores = torch.einsum("bshd,btd->bsht", q_index.float(), indexer_kv_cache.float()).relu()
             index_weights = (
                 indexer.scorer.weights_proj(hidden_chunk).float()
@@ -1508,8 +1513,8 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         kv_full = self.kv_norm(self.kv_proj(hidden_states)).to(hidden_states.dtype)
         kv_full = self._csa_prefill_rotate(kv_full.unsqueeze(1), cos, sin).squeeze(1)
 
-        local_kv_cache = cache_layer.sliding_window_kv.squeeze(1)
-        compressed_kv_cache = cache_layer.actual_compressed_kv.squeeze(1)
+        local_kv_cache = cache_layer.sliding_window_kv
+        compressed_kv_cache = cache_layer.actual_compressed_kv
         compressor_state = torch.zeros(
             batch_size,
             ratio,
@@ -1530,7 +1535,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             carry_positions = position_chunk[:, :1] - self.sliding_window + offsets
             carry_valid = carry_positions >= 0
             carry_slots = torch.remainder(carry_positions.clamp(min=0), self.sliding_window)
-            carry_kv = self._csa_prefill_gather(local_kv_cache, carry_slots, carry_valid)
+            safe_carry_slots = torch.where(carry_valid, carry_slots, torch.zeros_like(carry_slots)).to(torch.int32)
+            carry_kv = ctx_gather_blocked_kv(local_kv_cache, safe_carry_slots.unsqueeze(1))[:, 0]
+            carry_kv = torch.where(carry_valid.unsqueeze(-1), carry_kv, torch.zeros_like(carry_kv))
             query_positions = position_chunk.unsqueeze(-1)
             carry_query_valid = carry_valid.unsqueeze(1) & (
                 (query_positions - carry_positions.unsqueeze(1)) < self.sliding_window
@@ -1540,10 +1547,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 token_indices.view(1, -1, 1) - token_indices.view(1, 1, -1) < self.sliding_window
             )
             in_chunk_valid = in_chunk_valid.expand(batch_size, -1, -1)
-            local_kv_cache = self._csa_prefill_scatter(
+            local_kv_cache = ctx_scatter(
                 local_kv_cache,
                 torch.remainder(position_chunk, self.sliding_window),
-                kv_chunk,
+                kv_chunk.unsqueeze(1),
             )
 
             kv_all = self.compressor.kv_proj(hidden_chunk).float()
@@ -1575,10 +1582,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 compressed = self._csa_prefill_rotate(compressed.unsqueeze(1), compressed_cos, compressed_sin).squeeze(
                     1
                 )
-                compressed_kv_cache = self._csa_prefill_scatter(
+                compressed_kv_cache = ctx_scatter(
                     compressed_kv_cache,
                     torch.full((batch_size, 1), start // ratio, dtype=position_ids.dtype, device=position_ids.device),
-                    compressed,
+                    compressed.unsqueeze(1),
                 )
             if full_blocks > 0:
                 block_hidden = hidden_chunk[:, lead : lead + full_blocks * ratio].reshape(
@@ -1602,10 +1609,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 compressed = self._csa_prefill_rotate(compressed.unsqueeze(1), compressed_cos, compressed_sin).squeeze(
                     1
                 )
-                compressed_kv_cache = self._csa_prefill_scatter(
+                compressed_kv_cache = ctx_scatter(
                     compressed_kv_cache,
                     torch.div(block_starts, ratio, rounding_mode="floor").view(1, -1).expand(batch_size, -1),
-                    compressed,
+                    compressed.unsqueeze(1),
                 )
                 last_slots = torch.arange(ratio, device=hidden_states.device).view(1, -1).expand(batch_size, -1)
                 compressor_state = self._csa_prefill_scatter(
@@ -1642,13 +1649,15 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 dtype=torch.float32,
                 device=hidden_states.device,
             )
-            slot_ids = torch.arange(compressed_kv_cache.shape[1], device=hidden_states.device)
-            for compressed_start in range(0, compressed_kv_cache.shape[1], compressed_block_size):
-                compressed_end = min(compressed_start + compressed_block_size, compressed_kv_cache.shape[1])
+            slot_ids = torch.arange(compressed_kv_cache.shape[2], device=hidden_states.device)
+            for compressed_start in range(0, compressed_kv_cache.shape[2], compressed_block_size):
+                compressed_end = min(compressed_start + compressed_block_size, compressed_kv_cache.shape[2])
                 tile_slots = slot_ids[compressed_start:compressed_end]
                 tile_valid = tile_slots.view(1, -1) < causal_threshold
                 tile_indices = tile_slots.unsqueeze(0).expand(batch_size, -1)
-                gathered = self._csa_prefill_gather(compressed_kv_cache, tile_indices, tile_valid)
+                safe_indices = torch.where(tile_valid, tile_indices, torch.zeros_like(tile_indices)).to(torch.int32)
+                gathered = ctx_gather_blocked_kv(compressed_kv_cache, safe_indices.unsqueeze(1))[:, 0]
+                gathered = torch.where(tile_valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
                 compressed_scores = torch.einsum("bshd,bkd->bshk", query_chunk.float(), gathered.float()) * self.scaling
                 compressed_scores = torch.where(
                     tile_valid.view(batch_size, 1, 1, -1),
@@ -1671,8 +1680,8 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             )
             chunk_outputs.append(local_output + compressed_output)
 
-        cache_layer.sliding_window_kv = local_kv_cache.unsqueeze(1)
-        cache_layer.actual_compressed_kv = compressed_kv_cache.unsqueeze(1)
+        cache_layer.sliding_window_kv = local_kv_cache
+        cache_layer.actual_compressed_kv = compressed_kv_cache
         cache_layer.compressor_kv_buffer = cache_layer.compressor_kv_buffer.clone()
         cache_layer.compressor_gate_buffer = cache_layer.compressor_gate_buffer.clone()
         attention_output = torch.cat(chunk_outputs, dim=1)
