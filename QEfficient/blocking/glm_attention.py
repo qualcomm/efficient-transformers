@@ -80,18 +80,28 @@ def blocked_glm_dsa_topk(
             invalid = invalid | block_mask
         scores = scores.masked_fill(invalid, float("-inf"))
 
-        selected = torch.topk(scores, k=block_topk, dim=-1)
-        candidate_scores.append(selected.values.reshape(batch_local, dp, query_length, cp * block_topk))
-        candidate_indices.append(
-            torch.gather(
-                global_ids.expand(batch_local, dp, query_length, cp, block_width),
-                -1,
-                selected.indices,
-            ).reshape(batch_local, dp, query_length, cp * block_topk)
-        )
+        expanded_ids = global_ids.expand(batch_local, dp, query_length, cp, block_width)
+        if cp == 1:
+            # DP16/CP1 requires one global Top-K over the complete local context.
+            # Retain all block scores so export does not emit one intermediate
+            # Top-K node per indexer block.
+            candidate_scores.append(scores)
+            candidate_indices.append(expanded_ids)
+        else:
+            # Preserve the existing two-stage behavior for CP>1.
+            selected = torch.topk(scores, k=block_topk, dim=-1)
+            candidate_scores.append(selected.values.reshape(batch_local, dp, query_length, cp * block_topk))
+            candidate_indices.append(
+                torch.gather(expanded_ids, -1, selected.indices).reshape(
+                    batch_local, dp, query_length, cp * block_topk
+                )
+            )
 
     candidate_scores = torch.cat(candidate_scores, dim=-1)
     candidate_indices = torch.cat(candidate_indices, dim=-1)
+    if cp == 1:
+        candidate_scores = candidate_scores.squeeze(3)
+        candidate_indices = candidate_indices.squeeze(3)
     selected = torch.topk(candidate_scores, k=final_topk, dim=-1).indices
     return torch.gather(candidate_indices, -1, selected).reshape(batch_size, query_length, final_topk).to(torch.int32)
 
