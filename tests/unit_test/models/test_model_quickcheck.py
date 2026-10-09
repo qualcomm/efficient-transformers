@@ -412,6 +412,61 @@ def test_deepseek_v4_blocked_csa_indexer_matches_batch_major_decode():
         torch.testing.assert_close(reference_output.logits, blocked_output.logits, atol=2e-4, rtol=2e-4)
 
 
+def test_deepseek_v4_csa_prefill_rotates_indexer_queries_per_chunk():
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["compressed_sparse_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.qeff_csa_prefill_only = True
+    config.qeff_csa_prefill_q_block_size = 4
+    config.sliding_window = 4
+
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    cache = qeff_model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=8)
+    input_ids = torch.randint(0, config.vocab_size, (1, 8))
+    position_ids = torch.arange(8).unsqueeze(0)
+
+    with torch.no_grad():
+        output = qeff_model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=cache,
+            use_cache=True,
+        )
+
+    assert output.logits.shape == (1, 1, config.vocab_size)
+    assert torch.isfinite(output.logits).all()
+
+
+def test_deepseek_v4_hca_prefill_preserves_rank_four_compressed_cache():
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["heavily_compressed_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.qeff_hca_prefill_only = True
+    config.qeff_hca_prefill_q_block_size = 4
+    config.qeff_hca_prefill_comp_kv_block_size = 2
+    config.sliding_window = 4
+
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    cache = qeff_model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=8)
+    input_ids = torch.randint(0, config.vocab_size, (1, 8))
+    position_ids = torch.arange(8).unsqueeze(0)
+
+    with torch.no_grad():
+        output = qeff_model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=cache,
+            use_cache=True,
+        )
+
+    assert output.logits.shape == (1, 1, config.vocab_size)
+    assert output.past_key_values[0][0].shape == (1, 1, config.sliding_window, config.head_dim)
+    assert output.past_key_values[0][3].shape == (1, 1, 2, config.head_dim)
+    assert torch.isfinite(output.logits).all()
+
+
 def test_deepseek_v4_folded_hca_dp_matches_batch_major_decode():
     config = _tiny_deepseek_v4_config()
     torch.manual_seed(0)
@@ -6115,10 +6170,24 @@ def test_layerwise_export_hash_is_separate_from_default(monkeypatch):
 def test_subfunction_compile_io_names_use_internal_retained_state():
     from QEfficient.transformers.models.modeling_auto import _compile_io_name, _state_input_name
 
-    output_name = _compile_io_name("past_value.1_RetainedState", use_onnx_subfunctions=True)
+    for state_name in (
+        "past_value.1",
+        "past_sliding_window_kv.0",
+        "past_compressor_kv_buffer.2",
+        "past_compressor_gate_buffer.2",
+        "past_compressor_kv_state.2",
+        "past_compressor_score_state.2",
+        "past_indexer_kv_buffer.2",
+        "past_indexer_gate_buffer.2",
+        "past_indexer_kv_cache.2",
+        "past_indexer_kv_state.2",
+        "past_indexer_score_state.2",
+        "past_local_kv_cache.2",
+    ):
+        output_name = _compile_io_name(f"{state_name}_RetainedState", use_onnx_subfunctions=True)
+        assert output_name == f"{state_name}_InternalRetainedState"
+        assert _state_input_name(output_name) == state_name
 
-    assert output_name == "past_value.1_InternalRetainedState"
-    assert _state_input_name(output_name) == "past_value.1"
     assert _compile_io_name("vision_embeds_RetainedState", use_onnx_subfunctions=True) == "vision_embeds_RetainedState"
 
 

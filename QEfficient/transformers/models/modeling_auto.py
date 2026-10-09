@@ -334,7 +334,28 @@ def _compile_io_name(name: str, *, use_onnx_subfunctions: bool) -> str:
     """Return the compiler-visible name for retained-state ONNX outputs."""
     if not use_onnx_subfunctions or not name.endswith("_RetainedState"):
         return name
-    if any(token in name for token in ("key", "value", "conv_state", "recurrent_state", "compressed_kv", "k_pe")):
+    if any(
+        token in name
+        for token in (
+            "key",
+            "value",
+            "conv_state",
+            "recurrent_state",
+            "compressed_kv",
+            "k_pe",
+            "sliding_window_kv",
+            "local_kv_cache",
+            "compressor_kv_buffer",
+            "compressor_gate_buffer",
+            "compressor_kv_state",
+            "compressor_score_state",
+            "indexer_kv_buffer",
+            "indexer_gate_buffer",
+            "indexer_kv_cache",
+            "indexer_kv_state",
+            "indexer_score_state",
+        )
+    ):
         return name[: -len("_RetainedState")] + "_InternalRetainedState"
     return name
 
