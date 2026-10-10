@@ -1096,6 +1096,54 @@ class TestGrok1TransformStructure:
 
 
 # ---------------------------------------------------------------------------
+# Tests: K2 Horizon (structure only — external module mapper)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.transforms
+class TestK2HorizonTransformStructure:
+    """K2 Horizon (remote code): KVCacheExternalModuleMapperTransform must map every class by name."""
+
+    @pytest.mark.parametrize(
+        "class_name",
+        ["K2HorizonForCausalLM", "K2HorizonModel", "K2HorizonDecoderLayer", "K2HorizonAttention", "K2HorizonRMSNorm"],
+    )
+    def test_k2_horizon_class_in_external_mapper_transform(self, class_name):
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
+
+        mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method[class_name]
+        assert callable(mapping["forward"])
+
+    def test_k2_horizon_causal_lm_export_and_specialization_hooks(self):
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
+
+        mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method["K2HorizonForCausalLM"]
+        assert callable(mapping["get_submodules_for_export"])
+        assert callable(mapping["get_specializations"])
+
+    def test_k2_horizon_init_hooks(self):
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
+
+        mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method
+        assert callable(mapping["K2HorizonModel"]["__qeff_init__"])
+        assert callable(mapping["K2HorizonAttention"]["__qeff_init__"])
+
+    def test_k2_horizon_specializations_reject_ctx_len_above_rotary_cap(self):
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonForCausalLM
+        from QEfficient.utils import constants
+
+        cap = constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS
+        model = QEffK2HorizonForCausalLM.__new__(QEffK2HorizonForCausalLM)
+        specs = QEffK2HorizonForCausalLM.get_specializations(model, batch_size=1, prefill_seq_len=128, ctx_len=cap)
+        assert specs == [
+            {"batch_size": 1, "seq_len": 128, "ctx_len": cap},
+            {"batch_size": 1, "seq_len": 1, "ctx_len": cap},
+        ]
+        with pytest.raises(ValueError, match="capped"):
+            QEffK2HorizonForCausalLM.get_specializations(model, batch_size=1, prefill_seq_len=128, ctx_len=cap + 1)
+
+
+# ---------------------------------------------------------------------------
 # Tests: Llama4 (text) architecture (GAP B)
 # ---------------------------------------------------------------------------
 

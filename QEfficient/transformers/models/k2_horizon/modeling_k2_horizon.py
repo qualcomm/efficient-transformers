@@ -171,8 +171,7 @@ class QEffK2HorizonModel(nn.Module):
     def __qeff_init__(self):
         if getattr(self.config, "mova_num_experts", 0) or getattr(self.config, "num_experts", 0):
             raise NotImplementedError(
-                "K2 Horizon MoVA/MoE sizes are not supported yet; only the dense models "
-                "(0.9B, 3.7B, 7B, 32B) are covered"
+                "K2 Horizon MoVA/MoE sizes are not supported yet; only the dense models (0.9B, 3.7B, 7B) are covered"
             )
         max_seq_len = min(self.config.max_position_embeddings, constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS)
         if max_seq_len < self.config.max_position_embeddings:
@@ -264,6 +263,18 @@ class QEffK2HorizonModel(nn.Module):
 class QEffK2HorizonForCausalLM(nn.Module):
     def get_submodules_for_export(self) -> set[type[nn.Module]]:
         return {type(self.model.layers[0])}
+
+    def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs):
+        cap = constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS
+        if prefill_seq_len > cap or ctx_len > cap:
+            raise ValueError(
+                f"K2 Horizon rotary tables are capped at {cap} positions; "
+                f"prefill_seq_len={prefill_seq_len} and ctx_len={ctx_len} must not exceed it"
+            )
+        return [
+            {"batch_size": batch_size, "seq_len": prefill_seq_len, "ctx_len": ctx_len},
+            {"batch_size": batch_size, "seq_len": 1, "ctx_len": ctx_len},
+        ]
 
     def forward(
         self,

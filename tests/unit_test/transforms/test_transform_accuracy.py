@@ -2834,6 +2834,13 @@ class TestKVCacheExternalModuleMapperTransform:
         assert "forward" in grok1_mapping
         assert callable(grok1_mapping["forward"])
 
+    def test_external_mapper_k2_horizon_has_forward(self):
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
+
+        k2_mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method["K2HorizonForCausalLM"]
+        assert "forward" in k2_mapping
+        assert callable(k2_mapping["forward"])
+
     def test_external_mapper_has_apply_method(self):
         from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
 

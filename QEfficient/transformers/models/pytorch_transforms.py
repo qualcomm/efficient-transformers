@@ -1421,6 +1421,7 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
         "K2HorizonForCausalLM": {
             "forward": QEffK2HorizonForCausalLM.forward,
             "get_submodules_for_export": QEffK2HorizonForCausalLM.get_submodules_for_export,
+            "get_specializations": QEffK2HorizonForCausalLM.get_specializations,
         },
         "K2HorizonModel": {
             "forward": QEffK2HorizonModel.forward,
