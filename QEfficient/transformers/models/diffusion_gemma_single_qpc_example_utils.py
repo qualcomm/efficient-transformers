@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from io import BytesIO
 from time import perf_counter
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import requests
@@ -45,6 +45,15 @@ class DiffusionGemmaSingleQPCRuntimeResult(DiffusionGemmaRuntimeResult):
     executed_blocks: int
     total_canvas_time: float
     canvas_length: int
+
+
+@dataclass
+class DiffusionGemmaPrefillRuntimeResult:
+    kv_caches: List[np.ndarray]
+    encoder_outputs: Dict[str, np.ndarray]
+    prompt_length: int
+    next_position: int
+    total_time: float
 
 
 def _to_numpy(value, dtype=None):
@@ -81,6 +90,12 @@ def _binding_name(session: QAICInferenceSession, name: str) -> Optional[str]:
     return next((candidate for candidate in session.input_names if candidate.rsplit("/", 1)[-1] == name), None)
 
 
+def _validate_prefill_stages(prefill_stages: int) -> int:
+    if not isinstance(prefill_stages, int) or isinstance(prefill_stages, bool) or prefill_stages < 1:
+        raise ValueError("`prefill_stages` must be an integer greater than or equal to 1.")
+    return prefill_stages
+
+
 class UnifiedQPC(QEffCausalLMForTextImageToTextModel):
     def __init__(self, model):
         QEFFBaseModel.__init__(self, model)
@@ -102,6 +117,7 @@ class DiffusionGemmaEncoderQPC(UnifiedQPC):
         QEFFBaseModel.__init__(self, model)
         self.model = model.get_qeff_diffusion_encoder()
         self.model.qaic_config = None
+        self.num_layers = self.model.text_config.num_hidden_layers
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
         self.continuous_batching = False
 
@@ -650,7 +666,9 @@ class DiffusionGemmaSingleQPCGenerator:
 class DiffusionGemmaSplitQPCGenerator(DiffusionGemmaSingleQPCGenerator):
     """Chunked prefill with DMA handoff into decoder-owned retained KV."""
 
-    def __init__(self, *, model_config, encoder_session: QAICInferenceSession, decoder_session: QAICInferenceSession, seed=1234):
+    def __init__(
+        self, *, model_config, encoder_session: QAICInferenceSession, decoder_session: QAICInferenceSession, seed=1234
+    ):
         super().__init__(model_config=model_config, session=decoder_session, seed=seed)
         self.encoder_session = encoder_session
         self._input_session = encoder_session
@@ -658,6 +676,7 @@ class DiffusionGemmaSplitQPCGenerator(DiffusionGemmaSingleQPCGenerator):
         if not self._kv_caches:
             raise ValueError("Decoder QPC does not expose retained KV input bindings for DMA handoff.")
         self._decoder_kv_imported = False
+        self._last_encoder_outputs = {}
 
     def _prepare_prompt(self, inputs, pad_token_id: int):
         self._input_session = self.encoder_session
@@ -686,6 +705,7 @@ class DiffusionGemmaSplitQPCGenerator(DiffusionGemmaSingleQPCGenerator):
             )
             self.encoder_session.complete_inf(exec_idx, is_prefill=True)
             encoder_outputs = self.encoder_session.get_outputs(exec_idx)
+            self._last_encoder_outputs = encoder_outputs
             if "image_idx_output" in encoder_outputs:
                 self.image_idx = _to_numpy(encoder_outputs["image_idx_output"], np.int64)
             self._record_cache_write(self.position_ids)
@@ -767,6 +787,7 @@ def diffusion_gemma_generate_split_qpc_chunked(
     generation_config = getattr(qeff_model.model, "generation_config", None)
     pad_token_id = kwargs.pop("pad_token_id", getattr(generation_config, "pad_token_id", None))
     eos_token_id = kwargs.pop("eos_token_id", getattr(generation_config, "eos_token_id", None))
+    prefill_stages = _validate_prefill_stages(kwargs.pop("prefill_stages", 1))
     if pad_token_id is None:
         pad_token_id = 0
 
@@ -774,6 +795,7 @@ def diffusion_gemma_generate_split_qpc_chunked(
         str(encoder_qpc_path),
         device_ids=device_ids,
         kv_dma_share=True,
+        stages=prefill_stages,
         cluster_id="prefill",
         full_batch_size=1,
     )
@@ -797,6 +819,62 @@ def diffusion_gemma_generate_split_qpc_chunked(
         eos_token_id=eos_token_id,
         **kwargs,
     )
+
+
+def diffusion_gemma_prefill_split_qpc_chunked(
+    *,
+    qeff_model,
+    inputs,
+    encoder_qpc_path,
+    decoder_qpc_path,
+    device_ids=None,
+    seed: int = 1234,
+    prefill_stages: int = 1,
+) -> DiffusionGemmaPrefillRuntimeResult:
+    """Run batch-1 split encoder prefill and return decoder-ready retained KV buffers."""
+    prefill_stages = _validate_prefill_stages(prefill_stages)
+    if inputs.get("vision_embeds") is not None:
+        raise ValueError("The staged prefill helper supports text-only inputs only.")
+
+    generation_config = getattr(qeff_model.model, "generation_config", None)
+    pad_token_id = getattr(generation_config, "pad_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = 0
+
+    encoder_session = QAICInferenceSession(
+        str(encoder_qpc_path),
+        device_ids=device_ids,
+        kv_dma_share=True,
+        stages=prefill_stages,
+        cluster_id="prefill",
+        full_batch_size=1,
+    )
+    decoder_session = QAICInferenceSession(
+        str(decoder_qpc_path),
+        device_ids=device_ids,
+        kv_dma_share=True,
+        cluster_id="decode",
+        full_batch_size=1,
+    )
+    generator = DiffusionGemmaSplitQPCGenerator(
+        model_config=qeff_model.model.config,
+        encoder_session=encoder_session,
+        decoder_session=decoder_session,
+        seed=seed,
+    )
+    try:
+        prompt_length = generator._prepare_prompt(inputs, pad_token_id)
+        total_time, _ = generator.prefill()
+        return DiffusionGemmaPrefillRuntimeResult(
+            kv_caches=generator._kv_caches,
+            encoder_outputs=generator._last_encoder_outputs,
+            prompt_length=prompt_length,
+            next_position=generator._next_encoder_position(),
+            total_time=total_time,
+        )
+    finally:
+        encoder_session.deactivate()
+        decoder_session.deactivate()
 
 
 def load_model_and_processor(model_id: str, canvas_length: int):
@@ -877,7 +955,9 @@ def compile_split_qpcs(
     canvas_length: int,
     num_devices: int,
     num_cores: int,
+    prefill_stages: int = 1,
 ):
+    prefill_stages = _validate_prefill_stages(prefill_stages)
     if prefill_seq_len != canvas_length:
         raise ValueError("Split DiffusionGemma currently requires matching prefill and canvas lengths.")
 
@@ -941,6 +1021,7 @@ def compile_split_qpcs(
         onnx_path=encoder_onnx_path,
         specializations=encoder_specializations,
         qaic_config=qaic_config_moe,
+        mdp_num_partitions=prefill_stages,
         **common_compile_kwargs,
     )
     print(f"  encoder QPC: {encoder_qpc_path}")

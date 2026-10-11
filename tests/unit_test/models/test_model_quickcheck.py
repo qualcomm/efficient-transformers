@@ -3817,9 +3817,12 @@ def test_diffusion_gemma_split_compile_uses_paired_mxint8_kv_io(monkeypatch, tmp
         canvas_length=256,
         num_devices=4,
         num_cores=16,
+        prefill_stages=3,
     )
 
     assert [role for role, _ in captured] == ["encoder", "decoder"]
+    assert captured[0][1]["mdp_num_partitions"] == 3
+    assert "mdp_num_partitions" not in captured[1][1]
     expected_custom_io = {
         f"past_{kv_name}.{layer_index}{suffix}": "mxint8"
         for layer_index in range(2)
@@ -3828,3 +3831,198 @@ def test_diffusion_gemma_split_compile_uses_paired_mxint8_kv_io(monkeypatch, tmp
     }
     for _, kwargs in captured:
         assert kwargs["custom_io"] == expected_custom_io
+
+    with pytest.raises(ValueError, match="prefill_stages"):
+        diffusion_utils.compile_split_qpcs(
+            qeff_model,
+            prefill_seq_len=256,
+            ctx_len=1024,
+            canvas_length=256,
+            num_devices=4,
+            num_cores=16,
+            prefill_stages=0,
+        )
+
+
+def test_diffusion_gemma_encoder_qpc_exposes_num_layers_for_mdp(monkeypatch):
+    from types import SimpleNamespace
+
+    import QEfficient.transformers.models.diffusion_gemma_single_qpc_example_utils as diffusion_utils
+
+    def fake_base_model_init(instance, model):
+        instance.hash_params = {}
+
+    encoder_wrapper = SimpleNamespace(
+        qaic_config=object(),
+        text_config=SimpleNamespace(num_hidden_layers=4),
+    )
+    qeff_model = SimpleNamespace(get_qeff_diffusion_encoder=lambda: encoder_wrapper)
+    monkeypatch.setattr(diffusion_utils.QEFFBaseModel, "__init__", fake_base_model_init)
+
+    encoder = diffusion_utils.DiffusionGemmaEncoderQPC(qeff_model)
+
+    assert encoder.num_layers == 4
+    assert encoder.model.qaic_config is None
+
+
+def test_diffusion_gemma_split_runtime_configures_encoder_pipeline_stages(monkeypatch):
+    from types import SimpleNamespace
+
+    import QEfficient.transformers.models.diffusion_gemma_single_qpc_example_utils as diffusion_utils
+
+    sessions = []
+
+    class FakeSession:
+        def __init__(self, path, **kwargs):
+            self.path = path
+            self.kwargs = kwargs
+            self.deactivated = False
+            sessions.append(self)
+
+        def deactivate(self):
+            self.deactivated = True
+
+    class FakeGenerator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def generate(self, **kwargs):
+            return kwargs
+
+    monkeypatch.setattr(diffusion_utils, "QAICInferenceSession", FakeSession)
+    monkeypatch.setattr(diffusion_utils, "DiffusionGemmaSplitQPCGenerator", FakeGenerator)
+    qeff_model = SimpleNamespace(
+        model=SimpleNamespace(config=object(), generation_config=SimpleNamespace(pad_token_id=0))
+    )
+
+    result = diffusion_utils.diffusion_gemma_generate_split_qpc_chunked(
+        qeff_model=qeff_model,
+        inputs={},
+        generation_len=4,
+        encoder_qpc_path="encoder.qpc",
+        decoder_qpc_path="decoder.qpc",
+        prefill_stages=3,
+    )
+
+    assert sessions[0].kwargs == {
+        "device_ids": None,
+        "kv_dma_share": True,
+        "stages": 3,
+        "cluster_id": "prefill",
+        "full_batch_size": 1,
+    }
+    assert sessions[1].kwargs == {
+        "device_ids": None,
+        "kv_dma_share": True,
+        "cluster_id": "decode",
+        "full_batch_size": 1,
+    }
+    assert result["generation_len"] == 4
+
+
+def test_diffusion_gemma_split_prefill_handoff_uses_kv_buffers_on_final_chunk():
+    from QEfficient.transformers.models.diffusion_gemma_single_qpc_example_utils import DiffusionGemmaSplitQPCGenerator
+
+    calls = []
+
+    class FakeEncoderSession:
+        input_names = ["input_ids"]
+
+        def np_run_pipeline(self, feed, *, last_chunk, kv_cache_buffers):
+            calls.append((feed, last_chunk, kv_cache_buffers))
+            return len(calls) - 1
+
+        def complete_inf(self, exec_idx, *, is_prefill):
+            assert is_prefill
+            assert exec_idx >= 0
+
+        def get_outputs(self, exec_idx):
+            return {"image_idx_output": np.array([[exec_idx + 1]], dtype=np.int64)}
+
+    generator = object.__new__(DiffusionGemmaSplitQPCGenerator)
+    generator.encoder_session = FakeEncoderSession()
+    generator._input_session = generator.encoder_session
+    generator._kv_caches = [np.zeros((1, 2), dtype=np.int8)]
+    generator._prompt_chunks = [object(), object()]
+    generator._last_encoder_outputs = {}
+    generator.canvas_length = 2
+    generator.position_ids = np.array([[0, 1]], dtype=np.int64)
+    generator.image_idx = np.zeros((1, 1), dtype=np.int64)
+    generator._retained_last_position = -1
+    generator._load_prompt_chunk = lambda chunk_index, image_idx: None
+    generator._shared_feed = lambda **kwargs: {"input_ids": np.zeros((1, 2), dtype=np.int64)}
+    generator._record_cache_write = lambda cache_position_ids: None
+    generator._emit_debug = lambda debug_callback, event: None
+
+    total_time, retained_kv_count = generator.prefill()
+
+    assert total_time >= 0
+    assert retained_kv_count == 1
+    assert calls[0][1:] == (False, None)
+    assert calls[1][1:] == (True, generator._kv_caches)
+    assert np.array_equal(generator.image_idx, np.array([[2]], dtype=np.int64))
+    assert np.array_equal(generator._last_encoder_outputs["image_idx_output"], np.array([[2]], dtype=np.int64))
+
+
+def test_diffusion_gemma_prefill_runtime_returns_decoder_ready_kv(monkeypatch):
+    from types import SimpleNamespace
+
+    import QEfficient.transformers.models.diffusion_gemma_single_qpc_example_utils as diffusion_utils
+
+    sessions = []
+    kv_caches = [np.ones((1, 2), dtype=np.int8)]
+
+    class FakeSession:
+        def __init__(self, path, **kwargs):
+            self.kwargs = kwargs
+            self.deactivated = False
+            sessions.append(self)
+
+        def deactivate(self):
+            self.deactivated = True
+
+    class FakeGenerator:
+        def __init__(self, **kwargs):
+            self._kv_caches = kv_caches
+            self._last_encoder_outputs = {"image_idx_output": np.array([[0]], dtype=np.int64)}
+
+        def _prepare_prompt(self, inputs, pad_token_id):
+            assert inputs["input_ids"].shape == (1, 3)
+            assert pad_token_id == 0
+            return 3
+
+        def prefill(self):
+            return 0.25, len(self._kv_caches)
+
+        def _next_encoder_position(self):
+            return 3
+
+    monkeypatch.setattr(diffusion_utils, "QAICInferenceSession", FakeSession)
+    monkeypatch.setattr(diffusion_utils, "DiffusionGemmaSplitQPCGenerator", FakeGenerator)
+    qeff_model = SimpleNamespace(
+        model=SimpleNamespace(config=object(), generation_config=SimpleNamespace(pad_token_id=0))
+    )
+
+    result = diffusion_utils.diffusion_gemma_prefill_split_qpc_chunked(
+        qeff_model=qeff_model,
+        inputs={"input_ids": np.zeros((1, 3), dtype=np.int64)},
+        encoder_qpc_path="encoder.qpc",
+        decoder_qpc_path="decoder.qpc",
+        prefill_stages=2,
+    )
+
+    assert result.kv_caches is kv_caches
+    assert result.prompt_length == 3
+    assert result.next_position == 3
+    assert result.total_time == 0.25
+    assert np.array_equal(result.encoder_outputs["image_idx_output"], np.array([[0]], dtype=np.int64))
+    assert sessions[0].kwargs["stages"] == 2
+    assert all(session.deactivated for session in sessions)
+
+    with pytest.raises(ValueError, match="text-only"):
+        diffusion_utils.diffusion_gemma_prefill_split_qpc_chunked(
+            qeff_model=qeff_model,
+            inputs={"input_ids": np.zeros((1, 3), dtype=np.int64), "vision_embeds": np.zeros((1, 1, 1))},
+            encoder_qpc_path="encoder.qpc",
+            decoder_qpc_path="decoder.qpc",
+        )
