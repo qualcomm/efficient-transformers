@@ -25,6 +25,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4TextRotaryEmbedding,
     Gemma4TextRouter,
     Gemma4VisionAttention,
+    Gemma4VisionEncoderLayer,
     apply_rotary_pos_emb,
     eager_attention_forward,
     repeat_kv,
@@ -423,6 +424,38 @@ class QEffGemma4VisionAttention(Gemma4VisionAttention):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
+
+
+class QEffGemma4VisionEncoderLayer(Gemma4VisionEncoderLayer):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        hidden_states = _clamp_to_fp16_range(hidden_states)
+        residual = hidden_states
+
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            **kwargs,
+        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = _saturating_residual_add(residual, hidden_states)
+
+        residual = hidden_states
+        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = _saturating_residual_add(residual, hidden_states)
+
+        return hidden_states
 
 
 class QEffGemma4TextRotaryEmbedding(Gemma4TextRotaryEmbedding):
@@ -1291,7 +1324,9 @@ class QEffGemma4EncoderWrapper(nn.Module):
             output_length=output_length,
         )
         if vision_tower.config.standardize:
-            hidden_states = (hidden_states - vision_tower.std_bias) * vision_tower.std_scale
+            hidden_states = _clamp_to_fp16_range(
+                (hidden_states - vision_tower.std_bias) * vision_tower.std_scale
+            )
 
         vision_embeds = self.model.model.embed_vision(inputs_embeds=hidden_states)
         if vision_embeds.dim() == 2:
