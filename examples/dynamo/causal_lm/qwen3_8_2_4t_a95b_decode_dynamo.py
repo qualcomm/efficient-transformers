@@ -20,7 +20,7 @@ from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
 
-from QEfficient import QEFFAutoModelForCausalLM
+from QEfficient import QEFFAutoModelForCausalLM, cloud_ai_100_exec_kv
 
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
@@ -35,6 +35,12 @@ def parse_args():
     parser.add_argument("--model-id", default=MODEL_ID)
     parser.add_argument("--hf-hub-cache", default=None)
     parser.add_argument("--qeff-home", default=None)
+    parser.add_argument(
+        "--qpc-path",
+        type=Path,
+        default=None,
+        help="Existing QPC directory, or its parent compile-artifact directory. Skips export and compilation.",
+    )
     parser.add_argument("--use-synthetic-tiny", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--synthetic-checkpoint-dir", default=SYNTHETIC_CHECKPOINT_DIR)
     parser.add_argument("--torch-dtype", choices=("float32", "float16", "bfloat16"), default="float32")
@@ -79,6 +85,27 @@ def tiny_tokenizer() -> PreTrainedTokenizerFast:
         pad_token="[PAD]",
         unk_token="[UNK]",
         eos_token="[EOS]",
+    )
+
+
+def load_tokenizer(args) -> PreTrainedTokenizerFast:
+    if args.use_synthetic_tiny:
+        return tiny_tokenizer()
+
+    hub_kwargs = {"cache_dir": args.hf_hub_cache} if args.hf_hub_cache else {}
+    return AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True, **hub_kwargs)
+
+
+def resolve_qpc_path(qpc_path: Path) -> Path:
+    """Return a QPC directory from either the QPC or compile-artifact path."""
+    resolved_path = qpc_path.expanduser().resolve()
+    if (resolved_path / "programqpc.bin").is_file():
+        return resolved_path
+    if (resolved_path / "qpc" / "programqpc.bin").is_file():
+        return resolved_path / "qpc"
+    raise FileNotFoundError(
+        f"No programqpc.bin found at {resolved_path} or {resolved_path / 'qpc'}. "
+        "Pass the QPC directory or its parent compile-artifact directory."
     )
 
 
@@ -136,7 +163,7 @@ def load_model_and_tokenizer(args=None):
     torch.manual_seed(args.random_seed)
     if args.use_synthetic_tiny:
         config = tiny_config(dtype, args.num_hidden_layers)
-        tokenizer = tiny_tokenizer()
+        tokenizer = load_tokenizer(args)
         if args.weight_free:
             checkpoint_dir = ensure_synthetic_checkpoint(
                 config,
@@ -166,7 +193,7 @@ def load_model_and_tokenizer(args=None):
             config.layer_types = config.layer_types[: args.num_hidden_layers]
     config.dtype = dtype
     config.torch_dtype = dtype
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True, **hub_kwargs)
+    tokenizer = load_tokenizer(args)
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
         args.model_id,
         config=config,
@@ -185,44 +212,56 @@ def main():
     if args.qeff_home:
         os.environ["QEFF_HOME"] = args.qeff_home
 
-    qeff_model, tokenizer = load_model_and_tokenizer(args)
-    qeff_model.model.eval()
+    if args.qpc_path:
+        qpc_path = resolve_qpc_path(args.qpc_path)
+        tokenizer = load_tokenizer(args)
+        print(f"Using existing QPC path: {qpc_path}")
+        output = cloud_ai_100_exec_kv(
+            tokenizer=tokenizer,
+            qpc_path=str(qpc_path),
+            prompt=[args.prompt] * args.batch_size,
+            device_ids=args.device_ids,
+            generation_len=args.generation_len,
+        )
+    else:
+        qeff_model, tokenizer = load_model_and_tokenizer(args)
+        qeff_model.model.eval()
 
-    qaic_config = None
-    if args.enable_blocking or args.replicate_kv_heads:
-        qaic_config = {}
-        if args.enable_blocking:
-            qaic_config.update(
-                {
-                    "blocking_mode": args.blocking_mode,
-                    "num_kv_blocks": args.num_kv_blocks,
-                    "ctx_len": args.ctx_len,
-                }
-            )
-            if args.blocking_mode == "kv_headpar":
-                qaic_config["headpar_split"] = args.headpar_split
-        if args.replicate_kv_heads:
-            qaic_config["replicate_kv_heads"] = True
+        qaic_config = None
+        if args.enable_blocking or args.replicate_kv_heads:
+            qaic_config = {}
+            if args.enable_blocking:
+                qaic_config.update(
+                    {
+                        "blocking_mode": args.blocking_mode,
+                        "num_kv_blocks": args.num_kv_blocks,
+                        "ctx_len": args.ctx_len,
+                    }
+                )
+                if args.blocking_mode == "kv_headpar":
+                    qaic_config["headpar_split"] = args.headpar_split
+            if args.replicate_kv_heads:
+                qaic_config["replicate_kv_heads"] = True
 
-    qpc_path = qeff_model.compile(
-        batch_size=args.batch_size,
-        prefill_seq_len=args.prefill_seq_len,
-        ctx_len=args.ctx_len,
-        num_cores=args.num_cores,
-        num_devices=args.num_devices,
-        aic_hw_version=args.aic_hw_version,
-        dynamo=True,
-        use_onnx_subfunctions=args.use_onnx_subfunctions,
-        qaic_config=qaic_config,
-    )
-    print(f"Final QPC path: {qpc_path}")
+        qpc_path = qeff_model.compile(
+            batch_size=args.batch_size,
+            prefill_seq_len=args.prefill_seq_len,
+            ctx_len=args.ctx_len,
+            num_cores=args.num_cores,
+            num_devices=args.num_devices,
+            aic_hw_version=args.aic_hw_version,
+            dynamo=True,
+            use_onnx_subfunctions=args.use_onnx_subfunctions,
+            qaic_config=qaic_config,
+        )
+        print(f"Final QPC path: {qpc_path}")
 
-    output = qeff_model.generate(
-        tokenizer=tokenizer,
-        prompts=[args.prompt] * args.batch_size,
-        device_ids=args.device_ids,
-        generation_len=args.generation_len,
-    )
+        output = qeff_model.generate(
+            tokenizer=tokenizer,
+            prompts=[args.prompt] * args.batch_size,
+            device_ids=args.device_ids,
+            generation_len=args.generation_len,
+        )
     print(output.generated_ids)
     print(output.generated_texts)
     print(output)
