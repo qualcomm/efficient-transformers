@@ -121,7 +121,7 @@ This example:
 ---
 
 ### Remote-code models: K2 Horizon
-`IFM/K2-Horizon-*` ships its model class as remote code, so pass `--trust-remote-code`. The wrapper covers the dense sizes (0.9B, 3.7B, 7B, 32B); see `docs/source/validate.md` for the ones validated on hardware. The MoVA/MoE sizes (36B-A4B, 375B-A23B) are refused at load.
+`IFM/K2-Horizon-*` ships its model class as remote code, so pass `--trust-remote-code`. The wrapper covers the dense sizes (0.9B, 3.7B, 7B, 32B); see `docs/source/validate.md` for the ones validated on hardware. Configs with experts are refused at load.
 
 **Usage:**
 ```bash

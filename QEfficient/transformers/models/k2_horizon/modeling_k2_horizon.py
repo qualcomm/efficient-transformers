@@ -12,8 +12,9 @@ upstream classes live in the Hub repo (modeling_k2_horizon.py), so these
 wrappers are wired by class name through KVCacheExternalModuleMapperTransform
 instead of by class object.
 
-Only the dense layers (K2HorizonAttention + K2HorizonMLP) are covered; MoVA/MoE
-configs are refused at transform time. The upstream attention gate and QK norm
+Only the dense sizes (0.9B, 3.7B, 7B, 32B: K2HorizonAttention + K2HorizonMLP in
+every layer) are covered; a config with experts is refused at transform time.
+The upstream attention gate and QK norm
 are config options that no published dense size enables; they are supported and
 covered by the dummy-layer test config.
 """
@@ -170,9 +171,6 @@ class QEffK2HorizonDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        # sparse MoE layers return (hidden_states, router_logits)
-        if isinstance(hidden_states, tuple):
-            hidden_states = hidden_states[0]
         return residual + hidden_states
 
 
@@ -180,7 +178,7 @@ class QEffK2HorizonModel(nn.Module):
     def __qeff_init__(self):
         if getattr(self.config, "mova_num_experts", 0) or getattr(self.config, "num_experts", 0):
             raise NotImplementedError(
-                "K2 Horizon MoVA/MoE sizes are not supported yet; only the dense models (0.9B, 3.7B, 7B, 32B) are covered"
+                "only the dense K2 Horizon sizes (0.9B, 3.7B, 7B, 32B) are supported; this config has experts"
             )
         max_seq_len = min(self.config.max_position_embeddings, constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS)
         if max_seq_len < self.config.max_position_embeddings:
