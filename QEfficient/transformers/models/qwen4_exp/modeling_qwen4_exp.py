@@ -240,7 +240,13 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
         del self.ple_embedding
         self.register_buffer(
             "_qeff_conv_positions",
-            torch.arange(0, self.short_conv_state_len + 1, self.conv1d.dilation[0], dtype=torch.long),
+            torch.arange(
+                0,
+                self.short_conv_state_len + 1,
+                self.conv1d.dilation[0],
+                dtype=torch.long,
+                device=self.conv1d.weight.device,
+            ),
             persistent=False,
         )
 
@@ -385,7 +391,10 @@ class QEffQwen4ExpTextDecoderLayer(Qwen4ExpTextDecoderLayer):
 
 class QEffQwen4ExpTextModel(Qwen4ExpTextModel):
     def __qeff_init__(self):
-        self.rotary_emb = QEffQwen4ExpTextRotaryEmbedding(config=self.config)
+        self.rotary_emb = QEffQwen4ExpTextRotaryEmbedding(
+            config=self.config,
+            device=self.embed_tokens.weight.device,
+        )
         partial_rotary_factor = self.config.rope_parameters.get("partial_rotary_factor", 1.0)
         rotary_width = int(self.config.head_dim * partial_rotary_factor) // 2
         self._qeff_rotary_width = rotary_width
@@ -399,6 +408,27 @@ class QEffQwen4ExpTextModel(Qwen4ExpTextModel):
         )
         for layer in self.layers:
             layer._qeff_rotary_width = rotary_width
+
+    def get_weightfree_computed_initializers(self):
+        """Return generated constants needed when exporting from ``meta``."""
+        rotary = QEffQwen4ExpTextRotaryEmbedding(config=self.config, device="cpu")
+        values = {
+            "model.sin_cached": (rotary.sin_cached * rotary.attention_scaling).contiguous(),
+            "model.cos_cached": (rotary.cos_cached * rotary.attention_scaling).contiguous(),
+            "model.rotary_emb.inv_freq": rotary.inv_freq,
+            "model.rotary_emb.original_inv_freq": rotary.original_inv_freq,
+            "model.rotary_emb.cos_cached": rotary.cos_cached,
+            "model.rotary_emb.sin_cached": rotary.sin_cached,
+        }
+        for index, layer in enumerate(self.layers):
+            if layer.ple is not None:
+                values[f"model.layers.{index}.ple._qeff_conv_positions"] = torch.arange(
+                    0,
+                    layer.ple.short_conv_state_len + 1,
+                    layer.ple.conv1d.dilation[0],
+                    dtype=torch.long,
+                )
+        return values
 
     def forward(
         self, input_ids=None, position_ids=None, past_key_values=None, ngram_embeddings=None, use_cache=True, **kwargs
@@ -642,6 +672,9 @@ class QEffQwen4ExpForCausalLM(QEffQwen4ExpDecodeExportMixin, Qwen4ExpForCausalLM
 
     def qeff_cache_from_legacy(self, past_key_values=None):
         return QEffQwen4ExpDynamicCache.from_legacy_cache(self.config, past_key_values)
+
+    def get_weightfree_computed_initializers(self):
+        return self.model.get_weightfree_computed_initializers()
 
     def forward(self, input_ids=None, ngram_embeddings=None, position_ids=None, past_key_values=None, **kwargs):
         del kwargs
