@@ -319,6 +319,32 @@ def test_direct_init_keeps_dtype_and_torch_dtype_in_sync(self):
         assert qeff_model.model.config.torch_dtype is torch.float32
         assert qeff_model.model.config.dtype is torch.float32
 
+    def test_embedding_direct_init_preserves_weight_free(self):
+        """Embedding models retain weight-free mode for Dynamo export."""
+        qeff_model = QEFFAutoModel(make_tiny_bert()[0], weight_free=True)
+
+        assert qeff_model._weight_free is True
+
+    def test_embedding_export_defaults_to_dynamo_in_weight_free_mode(self, monkeypatch):
+        """Weight-free embedding export supplies Dynamo-compatible dynamic inputs."""
+        qeff_model = QEFFAutoModel(make_tiny_bert()[0], weight_free=True)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured["example_inputs"] = example_inputs
+            captured.update(kwargs)
+            return "embedding.onnx"
+
+        monkeypatch.setattr(qeff_model, "_export", fake_export)
+        qeff_model.export(dynamo=False)
+
+        assert captured["dynamo"] is True
+        assert captured["dynamic_axes"] == {
+            "input_ids": {0: "batch_size", 1: "seq_len"},
+            "attention_mask": {0: "batch_size", 1: "seq_len"},
+        }
+        assert captured["example_inputs"]["input_ids"].shape[0] >= 2
+
 
 # ---------------------------------------------------------------------------
 # Stage 2: QEFFAutoModelForCausalLM — logic methods
