@@ -171,7 +171,7 @@ class QEffK2HorizonModel(nn.Module):
     def __qeff_init__(self):
         if getattr(self.config, "mova_num_experts", 0) or getattr(self.config, "num_experts", 0):
             raise NotImplementedError(
-                "K2 Horizon MoVA/MoE sizes are not supported yet; only the dense models (0.9B, 3.7B, 7B) are covered"
+                "K2 Horizon MoVA/MoE sizes are not supported yet; only the dense models (0.9B, 3.7B, 7B, 32B) are covered"
             )
         max_seq_len = min(self.config.max_position_embeddings, constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS)
         if max_seq_len < self.config.max_position_embeddings:
