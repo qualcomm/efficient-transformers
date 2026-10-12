@@ -136,7 +136,7 @@ class AttentionBlockingConfig:
     gdn_num_head_blocks: Optional[int] = None
     headpar_split: Optional[int] = None
     batch_fold: Optional[bool] = False
-    n_rep_chunk: Optional[int] = None
+    n_rep_chunk: Optional[int] = 1
     ctx_len: Optional[int] = None
     kv_block_unroll: Optional[int] = 1
     num_cores_per_device: Optional[int] = None
@@ -478,8 +478,8 @@ def generic_blocked_attention_interface(
         skip_kv=blocking_config.skip_kv or False,
         paged_attention=blocking_config.paged_attention,
         # prefill-specific
-        n_rep_chunk=blocking_config.n_rep_chunk,
         num_cores_per_device=blocking_config.num_cores_per_device,
+        n_rep_chunk=blocking_config.n_rep_chunk if blocking_config.n_rep_chunk is not None else 1,
         # MLA-specific
         **(mla_kwargs or {}),
         **kwargs,

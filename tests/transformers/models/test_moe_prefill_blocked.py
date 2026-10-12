@@ -993,6 +993,131 @@ def test_gptoss_prefill_chunked_export(tmp_path):
     assert qeff.onnx_path.is_file()
 
 
+def test_gptoss_blocked_chunked_prefill_writes_current_chunk_once(monkeypatch):
+    from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
+    from QEfficient.transformers.cache_utils import QEffGPTOSSHybridCache
+    from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffPrefillOnlyChunkedGptOssAttention
+
+    config = AutoConfig.for_model("gpt_oss", **{**GPTOSS_CFG, "num_hidden_layers": 2, "sliding_window": 4})
+    attention = QEffPrefillOnlyChunkedGptOssAttention(config, layer_idx=1).eval()
+    assert attention.sliding_window is None
+    attention.attn_blocking_config = AttentionBlockingConfig(
+        mode=BlockingMode.PREFILL_ONLINE,
+        num_kv_blocks=2,
+        num_q_blocks=2,
+        ctx_len=8,
+    )
+
+    cache = QEffGPTOSSHybridCache(config=config)
+    cache.update(
+        torch.zeros(1, config.num_key_value_heads, 8, attention.head_dim),
+        torch.zeros(1, config.num_key_value_heads, 8, attention.head_dim),
+        layer_idx=1,
+        cache_kwargs={"position_ids": torch.arange(8).reshape(1, -1)},
+    )
+
+    calls = {"write": 0}
+    original_write_only = cache.write_only
+
+    def fail_full_cache_update_chunked(*args, **kwargs):
+        raise AssertionError("blocked chunked prefill must not pre-gather K/V before generic blocked attention")
+
+    def tracking_write_only(key_states, value_states, layer_idx, cache_kwargs):
+        calls["write"] += 1
+        assert key_states.shape[2] == cache_kwargs["position_ids"].shape[1]
+        assert value_states.shape[2] == cache_kwargs["position_ids"].shape[1]
+        return original_write_only(key_states, value_states, layer_idx, cache_kwargs)
+
+    monkeypatch.setattr(cache, "full_cache_update_chunked", fail_full_cache_update_chunked)
+    monkeypatch.setattr(cache, "write_only", tracking_write_only)
+
+    hidden_states = torch.randn(1, 4, config.hidden_size)
+    position_ids = torch.arange(4, 8).reshape(1, -1)
+    cos = torch.ones(1, 1, 4, attention.head_dim)
+    sin = torch.zeros(1, 1, 4, attention.head_dim)
+
+    with torch.no_grad():
+        attn_output, _, returned_cache = attention(
+            hidden_states,
+            position_embeddings=(cos, sin),
+            attention_mask=None,
+            position_ids=position_ids,
+            past_key_values=cache,
+            cos_cached=cos,
+            sin_cached=sin,
+        )
+
+    assert calls["write"] == 1
+    assert attn_output.shape == hidden_states.shape
+    assert returned_cache is cache
+
+
+def test_gptoss_prefill_online_blocked_matches_eager_with_sinks():
+    from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
+    from QEfficient.transformers.cache_utils import QEffGPTOSSHybridCache
+    from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
+    from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffPrefillOnlyChunkedGptOssAttention
+
+    torch.manual_seed(31)
+    config = AutoConfig.for_model(
+        "gpt_oss",
+        **{
+            **GPTOSS_CFG,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "sliding_window": 4,
+        },
+    )
+    eager_attention = QEffPrefillOnlyChunkedGptOssAttention(config, layer_idx=1).eval()
+    blocked_attention = copy.deepcopy(eager_attention).eval()
+    assert blocked_attention.sliding_window is None
+    blocked_attention.attn_blocking_config = AttentionBlockingConfig(
+        mode=BlockingMode.PREFILL_ONLINE,
+        num_kv_blocks=2,
+        num_q_blocks=2,
+        ctx_len=8,
+    )
+
+    hidden_states = torch.randn(1, 8, config.hidden_size)
+    position_ids = torch.arange(8).reshape(1, -1)
+    attention_mask = _create_causal_mask(position_ids=position_ids, target_length=8)
+    cos = torch.ones(1, 1, 8, blocked_attention.head_dim)
+    sin = torch.zeros(1, 1, 8, blocked_attention.head_dim)
+
+    eager_cache = QEffGPTOSSHybridCache(config=config)
+    blocked_cache = QEffGPTOSSHybridCache(config=config)
+    for cache in (eager_cache, blocked_cache):
+        cache.update(
+            torch.zeros(1, config.num_key_value_heads, 8, blocked_attention.head_dim),
+            torch.zeros(1, config.num_key_value_heads, 8, blocked_attention.head_dim),
+            layer_idx=1,
+            cache_kwargs={"position_ids": torch.arange(8).reshape(1, -1)},
+        )
+
+    with torch.no_grad():
+        eager_output, _, _ = eager_attention(
+            hidden_states,
+            position_embeddings=(cos, sin),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=eager_cache,
+            cos_cached=cos,
+            sin_cached=sin,
+        )
+        blocked_output, _, _ = blocked_attention(
+            hidden_states,
+            position_embeddings=(cos, sin),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=blocked_cache,
+            cos_cached=cos,
+            sin_cached=sin,
+        )
+
+    torch.testing.assert_close(blocked_output, eager_output, atol=1e-5, rtol=1e-5)
+
+
 def test_gptoss_prefill_chunked_export_traces_packed_chunks(tmp_path):
     import onnx
     from onnx import numpy_helper

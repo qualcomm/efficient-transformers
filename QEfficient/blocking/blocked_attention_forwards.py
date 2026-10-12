@@ -817,6 +817,7 @@ def blocked_qkv_attention_forward_prefill_online(
     ctx_len: int,
     n_rep_chunk: Optional[int] = 1,
     num_cores_per_device: Optional[int] = None,
+    sinks: Optional[torch.Tensor] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     B, NQH, QL, D = query.shape
@@ -872,6 +873,8 @@ def blocked_qkv_attention_forward_prefill_online(
             accs.append(
                 {
                     "rc": rc,
+                    "r_start": r_start,
+                    "r_end": r_end,
                     "Q": q_fold[:, :, r_start:r_end, t_start:t_end, :].reshape(B, num_cores, rc * tc, D),
                     "m_acc": torch.full(
                         (B, num_cores, rc * tc),
@@ -923,7 +926,21 @@ def blocked_qkv_attention_forward_prefill_online(
         r_chunks = []
         for acc in accs:
             rc = acc["rc"]
-            out = acc["o_acc"] / acc["s_acc"].unsqueeze(-1)
+            m_acc = acc["m_acc"]
+            s_acc = acc["s_acc"]
+            o_acc = acc["o_acc"]
+            if sinks is not None:
+                sink_logits = (
+                    sinks.reshape(1, num_cores, n_rep_per_core, 1)[:, :, acc["r_start"] : acc["r_end"], :]
+                    .expand(B, num_cores, rc, tc)
+                    .reshape(B, num_cores, rc * tc)
+                )
+                new_max = torch.maximum(m_acc, sink_logits)
+                scale_old = torch.exp(m_acc - new_max)
+                scale_sink = torch.exp(sink_logits - new_max)
+                s_acc = s_acc * scale_old + scale_sink
+                o_acc = o_acc * scale_old.unsqueeze(-1)
+            out = o_acc / s_acc.unsqueeze(-1)
             r_chunks.append(out.view(B, num_cores, rc, tc, D))
         t_chunks.append(torch.cat(r_chunks, dim=2))
 
@@ -1327,7 +1344,10 @@ def blocked_qkv_attention_forward(
 
         # If present, apply Attention Sinks, needed for GPT-OSS
         if sinks is not None:
-            _, _, output_blocks = update_running_softmax(current_max, sinks, current_denominator, output_blocks, None)
+            sinks_block = sinks[:, :, q_start : q_start + q_len_block, :]
+            _, _, output_blocks = update_running_softmax(
+                current_max, sinks_block, current_denominator, output_blocks, None
+            )
         q_output_blocks.append(output_blocks)
         q_attn_blocks.append(attn_weights_block)
 
@@ -1501,8 +1521,9 @@ def blocked_hqkv_attention_forward(
                 )
             # If present, apply Attention Sinks, needed for GPT-OSS
             if sinks is not None:
+                sinks_block = sinks[:, h_start:h_end, q_start : q_start + q_len_block, :]
                 _, _, output_blocks = update_running_softmax(
-                    current_max, sinks, current_denominator, output_blocks, None
+                    current_max, sinks_block, current_denominator, output_blocks, None
                 )
             q_output_blocks.append(output_blocks)
             q_attn_blocks.append(attn_weights_block)
@@ -1777,9 +1798,7 @@ def blocked_h_attention_forward(
         # attention sinks needed for gpt-oss
         if sinks is not None:
             sinks_g = (
-                module.sinks[h_start:h_end]
-                .reshape(1, -1, 1, 1)
-                .expand(attn_weights.shape[0], -1, attn_weights.shape[2], -1)
+                sinks[h_start:h_end].reshape(1, -1, 1, 1).expand(attn_weights.shape[0], -1, attn_weights.shape[2], -1)
             )
             combined_logits = torch.cat([attn_weights, sinks_g], dim=-1)
             attn_weights = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
