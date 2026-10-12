@@ -14,19 +14,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
 import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 from transformers import Qwen4ExpForCausalLM
 from transformers.cache_utils import DynamicCache
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextRotaryEmbedding
 
+from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.exporter.weight_free import resolve_weight_spec_path
 from QEfficient.transformers.models.qwen4_exp.host_ngram import HostNGramHistory, ShardedNGramLookup
 from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpForCausalLM
+
+NUM_CORES = 10
 
 QWEN4_RETAINED_STATE_NAMES = (
     "gdn_conv_state.0",
@@ -206,6 +212,99 @@ def _make_models(config: Qwen4ExpTextConfig, snapshot: Path):
     return reference.eval(), qeff.eval(), host_ple
 
 
+def _prune_weight_free_checkpoint(snapshot: Path, layers: int, output_dir: Path) -> Path:
+    """Create a checkpoint containing only the text layers used by this example."""
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    weight_map = json.loads((snapshot / "model.safetensors.index.json").read_text())["weight_map"]
+    selected = {}
+    for source_key, filename in weight_map.items():
+        if source_key.startswith("model.language_model.layers."):
+            layer_id = int(source_key.split(".")[3])
+            if layer_id >= layers:
+                continue
+        elif source_key not in {"lm_head.weight"} and not source_key.startswith("model.language_model."):
+            continue
+        if ".ple_embedding.ngram_embedding." in source_key:
+            continue
+        with safe_open(str(snapshot / filename), framework="pt", device="cpu") as handle:
+            target_key = source_key.removeprefix("model.language_model.")
+            if source_key.startswith("model.language_model."):
+                target_key = f"model.{target_key}"
+            selected[target_key] = handle.get_tensor(source_key)
+    if not selected:
+        raise RuntimeError(f"No tensors selected from {snapshot}")
+    shard_name = "model.safetensors"
+    save_file(selected, str(output_dir / shard_name), metadata={"format": "pt"})
+    (output_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"metadata": {"total_size": sum(t.numel() * t.element_size() for t in selected.values())},
+             "weight_map": {key: shard_name for key in selected}},
+            indent=2,
+        )
+    )
+    print(f"weightfree_pruned_tensors={len(selected)}")
+    return output_dir
+
+
+def export_weight_free(snapshot: Path, layers: int, context: int, export_dir: Path) -> tuple[Path, Path]:
+    """Export the same four-layer text window through the weight-free path."""
+    if layers != 4:
+        raise ValueError("The Qwen3.8-Flash weightfree parity artifact is defined for exactly 4 layers")
+    config = _window_config(snapshot, layers, context)
+    pruned_snapshot = _prune_weight_free_checkpoint(
+        snapshot, layers, export_dir.parent / "qwen38_flash_4layer_checkpoint_v2"
+    )
+    model = QEFFAutoModelForCausalLM.from_pretrained(
+        str(pruned_snapshot),
+        config=config,
+        weight_free=True,
+        torch_dtype=torch.float32,
+    )
+    model.model.eval()
+    onnx_path = Path(model.export(str(export_dir), offload_pt_weights=False, dynamo=True))
+    weight_spec_path = resolve_weight_spec_path(onnx_path)
+    if not weight_spec_path.is_file():
+        raise RuntimeError(f"Weightfree export did not produce {weight_spec_path}")
+    spec = json.loads(weight_spec_path.read_text())
+    prepared_checkpoint = spec.get("model_id")
+    print(f"weightfree_onnx={onnx_path}")
+    print(f"weightfree_spec={weight_spec_path}")
+    if prepared_checkpoint:
+        print(f"weightfree_prepared_checkpoint={prepared_checkpoint}")
+    return onnx_path, weight_spec_path
+
+
+def compile_weight_free(
+    snapshot: Path, layers: int, context: int, export_dir: Path, device_ids: list[int] | None
+) -> Path:
+    """Compile a fresh weightfree QPC using the example's fixed core count."""
+    config = _window_config(snapshot, layers, context)
+    pruned_snapshot = _prune_weight_free_checkpoint(
+        snapshot, layers, export_dir.parent / "qwen38_flash_4layer_checkpoint_v2"
+    )
+    model = QEFFAutoModelForCausalLM.from_pretrained(
+        str(pruned_snapshot),
+        config=config,
+        weight_free=True,
+        torch_dtype=torch.float32,
+    )
+    qpc_path = model.compile(
+        prefill_seq_len=1,
+        prefill_only=False,
+        ctx_len=context,
+        num_cores=NUM_CORES,
+        num_devices=len(device_ids or [0]),
+        dynamo=True,
+        use_onnx_subfunctions=False,
+        compile_dir=str(export_dir),
+    )
+    print(f"weightfree_num_cores={NUM_CORES}")
+    print(f"weightfree_qpc={qpc_path}")
+    return Path(qpc_path)
+
+
 def _qeff_cache(model, dtype: torch.dtype):
     cache = model.get_dummy_inputs(batch_size=1)["past_key_values"]
     return tuple(
@@ -267,7 +366,9 @@ def _compare_hf_qeff_qaic_logits(phase, position, input_token, hf_logits, qeff_l
     hf_logits = np.asarray(hf_logits, dtype=np.float32)
     qeff_logits = np.asarray(qeff_logits, dtype=np.float32)
     qaic_logits = np.asarray(qaic_logits, dtype=np.float32)
-    qeff_max_error = np.max(np.abs(qeff_logits - hf_logits)).item()
+    qeff_error = np.abs(qeff_logits - hf_logits)
+    qeff_max_error = qeff_error.max().item()
+    qeff_mad = qeff_error.mean().item()
     qaic_error = np.abs(qaic_logits - hf_logits)
     qaic_max_error = qaic_error.max().item()
     qaic_mad = qaic_error.mean().item()
@@ -277,7 +378,8 @@ def _compare_hf_qeff_qaic_logits(phase, position, input_token, hf_logits, qeff_l
     print(
         f"phase={phase} position={position} input_token={input_token} "
         f"hf_next_token={hf_next_token} qeff_next_token={qeff_next_token} qaic_next_token={qaic_next_token} "
-        f"qeff_max_abs={qeff_max_error:.6g} qaic_max_abs={qaic_max_error:.6g} qaic_mad={qaic_mad:.6g}"
+        f"qeff_max_abs={qeff_max_error:.6g} qeff_mad={qeff_mad:.6g} "
+        f"qaic_max_abs={qaic_max_error:.6g} qaic_mad={qaic_mad:.6g}"
     )
     if qeff_next_token != hf_next_token:
         raise AssertionError(
@@ -397,9 +499,31 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--layers", type=int, default=4, help="Leading layer window; 4 exercises GDN, PLE, and QSA")
     parser.add_argument("--context", type=int, default=32, help="Allocated QSA cache context")
+    parser.add_argument(
+        "--weight-free-export-dir",
+        type=Path,
+        default=Path("qwen3.8_flash_weightfree_export"),
+        help="Directory for the four-layer weightfree ONNX artifact",
+    )
+    parser.add_argument(
+        "--skip-weight-free-export",
+        action="store_true",
+        help="Reuse/skip the weightfree artifact step and only run numerical parity",
+    )
+    parser.add_argument(
+        "--compile-weight-free",
+        action="store_true",
+        help=f"Compile a fresh weightfree QPC with the hardcoded num_cores={NUM_CORES}",
+    )
     parser.add_argument("--atol", type=float, default=3e-2)
     parser.add_argument("--rtol", type=float, default=3e-2)
     args = parser.parse_args()
+    if args.compile_weight_free:
+        args.qpc_path = compile_weight_free(
+            args.snapshot, args.layers, args.context, args.weight_free_export_dir, args.device_id
+        )
+    elif not args.skip_weight_free_export:
+        export_weight_free(args.snapshot, args.layers, args.context, args.weight_free_export_dir)
     if args.qpc_path is None:
         run(args.snapshot, args.token_ids, args.steps, args.layers, args.context, args.atol, args.rtol)
     else:
