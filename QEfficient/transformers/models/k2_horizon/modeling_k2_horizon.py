@@ -44,13 +44,22 @@ class QEffK2HorizonRMSNorm(nn.Module):
     over each of the n_groups slices of the last dim, then the full weight is applied.
     """
 
+    def __qeff_init__(self):
+        # unit scale for the grouped op, built once instead of on every forward (same as gemma4)
+        if self.n_groups > 1 and not hasattr(self, "_qeff_unit_weight"):
+            self.register_buffer(
+                "_qeff_unit_weight", torch.ones_like(self.weight[: self.hidden_size // self.n_groups]), persistent=False
+            )
+
     def forward(self, hidden_states):
         rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
         if self.n_groups == 1:
             return rms_interface(hidden_states, self.weight, self.variance_epsilon)
         group_size = self.hidden_size // self.n_groups
         grouped = hidden_states.reshape(*hidden_states.shape[:-1], self.n_groups, group_size)
-        unit_weight = torch.ones(group_size, dtype=self.weight.dtype, device=self.weight.device)
+        unit_weight = getattr(self, "_qeff_unit_weight", None)
+        if unit_weight is None:
+            unit_weight = self.weight.new_ones(group_size)
         normed = rms_interface(grouped, unit_weight, self.variance_epsilon)
         return self.weight * normed.reshape(hidden_states.shape)
 
@@ -265,10 +274,11 @@ class QEffK2HorizonForCausalLM(nn.Module):
         return {type(self.model.layers[0])}
 
     def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs):
-        cap = constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS
+        # the baked rotary table (see QEffK2HorizonModel.__qeff_init__) is the real limit
+        cap = self.model.cos_cached.shape[0]
         if prefill_seq_len > cap or ctx_len > cap:
             raise ValueError(
-                f"K2 Horizon rotary tables are capped at {cap} positions; "
+                f"K2 Horizon rotary tables hold {cap} positions; "
                 f"prefill_seq_len={prefill_seq_len} and ctx_len={ctx_len} must not exceed it"
             )
         return [

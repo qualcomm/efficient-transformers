@@ -1127,20 +1127,50 @@ class TestK2HorizonTransformStructure:
         mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method
         assert callable(mapping["K2HorizonModel"]["__qeff_init__"])
         assert callable(mapping["K2HorizonAttention"]["__qeff_init__"])
+        assert callable(mapping["K2HorizonRMSNorm"]["__qeff_init__"])
 
-    def test_k2_horizon_specializations_reject_ctx_len_above_rotary_cap(self):
+    def test_k2_horizon_specializations_follow_the_baked_rotary_table(self):
+        from types import SimpleNamespace
+
         from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonForCausalLM
-        from QEfficient.utils import constants
 
-        cap = constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS
+        # a config smaller than the constant cap bakes a smaller table; the guard must follow the table
+        table_rows = 128
         model = QEffK2HorizonForCausalLM.__new__(QEffK2HorizonForCausalLM)
-        specs = QEffK2HorizonForCausalLM.get_specializations(model, batch_size=1, prefill_seq_len=128, ctx_len=cap)
+        model.model = SimpleNamespace(cos_cached=torch.zeros(table_rows, 32))
+        specs = QEffK2HorizonForCausalLM.get_specializations(
+            model, batch_size=1, prefill_seq_len=32, ctx_len=table_rows
+        )
         assert specs == [
-            {"batch_size": 1, "seq_len": 128, "ctx_len": cap},
-            {"batch_size": 1, "seq_len": 1, "ctx_len": cap},
+            {"batch_size": 1, "seq_len": 32, "ctx_len": table_rows},
+            {"batch_size": 1, "seq_len": 1, "ctx_len": table_rows},
         ]
-        with pytest.raises(ValueError, match="capped"):
-            QEffK2HorizonForCausalLM.get_specializations(model, batch_size=1, prefill_seq_len=128, ctx_len=cap + 1)
+        with pytest.raises(ValueError, match="rotary tables"):
+            QEffK2HorizonForCausalLM.get_specializations(
+                model, batch_size=1, prefill_seq_len=32, ctx_len=table_rows + 1
+            )
+        with pytest.raises(ValueError, match="rotary tables"):
+            QEffK2HorizonForCausalLM.get_specializations(
+                model, batch_size=1, prefill_seq_len=table_rows + 1, ctx_len=table_rows
+            )
+
+    @pytest.mark.parametrize("n_groups", [1, 4])
+    def test_k2_horizon_grouped_rmsnorm_matches_reference(self, n_groups):
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonRMSNorm
+
+        torch.manual_seed(0)
+        hidden_size, eps = 64, 1e-6
+        norm = torch.nn.Module()
+        norm.weight = torch.nn.Parameter(torch.rand(hidden_size) + 0.5)
+        norm.hidden_size, norm.n_groups, norm.variance_epsilon = hidden_size, n_groups, eps
+        QEffK2HorizonRMSNorm.__qeff_init__(norm)
+        assert hasattr(norm, "_qeff_unit_weight") == (n_groups > 1)
+
+        x = torch.randn(2, 5, hidden_size)
+        grouped = x.reshape(2, 5, n_groups, hidden_size // n_groups)
+        reference = norm.weight * (grouped * torch.rsqrt(grouped.pow(2).mean(-1, keepdim=True) + eps)).reshape(x.shape)
+        out = QEffK2HorizonRMSNorm.forward(norm, x)
+        assert torch.allclose(out, reference, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------

@@ -1432,7 +1432,10 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
             "forward": QEffK2HorizonAttention.forward,
             "__qeff_init__": QEffK2HorizonAttention.__qeff_init__,
         },
-        "K2HorizonRMSNorm": {"forward": QEffK2HorizonRMSNorm.forward},
+        "K2HorizonRMSNorm": {
+            "forward": QEffK2HorizonRMSNorm.forward,
+            "__qeff_init__": QEffK2HorizonRMSNorm.__qeff_init__,
+        },
         "KimiK25ForConditionalGeneration": {
             "_qeff_merge_input_ids_with_image_features": QEffKimiK25ForConditionalGeneration._qeff_merge_input_ids_with_image_features,
             "get_qeff_vision_encoder": QEffKimiK25ForConditionalGeneration.get_qeff_vision_encoder,
