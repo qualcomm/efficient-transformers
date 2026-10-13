@@ -44,6 +44,13 @@ from QEfficient.customop import (
 )
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, CustomRMSNormFunc
 from QEfficient.customop.utils import select_interface
+from QEfficient.transformers.moe import (
+    MoEProfile,
+    MoEWeights,
+    densify_topk,
+    moe_expert_parallel,
+    pack_moe_weights_for_expert_parallel,
+)
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 
 
@@ -2715,18 +2722,102 @@ class QEffDeepseekV4UnweightedRMSNorm(DeepseekV4UnweightedRMSNorm):
         return normalized.to(input_dtype)
 
 
+def _deepseek_v4_clamped_swiglu_mlp(
+    x: torch.Tensor,
+    gate_proj: torch.Tensor,
+    up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+    _gate_bias: torch.Tensor | None = None,
+    _up_bias: torch.Tensor | None = None,
+    _down_bias: torch.Tensor | None = None,
+    *,
+    act_fn,
+    limit: float,
+) -> torch.Tensor:
+    gate = x @ gate_proj
+    up = x @ up_proj
+    gate = gate.float().clamp(max=limit).to(gate.dtype)
+    up = up.float().clamp(min=-limit, max=limit).to(up.dtype)
+    return (act_fn(gate) * up) @ down_proj
+
+
 class QEffDeepseekV4SparseMoeBlock(DeepseekV4SparseMoeBlock):
     def __qeff_init__(self):
         self.experts.top_k = self.gate.top_k
+        self._prefill_expert_parallel = False
+
+    def configure_prefill_expert_parallel(
+        self,
+        *,
+        enabled: bool,
+        num_pipeline_stages: int | None = None,
+        num_parallelized_experts: int | None = None,
+        num_devices: int = 1,
+        experts_per_soc: int | None = None,
+        tree_reduce: bool = False,
+        num_packed_chunks: int = 1,
+    ) -> None:
+        self._prefill_expert_parallel = enabled
+        if not enabled:
+            if hasattr(self, "moe_weights"):
+                delattr(self, "moe_weights")
+            return
+        if num_pipeline_stages is None or num_parallelized_experts is None:
+            raise ValueError("Expert-parallel DeepSeek V4 prefill requires a resolved expert layout.")
+        canonical_weights = MoEWeights(
+            gate=self.experts.gate_proj,
+            up=self.experts.up_proj,
+            down=self.experts.down_proj,
+        )
+        self.moe_weights = pack_moe_weights_for_expert_parallel(
+            canonical_weights,
+            num_pipeline_stages=num_pipeline_stages,
+            num_parallelized_experts=num_parallelized_experts,
+        )
+        self.num_pipeline_stages = num_pipeline_stages
+        self.num_parallelized_experts = num_parallelized_experts
+        self.num_devices = num_devices
+        self.experts_per_soc = experts_per_soc
+        self.tree_reduce = tree_reduce
+        self.expert_parallel_num_packed_chunks = num_packed_chunks
+
+    def _prefill_moe_profile(self) -> MoEProfile:
+        return MoEProfile(
+            expert_mlp=lambda x, gate_proj, up_proj, down_proj, *_: _deepseek_v4_clamped_swiglu_mlp(
+                x,
+                gate_proj,
+                up_proj,
+                down_proj,
+                act_fn=self.experts.act_fn,
+                limit=self.experts.limit,
+            )
+        )
 
     def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
         batch, seq_len, hidden_dim = hidden_states.shape
         flat = hidden_states.view(-1, hidden_dim)
         if self.is_hash:
+            if input_ids is None:
+                raise ValueError("input_ids are required for hash-routed DeepSeek V4 MoE.")
             _, weights, indices = self.gate(hidden_states, input_ids)
         else:
             _, weights, indices = self.gate(hidden_states)
-        routed = self.experts(flat, indices, weights).view(batch, seq_len, hidden_dim)
+        if self._prefill_expert_parallel:
+            routing_weights = densify_topk(indices, weights.to(flat.dtype), self.experts.num_experts)
+            routed = moe_expert_parallel(
+                flat,
+                routing_weights,
+                self.moe_weights,
+                self._prefill_moe_profile(),
+                num_pipeline_stages=self.num_pipeline_stages,
+                num_parallelized_experts=self.num_parallelized_experts,
+                num_devices=self.num_devices,
+                experts_per_soc=self.experts_per_soc,
+                tree_reduce=self.tree_reduce,
+                num_packed_chunks=self.expert_parallel_num_packed_chunks,
+            ).view(batch, seq_len, hidden_dim)
+        else:
+            routed = self.experts(flat, indices, weights).view(batch, seq_len, hidden_dim)
         return routed + self.shared_experts(hidden_states)
 
 

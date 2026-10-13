@@ -626,6 +626,34 @@ def test_deepseek_v4_ffn_blocking_uses_qaic_config():
 
 
 @pytest.mark.llm_model
+def test_deepseek_v4_prefill_uses_expert_parallel_moe_without_weight_gathers():
+    config = _tiny_deepseek_v4_config()
+    config.torch_dtype = torch.float32
+    torch.manual_seed(0)
+    qeff = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    moe_block = qeff.model.model.layers[0].mlp
+    hidden_states = torch.randn(1, 3, config.hidden_size)
+    input_ids = torch.tensor([[3, 7, 11]])
+
+    with torch.no_grad():
+        expected = moe_block(hidden_states, input_ids)
+
+    qeff.transform(
+        ctx_len=8,
+        seq_len=3,
+        prefill_only=True,
+        qaic_config={"moe_config": {"expert_parallel_chunk_size": 3}},
+    )
+
+    assert moe_block._prefill_expert_parallel
+    assert moe_block.moe_weights.gate.ndim == 4
+    assert hasattr(moe_block.experts, "gate_proj")
+    with torch.no_grad():
+        actual = moe_block(hidden_states, input_ids)
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-3)
+
+
+@pytest.mark.llm_model
 def test_deepseek_v4_decode_compile_uses_all_fp16_retained_states(tmp_path, monkeypatch):
     config = _tiny_deepseek_v4_config()
     config.torch_dtype = torch.float16
