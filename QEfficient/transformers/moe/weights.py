@@ -350,8 +350,8 @@ def build_canonical_expert_weights(
         gate=_maybe_clone(gate.contiguous() if clone else gate, clone),
         up=_maybe_clone(up.contiguous() if clone else up, clone),
         down=_maybe_clone(down.contiguous() if clone else down, clone),
-        gate_bias=_maybe_clone(gate_bias, clone),
-        up_bias=_maybe_clone(up_bias, clone),
+        gate_bias=_maybe_clone(gate_bias.contiguous() if (clone and gate_bias is not None) else gate_bias, clone),
+        up_bias=_maybe_clone(up_bias.contiguous() if (clone and up_bias is not None) else up_bias, clone),
         down_bias=_maybe_clone(down_bias, clone),
     )
 

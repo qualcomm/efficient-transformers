@@ -1757,13 +1757,12 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         self,
         start_idx: torch.Tensor,
         end_idx: torch.Tensor,
-        layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         position_ids = cache_kwargs.get("position_ids")
         batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value from the kwargs
 
-        k_out = self.key_cache[layer_idx]
+        k_out = self.keys
 
         batch, num_kv_heads, _, _ = k_out.shape
 
@@ -1785,13 +1784,12 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         self,
         start_idx: torch.Tensor,
         end_idx: torch.Tensor,
-        layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         position_ids = cache_kwargs.get("position_ids")
         batch_index = cache_kwargs.get("batch_index", None)  # Check and fetch batch index value from the kwargs
 
-        v_out = self.value_cache[layer_idx]
+        v_out = self.values
 
         batch, num_kv_heads, _, _ = v_out.shape
 
@@ -1807,7 +1805,7 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
             ctx_indices = ctx_indices.expand(batch, num_kv_heads, ctx_indices.shape[-1])
             v_out = ctx_gather_blocked_kv(v_out, ctx_indices)
 
-        v_out = torch.where(invalid_mask.unsqueeze(-1), torch.tensor(0.0, dtype=torch.float32), v_out)
+        v_out = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(v_out, dtype=v_out.dtype), v_out)
         return v_out
 
     def update(

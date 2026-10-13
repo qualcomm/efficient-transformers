@@ -116,8 +116,15 @@ def cumsum_scatter_gather_update_expert_blocked(
     b_u: Optional[torch.Tensor] = None,
     b_d: Optional[torch.Tensor] = None,
     num_packed_chunks: int = 1,
+    expert_intermediate_block_size: Optional[int] = None,
 ) -> torch.Tensor:
-    """Run one local expert slot over statically traced packed chunks."""
+    """Run one local expert slot over statically traced packed chunks.
+
+    When ``expert_intermediate_block_size`` is set the intermediate dimension I
+    is tiled in slices of that size, reducing peak VTCM from ``[N, chunk, I]``
+    to ``[N, chunk, expert_intermediate_block_size]`` — matching the microbench
+    ``--ffn-weight-block-size`` behaviour.
+    """
     batch_size, seq_len = T2Ei.shape
     num_packed_chunks = max(1, int(num_packed_chunks))
     assert seq_len % num_packed_chunks == 0, (
@@ -126,6 +133,9 @@ def cumsum_scatter_gather_update_expert_blocked(
     packed_chunk_size = seq_len // num_packed_chunks
     matched_idx = build_matched_idx_from_cumsum(T2Ei)
     valid_rows = T2Ei.to(torch.int32).sum(dim=-1, keepdim=True)
+    row_range = torch.arange(packed_chunk_size, dtype=torch.int32, device=x.device).unsqueeze(0)
+    clamp_min = torch.zeros_like(valid_rows)
+    clamp_max = torch.full_like(valid_rows, packed_chunk_size)
     x_expanded = x.unsqueeze(0).expand(batch_size, -1, -1)
     for chunk_idx in range(num_packed_chunks):
         packed_start = chunk_idx * packed_chunk_size
@@ -133,23 +143,38 @@ def cumsum_scatter_gather_update_expert_blocked(
             packed_stop = seq_len
         else:
             packed_stop = packed_start + packed_chunk_size
-        chunk_rows = packed_stop - packed_start
-        row_range = torch.arange(chunk_rows, dtype=torch.int32, device=x.device).unsqueeze(0)
         chunk_matched_idx = matched_idx[:, packed_start:packed_stop]
 
         x_chunk = ctx_gather_3d_generalized(x_expanded, chunk_matched_idx)
-        down_chunk = expert_mlp(x_chunk, W_g, W_u, W_d, b_g, b_u, b_d)
+
+        if expert_intermediate_block_size is None:
+            down_chunk = expert_mlp(x_chunk, W_g, W_u, W_d, b_g, b_u, b_d)
+        else:
+            inter_size = W_d.shape[1]
+            N, chunk, H = x_chunk.shape[0], x_chunk.shape[1], W_d.shape[2]
+            down_chunk = x_chunk.new_zeros((N, chunk, H))
+            for i_start in range(0, inter_size, expert_intermediate_block_size):
+                i_end = min(i_start + expert_intermediate_block_size, inter_size)
+                b_g_s = b_g[..., i_start:i_end] if b_g is not None else None
+                b_u_s = b_u[..., i_start:i_end] if b_u is not None else None
+                down_chunk = down_chunk + expert_mlp(
+                    x_chunk,
+                    W_g[..., i_start:i_end],
+                    W_u[..., i_start:i_end],
+                    W_d[:, i_start:i_end, :],
+                    b_g_s,
+                    b_u_s,
+                    None,
+                )
+            if b_d is not None:
+                down_chunk = down_chunk + b_d.unsqueeze(-2)
 
         rw_chunk = ctx_gather_3d_generalized(routing_weight, chunk_matched_idx)
         down_chunk = down_chunk * rw_chunk
         expert_out_chunk = ctx_gather_3d_generalized(expert_out, chunk_matched_idx)
         updated_chunk = expert_out_chunk + down_chunk
 
-        chunk_valid_rows = torch.clamp(
-            valid_rows - packed_start,
-            min=torch.zeros_like(valid_rows),
-            max=torch.full_like(valid_rows, chunk_rows),
-        )
+        chunk_valid_rows = torch.clamp(valid_rows - packed_start, min=clamp_min, max=clamp_max)
         updated_chunk = torch.where(
             (row_range < chunk_valid_rows).unsqueeze(-1), updated_chunk, torch.zeros_like(updated_chunk)
         )
@@ -170,6 +195,7 @@ def moe_expert_parallel(
     experts_per_soc: Optional[int] = None,
     tree_reduce: bool = False,
     num_packed_chunks: int = 1,
+    expert_intermediate_block_size: Optional[int] = None,
 ) -> torch.Tensor:
     """Prefill expert-parallel flavour with branch-style expert reshaping."""
     T, H = x.shape
@@ -188,13 +214,6 @@ def moe_expert_parallel(
     if num_devices <= 0:
         raise ValueError(f"num_devices ({num_devices}) must be greater than 0")
 
-    rw = (
-        routing_weights.transpose(0, 1)
-        .contiguous()
-        .view(num_pipeline_stages, num_parallelized_experts, T)
-        .transpose(0, 1)
-        .contiguous()
-    )
     W_g = weights.gate
     W_u = weights.up
     W_d = weights.down
@@ -202,9 +221,12 @@ def moe_expert_parallel(
     b_u = weights.up_bias
     b_d = weights.down_bias
 
-    expert_out = x.new_zeros((num_parallelized_experts, T, H))
+    N = num_parallelized_experts
+    L = num_pipeline_stages
+    expert_out = x.new_zeros((N, T, H))
+    rw = routing_weights.transpose(0, 1).contiguous().view(L, N, T).transpose(0, 1).contiguous()
     routing_weights_unsqueezed = rw.unsqueeze(-1)
-    for slot in range(num_pipeline_stages):
+    for slot in range(L):
         T2Ei = rw[:, slot, :] > 0
         expert_out = cumsum_scatter_gather_update_expert_blocked(
             x=x,
@@ -219,6 +241,7 @@ def moe_expert_parallel(
             b_u=b_u[:, slot] if b_u is not None else None,
             b_d=b_d[:, slot] if b_d is not None else None,
             num_packed_chunks=num_packed_chunks,
+            expert_intermediate_block_size=expert_intermediate_block_size,
         )
 
     if experts_per_soc is not None:

@@ -2884,3 +2884,22 @@ class TestKVCacheExternalModuleMapperTransform:
         assert transformed
         assert calls
         assert torch.isfinite(out).all()
+
+    def test_prefill_deepseek_uses_mixin_with_moe_config_num_ffn_blocks(self):
+        model = _make_deepseek_external_moe()
+        _, transformed = OptimizedMoETransform.apply(
+            model, prefill_only=True, qaic_config={"moe_config": {"num_ffn_blocks": 2}}
+        )
+        calls = []
+
+        def fake_execute(self, x, routing):
+            calls.append(routing)
+            return x
+
+        model.execute_moe_flavour = MethodType(fake_execute, model)
+
+        out = model(torch.ones(1, 2, 4))
+
+        assert transformed
+        assert calls
+        assert torch.isfinite(out).all()

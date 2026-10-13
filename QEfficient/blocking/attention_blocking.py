@@ -420,14 +420,15 @@ def generic_blocked_attention_interface(
                 "Sliding window attention is not supported with blocked KV caching. Please set `sliding_window` to None or use a different caching strategy."
             )
         elif prefill_only:
-            if sliding_window is not None:
-                cache_kwargs.update(
-                    {
-                        "is_sliding": sliding_window is not None,
-                        "sliding_window": _get_sliding_window_len(past_key_value, module.layer_idx),
-                    }
-                )
-            past_key_value.write_only(key, value, module.layer_idx, cache_kwargs)
+            if past_key_value is not None and not kwargs.get("skip_kv_write", False):
+                if sliding_window is not None:
+                    cache_kwargs.update(
+                        {
+                            "is_sliding": sliding_window is not None,
+                            "sliding_window": _get_sliding_window_len(past_key_value, module.layer_idx),
+                        }
+                    )
+                past_key_value.write_only(key, value, module.layer_idx, cache_kwargs)
         elif past_key_value is not None:
             use_kv_blocked = "kv" in blocking_config.mode and supports_blocked_kv(past_key_value)
             if blocking_mode == BlockingMode.KV_BATCH_FOLD:
@@ -477,8 +478,8 @@ def generic_blocked_attention_interface(
         kv_block_unroll=blocking_config.kv_block_unroll,
         skip_kv=blocking_config.skip_kv or False,
         paged_attention=blocking_config.paged_attention,
-        # prefill-specific
-        n_rep_chunk=blocking_config.n_rep_chunk,
+        # prefill-specific — omit when None so function default (1) applies
+        **({"n_rep_chunk": blocking_config.n_rep_chunk} if blocking_config.n_rep_chunk is not None else {}),
         num_cores_per_device=blocking_config.num_cores_per_device,
         # MLA-specific
         **(mla_kwargs or {}),
