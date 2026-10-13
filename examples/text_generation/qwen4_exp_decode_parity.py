@@ -220,30 +220,51 @@ def _prune_weight_free_checkpoint(snapshot: Path, layers: int, output_dir: Path)
     weight_map = json.loads((snapshot / "model.safetensors.index.json").read_text())["weight_map"]
     selected = {}
     for source_key, filename in weight_map.items():
+        # The PLE table is host-provided during decode and can be many tens of
+        # gigabytes.  Never materialize it in the four-layer checkpoint window.
+        if ".ple_embedding.ngram_embedding." in source_key:
+            continue
         if source_key.startswith("model.language_model.layers."):
             layer_id = int(source_key.split(".")[3])
             if layer_id >= layers:
                 continue
         elif source_key not in {"lm_head.weight"} and not source_key.startswith("model.language_model."):
             continue
-        if ".ple_embedding.ngram_embedding." in source_key:
-            continue
         with safe_open(str(snapshot / filename), framework="pt", device="cpu") as handle:
             target_key = source_key.removeprefix("model.language_model.")
             if source_key.startswith("model.language_model."):
                 target_key = f"model.{target_key}"
-            selected[target_key] = handle.get_tensor(source_key)
+            selected[target_key] = (filename, source_key)
     if not selected:
         raise RuntimeError(f"No tensors selected from {snapshot}")
-    shard_name = "model.safetensors"
-    save_file(selected, str(output_dir / shard_name), metadata={"format": "pt"})
+
+    # Rewrite one source shard at a time. Four Qwen3.8 layers are large, so
+    # keeping all selected tensors in memory can consume tens of gigabytes.
+    # The rewritten files preserve the model-key remapping while bounding peak
+    # memory to the largest individual source shard.
+    by_filename = {}
+    for target_key, (filename, source_key) in selected.items():
+        by_filename.setdefault(filename, {})[target_key] = source_key
+    for filename, key_map in by_filename.items():
+        tensors = {}
+        with safe_open(str(snapshot / filename), framework="pt", device="cpu") as handle:
+            for target_key, source_key in key_map.items():
+                tensors[target_key] = handle.get_tensor(source_key)
+        save_file(tensors, str(output_dir / filename), metadata={"format": "pt"})
+        del tensors
     (output_dir / "model.safetensors.index.json").write_text(
         json.dumps(
-            {"metadata": {"total_size": sum(t.numel() * t.element_size() for t in selected.values())},
-             "weight_map": {key: shard_name for key in selected}},
+            {
+                "metadata": {"total_size": 0},
+                "weight_map": {key: filename for key, (filename, _) in selected.items()},
+            },
             indent=2,
         )
     )
+    # Keep the pruned directory loadable on its own. The compile example passes
+    # an overridden window config, but from_pretrained and checkpoint tooling
+    # still require a local config.json to recognize the model family.
+    shutil.copy2(snapshot / "config.json", output_dir / "config.json")
     print(f"weightfree_pruned_tensors={len(selected)}")
     return output_dir
 

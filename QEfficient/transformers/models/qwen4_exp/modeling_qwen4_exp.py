@@ -2,13 +2,12 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 # -----------------------------------------------------------------------------
-"""Decode-only QEfficient wrapper for Transformers 5.18 Qwen4-Exp text models."""
+"""QEfficient wrapper for Transformers 5.18 Qwen4-Exp text models."""
 
 from __future__ import annotations
 
 import math
 from functools import partial
-
 import torch
 import torch.nn.functional as F
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
@@ -28,6 +27,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
 )
 
 from QEfficient.customop.rms_norm import CustomRMSNormFunc
+from QEfficient.customop import ctx_gather_rows, ctx_paged_scatter
 from QEfficient.transformers.cache_utils import QEffQwen4ExpDynamicCache
 from QEfficient.transformers.moe import (
     MoEFlavour,
@@ -274,12 +274,49 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
 
 
 class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
-    """QSA recurrent decode adapted from qsa_benchmark's retained-cache path."""
+    """QSA attention with the legacy decode ABI and aligned prefill path."""
+
+    def __qeff_init__(self):
+        self._qsa_config = None
+        self._qsa_use_benchmark_path = False
+
+    def configure_qsa(self, qsa_config=None, *, ctx_len=None, seq_len=None):
+        config = self.config
+        deployment = dict(qsa_config or {})
+        self._qsa_config = {
+            "indexer_dp": int(deployment.get("indexer_dp", 1)),
+            "indexer_cp": int(deployment.get("indexer_cp", 1)),
+            "attn_dp": int(deployment.get("attn_dp", 1)),
+            "attn_cp": int(deployment.get("attn_cp", 1)),
+            "num_cores": int(deployment.get("num_cores_per_device", deployment.get("num_cores", 16))),
+            "indexer_num_blocks": int(deployment.get("indexer_num_blocks", 4)),
+            "indexer_ql_chunk": int(deployment.get("indexer_ql_chunk", 512)),
+            "indexer_q_block_size": int(deployment.get("indexer_q_block_size", 512)),
+            "indexer_topk_blocking": int(deployment.get("indexer_topk_blocking", 4)),
+            "sparse_q_block_size": int(deployment.get("sparse_q_block_size", 16)),
+            "sparse_kv_num_blocks": int(deployment.get("sparse_kv_num_blocks", 8)),
+            "skip_kv": bool(deployment.get("skip_kv", False)),
+            "ctx_len": int(deployment.get("ctx_len", ctx_len or config.max_position_embeddings)),
+            "seq_len": seq_len,
+        }
+        self._qsa_use_benchmark_path = bool(qsa_config)
+
+    @property
+    def _qsa_deployment(self):
+        if self._qsa_config is None:
+            self.configure_qsa()
+        return self._qsa_config
+
+    def qsa_forward(self, hidden_states, position_embeddings, past_key_values=None, **kwargs):
+        if hidden_states.shape[1] != 1:
+            return self._qsa_prefill(hidden_states, position_embeddings, past_key_values)
+        return self._qsa_decode(hidden_states, position_embeddings, past_key_values, **kwargs)
 
     def forward(self, hidden_states, position_embeddings, past_key_values=None, **kwargs):
+        return self.qsa_forward(hidden_states, position_embeddings, past_key_values, **kwargs)
+
+    def _qsa_decode(self, hidden_states, position_embeddings, past_key_values=None, **kwargs):
         del kwargs
-        if hidden_states.shape[1] != 1:
-            raise ValueError("Qwen4-Exp QEfficient wrapper supports decode (seq_len=1) only")
         key_cache = past_key_values.qsa_key_states[self.layer_idx]
         value_cache = past_key_values.qsa_value_states[self.layer_idx]
         index_cache = past_key_values.qsa_index_states[self.layer_idx]
@@ -289,22 +326,39 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         batch = hidden_states.shape[0]
         cos, sin = (tensor[:, -1:, :] for tensor in position_embeddings[:2])
         query, gate = self.q_proj(hidden_states).view(batch, 1, -1, self.head_dim * 2).chunk(2, dim=-1)
-        query = apply_rotary_pos_emb(self.q_norm(query), cos=cos, sin=sin).transpose(1, 2)
+        query = apply_rotary_pos_emb(self.q_norm(query), cos=cos, sin=sin, unsqueeze_dim=2).transpose(1, 2)
         key = apply_rotary_pos_emb(
-            self.k_norm(self.k_proj(hidden_states).view(batch, 1, -1, self.head_dim)), cos=cos, sin=sin
+            self.k_norm(self.k_proj(hidden_states).view(batch, 1, -1, self.head_dim)),
+            cos=cos,
+            sin=sin,
+            unsqueeze_dim=2,
         ).transpose(1, 2)
         value = self.v_proj(hidden_states).view(batch, 1, -1, self.head_dim).transpose(1, 2)
         positions = past_key_values.position_ids[0, :, -1].to(torch.long)
-        kv_slots = positions[:, None, None, None].expand_as(key)
-        next_key = key_cache.scatter(2, kv_slots, key)
-        next_value = value_cache.scatter(2, kv_slots, value)
+        deployment = self._qsa_deployment
+        folded = deployment["attn_dp"] > 1 or deployment["attn_cp"] > 1
+        if folded:
+            next_key = self._qsa_scatter_folded(
+                key_cache, positions, key, deployment, rows_per_way=self.config.num_key_value_heads
+            )
+            next_value = self._qsa_scatter_folded(
+                value_cache, positions, value, deployment, rows_per_way=self.config.num_key_value_heads
+            )
+        else:
+            kv_slots = positions[:, None, None, None].expand_as(key)
+            next_key = key_cache.scatter(2, kv_slots, key)
+            next_value = value_cache.scatter(2, kv_slots, value)
         qk = self.indexer.index_qk_proj(hidden_states)
         index_query, raw_key = torch.split(
             qk, (self.indexer.index_n_heads * self.indexer.index_head_dim, self.indexer.index_head_dim), dim=-1
         )
         index_query = apply_rotary_pos_emb(
-            self.indexer.q_layernorm(index_query.view(batch, 1, -1, self.indexer.index_head_dim)), cos=cos, sin=sin
+            self.indexer.q_layernorm(index_query.view(batch, 1, -1, self.indexer.index_head_dim)),
+            cos=cos,
+            sin=sin,
+            unsqueeze_dim=2,
         ).squeeze(1)
+        index_query = index_query.reshape(batch, -1, self.indexer.index_head_dim)
         ratio = self.indexer.compress_ratio
         block = torch.div(positions, ratio, rounding_mode="trunc")
         boundary = (positions + 1).remainder(ratio) == 0
@@ -327,15 +381,47 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             self.indexer.k_layernorm((total / ratio).to(hidden_states.dtype)).unsqueeze(1),
             cos=pooled_cos,
             sin=pooled_sin,
+            unsqueeze_dim=2,
         ).squeeze(1)
-        index_slots = block[:, None, None].expand(-1, 1, index_cache.shape[-1])
-        next_index = torch.where(boundary[:, None, None], index_cache.scatter(1, index_slots, pooled), index_cache)
+        if index_cache.ndim == 4:
+            pooled_update = pooled.reshape(batch, 1, 1, index_cache.shape[-1])
+            scattered_index = self._qsa_scatter_folded(
+                index_cache,
+                block,
+                pooled_update,
+                deployment,
+                rows_per_way=1,
+                dp_key="indexer_dp",
+                cp_key="indexer_cp",
+                valid=boundary,
+            )
+        else:
+            index_slots = block.reshape(batch, 1, 1).expand(-1, 1, index_cache.shape[-1])
+            pooled_update = pooled.reshape(batch, 1, index_cache.shape[-1])
+            scattered_index = index_cache.scatter(1, index_slots, pooled_update)
+        boundary_shape = (boundary[:, None, None, None] if index_cache.ndim == 4 else boundary[:, None, None])
+        next_index = torch.where(boundary_shape, scattered_index, index_cache)
         next_partial = torch.where(boundary[:, None, None], torch.zeros_like(total), total)
-        scores = F.relu(index_query.float() @ next_index.float().transpose(-1, -2)).sum(-2)
+        index_attention = next_index[:, 0] if next_index.ndim == 4 and next_index.shape[1] == 1 else next_index
         complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
-        visible = torch.arange(index_cache.shape[1], device=positions.device)[None, :] < complete[:, None]
-        scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE)
-        blocks = scores.topk(min(self.indexer.block_topk, index_cache.shape[1]), dim=-1).indices
+        if index_cache.ndim == 4:
+            index_dp, index_cp = deployment["indexer_dp"], deployment["indexer_cp"]
+            batch_local = batch // index_dp
+            local_context = next_index.shape[2]
+            cache_grouped = next_index.reshape(batch_local, index_dp, index_cp, local_context, -1)
+            query_grouped = index_query.reshape(batch_local, index_dp, -1, index_query.shape[-1])
+            scores = torch.einsum("badh,baclh->bacl", query_grouped.float(), cache_grouped.float())
+            ids = (
+                torch.arange(local_context, device=positions.device)[None, :] * index_cp
+                + torch.arange(index_cp, device=positions.device)[:, None]
+            )
+            visible = ids[None, None] < complete.reshape(batch_local, index_dp, 1, 1)
+            scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE).reshape(batch, -1)
+        else:
+            scores = F.relu(index_query.float() @ index_attention.float().transpose(-1, -2)).sum(-2)
+            visible = torch.arange(index_attention.shape[1], device=positions.device)[None, :] < complete[:, None]
+            scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE)
+        blocks = scores.topk(min(self.indexer.block_topk, scores.shape[-1]), dim=-1).indices
         selected = (blocks.unsqueeze(-1) * ratio + torch.arange(ratio, device=positions.device)).reshape(batch, -1)
         selected_valid = (blocks < complete[:, None]).unsqueeze(-1).expand(-1, -1, ratio).reshape(batch, -1)
         tail = complete[:, None] * ratio + torch.arange(ratio, device=positions.device)[None, :]
@@ -347,9 +433,13 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             selected,
         )
         selected_valid = torch.cat((selected_valid, tail_valid), dim=-1)
-        gather = selected[:, None, :, None].expand(-1, key_cache.shape[1], -1, key_cache.shape[-1])
-        keys = next_key.gather(2, gather).repeat_interleave(self.num_key_value_groups, dim=1)
-        values = next_value.gather(2, gather).repeat_interleave(self.num_key_value_groups, dim=1)
+        if folded:
+            keys = self._qsa_gather_folded(next_key, selected, positions, deployment)
+            values = self._qsa_gather_folded(next_value, selected, positions, deployment)
+        else:
+            gather = selected[:, None, :, None].expand(-1, key_cache.shape[1], -1, key_cache.shape[-1])
+            keys = next_key.gather(2, gather).repeat_interleave(self.num_key_value_groups, dim=1)
+            values = next_value.gather(2, gather).repeat_interleave(self.num_key_value_groups, dim=1)
         selected_keys, selected_values = keys, values
         logits = (query @ selected_keys.transpose(-1, -2)) / math.sqrt(self.head_dim)
         mask = selected_valid[:, None, None, :]
@@ -363,6 +453,98 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         output = output * torch.sigmoid(gate.reshape(batch, 1, -1))
         past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, next_partial)
         return self.o_proj(output), None
+
+    @staticmethod
+    def _qsa_scatter_folded(
+        cache, positions, updates, deployment, rows_per_way, dp_key="attn_dp", cp_key="attn_cp", valid=None
+    ):
+        dp, cp = deployment[dp_key], deployment[cp_key]
+        batch, _, _, dim = updates.shape
+        if batch % dp:
+            raise ValueError("QSA batch must be divisible by attn_dp")
+        batch_local = batch // dp
+        positions_dp = positions.reshape(batch_local, dp)
+        slots = torch.div(positions_dp, cp, rounding_mode="trunc")
+        ways = positions_dp.remainder(cp)
+        rows = dp * cp * rows_per_way
+        updates_rows = updates.reshape(batch_local, dp, rows_per_way, 1, dim).unsqueeze(2).expand(
+            batch_local, dp, cp, rows_per_way, 1, dim
+        ).reshape(batch_local, rows, 1, dim)
+        row = torch.arange(rows, device=positions.device).reshape(dp, cp, rows_per_way)
+        row = row[None].expand(batch_local, -1, -1, -1)
+        owner = ways[:, :, None, None] == torch.arange(cp, device=positions.device).view(1, 1, cp, 1)
+        owner = owner.expand(batch_local, dp, cp, rows_per_way)
+        if valid is not None:
+            owner = owner & valid.reshape(batch_local, dp, 1, 1)
+        block_ids = torch.arange(batch_local, device=positions.device).view(batch_local, 1, 1).expand(batch_local, rows, 1)
+        block_ids = torch.where(owner.reshape(batch_local, rows, 1), block_ids, torch.full_like(block_ids, torch.iinfo(torch.int32).max))
+        addresses = slots[:, :, None, None].expand(batch_local, dp, cp, rows_per_way).reshape(batch_local, rows, 1)
+        return ctx_paged_scatter(cache, block_ids.to(torch.int32), addresses.to(torch.int32), updates_rows)
+
+    def _qsa_gather_folded(self, cache, selected, positions, deployment):
+        dp, cp = deployment["attn_dp"], deployment["attn_cp"]
+        kv_heads = cache.shape[1] // (dp * cp)
+        batch, count = selected.shape
+        batch_local = batch // dp
+        pos = selected[:, None, :].expand(batch, kv_heads, count)
+        pos_dp = pos.reshape(batch_local, dp, kv_heads, count)
+        slots = torch.div(pos_dp, cp, rounding_mode="trunc")
+        ways = pos_dp.remainder(cp)
+        row = (
+            torch.arange(dp, device=selected.device).view(1, dp, 1, 1) * cp * kv_heads
+            + ways * kv_heads
+            + torch.arange(kv_heads, device=selected.device).view(1, 1, kv_heads, 1)
+        )
+        gathered = ctx_gather_rows(cache, row.reshape(batch_local, dp * kv_heads, count).to(torch.int32))
+        gathered = gathered.reshape(batch_local, dp, kv_heads, count, cache.shape[-1])
+        return gathered.reshape(batch, kv_heads, count, cache.shape[-1]).repeat_interleave(
+            self.num_key_value_groups, dim=1
+        )
+
+    def _qsa_prefill(self, hidden_states, position_embeddings, past_key_values):
+        if past_key_values is None:
+            raise ValueError("Qwen4-Exp QSA prefill requires retained cache state")
+        deployment = self._qsa_deployment
+        if deployment["attn_cp"] != 1 or deployment["indexer_cp"] != 1:
+            raise ValueError("QSA aligned prefill requires attention/indexer CP=1")
+        batch, query_len, _ = hidden_states.shape
+        positions = past_key_values.position_ids
+        if positions.ndim == 3:
+            positions = positions[0]
+        positions = positions[..., :query_len].to(torch.long)
+        if positions.shape != (batch, query_len) or query_len % self.indexer.compress_ratio:
+            raise ValueError("QSA prefill requires aligned [batch, seq_len] positions")
+        cos, sin = position_embeddings[:2]
+        query_gate = self.q_proj(hidden_states).view(batch, query_len, -1, self.head_dim * 2)
+        query, gate = query_gate.chunk(2, dim=-1)
+        query = apply_rotary_pos_emb(self.q_norm(query), cos=cos, sin=sin, unsqueeze_dim=2)
+        key = apply_rotary_pos_emb(
+            self.k_norm(self.k_proj(hidden_states).view(batch, query_len, -1, self.head_dim)),
+            cos=cos,
+            sin=sin,
+            unsqueeze_dim=2,
+        )
+        value = self.v_proj(hidden_states).view(batch, query_len, -1, self.head_dim)
+        key_cache = past_key_values.qsa_key_states[self.layer_idx]
+        value_cache = past_key_values.qsa_value_states[self.layer_idx]
+        index_cache = past_key_values.qsa_index_states[self.layer_idx]
+        partial = past_key_values.qsa_partial_states[self.layer_idx]
+        # Aligned prefill completes pooling groups; retain the same four-state ABI.
+        ratio = self.indexer.compress_ratio
+        raw = self.indexer.index_qk_proj(hidden_states).split(
+            [self.indexer.index_n_heads * self.indexer.index_head_dim, self.indexer.index_head_dim], dim=-1
+        )[1]
+        pooled = self.indexer.k_layernorm(raw.reshape(batch, -1, ratio, raw.shape[-1]).float().mean(2).to(raw.dtype))
+        pooled_pos = positions[:, ::ratio]
+        index_cache = index_cache.scatter(1, torch.div(pooled_pos, ratio, rounding_mode="trunc").unsqueeze(-1).expand(-1, -1, index_cache.shape[-1]), pooled)
+        key_cache = key_cache.scatter(2, positions[:, :, None, None].expand(batch, query_len, key.shape[2], key.shape[3]).transpose(1, 2), key.transpose(1, 2))
+        value_cache = value_cache.scatter(2, positions[:, :, None, None].expand(batch, query_len, value.shape[2], value.shape[3]).transpose(1, 2), value.transpose(1, 2))
+        scores = torch.einsum("bqhd,bkhd->bhqk", query.float(), key.float()) / math.sqrt(self.head_dim)
+        causal = positions[:, None, None, :] <= positions[:, None, :, None]
+        probs = scores.masked_fill(~causal, MIN_MASKED_ATTENTION_VALUE).softmax(-1).to(query.dtype)
+        output = torch.einsum("bhqk,bkhd->bqhd", probs, value).reshape(batch, query_len, -1)
+        past_key_values.update_qsa_state(self.layer_idx, key_cache, value_cache, index_cache, partial)
+        return self.o_proj(output * gate.reshape_as(output).sigmoid()), None
 
 
 class QEffQwen4ExpTextDecoderLayer(Qwen4ExpTextDecoderLayer):
@@ -434,10 +616,10 @@ class QEffQwen4ExpTextModel(Qwen4ExpTextModel):
         self, input_ids=None, position_ids=None, past_key_values=None, ngram_embeddings=None, use_cache=True, **kwargs
     ):
         del kwargs
-        if input_ids is None or input_ids.shape[1] != 1:
-            raise ValueError("Qwen4-Exp QEfficient wrapper accepts input_ids decode with seq_len=1 only")
+        if input_ids is None:
+            raise ValueError("Qwen4-Exp QEfficient wrapper requires input_ids")
         if position_ids is None or position_ids.shape[0] != 4:
-            raise ValueError("Qwen4-Exp decode requires explicit position_ids [4, batch, 1]")
+            raise ValueError("Qwen4-Exp requires explicit position_ids [4, batch, seq_len]")
         return_legacy_cache = isinstance(past_key_values, (list, tuple))
         if return_legacy_cache:
             past_key_values = QEffQwen4ExpDynamicCache.from_legacy_cache(self.config, past_key_values)
@@ -447,9 +629,9 @@ class QEffQwen4ExpTextModel(Qwen4ExpTextModel):
                     self.config, past_key_values.to_legacy_cache()
                 )
             else:
-                raise TypeError("Qwen4-Exp decode requires QEffQwen4ExpDynamicCache or a legacy cache tuple")
+                raise TypeError("Qwen4-Exp requires QEffQwen4ExpDynamicCache or a legacy cache tuple")
         if ngram_embeddings is None:
-            raise ValueError("Qwen4-Exp decode requires host-provided ngram_embeddings")
+            raise ValueError("Qwen4-Exp requires host-provided ngram_embeddings")
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = hidden_states.repeat(1, 1, self.config.hc_count)
         past_key_values.position_ids = position_ids[1:]
@@ -560,6 +742,12 @@ class QEffQwen4ExpDecodeExportMixin:
                     axes.append({0: batch_axis})
             else:
                 context = config.max_position_embeddings
+                attention = self.model.layers[index].self_attn
+                qsa_config = getattr(attention, "_qsa_config", None)
+                attn_dp = int(qsa_config.get("attn_dp", 1)) if qsa_config else 1
+                attn_cp = int(qsa_config.get("attn_cp", 1)) if qsa_config else 1
+                indexer_dp = int(qsa_config.get("indexer_dp", 1)) if qsa_config else 1
+                indexer_cp = int(qsa_config.get("indexer_cp", 1)) if qsa_config else 1
                 names = [
                     f"qsa_key_state.{index}",
                     f"qsa_value_state.{index}",
@@ -567,17 +755,33 @@ class QEffQwen4ExpDecodeExportMixin:
                     f"qsa_partial_state.{index}",
                 ]
                 states = [
-                    torch.zeros((batch_size, config.num_key_value_heads, context, config.head_dim), dtype=dtype),
-                    torch.zeros((batch_size, config.num_key_value_heads, context, config.head_dim), dtype=dtype),
                     torch.zeros(
+                        (batch_size // attn_dp, attn_dp * attn_cp * config.num_key_value_heads, context // attn_cp, config.head_dim),
+                        dtype=dtype,
+                    ),
+                    torch.zeros(
+                        (batch_size // attn_dp, attn_dp * attn_cp * config.num_key_value_heads, context // attn_cp, config.head_dim),
+                        dtype=dtype,
+                    ),
+                    torch.zeros(
+                        (
+                            batch_size // indexer_dp,
+                            indexer_dp * indexer_cp,
+                            context // (config.indexer_compress_ratio * indexer_cp),
+                            config.indexer_head_dim,
+                        ),
+                        dtype=dtype,
+                    )
+                    if qsa_config
+                    else torch.zeros(
                         (batch_size, context // config.indexer_compress_ratio, config.indexer_head_dim), dtype=dtype
                     ),
                     torch.zeros((batch_size, 1, config.indexer_head_dim), dtype=torch.float32),
                 ]
                 axes = [
-                    {0: batch_axis, 2: "ctx_len"},
-                    {0: batch_axis, 2: "ctx_len"},
-                    {0: batch_axis, 1: "pooled_ctx_len"},
+                    {0: batch_axis, 2: "local_ctx_len"},
+                    {0: batch_axis, 2: "local_ctx_len"},
+                    {0: batch_axis, 2: "local_pooled_ctx_len"} if qsa_config else {0: batch_axis, 1: "pooled_ctx_len"},
                     {0: batch_axis},
                 ]
             specs["past_key_values"].append(states)
@@ -589,13 +793,14 @@ class QEffQwen4ExpDecodeExportMixin:
 
     def get_dummy_inputs(self, continuous_batching=False, **kwargs):
         batch_size = min(kwargs.get("batch_size", constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE), 2)
-        specs = self.get_onnx_retained_state_specs(batch_size, 1, continuous_batching=continuous_batching)
+        seq_len = int(kwargs.get("seq_len", self.get_export_seq_len()))
+        specs = self.get_onnx_retained_state_specs(batch_size, seq_len, continuous_batching=continuous_batching)
         inputs = {
-            "input_ids": torch.zeros((batch_size, 1), dtype=torch.int64),
+            "input_ids": torch.zeros((batch_size, seq_len), dtype=torch.int64),
             "ngram_embeddings": torch.zeros(
-                (batch_size, 1, self.config.ple_embed_dim), dtype=self.lm_head.weight.dtype
+                (batch_size, seq_len, self.config.ple_embed_dim), dtype=self.lm_head.weight.dtype
             ),
-            "position_ids": torch.zeros((4, batch_size, 1), dtype=torch.int64),
+            "position_ids": torch.zeros((4, batch_size, seq_len), dtype=torch.int64),
             "past_key_values": specs["past_key_values"],
         }
         if continuous_batching:
@@ -630,35 +835,44 @@ class QEffQwen4ExpDecodeExportMixin:
         del prefill_seq_len, kwargs
         batch_size = batch_size or 1
         pooled_ctx_len = -(-ctx_len // self.config.indexer_compress_ratio)
+        export_seq_len = self.get_export_seq_len()
         specialization = {
             "batch_size": batch_size,
-            "seq_len": 1,
+            "seq_len": export_seq_len,
             "ctx_len": ctx_len,
             "pooled_ctx_len": pooled_ctx_len,
         }
         return [dict(specialization), dict(specialization)]
 
     def get_custom_io(self, **kwargs):
-        """Return FP16 custom I/O for every retained state input/output pair."""
-        del kwargs
+        """Return custom I/O for every retained state input/output pair."""
+        dtype = kwargs.pop("dtype", "float16")
+        if kwargs:
+            raise TypeError(f"Unexpected custom I/O options: {sorted(kwargs)}")
         return {
-            name: "float16"
+            name: dtype
             for state_name in self._iter_retained_state_names()
             for name in (state_name, f"{state_name}_RetainedState")
         }
 
     def get_export_seq_len(self):
-        """Return the single-token sequence length required by the decode graph."""
+        """Return a configured QSA export length, preserving decode by default."""
+        for layer in self.model.layers:
+            attention = getattr(layer, "self_attn", None)
+            qsa_config = getattr(attention, "_qsa_config", None)
+            if qsa_config is not None and qsa_config.get("seq_len") is not None:
+                return int(qsa_config["seq_len"])
         return 1
 
     def prepare_export_inputs(self, example_inputs, dynamic_axes):
         """Add host PLE input and the four-stream MRoPE position input."""
         batch_size = example_inputs["input_ids"].shape[0]
         dtype = self.config.torch_dtype
+        seq_len = example_inputs["input_ids"].shape[1]
         example_inputs["ngram_embeddings"] = torch.zeros(
-            (batch_size, 1, self.config.ple_embed_dim), dtype=dtype
+            (batch_size, seq_len, self.config.ple_embed_dim), dtype=dtype
         )
-        example_inputs["position_ids"] = torch.zeros((4, batch_size, 1), dtype=torch.int64)
+        example_inputs["position_ids"] = torch.zeros((4, batch_size, seq_len), dtype=torch.int64)
         dynamic_axes["ngram_embeddings"] = {0: "batch_size", 1: "seq_len"}
         dynamic_axes["position_ids"] = {1: "batch_size", 2: "seq_len"}
         return example_inputs, dynamic_axes
