@@ -526,6 +526,67 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert list(model.functions[0].output) == ["updated_local_kv_cache"]
         assert list(model.graph.node[0].input) == [state_input, "position_ids", "updates"]
         assert list(model.graph.node[0].output) == [retained_state]
+
+    def test_aligns_prefill_retained_state_function_outputs_with_call_outputs(self):
+        retained_states = [
+            "past_local_kv_cache.0_RetainedState",
+            "past_compressor_kv_state.0_RetainedState",
+            "past_compressor_score_state.0_RetainedState",
+            "past_compressed_kv_cache.0_RetainedState",
+            "past_indexer_kv_state.0_RetainedState",
+            "past_indexer_score_state.0_RetainedState",
+            "past_indexer_kv_cache.0_RetainedState",
+        ]
+        state_inputs = [name.removesuffix("_RetainedState") for name in retained_states]
+        function_outputs = ["hidden_states", "local_kv", state_inputs[1], state_inputs[2], state_inputs[4], state_inputs[5]]
+        function = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=["hidden_states", *retained_states],
+            outputs=function_outputs,
+            nodes=[
+                helper.make_node("Identity", ["hidden_states"], ["hidden_states"]),
+                helper.make_node("Identity", [retained_states[0]], ["local_kv"]),
+                helper.make_node("Identity", [retained_states[1]], [state_inputs[1]]),
+                helper.make_node("Identity", [retained_states[2]], [state_inputs[2]]),
+                helper.make_node("Identity", [retained_states[3]], ["compressed_kv"]),
+                helper.make_node("Identity", [retained_states[4]], [state_inputs[4]]),
+                helper.make_node("Identity", [retained_states[5]], [state_inputs[5]]),
+                helper.make_node("Identity", [retained_states[6]], ["indexer_kv"]),
+            ],
+            opset_imports=[helper.make_opsetid("", 17)],
+        )
+        call_node = helper.make_node(
+            "repeated_subgraph0",
+            inputs=["hidden_states", *retained_states],
+            outputs=["hidden_states_out"],
+        )
+        graph = helper.make_graph(
+            [call_node],
+            "test_graph",
+            [helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, None)]
+            + [helper.make_tensor_value_info(name, TensorProto.FLOAT, None) for name in retained_states],
+            [helper.make_tensor_value_info("hidden_states_out", TensorProto.FLOAT, None)]
+            + [helper.make_tensor_value_info(name, TensorProto.FLOAT, None) for name in retained_states],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(function)
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert changed
+        assert list(model.graph.node[0].output) == ["hidden_states_out", *retained_states]
+        assert list(model.functions[0].output) == [
+            "hidden_states",
+            "local_kv",
+            state_inputs[1],
+            state_inputs[2],
+            "compressed_kv",
+            state_inputs[4],
+            state_inputs[5],
+            "indexer_kv",
+        ]
+        assert len(model.functions[0].output) == len(model.graph.node[0].output)
         assert model.graph.input[0].name == state_input
 
     def test_preserves_final_scatternd_cache_state_from_prefill_update_chain(self):
@@ -571,6 +632,45 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert list(model.graph.node[0].input) == [state_input, "indices", "updates"]
         assert list(model.graph.node[0].output) == [retained_state]
 
+    def test_ignores_scatter_update_dependency_when_resolving_cache_state(self):
+        retained_state = "past_compressed_kv_cache.0_RetainedState"
+        state_input = "past_compressed_kv_cache.0"
+        function = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=[retained_state, "indices", "updates"],
+            outputs=[],
+            nodes=[
+                helper.make_node("Identity", [retained_state], ["cache_view"]),
+                helper.make_node("ScatterND", ["cache_view", "indices", "updates"], ["cache_result"]),
+                helper.make_node("ScatterND", ["updates", "indices", "cache_result"], ["unrelated_result"]),
+            ],
+            opset_imports=[helper.make_opsetid("", 17)],
+        )
+        call_node = helper.make_node(
+            "repeated_subgraph0",
+            inputs=[retained_state, "indices", "updates"],
+            outputs=[],
+        )
+        graph = helper.make_graph(
+            [call_node],
+            "test_graph",
+            [
+                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
+                helper.make_tensor_value_info("indices", TensorProto.INT64, None),
+                helper.make_tensor_value_info("updates", TensorProto.FLOAT, None),
+            ],
+            [helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None)],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(function)
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert changed
+        assert list(model.functions[0].output) == ["cache_result"]
+        assert list(model.graph.node[0].output) == [retained_state]
+
     def test_preserves_unchanged_prefill_retained_state(self):
         retained_state = "past_compressor_kv_state.0_RetainedState"
         state_input = "past_compressor_kv_state.0"
@@ -578,7 +678,7 @@ class TestPreserveNestedCacheRetainedStateTransform:
             domain="",
             fname="repeated_subgraph0",
             inputs=[retained_state, "hidden_states"],
-            outputs=[],
+            outputs=["output"],
             nodes=[
                 helper.make_node("Add", inputs=[retained_state, "hidden_states"], outputs=["output"]),
             ],
@@ -607,7 +707,7 @@ class TestPreserveNestedCacheRetainedStateTransform:
         changed = PreserveNestedCacheRetainedStateTransform.apply(model)
 
         assert changed
-        assert list(model.functions[0].output) == ["past_compressor_kv_state.0_RetainedState"]
+        assert list(model.functions[0].output) == ["output", retained_state]
         assert list(model.graph.node[0].input) == [state_input, "hidden_states"]
         assert list(model.graph.node[0].output) == ["output", retained_state]
 

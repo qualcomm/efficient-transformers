@@ -393,7 +393,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         producer_by_output = {output: fn_node for fn_node in fn.node for output in fn_node.output if output}
         dependency_cache: dict[tuple[str, str], bool] = {}
 
-        def depends_on(value_name: str, ancestor_name: str, visiting: set[str] | None = None) -> bool:
+        def depends_on_data(value_name: str, ancestor_name: str, visiting: set[str] | None = None) -> bool:
             cache_key = (value_name, ancestor_name)
             if cache_key in dependency_cache:
                 return dependency_cache[cache_key]
@@ -413,9 +413,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                 return False
 
             visiting.add(value_name)
-            result = any(
-                input_name and depends_on(input_name, ancestor_name, visiting) for input_name in producer.input
-            )
+            result = bool(producer.input) and depends_on_data(producer.input[0], ancestor_name, visiting)
             visiting.remove(value_name)
             dependency_cache[cache_key] = result
             return result
@@ -426,10 +424,27 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             if fn_node.op_type in cls._SCATTER_OP_TYPES
             and fn_node.input
             and fn_node.output
-            and depends_on(fn_node.input[0], function_input)
+            and depends_on_data(fn_node.input[0], function_input)
         ]
         if not writers:
             if allow_unchanged:
+                # Preserve a named Identity alias when the cache passes through
+                # unchanged; export call results still need a function output name.
+                aliases = [
+                    alias
+                    for alias in fn.node
+                    if alias.op_type == "Identity"
+                    and alias.input
+                    and alias.output
+                    and depends_on_data(alias.input[0], function_input)
+                ]
+                final_aliases = [
+                    alias
+                    for alias in aliases
+                    if not any(other is not alias and depends_on_data(other.input[0], alias.output[0]) for other in aliases)
+                ]
+                if len(final_aliases) == 1:
+                    return final_aliases[0].output[0]
                 return function_input
             raise ValueError(
                 f"Could not uniquely resolve a retained-state writer in nested function '{fn.name}': "
@@ -439,7 +454,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         final_writers = [
             writer
             for writer in writers
-            if not any(other is not writer and depends_on(other.input[0], writer.output[0]) for other in writers)
+            if not any(other is not writer and depends_on_data(other.input[0], writer.output[0]) for other in writers)
         ]
         if len(final_writers) != 1:
             writer_names = [
@@ -545,6 +560,8 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             # V4's local KV cache) do not follow the shared state-kind naming
             # convention above. Preserve those by resolving their scatter
             # writers from the positional function inputs.
+            original_outputs = list(fn.output)
+            retained_state_values: dict[str, str] = {}
             for input_index, retained_input in enumerate(node.input):
                 if retained_input not in remaining_dangling_outputs:
                     continue
@@ -560,9 +577,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
                 function_input = fn.input[input_index]
                 scatter_output = cls._resolve_retained_state_output(fn, function_input, allow_unchanged=True)
-                if scatter_output not in fn.output:
-                    fn.output.append(scatter_output)
-                    changed = True
+                retained_state_values[retained_input] = scatter_output
 
                 plain_input = re.sub(r"_(?:Internal)?RetainedState$", "", retained_input)
                 state_rename_map[retained_input] = plain_input
@@ -570,6 +585,24 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                     node.output.append(retained_input)
                     changed = True
                 remaining_dangling_outputs.discard(retained_input)
+
+            if retained_state_values:
+                aligned_outputs = []
+                for output_index, call_output in enumerate(node.output):
+                    retained_state_value = retained_state_values.get(call_output)
+                    if retained_state_value is not None:
+                        aligned_outputs.append(retained_state_value)
+                    elif output_index < len(original_outputs):
+                        aligned_outputs.append(original_outputs[output_index])
+                    else:
+                        raise ValueError(
+                            f"Nested function '{fn.name}' has no result for call output "
+                            f"'{call_output}' at position {output_index}."
+                        )
+                if list(fn.output) != aligned_outputs:
+                    del fn.output[:]
+                    fn.output.extend(aligned_outputs)
+                    changed = True
         retained_output_names = {output.name for output in graph.output if output.name.endswith("_RetainedState")}
         for graph_input in graph.input:
             match = cls._STATE_INPUT_RE.match(graph_input.name)

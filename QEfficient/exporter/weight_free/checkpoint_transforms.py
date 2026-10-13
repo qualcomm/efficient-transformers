@@ -289,9 +289,13 @@ class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
         out: Path,
         target_dtype: torch.dtype = torch.float32,
         num_hidden_layers: Optional[int] = None,
+        moe_prefill_num_pipeline_stages: Optional[int] = None,
+        moe_prefill_num_parallelized_experts: Optional[int] = None,
         **kwargs,
     ) -> bool:
         """Rename dense tensors and dequantize/stack the selected routed-expert layers."""
+        if (moe_prefill_num_pipeline_stages is None) != (moe_prefill_num_parallelized_experts is None):
+            raise ValueError("DeepSeek V4 expert-parallel checkpoint packing requires both layout dimensions.")
         sentinel = out / _SENTINEL
         if sentinel.exists():
             logger.info("DeepseekV4CheckpointTransform: prepared checkpoint exists, skipping.")
@@ -387,11 +391,32 @@ class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
                         scale = checkpoint.get_tensor(scale_key)
                     dequantized[projection].append(dequantizer._dequantize_one(weight, scale, target_dtype))
 
-            tensors = {
-                f"model.layers.{layer_idx}.mlp.experts.gate_proj": torch.stack(dequantized["w1"]).transpose(1, 2),
-                f"model.layers.{layer_idx}.mlp.experts.up_proj": torch.stack(dequantized["w3"]).transpose(1, 2),
-                f"model.layers.{layer_idx}.mlp.experts.down_proj": torch.stack(dequantized["w2"]).transpose(1, 2),
-            }
+            gate = torch.stack(dequantized["w1"]).transpose(1, 2)
+            up = torch.stack(dequantized["w3"]).transpose(1, 2)
+            down = torch.stack(dequantized["w2"]).transpose(1, 2)
+            if moe_prefill_num_pipeline_stages is None:
+                tensors = {
+                    f"model.layers.{layer_idx}.mlp.experts.gate_proj": gate,
+                    f"model.layers.{layer_idx}.mlp.experts.up_proj": up,
+                    f"model.layers.{layer_idx}.mlp.experts.down_proj": down,
+                }
+            else:
+                num_pipeline_stages = moe_prefill_num_pipeline_stages
+                num_parallelized_experts = moe_prefill_num_parallelized_experts
+                if len(expert_indices) != num_pipeline_stages * num_parallelized_experts:
+                    raise ValueError(
+                        f"DeepSeek-V4 layer {layer_idx} has {len(expert_indices)} experts, which does not match "
+                        f"expert-parallel layout {num_pipeline_stages} x {num_parallelized_experts}."
+                    )
+
+                def pack(tensor: torch.Tensor) -> torch.Tensor:
+                    return tensor.view(num_pipeline_stages, num_parallelized_experts, *tensor.shape[1:]).transpose(0, 1)
+
+                tensors = {
+                    f"model.layers.{layer_idx}.mlp.moe_weights.gate": pack(gate),
+                    f"model.layers.{layer_idx}.mlp.moe_weights.up": pack(up),
+                    f"model.layers.{layer_idx}.mlp.moe_weights.down": pack(down),
+                }
             out_name = f"experts-layer-{layer_idx:05d}.safetensors"
             atomic_save(tensors, out / out_name)
             new_weight_map.update({key: out_name for key in tensors})

@@ -316,6 +316,16 @@ def _prepare_checkpoint_for_weight_free_export(
                 prepared_out,
                 target_dtype=target_dtype,
                 num_hidden_layers=getattr(config, "num_hidden_layers", None),
+                moe_prefill_num_pipeline_stages=(
+                    hash_params.get("moe_prefill_num_pipeline_stages")
+                    if hash_params.get("moe_prefill_flavour") == "expert_parallel"
+                    else None
+                ),
+                moe_prefill_num_parallelized_experts=(
+                    hash_params.get("moe_prefill_num_parallelized_experts")
+                    if hash_params.get("moe_prefill_flavour") == "expert_parallel"
+                    else None
+                ),
             )
             return str(prepared_out)
 

@@ -1675,7 +1675,84 @@ class FFNBlockingTransform(PytorchTransform):
             if isinstance(module, QEffDeepseekV4Experts):
                 module.configure_ffn_blocking(mode, token_block_size, weight_block_size)
                 transformed = True
+
         return model, transformed
+
+
+class DeepseekV4PrefillMoETransform(PytorchTransform):
+    """Configure expert-parallel routed MoE only for DeepSeek V4 prefill exports."""
+
+    @classmethod
+    def apply(
+        cls,
+        model: nn.Module,
+        *,
+        prefill_only: bool = False,
+        batch_size: int = 1,
+        num_devices: int = 1,
+        num_cores: int = DEFAULT_AIC_NUM_CORES,
+        qaic_config: dict | None = None,
+        prefill_seq_len: int | None = None,
+        hash_params: dict | None = None,
+    ) -> tuple[nn.Module, bool]:
+        modules = [module for module in model.modules() if isinstance(module, QEffDeepseekV4SparseMoeBlock)]
+        if not modules:
+            return model, False
+        if not prefill_only:
+            for module in modules:
+                module.configure_prefill_expert_parallel(enabled=False)
+            return model, True
+
+        from QEfficient.transformers.moe import MoEFlavour
+
+        moe_config = (qaic_config or {}).get("moe_config", {}) or {}
+        requested_flavour = moe_config.get("flavour")
+        if requested_flavour not in (None, MoEFlavour.EXPERT_PARALLEL.value):
+            raise NotImplementedError(
+                "DeepSeek V4 prefill supports only moe_config['flavour']='expert_parallel'."
+            )
+        cores_per_expert = int(moe_config.get("cores_per_expert", 1))
+        tree_reduce = moe_config.get("tree_reduce", False)
+        if not isinstance(tree_reduce, bool):
+            raise TypeError("qaic_config['moe_config']['tree_reduce'] must be a boolean")
+        chunk_size = int(moe_config.get("expert_parallel_chunk_size", MOE_PREFILL_PACKED_CHUNK_SIZE))
+        if chunk_size <= 0:
+            raise ValueError("moe expert_parallel_chunk_size must be greater than zero")
+        compile_tokens = int(batch_size) * int(prefill_seq_len or ONNX_EXPORT_EXAMPLE_SEQ_LEN)
+        num_packed_chunks = max(1, -(-compile_tokens // chunk_size))
+
+        layout = None
+        for module in modules:
+            layout = _resolve_expert_parallel_layout(
+                num_experts=module.experts.num_experts,
+                num_devices=int(num_devices),
+                num_cores=int(num_cores),
+                cores_per_expert=cores_per_expert,
+            )
+            total_avl_cores, num_pipeline_stages, num_parallelized_experts, experts_per_soc = layout
+            module.configure_prefill_expert_parallel(
+                enabled=True,
+                num_pipeline_stages=num_pipeline_stages,
+                num_parallelized_experts=num_parallelized_experts,
+                num_devices=int(num_devices),
+                experts_per_soc=experts_per_soc,
+                tree_reduce=tree_reduce,
+                num_packed_chunks=num_packed_chunks,
+            )
+            module.total_avl_cores = total_avl_cores
+            module.cores_per_expert = cores_per_expert
+
+        if hash_params is not None and layout is not None:
+            total_avl_cores, num_pipeline_stages, num_parallelized_experts, _ = layout
+            hash_params["moe_prefill_flavour"] = MoEFlavour.EXPERT_PARALLEL.value
+            hash_params["moe_prefill_total_avl_cores"] = total_avl_cores
+            hash_params["moe_prefill_cores_per_expert"] = cores_per_expert
+            hash_params["moe_prefill_tree_reduce"] = tree_reduce
+            hash_params["moe_prefill_num_pipeline_stages"] = num_pipeline_stages
+            hash_params["moe_prefill_num_parallelized_experts"] = num_parallelized_experts
+            hash_params["moe_prefill_expert_parallel_chunk_size"] = chunk_size
+            hash_params["moe_prefill_num_packed_chunks"] = num_packed_chunks
+        return model, True
 
 
 def _iter_optimized_moe_modules(model: nn.Module):

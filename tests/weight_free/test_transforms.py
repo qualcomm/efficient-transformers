@@ -323,6 +323,22 @@ class TestWeightFreeCheckpointTransforms:
         torch.testing.assert_close(tensors["model.layers.0.mlp.experts.up_proj"], expected)
         torch.testing.assert_close(tensors["model.layers.0.mlp.experts.down_proj"], expected)
 
+        prefill_out = tmp_path / "prefill-out"
+        changed = DeepseekV4CheckpointTransform.apply(
+            src,
+            prefill_out,
+            target_dtype=torch.float32,
+            num_hidden_layers=1,
+            moe_prefill_num_pipeline_stages=1,
+            moe_prefill_num_parallelized_experts=1,
+        )
+
+        assert changed
+        prefill_tensors = _load_prepared_tensors(prefill_out)
+        assert "model.layers.0.mlp.experts.gate_proj" not in prefill_tensors
+        assert prefill_tensors["model.layers.0.mlp.moe_weights.gate"].shape == (1, 1, 1, 2)
+        torch.testing.assert_close(prefill_tensors["model.layers.0.mlp.moe_weights.gate"], expected.unsqueeze(0))
+
     @pytest.mark.skipif(not hasattr(torch, "float8_e8m0fnu"), reason="PyTorch does not provide UE8M0 tensors")
     def test_deepseek_v4_transform_decodes_ue8m0_scales(self):
         scale = torch.tensor([0.5, 1.0], dtype=torch.float8_e8m0fnu)

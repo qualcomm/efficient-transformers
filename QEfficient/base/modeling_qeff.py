@@ -48,6 +48,7 @@ from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolv
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.pytorch_transforms import (
     BlockingAttentionTransform,
+    DeepseekV4PrefillMoETransform,
     GatedDeltaConfigTransform,
     FFNBlockingTransform,
     OptimizedMoETransform,
@@ -1343,6 +1344,16 @@ class QEFFBaseModel(ABC):
         if mdp_num_partitions > 1:
             moe_num_devices = moe_num_devices // mdp_num_partitions
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
+        self.model, _ = DeepseekV4PrefillMoETransform.apply(
+            self.model,
+            prefill_only=bool(compiler_options.get("prefill_only", False)),
+            batch_size=moe_batch_size,
+            num_devices=moe_num_devices,
+            num_cores=num_cores,
+            qaic_config=qaic_config,
+            prefill_seq_len=prefill_seq_len,
+            hash_params=self.hash_params,
+        )
         self.model, _ = OptimizedMoETransform.apply(
             self.model,
             prefill_only=bool(compiler_options.get("prefill_only", False)),
