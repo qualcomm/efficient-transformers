@@ -4082,19 +4082,18 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         return self.model.config.__dict__
 
     def handle_gpt_oss_env_variable_legacy_burden(self, prefill_seq_len: Optional[int] = None) -> int:
-        """Resolve export seq_len and populate hash_params from GPT-OSS blocking env variables.
+        """Resolve export seq_len and populate hash_params from GPT-OSS blocking configuration.
 
-        GPT-OSS prefill blocking is controlled by two env variables:
+        GPT-OSS prefill blocking is controlled by two parameters:
 
         * NUM_Q_BLOCKS  — number of query blocks in the blocked attention forward.
           Can also be inferred from prefill_seq_len / GPT_OSS_PREFILL_Q_BLOCK_SIZE when
           blocking_kwargs is not yet wired (legacy entry path).
 
-        * NUM_FFN_BLOCKS — number of token-dimension blocks in the MoE expert loop.
-          Preserved for backward compatibility: QEffGptOssMLP.execute_moe_flavour()
-          reads this env variable at forward time and bypasses the configured _moe_flavour
-          in favour of a token-blocked moe_simple_loop pass. Including it in hash_params
-          ensures exports with and without FFN blocking map to distinct compiled artifacts.
+        * num_ffn_blocks — number of token-dimension blocks in the MoE expert loop.
+          Preferred path: set via ``qaic_config['moe_config']['num_ffn_blocks']``.
+          Deprecated fallback: ``NUM_FFN_BLOCKS`` environment variable (will be removed
+          in a future release).
 
         The returned int is the minimum seq_len that satisfies both blocking divisibility
         constraints, clamped up to ONNX_EXPORT_EXAMPLE_SEQ_LEN when necessary.
@@ -4120,12 +4119,22 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         num_q_blocks = int(num_q_blocks)
 
-        num_ffn_blocks = os.environ.get("NUM_FFN_BLOCKS", None)
-        num_ffn_blocks = int(num_ffn_blocks) if num_ffn_blocks else num_ffn_blocks
+        # Preferred path: num_ffn_blocks written into hash_params by OptimizedMoEExportConfigTransform.
+        num_ffn_blocks = self.hash_params.get("num_ffn_blocks", None)
+        if num_ffn_blocks is None:
+            env_val = os.environ.get("NUM_FFN_BLOCKS", None)
+            if env_val is not None:
+                logger.warning(
+                    "NUM_FFN_BLOCKS environment variable is deprecated. "
+                    "Pass num_ffn_blocks via qaic_config['moe_config']['num_ffn_blocks'] instead."
+                )
+                num_ffn_blocks = int(env_val)
+        if num_ffn_blocks is not None:
+            num_ffn_blocks = int(num_ffn_blocks)
         min_seq_len = max(num_q_blocks, num_ffn_blocks) if num_ffn_blocks else num_q_blocks
         if (num_ffn_blocks and min_seq_len % num_ffn_blocks != 0) or min_seq_len % num_q_blocks != 0:
             raise ValueError(
-                f"Got NUM_FFN_BLOCKS={num_ffn_blocks} and NUM_Q_BLOCKS={num_q_blocks}, tried to set seq_len={min_seq_len} for export but,"
+                f"Got num_ffn_blocks={num_ffn_blocks} and NUM_Q_BLOCKS={num_q_blocks}, tried to set seq_len={min_seq_len} for export but,"
                 "seq_len is not divisible by either num_ffn_blocks or num_q_blocks, try changing the values."
             )
 

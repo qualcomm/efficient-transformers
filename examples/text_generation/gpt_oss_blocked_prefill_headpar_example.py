@@ -102,6 +102,12 @@ def parse_args():
         default=None,
         help="MoE I-dim block size to reduce VTCM pressure (expert_intermediate_block_size in moe_config). None = no blocking.",
     )
+    parser.add_argument(
+        "--num-ffn-blocks",
+        type=int,
+        default=None,
+        help="Number of token-dimension blocks in the MoE expert loop (num_ffn_blocks in moe_config). None = no token blocking.",
+    )
     return parser.parse_args()
 
 
@@ -225,6 +231,7 @@ def main():
                 if args.moe_intermediate_block_size is not None
                 else {}
             ),
+            **({"num_ffn_blocks": args.num_ffn_blocks} if args.num_ffn_blocks is not None else {}),
         },
     }
 

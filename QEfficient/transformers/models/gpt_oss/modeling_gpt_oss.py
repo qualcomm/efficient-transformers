@@ -121,15 +121,24 @@ class QEffGptOssExperts(GptOssExperts):
         return (top_i, top_w), router_logits
 
     def execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:
-        """Override to preserve backward-compatible NUM_FFN_BLOCKS token-blocking behaviour.
+        """Override for token-blocked simple-loop when num_ffn_blocks is configured.
 
-        When NUM_FFN_BLOCKS is set, iterates outer-expert inner-token-block so each
-        expert's weights are loaded once and reused across all token blocks before moving
-        to the next expert. This preserves the CopyToVTCM+compute pipelining that the
-        compiler can exploit (weights stay hot across token blocks). When NUM_FFN_BLOCKS
-        is not set, dispatch falls through to the standard flavour path.
+        When ``expert_num_ffn_blocks`` is set (via ``moe_config['num_ffn_blocks']``),
+        iterates outer-expert inner-token-block so each expert's weights are loaded once
+        and reused across all token blocks before moving to the next expert. This
+        preserves the CopyToVTCM+compute pipelining that the compiler can exploit
+        (weights stay hot across token blocks). When not set, dispatch falls through
+        to the standard flavour path.
         """
-        num_ffn_blocks = os.environ.get("NUM_FFN_BLOCKS", None)
+        num_ffn_blocks = getattr(self, "expert_num_ffn_blocks", None)
+        if num_ffn_blocks is None:
+            env_val = os.environ.get("NUM_FFN_BLOCKS", None)
+            if env_val is not None:
+                logger.warning(
+                    "NUM_FFN_BLOCKS environment variable is deprecated. "
+                    "Pass num_ffn_blocks via qaic_config['moe_config']['num_ffn_blocks'] instead."
+                )
+                num_ffn_blocks = int(env_val)
         if num_ffn_blocks is None:
             return super().execute_moe_flavour(x, routing)
 
@@ -138,7 +147,6 @@ class QEffGptOssExperts(GptOssExperts):
                 f"{type(self).__name__} weights are not transformed; run OptimizedMoEWeightsTransform before forward"
             )
 
-        num_ffn_blocks = int(num_ffn_blocks)
         T, H = x.shape
         dense, _ = resolve_routing(routing, self.moe_weights.num_experts)
         block_size = T // num_ffn_blocks

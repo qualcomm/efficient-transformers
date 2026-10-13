@@ -61,6 +61,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     tree_reduce: bool = False
     expert_parallel_num_packed_chunks: int = 1
     expert_intermediate_block_size: Optional[int] = None
+    expert_num_ffn_blocks: Optional[int] = None
     # Set by OptimizedMoEWeightsTransform after model-local canonicalization.
     weights_transformed: bool = False
 
