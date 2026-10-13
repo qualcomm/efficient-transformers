@@ -207,3 +207,55 @@ class MiniMaxM3StaticPrefillLoopTransform(BaseOnnxTransform):
         if matched_loops == 0:
             raise ValueError("Could not find the exported MiniMax MSA prefill query-chunk Loop.")
         return transformed
+
+
+class MiniMaxM3SignRewriteTransform(BaseOnnxTransform):
+    """Rewrite ONNX Sign as Greater/Less comparisons, which the AIC compiler supports for integer tensors."""
+
+    _apply_with_pipeline_kwargs = True
+
+    @staticmethod
+    def _sign_replacement(node: onnx.NodeProto) -> list[onnx.NodeProto]:
+        x, y = node.input[0], node.output[0]
+        zero, zero_like = f"{y}_sign_zero", f"{y}_sign_zero_like"
+        positive, negative = f"{y}_sign_pos", f"{y}_sign_neg"
+        positive_cast, negative_cast = f"{y}_sign_pos_cast", f"{y}_sign_neg_cast"
+        zero_const = onnx.helper.make_tensor(f"{zero}_value", onnx.TensorProto.INT64, [], [0])
+        return [
+            onnx.helper.make_node("Constant", [], [zero], value=zero_const),
+            onnx.helper.make_node("CastLike", [zero, x], [zero_like]),
+            onnx.helper.make_node("Greater", [x, zero_like], [positive]),
+            onnx.helper.make_node("Less", [x, zero_like], [negative]),
+            onnx.helper.make_node("CastLike", [positive, x], [positive_cast]),
+            onnx.helper.make_node("CastLike", [negative, x], [negative_cast]),
+            onnx.helper.make_node("Sub", [positive_cast, negative_cast], [y]),
+        ]
+
+    @classmethod
+    def _rewrite_nodes(cls, nodes) -> tuple[list[onnx.NodeProto], bool]:
+        rewritten = []
+        changed = False
+        for node in nodes:
+            if node.op_type == "Sign" and node.domain in ("", "ai.onnx"):
+                rewritten.extend(cls._sign_replacement(node))
+                changed = True
+            else:
+                rewritten.append(node)
+        return rewritten, changed
+
+    @classmethod
+    def apply(cls, model: onnx.ModelProto, **kwargs) -> bool:
+        del kwargs
+        changed = False
+        for function in model.functions:
+            nodes, function_changed = cls._rewrite_nodes(function.node)
+            if function_changed:
+                del function.node[:]
+                function.node.extend(nodes)
+                changed = True
+        nodes, graph_changed = cls._rewrite_nodes(model.graph.node)
+        if graph_changed:
+            del model.graph.node[:]
+            model.graph.node.extend(nodes)
+            changed = True
+        return changed

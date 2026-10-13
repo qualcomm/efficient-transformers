@@ -244,6 +244,22 @@ def ctx_gather_rows(data, ctx_indices):
     return select_interface(CtxGatherRowsFunc.apply, torch.ops.qefficient.ctx_gather_rows)(data, ctx_indices)
 
 
+def ctx_paged_scatter_page(data: torch.Tensor, block_id: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxPagedScatterFuncPage
+
+    return select_interface(CtxPagedScatterFuncPage.apply, torch.ops.qefficient.ctx_paged_scatter_page)(
+        data, block_id, updates
+    )
+
+
+def ctx_gather_paged_kv_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncPagedKVHeads
+
+    return select_interface(CtxGatherFuncPagedKVHeads.apply, torch.ops.qefficient.ctx_gather_paged_kv_heads)(
+        data, block_ids
+    )
+
+
 def ctx_gather_blocked_kv_dp(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKVDP
 
