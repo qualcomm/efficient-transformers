@@ -7,9 +7,10 @@
 
 """MiniMax-M3 paged MSA decode example with DP/CP enabled.
 
-The paged runtime contract uses two block tables with shape
-``[dp, batch // dp, ceil(ctx_len / page_block_size)]``:
+The paged runtime contract uses three block tables with shape
+``[dp, batch // dp, ceil(num_pages / cp)]``:
 
+* ``gqa_block_table`` addresses the dense GQA KV pool.
 * ``msa_indexer_block_table`` addresses the physical index-key pool.
 * ``msa_attn_block_table`` addresses the physical attention KV pool.
 
@@ -29,16 +30,16 @@ from QEfficient import QEFFAutoModelForImageTextToText
 MODEL_ID = "MiniMaxAI/MiniMax-M3"
 
 
-def build_block_table(dp: int, batch_size: int, ctx_len: int, page_block_size: int) -> torch.Tensor:
-    """Build a DP-major ``[DP, B_local, num_pages]`` page table."""
+def build_block_table(dp: int, cp: int, batch_size: int, ctx_len: int, page_block_size: int) -> torch.Tensor:
+    """Build a DP-major ``[DP, B_local, num_page_groups]`` page table."""
     if batch_size % dp:
         raise ValueError("batch_size must be divisible by dp")
-    pages = math.ceil(ctx_len / page_block_size)
+    page_groups = math.ceil(math.ceil(ctx_len / page_block_size) / cp)
     batch_local = batch_size // dp
-    physical_pages_per_dp = batch_local * pages
-    table = torch.empty((dp, batch_local, pages), dtype=torch.int32)
+    physical_pages_per_dp = batch_local * page_groups
+    table = torch.empty((dp, batch_local, page_groups), dtype=torch.int32)
     for dp_idx in range(dp):
-        table[dp_idx] = torch.randperm(physical_pages_per_dp, dtype=torch.int32).view(batch_local, pages)
+        table[dp_idx] = torch.randperm(physical_pages_per_dp, dtype=torch.int32).view(batch_local, page_groups)
     return table
 
 
@@ -58,6 +59,8 @@ def main() -> None:
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--page-block-size", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--attn-dp", type=int, default=1)
+    parser.add_argument("--attn-cp", type=int, default=1)
     parser.add_argument("--msa-indexer-dp", type=int, default=2)
     parser.add_argument("--msa-indexer-cp", type=int, default=1)
     parser.add_argument("--msa-attn-dp", type=int, default=2)
@@ -96,8 +99,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if any(value < 1 for value in (args.msa_indexer_dp, args.msa_indexer_cp, args.msa_attn_dp, args.msa_attn_cp)):
-        parser.error("All MSA DP/CP factors must be positive")
+    if any(
+        value < 1
+        for value in (
+            args.attn_dp,
+            args.attn_cp,
+            args.msa_indexer_dp,
+            args.msa_indexer_cp,
+            args.msa_attn_dp,
+            args.msa_attn_cp,
+        )
+    ):
+        parser.error("All GQA and MSA DP/CP factors must be positive")
     if args.num_kv_blocks < 1:
         parser.error("--num-kv-blocks must be positive")
     if args.indexer_num_blocks is not None and args.indexer_num_blocks < 1:
@@ -106,9 +119,11 @@ def main() -> None:
         parser.error("--msa-num-kv-blocks must be positive")
     if args.ctx_len % args.page_block_size:
         parser.error("--ctx-len must be divisible by --page-block-size")
+    if (args.ctx_len // args.page_block_size) % args.attn_cp:
+        parser.error("The number of GQA pages must be divisible by --attn-cp")
     if (args.ctx_len // args.page_block_size) % args.msa_attn_cp:
         parser.error("The number of attention pages must be divisible by --msa-attn-cp")
-    dp_lcm = math.lcm(args.msa_indexer_dp, args.msa_attn_dp)
+    dp_lcm = math.lcm(args.attn_dp, args.msa_indexer_dp, args.msa_attn_dp)
     execution_batch_size = args.batch_size * dp_lcm
     if execution_batch_size % args.msa_indexer_dp or execution_batch_size % args.msa_attn_dp:
         parser.error("DP factors must divide the execution batch size")
@@ -128,6 +143,8 @@ def main() -> None:
     qaic_config = {
         "blocking_mode": "kv_headpar",
         "num_kv_blocks": args.num_kv_blocks,
+        "attn_dp": args.attn_dp,
+        "attn_cp": args.attn_cp,
         "indexer_num_blocks": args.indexer_num_blocks,
         "msa_num_kv_blocks": args.msa_num_kv_blocks,
         "msa_indexer_dp": args.msa_indexer_dp,
@@ -177,8 +194,14 @@ def main() -> None:
     inputs = expand_batch(inputs, execution_batch_size)
 
     # Tables are DP-major even though input_ids are flattened as [DP * B_local, ...].
-    indexer_table = build_block_table(args.msa_indexer_dp, execution_batch_size, args.ctx_len, args.page_block_size)
-    attention_table = build_block_table(args.msa_attn_dp, execution_batch_size, args.ctx_len, args.page_block_size)
+    gqa_table = build_block_table(args.attn_dp, args.attn_cp, execution_batch_size, args.ctx_len, args.page_block_size)
+    indexer_table = build_block_table(
+        args.msa_indexer_dp, args.msa_indexer_cp, execution_batch_size, args.ctx_len, args.page_block_size
+    )
+    attention_table = build_block_table(
+        args.msa_attn_dp, args.msa_attn_cp, execution_batch_size, args.ctx_len, args.page_block_size
+    )
+    inputs["gqa_block_table"] = gqa_table
     inputs["msa_indexer_block_table"] = indexer_table
     inputs["msa_attn_block_table"] = attention_table
 
