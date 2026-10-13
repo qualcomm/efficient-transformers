@@ -27,6 +27,7 @@ For the complete list of supported audio models, see the [Validated Models - Aud
 Popular models include:
 - Whisper (tiny, base, small, medium, large, large-v3-turbo)
 - Wav2Vec2 (base-960h)
+- Cohere Transcribe
 
 ## Available Examples
 
@@ -79,6 +80,12 @@ This example:
 - Uses Wav2Vec2-base-960h model by default
 - Compiles and runs inference on Cloud AI 100
 - Outputs the recognized text
+
+### cohere_asr_inference.py
+
+Compile a Cohere ASR QPC and transcribe a local audio file, or reuse an
+existing QPC. See [Cohere ASR on Cloud AI 100](COHERE_ASR.md) for the complete
+customer workflow.
 
 ## Documentation
 

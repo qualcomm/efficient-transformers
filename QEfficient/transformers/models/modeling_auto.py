@@ -5274,8 +5274,14 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         str
             Path to the generated ONNX graph file.
         """
-        inputs = self.model.get_dummy_inputs()
+        dummy_input_kwargs = {
+            key: kwargs[key] for key in ("batch_size", "encoder_ctx_len") if kwargs.get(key) is not None
+        }
+        inputs = self.model.get_dummy_inputs(**dummy_input_kwargs)
         dynamic_axes = self.model.get_onnx_dynamic_axes()
+        get_export_hash_params = getattr(self.model, "get_export_hash_params", None)
+        if callable(get_export_hash_params):
+            self.hash_params["speech_export"] = get_export_hash_params(**dummy_input_kwargs)
         output_names = self.model.get_output_names()
         return self._export(
             inputs,
@@ -5387,6 +5393,19 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
 
         output_names = self.model.get_output_names()
 
+        if onnx_path is None:
+            weights_offloaded = self._is_weights_offloaded or any(param.is_meta for param in self.model.parameters())
+            if self.onnx_path is not None and weights_offloaded and not self._weight_free:
+                onnx_path = self.onnx_path
+            else:
+                export_kwargs = {
+                    "export_dir": compile_dir,
+                    "encoder_ctx_len": encoder_ctx_len,
+                    "batch_size": batch_size,
+                    "use_onnx_subfunctions": use_onnx_subfunctions,
+                }
+                onnx_path = self.export(**export_kwargs)
+
         target_dtype = getattr(self.model.config, "torch_dtype", torch.float32)
         kv_cache_dtype = CUSTOM_IO_DTYPE_MAP[target_dtype]
         custom_io = {}
@@ -5459,66 +5478,98 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         if not isinstance(self.qpc_path, Path):
             raise TypeError("Please run compile API first!")
 
-        inputs = self.auto_correct_inputs(inputs)
         if self.qpc_session is None:
             self.qpc_session = QAICInferenceSession(str(self.qpc_path), device_ids)
             self.batch_size = self.qpc_session.bindings[0].dims[0]
 
-        inputs["input_features"] = inputs["input_features"].numpy().astype(np.float16)
+        inputs = dict(inputs)
+        decoder_prompt = inputs.pop("decoder_input_ids", None)
+        feature_binding = self.qpc_session.bindings[self.qpc_session.binding_index_map["input_features"]]
+        input_features_shape = tuple(feature_binding.dims)
 
-        # add start token id and initial position ids to inputs
-        seq_len = 1
-        inputs["input_ids"] = (
-            torch.ones((self.batch_size, seq_len), dtype=torch.int64) * self.model.config.decoder_start_token_id
-        ).numpy()
-        inputs["position_ids"] = (
-            torch.arange(seq_len, dtype=torch.int64).view(1, seq_len).repeat(self.batch_size, 1).numpy()
-        )
+        def binding_numpy_dtype(name: str, fallback: np.dtype) -> np.dtype:
+            binding_index = self.qpc_session.binding_index_map.get(name)
+            if binding_index is None:
+                return fallback
+            binding = self.qpc_session.bindings[binding_index]
+            dtype_mapping = getattr(self.qpc_session, "aic_to_np_dtype_mapping", {})
+            return dtype_mapping.get(getattr(binding, "type", None), fallback)
+
+        input_features_dtype = binding_numpy_dtype("input_features", np.float16)
+        logits_dtype = binding_numpy_dtype("logits", np.float16)
+        prepare_qpc_generation_inputs = getattr(self.model, "prepare_qpc_generation_inputs", None)
+        if callable(prepare_qpc_generation_inputs):
+            inputs = prepare_qpc_generation_inputs(inputs, input_features_shape)
+
+        inputs = self.auto_correct_inputs(inputs)
+        inputs["input_features"] = inputs["input_features"].numpy().astype(input_features_dtype)
+        if "feature_lengths" in inputs:
+            inputs["feature_lengths"] = inputs["feature_lengths"].numpy().astype(np.int64)
+
+        if decoder_prompt is None:
+            decoder_prompt = torch.full(
+                (self.batch_size, 1), self.model.config.decoder_start_token_id, dtype=torch.int64
+            )
+        if isinstance(decoder_prompt, torch.Tensor):
+            decoder_prompt = decoder_prompt.detach().cpu().numpy()
+        decoder_prompt = np.asarray(decoder_prompt, dtype=np.int64)
+        if decoder_prompt.ndim != 2 or decoder_prompt.shape[0] != self.batch_size:
+            raise RuntimeError(
+                f"decoder_input_ids must have shape ({self.batch_size}, prompt_length), got {decoder_prompt.shape}"
+            )
+        prompt_length = decoder_prompt.shape[1]
+        if prompt_length == 0:
+            raise RuntimeError("decoder_input_ids must contain at least one prompt token")
 
         self.qpc_session.skip_buffers(
             [x for x in self.qpc_session.input_names + self.qpc_session.output_names if is_retained_state_name(x)]
         )
 
         outputs = {
-            "logits": np.random.randn(self.batch_size, 1, self.model.config.vocab_size).astype(np.float32),
+            "logits": np.random.randn(self.batch_size, 1, self.model.config.vocab_size).astype(logits_dtype),
         }
         self.qpc_session.set_buffers(outputs)
 
-        # encoder run
+        # Run the encoder with the first prompt token, then consume any remaining
+        # processor prompt tokens through cached decode before generation starts.
         start = perf_counter()
-        outputs = self.qpc_session.run(inputs)
-
-        # array to hold generated tokens
-        generated_ids = np.full((self.batch_size, generation_len + 1), self.model.config.eos_token_id)
-        generated_ids[:, 0] = [self.model.config.decoder_start_token_id]
-        logits = outputs["logits"]
-        next_token = logits.argmax(-1)
-        generated_ids[:, 1] = next_token.squeeze(1)
-
-        if streamer:
-            streamer.put(next_token)
-
-        inputs["input_features"] = np.zeros((self.batch_size, self.model.config.num_mel_bins, 1)).astype(np.float16)
-
-        loop_start = perf_counter()
-        for num_tokens in range(generation_len):
+        outputs = None
+        for prompt_position in range(prompt_length):
+            inputs["input_ids"] = decoder_prompt[:, prompt_position : prompt_position + 1]
+            inputs["position_ids"] = np.full((self.batch_size, 1), prompt_position, dtype=np.int64)
             outputs = self.qpc_session.run(inputs)
+            inputs["input_features"] = np.zeros(
+                (self.batch_size, input_features_shape[1], 1), dtype=input_features_dtype
+            )
 
+        generated_ids = np.full(
+            (self.batch_size, prompt_length + generation_len), self.model.config.eos_token_id, dtype=np.int64
+        )
+        generated_ids[:, :prompt_length] = decoder_prompt
+        finished = np.zeros(self.batch_size, dtype=bool)
+        loop_start = perf_counter()
+        generated_count = 0
+        for generated_index in range(generation_len):
             logits = outputs["logits"]
-            next_token = logits.argmax(-1)
-            generated_ids[:, num_tokens + 1] = next_token.squeeze(1)
-
-            if next_token[0][0] == self.model.config.eos_token_id:
-                break
-
-            inputs["input_ids"] = next_token
-            inputs["position_ids"] += 1
+            next_token = logits.argmax(-1).reshape(self.batch_size).astype(np.int64)
+            next_token = np.where(finished, self.model.config.eos_token_id, next_token)
+            generated_ids[:, prompt_length + generated_index] = next_token
+            generated_count = generated_index + 1
+            finished |= next_token == self.model.config.eos_token_id
 
             if streamer:
-                streamer.put(next_token)
+                streamer.put(next_token[:, None])
+            if finished.all() or generated_count == generation_len:
+                break
+
+            inputs["input_ids"] = np.where(finished, self.model.config.eos_token_id, next_token)[:, None]
+            inputs["position_ids"] = np.full((self.batch_size, 1), prompt_length + generated_index, dtype=np.int64)
+            outputs = self.qpc_session.run(inputs)
         end = perf_counter()
 
-        prefill_time, decode_perf, total_perf, total_time = calculate_latency(num_tokens, loop_start, start, end)
+        prefill_time, decode_perf, total_perf, total_time = calculate_latency(
+            max(generated_count - 1, 0), loop_start, start, end
+        )
 
         return CloudAI100ExecInfoNew(
             batch_size=self.batch_size,
