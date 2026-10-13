@@ -80,30 +80,51 @@ def blocked_glm_dsa_topk(
             invalid = invalid | block_mask
         scores = scores.masked_fill(invalid, float("-inf"))
 
+        # Keep every scored token until all indexer blocks have contributed.
+        # Top-K is a reduction over the complete CP-local context, not over an
+        # individual indexer block.  This matches the benchmark dataflow and
+        # keeps the number of logical Top-K stages independent of num_blocks.
         expanded_ids = global_ids.expand(batch_local, dp, query_length, cp, block_width)
-        if cp == 1:
-            # DP16/CP1 requires one global Top-K over the complete local context.
-            # Retain all block scores so export does not emit one intermediate
-            # Top-K node per indexer block.
-            candidate_scores.append(scores)
-            candidate_indices.append(expanded_ids)
-        else:
-            # Preserve the existing two-stage behavior for CP>1.
-            selected = torch.topk(scores, k=block_topk, dim=-1)
-            candidate_scores.append(selected.values.reshape(batch_local, dp, query_length, cp * block_topk))
-            candidate_indices.append(
-                torch.gather(expanded_ids, -1, selected.indices).reshape(
-                    batch_local, dp, query_length, cp * block_topk
-                )
-            )
+        candidate_scores.append(scores)
+        candidate_indices.append(expanded_ids)
 
     candidate_scores = torch.cat(candidate_scores, dim=-1)
     candidate_indices = torch.cat(candidate_indices, dim=-1)
+
+    # First reduce each CP shard independently.  The core dimension is already
+    # folded into the CP-local token dimension by the layout above, so this is
+    # one logical Top-K per (DP, CP) lane regardless of the number of cores or
+    # indexer blocks.
+    local_context = candidate_scores.shape[-1]
+    local_topk = min(final_topk, local_context)
+    local_scores, local_order = torch.topk(
+        candidate_scores.to(torch.float16),
+        k=local_topk,
+        dim=-1,
+        sorted=False,
+    )
+    local_indices = torch.gather(candidate_indices, -1, local_order)
+
     if cp == 1:
-        candidate_scores = candidate_scores.squeeze(3)
-        candidate_indices = candidate_indices.squeeze(3)
-    selected = torch.topk(candidate_scores, k=final_topk, dim=-1).indices
-    return torch.gather(candidate_indices, -1, selected).reshape(batch_size, query_length, final_topk).to(torch.int32)
+        selected_indices = local_indices.squeeze(3)
+        selected_topk = local_topk
+    else:
+        # Merge only the CP candidates belonging to the same DP lane.  DP
+        # lanes represent independent batch partitions and must never be
+        # merged with one another.
+        merged_scores = local_scores.reshape(batch_local, dp, query_length, cp * local_topk)
+        merged_indices = local_indices.reshape(batch_local, dp, query_length, cp * local_topk)
+        merged_topk = min(final_topk, cp * local_topk)
+        _, merged_order = torch.topk(
+            merged_scores,
+            k=merged_topk,
+            dim=-1,
+            sorted=False,
+        )
+        selected_indices = torch.gather(merged_indices, -1, merged_order)
+        selected_topk = merged_topk
+
+    return selected_indices.reshape(batch_size, query_length, selected_topk).to(torch.int32)
 
 
 def blocked_glm_dsa_prefill_topk(

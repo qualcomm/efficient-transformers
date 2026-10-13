@@ -176,6 +176,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-free", action="store_true")
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
+    parser.add_argument("--user-tiled", action="store_true")
     parser.add_argument("--cache-io-dtype", choices=("float16", "mxint8"), default="float16")
     parser.add_argument(
         "--ffn-blocking-mode",
@@ -354,6 +355,7 @@ def compile_weight_free_decode_only(
     num_devices: int,
     num_cores: int,
     cache_io_dtype: str,
+    user_tiled: bool,
 ):
     """Compile the validated single-token GLM weight-free specialization."""
     custom_io = {}
@@ -378,6 +380,7 @@ def compile_weight_free_decode_only(
         aic_num_cores=num_cores,
         mxint8_kv_cache=cache_io_dtype == "mxint8",
         allow_mxint8_mdp_io=cache_io_dtype == "mxint8",
+        user_tiled=user_tiled,
     )
 
 
@@ -602,6 +605,7 @@ def main() -> None:
             args.num_devices,
             args.num_cores,
             args.cache_io_dtype,
+            args.user_tiled,
         )
     else:
         qpc_path = qeff_model.compile(
