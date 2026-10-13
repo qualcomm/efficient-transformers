@@ -140,6 +140,20 @@ def ctx_gather_blocked_kv_batch(data: torch.Tensor, ctx_indices: torch.Tensor) -
     )
 
 
+def ctx_paged_scatter(data, block_id, addr, updates):
+    from QEfficient.customop.ctx_scatter_gather import CtxPagedScatterFunc
+
+    return select_interface(CtxPagedScatterFunc.apply, torch.ops.qefficient.ctx_paged_scatter)(
+        data, block_id, addr, updates
+    )
+
+
+def ctx_gather_rows(data, ctx_indices):
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherRowsFunc
+
+    return select_interface(CtxGatherRowsFunc.apply, torch.ops.qefficient.ctx_gather_rows)(data, ctx_indices)
+
+
 # ---------------------------------------------------------------------------
 # Interface functions for ctx_scatter_gather_cb ops
 # ---------------------------------------------------------------------------
