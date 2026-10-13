@@ -69,7 +69,7 @@ def gptoss_clamped_glu_mlp(
     W_d = W_d.to(x.dtype)
     b_g = b_g.to(x.dtype)
     b_u = b_u.to(x.dtype)
-    b_d = b_d.to(x.dtype)
+    b_d = b_d.to(x.dtype) if b_d is not None else None
     gate = (x @ W_g) + b_g.unsqueeze(-2)
     up = (x @ W_u) + b_u.unsqueeze(-2)
     _fp16_min = x.new_full((), torch.finfo(torch.float16).min)
