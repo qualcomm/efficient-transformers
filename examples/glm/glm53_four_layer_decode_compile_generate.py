@@ -6,7 +6,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""Run a four-layer GLM-5.3 decode-only QEff export, compile, and generation experiment."""
+"""Run a configurable GLM-5.3 decode-only export, compile, and generation experiment."""
 
 from __future__ import annotations
 
@@ -77,6 +77,16 @@ ATTENTION_PRESETS = {
         "attn_kvp": 1,
         "indexer_num_blocks": 16,
         "num_cores_per_device": 16,
+    },
+    "dsa_ts24_smoke": {
+        "indexer_dp": 1,
+        "indexer_cp": 24,
+        "indexer_kvp": 1,
+        "attn_dp": 24,
+        "attn_cp": 1,
+        "attn_kvp": 1,
+        "indexer_num_blocks": 12,
+        "num_cores_per_device": 4,
     },
 }
 
@@ -162,7 +172,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-id", default=MODEL_ID)
     parser.add_argument("--hf-cache", default=DEFAULT_HF_CACHE)
     parser.add_argument("--qeff-home", default=DEFAULT_QEFF_HOME)
-    parser.add_argument("--num-layers", type=int, default=4)
+    parser.add_argument(
+        "--num-layers",
+        type=int,
+        default=None,
+        help="Number of transformer layers. Defaults to 4 unless --full-model is set.",
+    )
+    parser.add_argument(
+        "--full-model",
+        action="store_true",
+        help="Use all transformer layers defined by the model config.",
+    )
     parser.add_argument("--prompt-len", type=int, default=32)
     parser.add_argument("--ctx-len", type=int, default=None)
     parser.add_argument("--generation-len", type=int, default=None)
@@ -363,8 +383,8 @@ def compile_weight_free_decode_only(
         for cache_name in (f"compressed_kv.{layer_idx}", f"k_pe.{layer_idx}"):
             custom_io[cache_name] = cache_io_dtype
             custom_io[f"{cache_name}_RetainedState"] = cache_io_dtype
-    for cache_idx, _ in enumerate(qeff_model.model.get_indexer_cache_layers(qeff_model.model.config)):
-        cache_name = f"indexer_key.{cache_idx}"
+    for layer_idx in qeff_model.model.get_indexer_cache_layers(qeff_model.model.config):
+        cache_name = f"indexer_key.{layer_idx}"
         custom_io[cache_name] = cache_io_dtype
         custom_io[f"{cache_name}_RetainedState"] = cache_io_dtype
 
@@ -474,6 +494,17 @@ def main() -> None:
     torch.set_grad_enabled(False)
 
     config = AutoConfig.from_pretrained(args.model_id, cache_dir=args.hf_cache)
+    full_num_layers = int(config.num_hidden_layers)
+    if args.full_model and args.num_layers is not None:
+        raise ValueError("Use either --full-model or --num-layers, not both.")
+    args.num_layers = full_num_layers if args.full_model else (
+        args.num_layers if args.num_layers is not None else 4
+    )
+    if args.num_layers < 1 or args.num_layers > full_num_layers:
+        raise ValueError(
+            f"--num-layers must be between 1 and the model's full layer count ({full_num_layers}), "
+            f"got {args.num_layers}."
+        )
     config.num_hidden_layers = args.num_layers
     config.use_cache = True
     config.torch_dtype = torch.float32
@@ -494,9 +525,6 @@ def main() -> None:
                 "Dense-vs-native-DSA validation requires prompt_len + generation_len <= index_topk "
                 f"({native_hf_config.index_topk})."
             )
-    if args.weight_free and config.num_hidden_layers != 4:
-        raise ValueError("GLM-5.3 weight-free export is currently supported only with --num-layers 4.")
-
     print(
         json.dumps(
             {
