@@ -506,15 +506,19 @@ def generate_disagg_mdp_partition_config(
     inlined_functions = {f.name for f in model.functions} - non_inlined_functions
     local_functions = {f.name: f for f in model.functions}
 
-    # The compiler MDP dump includes retained-state graph inputs and layer-scoped
-    # initializers (for example Qwen linear-attention's `_ones_lower`) as
-    # partitionable names. They are graph values rather than NodeProto entries,
-    # so collect them explicitly while excluding external parameter inputs.
+    # The compiler MDP dump includes retained-state graph inputs, layer-scoped
+    # initializers (for example Qwen linear-attention's `_ones_lower`), and
+    # weight-free MoE expert tensors as partitionable names. They are graph
+    # values rather than NodeProto entries, so collect them explicitly.
     external_values_by_layer: Dict[int, List[str]] = {}
     for graph_input in model.graph.input:
         match = _RETAINED_STATE_NAME_RE.match(graph_input.name)
+        layer_num = _get_layer_num(graph_input.name)
+        is_moe_expert_weight = ".mlp.experts.moe_weights." in graph_input.name
         if match:
             external_values_by_layer.setdefault(int(match.group(1)), []).append(graph_input.name)
+        elif layer_num is not None and is_moe_expert_weight:
+            external_values_by_layer.setdefault(layer_num, []).append(graph_input.name)
     for initializer in model.graph.initializer:
         layer_num = _get_layer_num(initializer.name)
         if layer_num is not None:
