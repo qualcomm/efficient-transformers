@@ -371,60 +371,59 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             if fn is None:
                 continue
 
-            # Identify layer index from KV inputs on this call node.
-            layer_idx = None
-            kv_inputs = {}
+            # A function call can carry cache inputs for more than one layer.
+            # Falcon's later decoder calls, for example, read layer 0 to obtain
+            # the context length while updating layer 1.  Group the inputs by
+            # layer so the updated layer can still be exposed as retained state.
+            kv_inputs_by_layer: dict[str, dict[str, str]] = {}
             for inp_name in node.input:
                 match = cls._KV_INPUT_RE.match(inp_name)
                 if match is None:
                     continue
                 kind, idx = match.groups()
-                layer_idx = idx if layer_idx is None else layer_idx
-                if layer_idx != idx:
-                    kv_inputs = {}
-                    break
-                kv_inputs[kind] = inp_name
+                kv_inputs_by_layer.setdefault(idx, {})[kind] = inp_name
 
-            if layer_idx is None or set(kv_inputs) != {"key", "value"}:
-                continue
+            for layer_idx, kv_inputs in kv_inputs_by_layer.items():
+                if set(kv_inputs) != {"key", "value"}:
+                    continue
 
-            desired_outputs = [
-                f"past_key.{layer_idx}_RetainedState",
-                f"past_value.{layer_idx}_RetainedState",
-            ]
-            # Skip layers whose retained-state outputs are not dangling —
-            # either the graph is already correctly wired or a previous call
-            # to this transform already fixed them.
-            if not any(name in dangling_retained_outputs for name in desired_outputs):
-                continue
+                desired_outputs = [
+                    f"past_key.{layer_idx}_RetainedState",
+                    f"past_value.{layer_idx}_RetainedState",
+                ]
+                # Skip layers whose retained-state outputs are not dangling —
+                # either the graph is already correctly wired or a previous call
+                # to this transform already fixed them.
+                if not any(name in dangling_retained_outputs for name in desired_outputs):
+                    continue
 
-            if not all(name in dangling_retained_outputs for name in desired_outputs):
-                raise ValueError(
-                    f"Nested function '{fn.name}' has partially dangling KV retained-state outputs for layer "
-                    f"{layer_idx}: expected both {desired_outputs}."
-                )
+                if not all(name in dangling_retained_outputs for name in desired_outputs):
+                    raise ValueError(
+                        f"Nested function '{fn.name}' has partially dangling KV retained-state outputs for layer "
+                        f"{layer_idx}: expected both {desired_outputs}."
+                    )
 
-            scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx)
-            if scatter_outputs is None:
-                continue
+                scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx)
+                if scatter_outputs is None:
+                    continue
 
-            # Expose scatter outputs in the function's output list, rename KV
-            # inputs and append retained-state output names to the call node.
-            # Both writers are resolved before this block, so graph rewiring is atomic.
-            for kind, desired_output in zip(("key", "value"), desired_outputs):
-                scatter_output = scatter_outputs[kind]
-                if scatter_output not in fn.output:
-                    fn.output.append(scatter_output)
-                    changed = True
+                # Expose scatter outputs in the function's output list, rename KV
+                # inputs and append retained-state output names to the call node.
+                # Both writers are resolved before this block, so graph rewiring is atomic.
+                for kind, desired_output in zip(("key", "value"), desired_outputs):
+                    scatter_output = scatter_outputs[kind]
+                    if scatter_output not in fn.output:
+                        fn.output.append(scatter_output)
+                        changed = True
 
-                retained_input = kv_inputs[kind]
-                plain_input = f"past_{kind}.{layer_idx}"
-                if retained_input.endswith("_RetainedState"):
-                    kv_rename_map[retained_input] = plain_input
+                    retained_input = kv_inputs[kind]
+                    plain_input = f"past_{kind}.{layer_idx}"
+                    if retained_input.endswith("_RetainedState"):
+                        kv_rename_map[retained_input] = plain_input
 
-                if desired_output not in node.output:
-                    node.output.append(desired_output)
-                    changed = True
+                    if desired_output not in node.output:
+                        node.output.append(desired_output)
+                        changed = True
 
         if kv_rename_map:
             changed |= cls._rename_graph_inputs_bulk(graph, kv_rename_map)
@@ -516,13 +515,19 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
 
         for idx, (_, fn) in enumerate(repeated_functions):
             if idx >= len(target_classnames):
-                logger.warning(
-                    f"RenameRepeatedSubgraphTransform: more repeated subgraph functions ({len(repeated_functions)}) "
-                    f"than target class names ({len(target_classnames)}). "
-                    f"Function '{fn.name}' (index {idx}) will be assigned the last available name "
-                    f"'{target_classnames[-1]}' with a numeric suffix — verify get_submodules_for_export() "
-                    "returns all repeated block classes for this model."
-                )
+                if len(target_classnames) == 1:
+                    logger.info(
+                        f"RenameRepeatedSubgraphTransform: repeated subgraph function '{fn.name}' (index {idx}) "
+                        f"shares the last available target class name '{target_classnames[-1]}' and will receive "
+                        "a numeric suffix. Multiple exported variants can correspond to one repeated block class."
+                    )
+                else:
+                    logger.warning(
+                        f"RenameRepeatedSubgraphTransform: more repeated subgraph functions ({len(repeated_functions)}) "
+                        f"than target class names ({len(target_classnames)}). Function '{fn.name}' (index {idx}) "
+                        f"will be assigned the last available name '{target_classnames[-1]}' with a numeric suffix — "
+                        "verify get_submodules_for_export() returns all repeated block classes for this model."
+                    )
             base_name = target_classnames[min(idx, len(target_classnames) - 1)]
             candidate = base_name
             suffix = 1

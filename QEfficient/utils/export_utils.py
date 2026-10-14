@@ -425,10 +425,14 @@ def export_wrapper(func):
                 if use_onnx_subfunctions and dynamo
                 else nullcontext()
             )
+            # This is an inference export. Without no_grad, the first layer's
+            # input has requires_grad=False while later layer inputs have
+            # requires_grad=True. PyTorch's region comparison treats their
+            # otherwise identical bodies as different subgraphs.
+            grad_context = torch.no_grad() if use_onnx_subfunctions and dynamo else nullcontext()
             try:
-                with export_context:
-                    with dynamo_patch:
-                        onnx_path = func(self, *args, **kwargs)
+                with export_context, dynamo_patch, grad_context:
+                    onnx_path = func(self, *args, **kwargs)
             except Exception as export_exc:
                 QEFFLogger.log_api_failure("export", self.__class__.__name__, export_exc)
                 if use_onnx_subfunctions and dynamo:
@@ -538,7 +542,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
-        copy_of_hash_params["onnx_subfunction_version"] = 3
+        copy_of_hash_params["onnx_subfunction_version"] = 4
     # Generate hash from relevant parameters
     export_hash, filtered_hash_params = create_export_hash(
         model_params=copy_of_hash_params,
@@ -584,7 +588,7 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
     orig_hash_subfunction_version = qeff_model.hash_params.get("onnx_subfunction_version")
     qeff_model._use_onnx_subfunctions = True
     qeff_model.hash_params["use_onnx_subfunctions"] = True
-    qeff_model.hash_params["onnx_subfunction_version"] = 3
+    qeff_model.hash_params["onnx_subfunction_version"] = 4
     # TorchScript patches are irrelevant on the dynamo path.
     if not dynamo:
         apply_torch_patches()
