@@ -925,7 +925,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
             attentions=outputs.attentions,
         )
 
-    def get_dummy_pkv_cache(self, config, batch_size, seq_len):
+    def get_dummy_pkv_cache(self, config, batch_size, seq_len, device=None):
         caches = []
         for layer_idx in range(config.num_hidden_layers):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
@@ -937,13 +937,17 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
                 local_context = seq_len
             caches.append(
                 (
-                    torch.zeros((*prefix, local_context, config.kv_lora_rank), dtype=config.torch_dtype),
-                    torch.zeros((*prefix, local_context, config.qk_rope_head_dim), dtype=config.torch_dtype),
+                    torch.zeros(
+                        (*prefix, local_context, config.kv_lora_rank), dtype=config.torch_dtype, device=device
+                    ),
+                    torch.zeros(
+                        (*prefix, local_context, config.qk_rope_head_dim), dtype=config.torch_dtype, device=device
+                    ),
                 )
             )
         return tuple(caches)
 
-    def get_dummy_indexer_cache(self, config, batch_size, seq_len):
+    def get_dummy_indexer_cache(self, config, batch_size, seq_len, device=None):
         caches = []
         for layer_idx in self.get_indexer_cache_layers(config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
@@ -960,7 +964,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
                 )
             else:
                 shape = (batch_size, seq_len, config.index_head_dim)
-            caches.append(torch.zeros(shape, dtype=config.torch_dtype))
+            caches.append(torch.zeros(shape, dtype=config.torch_dtype, device=device))
         return tuple(caches)
 
     def get_export_example_dimensions(
