@@ -15,6 +15,11 @@ from warnings import warn
 import numpy as np
 
 
+def _bfloat16_to_float32(values: np.ndarray) -> np.ndarray:
+    """Decode a numpy float16-sized array containing raw bfloat16 bit patterns."""
+    return (values.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+
+
 def _public_retained_state_name(output_name: str) -> Optional[str]:
     """Map internal subfunction retained-state outputs to public runtime names."""
     suffix = "_InternalRetainedState"
@@ -445,6 +450,8 @@ class QAICInferenceSession:
                 bytes(output_qbuffers[buffer_index]),
                 self.aic_to_np_dtype_mapping[self.bindings[buffer_index].type],
             ).reshape(buf_dims[buffer_index][1])
+            if output_name.rsplit("/", 1)[-1] == "logits" and self.binding_is_bfloat16(output_name):
+                output = _bfloat16_to_float32(output)
             outputs[output_name] = output
             output_basename = output_name.rsplit("/", 1)[-1]
             outputs.setdefault(output_basename, output)

@@ -92,6 +92,7 @@ def _make_mock_session(
     session.input_names = [b.name for b in bindings if b.dir == "input"]
     session.output_names = [b.name for b in bindings if b.dir == "output"]
     session.is_active = True
+    session.binding_is_bfloat16.return_value = False
 
     # run() returns logits with argmax-able values
     def _run(inputs):
