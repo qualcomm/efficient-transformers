@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-cores", type=int, default=4)
     parser.add_argument("--num-devices", type=int, default=1)
+    parser.add_argument(
+        "--mdp-num-partitions",
+        type=int,
+        default=1,
+        help="Number of pipeline-parallel MDP partitions; TS devices per partition are num-devices / partitions.",
+    )
     parser.add_argument("--device-ids", type=int, nargs="*", default=None)
     parser.add_argument("--mxfp6-matmul", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--aic-hw-version", default="ai200")
@@ -201,6 +207,7 @@ def _compile_prefill(args: argparse.Namespace) -> Path:
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
         num_devices=args.num_devices,
+        mdp_num_partitions=args.mdp_num_partitions,
         mxfp6_matmul=args.mxfp6_matmul,
         aic_hw_version=args.aic_hw_version,
         dynamo=True,
@@ -259,6 +266,8 @@ def main() -> None:
         os.environ["QEFF_HOME"] = args.qeff_home
     if args.prefill_seq_len <= 0 or args.ctx_len < args.prefill_seq_len:
         raise ValueError("ctx_len must be at least prefill_seq_len, and both lengths must be positive.")
+    if args.mdp_num_partitions <= 0 or args.num_devices % args.mdp_num_partitions:
+        raise ValueError("num-devices must be divisible by a positive mdp-num-partitions value.")
 
     tokenizer = _load_tokenizer(args)
     qpc_path = _resolve_qpc_path(args.qpc_path) if args.qpc_path else _compile_prefill(args)
