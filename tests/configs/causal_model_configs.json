@@ -793,9 +793,7 @@
       "tokenizer_id": "gpt2",
       "is_moe": true,
       "supports_blocking": false,
-      "num_hidden_layers": 2,
-      "known_fp16_subfunction_compile_issue": "GPT-OSS FP16 subfunction compilation on AI100 fails because qaic-compile rejects the ONNX Clip operation emitted by torch.clamp.",
-      "known_ccl_export_or_compile_issue": "GPT-OSS CCL subfunction compilation fails because qaic-compile does not support the dynamic Slice ends tensor in the prefill decoder layer."
+      "num_hidden_layers": 2
     },
     {
       "id": "glm4_moe_text",

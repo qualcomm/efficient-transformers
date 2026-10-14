@@ -739,6 +739,21 @@ class TestQEffGPTOSSHybridCacheCorrectness:
         assert torch.isfinite(k_out).all()
         assert torch.isfinite(v_out).all()
 
+    def test_update_sliding_clamps_ccl_to_window_length(self):
+        cache = self._make(sw=4)
+        cache.append_new_layers(0)  # layer 0 is sliding_attention per _gptoss_cfg
+        k, v = _kv(ctx_len=4)
+        cache.update(k, v, layer_idx=0, cache_kwargs={"position_ids": _pids(4)})
+
+        k_out, v_out = cache.update(
+            *_kv(ctx_len=1),
+            layer_idx=0,
+            cache_kwargs={"position_ids": torch.tensor([[5]]), "CCL": 2},
+        )
+
+        assert k_out.shape[2] == 2
+        assert v_out.shape[2] == 2
+
     def test_cache_lengths_track_layer_tensor_shapes(self):
         cache = self._make(sw=4)
         k_sliding, v_sliding = _kv(ctx_len=4)

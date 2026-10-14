@@ -318,6 +318,7 @@ def past_key_value_update(
     attention_mask: Optional[torch.Tensor],
     past_key_value: Cache,
     comp_ctx_lengths: Optional[torch.LongTensor] = None,
+    ccl_length: Optional[int] = None,
     batch_index: Optional[torch.LongTensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
     sliding_window: Optional[int] = None,
@@ -338,8 +339,10 @@ def past_key_value_update(
                 }
             )
         if comp_ctx_lengths is not None:
-            attention_mask = attention_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
-            cache_kwargs["CCL"] = attention_mask.shape[-1]
+            if ccl_length is None:
+                attention_mask = attention_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
+                ccl_length = attention_mask.shape[-1]
+            cache_kwargs["CCL"] = ccl_length
         key, value = past_key_value.update(key, value, module.layer_idx, cache_kwargs)
     return key, value, attention_mask, cache_kwargs
 
