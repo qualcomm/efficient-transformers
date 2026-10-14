@@ -95,6 +95,12 @@ def set_num_layers_vlm(config: AutoConfig, n_layer: int = -1):
         config.text_config.cross_attention_layers = [
             x for x in config.text_config.cross_attention_layers if x < n_layer
         ]
+    elif getattr(config, "model_type", None) == "molmo_point":
+        config.text_config.num_hidden_layers = n_layer
+        config.text_config.rope_scaling = {"rope_type": "linear", "factor": 1.0}
+        config.text_config.standardize_rope_params()
+        config.vit_config.num_hidden_layers = n_layer
+        config.adapter_config.vit_layers = [-1]
     elif hasattr(config, "text_config"):
         config.text_config.num_hidden_layers = n_layer
         config.vision_config.num_hidden_layers = n_layer
@@ -222,7 +228,12 @@ def load_qeff_vlm_model(
 def load_vlm_model(config):
     try:
         model_hf = AutoModelForImageTextToText.from_pretrained(
-            config._name_or_path, low_cpu_mem_usage=False, config=config, dtype=torch.float32
+            config._name_or_path,
+            low_cpu_mem_usage=False,
+            trust_remote_code=True,
+            config=config,
+            dtype=torch.float32,
+            ignore_mismatched_sizes=True,
         )
     except ValueError:
         model_hf = AutoModelForCausalLM.from_pretrained(
@@ -525,6 +536,7 @@ class ModelConfig:
     }
 
     EXTERNAL_MODELS = {
+        "allenai/MolmoPoint-8B": {},
         "hpcai-tech/grok-1": {
             "pytorch_hf_tokens_custom_case": [
                 0,

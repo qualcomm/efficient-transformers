@@ -531,6 +531,15 @@ from QEfficient.transformers.models.molmo.modeling_molmo import (
     QEffMolmoSequentialBlock,
     QEffMultiHeadDotProductAttention,
 )
+from QEfficient.transformers.models.molmo_point.modeling_molmo_point import (
+    QEffMolmoPointAttention,
+    QEffMolmoPointDecoderLayer,
+    QEffMolmoPointForConditionalGeneration,
+    QEffMolmoPointPatchRope,
+    QEffMolmoPointRotaryEmbedding,
+    QEffMolmoPointTextModel,
+    QEffMolmoPointVisionAttention,
+)
 from QEfficient.transformers.models.mpt.modeling_mpt import (
     QEffMptAttention,
     QEffMptBlock,
@@ -1405,6 +1414,32 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
         "MultiHeadDotProductAttention": {
             "forward": QEffMultiHeadDotProductAttention.forward,
         },
+        "MolmoPointForConditionalGeneration": {
+            "__qeff_init__": QEffMolmoPointForConditionalGeneration.__qeff_init__,
+            "forward": QEffMolmoPointForConditionalGeneration.forward,
+            "get_qeff_vision_encoder": QEffMolmoPointForConditionalGeneration.get_qeff_vision_encoder,
+            "get_qeff_language_decoder": QEffMolmoPointForConditionalGeneration.get_qeff_language_decoder,
+            "get_submodules_for_export": QEffMolmoPointForConditionalGeneration.get_submodules_for_export,
+            "get_specializations": QEffMolmoPointForConditionalGeneration.get_specializations,
+            "get_onnx_dynamic_axes": QEffMolmoPointForConditionalGeneration.get_onnx_dynamic_axes,
+            "get_output_names": QEffMolmoPointForConditionalGeneration.get_output_names,
+            "get_dummy_inputs": QEffMolmoPointForConditionalGeneration.get_dummy_inputs,
+            "get_inputs_info": QEffMolmoPointForConditionalGeneration.get_inputs_info,
+        },
+        "MolmoPointTextModel": {"forward": QEffMolmoPointTextModel.forward},
+        "Molmo2Attention": {"forward": QEffMolmoPointAttention.forward},
+        "Molmo2DecoderLayer": {"forward": QEffMolmoPointDecoderLayer.forward},
+        "Molmo2PostNormDecoderLayer": {"forward": QEffMolmoPointDecoderLayer.forward_post_norm},
+        "Molmo2RotaryEmbedding": {
+            "forward": QEffMolmoPointRotaryEmbedding.forward,
+            "__qeff_init__": QEffMolmoPointRotaryEmbedding.__qeff_init__,
+        },
+        "MolmoPointPatchRope": {
+            "forward": QEffMolmoPointPatchRope.forward,
+            "__qeff_init__": QEffMolmoPointPatchRope.__qeff_init__,
+        },
+        "Molmo2RMSNorm": {"forward": CustomRMSNormAIC.forward},
+        "ViTMultiHeadDotProductAttention": {"forward": QEffMolmoPointVisionAttention.forward},
         # Mapping for grok1 model
         "Grok1ModelForCausalLM": {"forward": QEffGrok1ModelForCausalLM.forward},
         "Grok1Model": {

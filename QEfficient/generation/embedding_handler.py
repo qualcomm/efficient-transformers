@@ -108,6 +108,8 @@ class VisionHandler:
         for k in keys:
             if k not in vision_inputs:
                 continue
+            if self._vision_session is None:
+                continue
             if self._vision_session.binding_is_bfloat16(k):
                 vision_inputs[k] = (
                     torch.from_numpy(vision_inputs[k]).to(torch.bfloat16).view(torch.int16).numpy().view(np.float16)
@@ -309,6 +311,19 @@ class VisionHandler:
                 inputs = self._qeff_model.model.prepare_inputs_for_generation(
                     inputs=inputs, prefill_seq_len=prefill_seq_len, batch_size=inputs["input_ids"].shape[0]
                 )
+            elif model_type == "molmo_point":
+                pixel_values, image_token_pooling = self._qeff_model.model.model.merge_visual_inputs(
+                    input_ids=inputs.get("input_ids"),
+                    pixel_values=inputs.get("pixel_values"),
+                    image_token_pooling=inputs.get("image_token_pooling"),
+                    image_grids=inputs.get("image_grids"),
+                    image_num_crops=inputs.get("image_num_crops"),
+                    pixel_values_videos=inputs.get("pixel_values_videos"),
+                    video_token_pooling=inputs.get("video_token_pooling"),
+                    video_grids=inputs.get("video_grids"),
+                )
+                inputs["pixel_values"] = pixel_values
+                inputs["image_token_pooling"] = image_token_pooling
 
             # Convert to float32 if needed
             if "pixel_values" in inputs:
@@ -319,6 +334,7 @@ class VisionHandler:
             for k, v in inputs.items():
                 if k in {
                     "pixel_values",
+                    "image_token_pooling",
                     "image_position_ids",
                     "image_masks",
                     "image_input_idx",
@@ -327,6 +343,11 @@ class VisionHandler:
                     "aspect_ratio_mask",
                 }:
                     vision_inputs[k] = np.array(v)
+
+            if self._vision_session is not None:
+                vision_inputs = {
+                    name: value for name, value in vision_inputs.items() if name in self._vision_session.input_names
+                }
 
             if is_kimi_k25:
                 grid_thws = inputs.get("grid_thws")

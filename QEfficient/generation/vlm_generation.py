@@ -416,6 +416,7 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
                 for op in Constants.SAMPLER_OPS | ({"token_bitmasks"} if self.include_guided_decoding else set()):
                     chunk_inputs[op] = lang_inputs[op]
 
+            chunk_inputs = {name: value for name, value in chunk_inputs.items() if name in self._session.input_names}
             outputs = self._session.run(chunk_inputs)
 
             if "image_idx_output" in outputs:

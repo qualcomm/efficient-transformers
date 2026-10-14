@@ -120,6 +120,7 @@ CAUSAL_MULTI_SUBFUNCTION_MODEL_TYPES = {
 VLM_TEXT_RUNTIME_MODEL_ID = "tiny-random/gemma-3"
 VLM_EXPORT_MODEL_IDS = {
     "gemma3": "tiny-random/gemma-3",
+    "molmo_point": "allenai/MolmoPoint-8B",
     "qwen2_5_vl": "optimum-intel-internal-testing/tiny-random-qwen2.5-vl",
     "internvl2": "optimum-intel-internal-testing/tiny-random-internvl2",
 }

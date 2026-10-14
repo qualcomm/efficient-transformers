@@ -10,6 +10,8 @@ import json
 import os
 from typing import List, Optional
 
+import numpy as np
+import onnx
 import pytest
 import requests
 import torch
@@ -21,9 +23,12 @@ from transformers import (
     GenerationConfig,
     TextStreamer,
 )
+from transformers.processing_utils import ProcessorMixin
 from urllib3.util.retry import Retry
 
 from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.transformers.models.molmo_point.modeling_molmo_point import _reset_molmo_point_patch_rope
 from QEfficient.utils.run_utils import ApiRunnerInternVL, ApiRunnerMolmo, ApiRunnerVlm
 from QEfficient.utils.test_utils import (
     InternProcessor,
@@ -58,6 +63,76 @@ test_mm_blocking_models = [model["model_name"] for model in multimodal_models if
 
 NEW_GENERATION_TOKENS = 10
 
+MOLMO_POINT_VISION_STATES = (
+    "vision_embeds",
+    "vision_embeds_vit_features",
+    "vision_embeds_vit_mask",
+    "vision_embeds_subpatch_k",
+)
+MOLMO_POINT_POINT_STATES = (
+    "vision_embeds_patch_k",
+    "vision_embeds_patch_mask",
+    "vision_embeds_image_pos_ids",
+    "vision_embeds_last_patch_id",
+)
+
+
+def _load_vlm_processor(model_name: str):
+    """Load a VLM processor, bridging old ProcessorMixin optional-kwarg handling.
+
+    MolmoPoint's remote processor declares image/video formatting options as
+    ``optional_attributes``.  Transformers 5.5.4 forwards those options to
+    ``ProcessorMixin.__init__`` but that version only accepts modality
+    attributes, so processor construction fails before the model is exercised.
+    Keep the compatibility shim scoped to this load and preserve the options on
+    the processor instance for the remote implementation.
+    """
+    try:
+        return AutoProcessor.from_pretrained(model_name, trust_remote_code=True, padding=True)
+    except TypeError as exc:
+        if model_name != "allenai/MolmoPoint-8B" or "Unexpected keyword argument" not in str(exc):
+            raise
+
+    original_init = ProcessorMixin.__dict__["__init__"]
+
+    def compatible_init(self, *args, **kwargs):
+        optional = set(getattr(self, "optional_attributes", ()))
+        deferred = {key: kwargs.pop(key) for key in list(kwargs) if key in optional}
+        original_init(self, *args, **kwargs)
+        for key, value in deferred.items():
+            setattr(self, key, value)
+
+    ProcessorMixin.__init__ = compatible_init
+    try:
+        return AutoProcessor.from_pretrained(model_name, trust_remote_code=True, padding=True)
+    finally:
+        ProcessorMixin.__init__ = original_init
+
+
+def _patch_molmo_point_hf_generation(model):
+    """Supply the cache positions expected by the Hub model on Transformers 5.5.4."""
+    if getattr(getattr(model, "config", None), "model_type", None) != "molmo_point":
+        return
+
+    original_prepare = model.prepare_inputs_for_generation
+
+    def compatible_prepare(input_ids, *args, **kwargs):
+        if kwargs.get("cache_position") is None:
+            source = input_ids if input_ids is not None else kwargs.get("inputs_embeds")
+            past_key_values = kwargs.get("past_key_values")
+            if source is None:
+                raise ValueError("MolmoPoint generation requires input_ids or inputs_embeds")
+            if past_key_values is None:
+                past_length = 0
+            else:
+                past_length = past_key_values.get_seq_length()
+            kwargs["cache_position"] = torch.arange(
+                past_length, past_length + source.shape[1], device=source.device
+            )
+        return original_prepare(input_ids, *args, **kwargs)
+
+    model.prepare_inputs_for_generation = compatible_prepare
+
 
 def _assert_runtime_token_parity(reference_tokens, qpc_tokens, parity_issue=None):
     """Compare HF and QAIC tokens, xfail only a configured numerical parity mismatch."""
@@ -66,6 +141,341 @@ def _assert_runtime_token_parity(reference_tokens, qpc_tokens, parity_issue=None
     if parity_issue:
         pytest.xfail(parity_issue)
     pytest.fail("Tokens don't match for pytorch HF output and QPC output")
+
+
+def _molmo_point_dual_inputs(model, inputs, prompt_len, ctx_len):
+    """Build the exact padded dual-QPC inputs used by the MolmoPoint runtime."""
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
+    input_ids_length = input_ids.shape[1]
+    padded_len = -(input_ids_length // -prompt_len) * prompt_len
+    input_ids = torch.nn.functional.pad(input_ids, (0, padded_len - input_ids_length), value=1)
+    attention_mask = torch.nn.functional.pad(attention_mask, (0, padded_len - input_ids_length), value=0)
+    position_ids = torch.where(
+        attention_mask.to(torch.bool),
+        torch.arange(padded_len, dtype=torch.int64).view(1, padded_len),
+        -1,
+    )
+    token_type_ids = torch.nn.functional.pad(
+        inputs["token_type_ids"], (0, padded_len - input_ids_length), value=0
+    )
+
+    pixel_values, image_token_pooling = model.model.merge_visual_inputs(
+        input_ids=inputs["input_ids"],
+        pixel_values=inputs.get("pixel_values"),
+        image_token_pooling=inputs.get("image_token_pooling"),
+        image_grids=inputs.get("image_grids"),
+        image_num_crops=inputs.get("image_num_crops"),
+        pixel_values_videos=inputs.get("pixel_values_videos"),
+        video_token_pooling=inputs.get("video_token_pooling"),
+        video_grids=inputs.get("video_grids"),
+    )
+    dummy_inputs = model.get_dummy_inputs(
+        kv_offload=True,
+        prefill_seq_len=padded_len,
+        ctx_len=ctx_len,
+        num_crops=pixel_values.shape[1],
+        num_patches=pixel_values.shape[2],
+        pixels_per_patch=pixel_values.shape[3],
+        num_image_tokens=image_token_pooling.shape[1],
+        pool_dim=image_token_pooling.shape[2],
+    )
+    lang_inputs = dummy_inputs["lang"]
+    lang_inputs.update(
+        {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "token_type_ids": token_type_ids,
+        }
+    )
+    vision_inputs = {
+        "pixel_values": pixel_values,
+        "image_token_pooling": image_token_pooling,
+    }
+    return vision_inputs, lang_inputs
+
+
+def _molmo_point_flatten_torch_outputs(model, outputs):
+    output_names = model.get_output_names(kv_offload=True)["lang"]
+    values = list(outputs[:-1])
+    for key_cache, value_cache in outputs[-1]:
+        values.extend((key_cache, value_cache))
+    assert len(output_names) == len(values)
+    return {
+        name: value.detach().cpu().numpy().copy()
+        for name, value in zip(output_names, values, strict=True)
+    }
+
+
+def _molmo_point_next_inputs(previous_inputs, outputs, num_hidden_layers):
+    next_token = outputs["logits"].argmax(-1).reshape(1, 1)
+    next_inputs = {
+        "input_ids": next_token,
+        "position_ids": np.max(previous_inputs["position_ids"], axis=1, keepdims=True) + 1,
+        "token_type_ids": np.zeros_like(next_token, dtype=previous_inputs["token_type_ids"].dtype),
+    }
+    for state_name in MOLMO_POINT_VISION_STATES + MOLMO_POINT_POINT_STATES:
+        next_inputs[state_name] = outputs[f"{state_name}_RetainedState"]
+    next_inputs["past_key_values"] = [
+        (
+            outputs[f"past_key.{layer_idx}_RetainedState"],
+            outputs[f"past_value.{layer_idx}_RetainedState"],
+        )
+        for layer_idx in range(num_hidden_layers)
+    ]
+    return next_inputs
+
+
+@torch.no_grad()
+def _run_molmo_point_qeff_pytorch(model, inputs, prompt_len, ctx_len, generation_len):
+    """Run dual-QPC wrappers on CPU and retain every recurrent output for ORT comparison."""
+    vision_inputs, lang_inputs = _molmo_point_dual_inputs(model, inputs, prompt_len, ctx_len)
+    vision_model = model.get_qeff_vision_encoder()
+    language_model = model.get_qeff_language_decoder()
+    vision_values = vision_model(**vision_inputs)
+    vision_outputs = {
+        name: value.detach().cpu().numpy().copy()
+        for name, value in zip(MOLMO_POINT_VISION_STATES, vision_values, strict=True)
+    }
+    lang_inputs.update(dict(zip(MOLMO_POINT_VISION_STATES, vision_values, strict=True)))
+
+    generated_ids = []
+    step_outputs = []
+    for _ in range(generation_len):
+        raw_outputs = language_model(**lang_inputs)
+        step_outputs.append(_molmo_point_flatten_torch_outputs(model, raw_outputs))
+        next_token = raw_outputs[0].argmax(-1).reshape(1, 1)
+        generated_ids.append(next_token.detach().cpu().numpy())
+        lang_inputs = {
+            "input_ids": next_token,
+            "position_ids": lang_inputs["position_ids"].max(1, keepdim=True).values + 1,
+            "token_type_ids": torch.zeros_like(next_token, dtype=lang_inputs["token_type_ids"].dtype),
+            "past_key_values": raw_outputs[-1],
+        }
+        lang_inputs.update(dict(zip(MOLMO_POINT_VISION_STATES, raw_outputs[1:5], strict=True)))
+        lang_inputs.update(dict(zip(MOLMO_POINT_POINT_STATES, raw_outputs[5:9], strict=True)))
+    return np.concatenate(generated_ids, axis=1), vision_outputs, step_outputs
+
+
+def _assert_molmo_point_outputs_close(reference, actual, boundary, base_vocab_size):
+    assert reference.keys() == actual.keys(), f"{boundary}: output names differ"
+    for name in reference:
+        reference_value = reference[name]
+        actual_value = actual[name]
+        assert reference_value.shape == actual_value.shape, f"{boundary}/{name}: shape mismatch"
+        if name == "logits":
+            reference_value = reference_value[..., :base_vocab_size]
+            actual_value = actual_value[..., :base_vocab_size]
+        if np.issubdtype(reference_value.dtype, np.floating):
+            try:
+                np.testing.assert_allclose(
+                    actual_value,
+                    reference_value,
+                    rtol=1e-3,
+                    atol=1e-4,
+                    err_msg=f"{boundary}/{name}",
+                )
+            except AssertionError:
+                delta = np.abs(actual_value.astype(np.float32) - reference_value.astype(np.float32))
+                max_index = np.unravel_index(delta.argmax(), delta.shape)
+                print(
+                    f"[molmo-point-ort] {boundary}/{name}: max_index={max_index} "
+                    f"reference={reference_value[max_index]} actual={actual_value[max_index]} "
+                    f"reference_nonzero={np.count_nonzero(reference_value)} "
+                    f"actual_nonzero={np.count_nonzero(actual_value)}"
+                )
+                raise
+        else:
+            np.testing.assert_array_equal(actual_value, reference_value, err_msg=f"{boundary}/{name}")
+
+
+def _run_molmo_point_ort(
+    api_runner,
+    model,
+    inputs,
+    onnx_paths,
+    prompt_len,
+    ctx_len,
+    generation_len,
+    pytorch_vision_outputs,
+    pytorch_step_outputs,
+):
+    """Run both ONNX graphs and compare all vision, point, and KV retained states."""
+    vision_inputs, lang_inputs = _molmo_point_dual_inputs(model, inputs, prompt_len, ctx_len)
+    _, vision_session = api_runner.setup_ort_session(onnx_paths[0])
+    _, language_session = api_runner.setup_ort_session(onnx_paths[1])
+    vision_inputs = {name: value.detach().cpu().numpy() for name, value in vision_inputs.items()}
+    lang_inputs = {
+        name: value.detach().cpu().numpy()
+        for name, value in lang_inputs.items()
+        if name != "past_key_values"
+    }
+    for layer_idx, (key_cache, value_cache) in enumerate(
+        _molmo_point_dual_inputs(model, inputs, prompt_len, ctx_len)[1]["past_key_values"]
+    ):
+        lang_inputs[f"past_key.{layer_idx}"] = key_cache.detach().cpu().numpy()
+        lang_inputs[f"past_value.{layer_idx}"] = value_cache.detach().cpu().numpy()
+
+    base_vocab_size = model.config.text_config.vocab_size + model.config.text_config.additional_vocab_size
+    vision_outputs = api_runner.run_ort_session(vision_inputs, vision_session)
+    _assert_molmo_point_outputs_close(
+        pytorch_vision_outputs, vision_outputs, "QEff-PyTorch/ORT vision", base_vocab_size
+    )
+    lang_inputs.update(vision_outputs)
+
+    generated_ids = []
+    step_outputs = []
+    num_hidden_layers = model.config.text_config.num_hidden_layers
+    for step in range(generation_len):
+        outputs = api_runner.run_ort_session(lang_inputs, language_session)
+        step_outputs.append({name: value.copy() for name, value in outputs.items()})
+        _assert_molmo_point_outputs_close(
+            pytorch_step_outputs[step], outputs, f"QEff-PyTorch/ORT language step {step}", base_vocab_size
+        )
+        next_inputs = _molmo_point_next_inputs(lang_inputs, outputs, num_hidden_layers)
+        generated_ids.append(next_inputs["input_ids"])
+        lang_inputs = {
+            name: value
+            for name, value in next_inputs.items()
+            if name != "past_key_values"
+        }
+        for layer_idx, (key_cache, value_cache) in enumerate(next_inputs["past_key_values"]):
+            lang_inputs[f"past_key.{layer_idx}"] = key_cache
+            lang_inputs[f"past_value.{layer_idx}"] = value_cache
+    return np.concatenate(generated_ids, axis=1), vision_outputs, step_outputs
+
+
+def _cast_molmo_point_qpc_input(session, name, value):
+    binding = session.bindings[session.binding_index_map[name]]
+    dtype = session.aic_to_np_dtype_mapping[binding.type]
+    return np.asarray(value).astype(dtype, copy=False)
+
+
+def _report_molmo_point_qpc_delta(reference, actual, boundary, base_vocab_size):
+    """Report the raw ORT/QPC delta without hiding an argmax mismatch."""
+    assert reference.keys() <= actual.keys(), f"{boundary}: QPC outputs are missing {reference.keys() - actual.keys()}"
+    for name, reference_value in reference.items():
+        actual_value = actual[name]
+        assert reference_value.shape == actual_value.shape, f"{boundary}/{name}: shape mismatch"
+        if name == "logits":
+            reference_value = reference_value[..., :base_vocab_size]
+            actual_value = actual_value[..., :base_vocab_size]
+        if not np.issubdtype(reference_value.dtype, np.floating):
+            np.testing.assert_array_equal(actual_value, reference_value, err_msg=f"{boundary}/{name}")
+            continue
+        if name == "vision_embeds_patch_k_RetainedState":
+            live_slots = reference["vision_embeds_patch_mask_RetainedState"] > 0
+            reference_value = reference_value[live_slots]
+            actual_value = actual_value[live_slots]
+        masked = reference_value <= -60000
+        assert np.all(actual_value[masked] <= -60000), f"{boundary}/{name}: masked values became live"
+        live_actual = actual_value[~masked]
+        live_reference = reference_value[~masked]
+        if not np.isfinite(live_actual).all():
+            invalid = np.argwhere(~np.isfinite(actual_value))[:10].tolist()
+            pytest.fail(f"{boundary}/{name}: QPC produced non-finite live values at {invalid}")
+        delta = np.abs(live_actual.astype(np.float32) - live_reference.astype(np.float32))
+        actual_norm = np.linalg.norm(live_actual.astype(np.float64))
+        reference_norm = np.linalg.norm(live_reference.astype(np.float64))
+        if actual_norm == 0 or reference_norm == 0:
+            cosine = 1.0 if np.array_equal(live_actual, live_reference) else 0.0
+        else:
+            cosine = float(
+                np.dot(live_actual.astype(np.float64), live_reference.astype(np.float64))
+                / (actual_norm * reference_norm)
+            )
+        print(
+            f"[molmo-point-qpc] {boundary}/{name}: "
+            f"max_abs={delta.max():.7g} mean_abs={delta.mean():.7g} cosine={cosine:.7f}"
+        )
+        assert cosine >= 0.995, f"{boundary}/{name}: cosine {cosine:.7f} is below 0.995"
+        assert delta.mean() <= 0.1, f"{boundary}/{name}: mean absolute error exceeds 0.1"
+
+
+def _run_molmo_point_qpc(
+    model,
+    inputs,
+    qpc_paths,
+    device_ids,
+    prompt_len,
+    ctx_len,
+    generation_len,
+    ort_vision_outputs,
+    ort_step_outputs,
+):
+    """Run both MolmoPoint QPCs while exposing every retained state for comparison."""
+    vision_inputs, lang_inputs = _molmo_point_dual_inputs(model, inputs, prompt_len, ctx_len)
+    vision_session = QAICInferenceSession(qpc_paths[0], device_ids=device_ids)
+    language_session = QAICInferenceSession(qpc_paths[1], device_ids=device_ids, activate=False)
+    base_vocab_size = model.config.text_config.vocab_size + model.config.text_config.additional_vocab_size
+    try:
+        vision_inputs = {
+            name: _cast_molmo_point_qpc_input(vision_session, name, value.detach().cpu().numpy())
+            for name, value in vision_inputs.items()
+        }
+        vision_outputs = vision_session.run(vision_inputs)
+        _report_molmo_point_qpc_delta(
+            ort_vision_outputs, vision_outputs, "ORT/QPC vision", base_vocab_size
+        )
+        vision_session.deactivate()
+        language_session.activate()
+
+        qpc_inputs = {
+            name: _cast_molmo_point_qpc_input(language_session, name, value.detach().cpu().numpy())
+            for name, value in lang_inputs.items()
+            if name in {"input_ids", "position_ids", "token_type_ids"}
+        }
+        qpc_inputs.update(
+            {
+                name: _cast_molmo_point_qpc_input(language_session, name, value)
+                for name, value in vision_outputs.items()
+            }
+        )
+        for name in language_session.input_names:
+            if name in qpc_inputs:
+                continue
+            binding = language_session.bindings[language_session.binding_index_map[name]]
+            qpc_inputs[name] = np.zeros(
+                tuple(binding.dims), dtype=language_session.aic_to_np_dtype_mapping[binding.type]
+            )
+
+        generated_ids = []
+        num_hidden_layers = model.config.text_config.num_hidden_layers
+        for step in range(generation_len):
+            outputs = language_session.run(qpc_inputs)
+            _report_molmo_point_qpc_delta(
+                ort_step_outputs[step], outputs, f"ORT/QPC language step {step}", base_vocab_size
+            )
+            next_inputs = _molmo_point_next_inputs(qpc_inputs, outputs, num_hidden_layers)
+            generated_ids.append(next_inputs["input_ids"])
+            qpc_inputs = {
+                "input_ids": _cast_molmo_point_qpc_input(
+                    language_session, "input_ids", next_inputs["input_ids"]
+                ),
+                "position_ids": _cast_molmo_point_qpc_input(
+                    language_session, "position_ids", next_inputs["position_ids"]
+                ),
+                "token_type_ids": _cast_molmo_point_qpc_input(
+                    language_session, "token_type_ids", next_inputs["token_type_ids"]
+                ),
+            }
+            for state_name in MOLMO_POINT_VISION_STATES + MOLMO_POINT_POINT_STATES:
+                qpc_inputs[state_name] = _cast_molmo_point_qpc_input(
+                    language_session, state_name, next_inputs[state_name]
+                )
+            for layer_idx, (key_cache, value_cache) in enumerate(next_inputs["past_key_values"]):
+                qpc_inputs[f"past_key.{layer_idx}"] = _cast_molmo_point_qpc_input(
+                    language_session, f"past_key.{layer_idx}", key_cache
+                )
+                qpc_inputs[f"past_value.{layer_idx}"] = _cast_molmo_point_qpc_input(
+                    language_session, f"past_value.{layer_idx}", value_cache
+                )
+        return np.concatenate(generated_ids, axis=1)
+    finally:
+        if vision_session.is_active:
+            vision_session.deactivate()
+        if language_session.is_active:
+            language_session.deactivate()
 
 
 def _resolve_vlm_hf_golden(
@@ -205,15 +615,28 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
                 ignore_mismatched_sizes=True,
             )
         else:
+            if model_name == "allenai/MolmoPoint-8B":
+                config._attn_implementation = "eager"
             model_hf = load_vlm_model(config)
-            qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
-                model_name,
-                kv_offload=kv_offload,
-                config=config,
-                qaic_config=qaic_config,
-                torch_dtype=torch_dtype,
-                ignore_mismatched_sizes=True,
-            )
+            if model_name == "allenai/MolmoPoint-8B":
+                _reset_molmo_point_patch_rope(model_hf)
+                qeff_model = QEFFAutoModelForImageTextToText(
+                    copy.deepcopy(model_hf),
+                    kv_offload=kv_offload,
+                    config=model_hf.config,
+                    qaic_config=qaic_config,
+                    torch_dtype=torch.float32,
+                    ignore_mismatched_sizes=True,
+                )
+            else:
+                qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
+                    model_name,
+                    kv_offload=kv_offload,
+                    config=config,
+                    qaic_config=qaic_config,
+                    torch_dtype=torch_dtype,
+                    ignore_mismatched_sizes=True,
+                )
     else:
         if test_kv_replicate:
             qaic_config = qaic_config or {}
@@ -228,6 +651,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             ignore_mismatched_sizes=True,
         )
     aic_hw_version = "ai200" if torch_dtype == torch.bfloat16 else "ai100"
+    _patch_molmo_point_hf_generation(model_hf)
     compile_kwargs = {
         "num_devices": num_devices,
         "num_cores": 4 if aic_hw_version == "ai200" else 16,
@@ -367,7 +791,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
         )
 
     else:
-        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True, padding=True)
+        processor = _load_vlm_processor(model_name)
         image = load_test_image(img_url, session=_session)
         if model_name == "tiny-random/mistral-3":
             image = image.resize((1540, 1540))
@@ -419,14 +843,39 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             )
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(qeff_model.model.config.torch_dtype)
-        compile_kwargs["img_size"] = img_size
+        if model_name != "allenai/MolmoPoint-8B":
+            compile_kwargs["img_size"] = img_size
 
-    # pytorch_kv_tokens = api_runner.run_vlm_kv_model_on_pytorch(qeff_model.model)
-    # assert (pytorch_kv_tokens == pytorch_hf_tokens).all(), (
-    #     "Tokens don't match for pytorch HF output and pytorch KV output"
-    # )
-    # ort_tokens = api_runner.run_vlm_kv_model_on_ort(onnx_model_path)
-    # assert (pytorch_hf_tokens == ort_tokens).all(), "Tokens don't match for pytorch HF output and ORT output"
+    if model_name == "allenai/MolmoPoint-8B" and not compile_only:
+        pytorch_kv_tokens, pytorch_vision_outputs, pytorch_step_outputs = _run_molmo_point_qeff_pytorch(
+            qeff_model.model,
+            inputs,
+            prompt_len,
+            ctx_len,
+            max_gen_len,
+        )
+        _assert_runtime_token_parity(pytorch_hf_tokens, pytorch_kv_tokens)
+        with model_export_compile_lock(model_name):
+            onnx_model_path = qeff_model.export(
+                use_onnx_subfunctions=use_onnx_subfunctions,
+                offload_pt_weights=False,
+            )
+        for path in onnx_model_path:
+            onnx.checker.check_model(path)
+        ort_tokens, ort_vision_outputs, ort_step_outputs = _run_molmo_point_ort(
+            api_runner,
+            qeff_model.model,
+            inputs,
+            onnx_model_path,
+            prompt_len,
+            ctx_len,
+            max_gen_len,
+            pytorch_vision_outputs,
+            pytorch_step_outputs,
+        )
+        _assert_runtime_token_parity(pytorch_kv_tokens, ort_tokens)
+        compile_kwargs["vision_onnx_path"] = str(onnx_model_path[0])
+        compile_kwargs["lang_onnx_path"] = str(onnx_model_path[1])
 
     if (
         mdp_compile_kwargs
@@ -444,6 +893,20 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
     if compile_only:
         manual_cleanup(qeff_model.onnx_path)
         return
+
+    if model_name == "allenai/MolmoPoint-8B":
+        qpc_tokens = _run_molmo_point_qpc(
+            qeff_model.model,
+            inputs,
+            [qeff_model.vision_model.qpc_path, qeff_model.lang_model.qpc_path],
+            [0],
+            prompt_len,
+            ctx_len,
+            max_gen_len,
+            ort_vision_outputs,
+            ort_step_outputs,
+        )
+        _assert_runtime_token_parity(ort_tokens, qpc_tokens)
 
     streamer = TextStreamer(processor.tokenizer)
     print("QPC Outputs (QAIC):")
@@ -463,7 +926,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
         cloud_ai_100_tokens=cloud_ai_100_tokens.tolist(),
         pytorch_hf_tokens=pytorch_hf_tokens.tolist(),
         pytorch_kv_tokens=pytorch_kv_tokens.tolist() if pytorch_kv_tokens is not None else None,
-        ort_tokens=ort_tokens.cpu().tolist() if ort_tokens is not None else None,
+        ort_tokens=ort_tokens.tolist() if ort_tokens is not None else None,
         exec_info=exec_info,
     )
 
@@ -533,7 +996,7 @@ def test_few_image_text_to_text_onnx_mdp_compile_only(model_name, kv_offload, ma
 def test_dummy_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(model_name, kv_offload, manual_cleanup):
     if model_name in ModelConfig.SKIPPED_MODELS:
         pytest.skip("Test skipped for this model due to some issues.")
-    torch.manual_seed(42)
+    torch.manual_seed(7 if model_name == "allenai/MolmoPoint-8B" else 42)
     hf_config = None
     if is_kimi_k25(model_name):
         hf_config = get_kimi_k25_test_config(model_name, model_config_dict)
@@ -642,7 +1105,7 @@ def test_dummy_image_text_to_text_ccl_dual_qpc(model_name, manual_cleanup):
     }
     if model_name in ModelConfig.SKIPPED_MODELS and model_name not in ccl_forced:
         pytest.skip("Test skipped for this model due to some issues.")
-    torch.manual_seed(42)
+    torch.manual_seed(7 if model_name == "allenai/MolmoPoint-8B" else 42)
     comp_ctx_lengths_decode = model_config_dict[model_name].get("comp_ctx_lengths_decode")
 
     # On hybrid linear-attention stacks only the full_attention layers consume

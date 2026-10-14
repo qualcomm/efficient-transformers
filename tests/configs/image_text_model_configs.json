@@ -554,6 +554,25 @@
       "additional_params": {}
     },
     {
+      "model_name": "allenai/MolmoPoint-8B",
+      "model_type": "molmo_point",
+      "supports_blocking": false,
+      "batch_size": 1,
+      "prompt_len": 896,
+      "ctx_len": 1024,
+      "img_size": 378,
+      "img_url": "https://picsum.photos/id/237/378/378",
+      "text_prompt": "Locate the dog in this image.",
+      "num_layers": 2,
+      "additional_params": {
+        "num_crops": 2,
+        "num_patches": 729,
+        "pixels_per_patch": 588,
+        "num_image_tokens": 392,
+        "pool_dim": 4
+      }
+    },
+    {
       "model_name": "OpenGVLab/InternVL2_5-1B",
       "model_type": "internvl_chat",
       "supports_blocking": false,

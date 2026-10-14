@@ -23,6 +23,14 @@ import pytest
 import torch
 from torch import nn
 
+from QEfficient.transformers.models.molmo_point.modeling_molmo_point import (
+    QEffMolmoPointForConditionalGeneration,
+    QEffMolmoPointPatchRope,
+    QEffMolmoPointVisionAttention,
+    _gather_image_position_ids,
+    eager_attention_forward as molmo_point_eager_attention_forward,
+)
+
 
 class _CompileOnlyModule:
     def __init__(self, name, calls):
@@ -52,6 +60,101 @@ class _CompileOnlyVLM:
         if kwargs.get("kv_offload"):
             return {"vision": [{"batch_size": 1}], "lang": [{"batch_size": 1}]}, dict(kwargs)
         return [{"batch_size": 1}], dict(kwargs)
+
+
+def test_molmo_point_attention_zeroes_fully_masked_rows():
+    """Match SDPA's finite zero output for padded queries with no valid keys."""
+    module = SimpleNamespace(num_key_value_groups=1)
+    query = torch.ones((1, 1, 2, 2), dtype=torch.float32)
+    key = torch.ones((1, 1, 2, 2), dtype=torch.float32)
+    value = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
+    attention_mask = torch.tensor([[[[True, True], [False, True]]]])
+
+    attention_output, attention_weights = molmo_point_eager_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        attention_mask,
+        scaling=1.0,
+    )
+
+    assert torch.isfinite(attention_output).all()
+    assert torch.isfinite(attention_weights).all()
+    torch.testing.assert_close(attention_weights[0, 0, 0], torch.zeros(2))
+    torch.testing.assert_close(attention_weights[0, 0, 1], torch.tensor([1.0, 0.0]))
+
+
+def test_molmo_point_patch_rope_uses_finite_cached_values():
+    """Point RoPE keeps negative and positive positions finite without runtime trigonometry."""
+
+    module = nn.Module()
+    module.register_buffer("inv_freq", torch.tensor([1.0, 0.1]))
+    QEffMolmoPointPatchRope.__qeff_init__(module)
+    hidden_states = torch.tensor([[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]])
+    position_ids = torch.tensor([-1, 7])
+
+    actual = QEffMolmoPointPatchRope.forward(module, hidden_states, position_ids)
+    frequencies = position_ids.float().unsqueeze(-1) * module.inv_freq.unsqueeze(0)
+    embeddings = torch.cat((frequencies, frequencies), dim=-1)
+    rotated = torch.cat((-hidden_states[:, 2:], hidden_states[:, :2]), dim=-1)
+    expected = hidden_states * embeddings.cos() + rotated * embeddings.sin()
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected)
+
+
+def test_molmo_point_image_position_gather_clamps_sentinel_indices():
+    """Point-position lookup must never send padding sentinels to Gather."""
+
+    image_position_ids = torch.tensor([[3, 5, 7], [11, 13, 17]])
+    last_patch_ids = torch.tensor([[torch.iinfo(torch.int32).max], [-1]])
+
+    actual = _gather_image_position_ids(image_position_ids, last_patch_ids)
+
+    torch.testing.assert_close(actual, torch.tensor([[7], [0]]))
+
+
+def test_molmo_point_transform_rebuilds_nonpersistent_patch_rope_buffer():
+    """The parent transform reconstructs point RoPE after meta-device loading."""
+
+    patch_rotary = nn.Module()
+    patch_rotary.register_buffer("inv_freq", torch.full((4,), torch.nan), persistent=False)
+    module = SimpleNamespace(
+        config=SimpleNamespace(token_prediction_rotary_theta=50000.0, patch_embed_dim=8),
+        model=SimpleNamespace(point_predictor=SimpleNamespace(patch_rotary=patch_rotary)),
+    )
+
+    QEffMolmoPointForConditionalGeneration.__qeff_init__(module)
+
+    expected = 1.0 / (50000.0 ** (torch.arange(0, 8, 2, dtype=torch.float32) / 8))
+    torch.testing.assert_close(patch_rotary.inv_freq, expected)
+    assert torch.isfinite(patch_rotary.inv_freq).all()
+
+
+def test_molmo_point_vision_attention_matches_hub_eager_mask_semantics():
+    """The remote eager attention accepts but intentionally ignores its mask."""
+
+    module = SimpleNamespace(
+        wq=nn.Identity(),
+        wk=nn.Identity(),
+        wv=nn.Identity(),
+        wo=nn.Identity(),
+        num_heads=1,
+        num_key_value_heads=1,
+        num_key_value_groups=1,
+        head_dim=2,
+        float32_attention=True,
+        residual_dropout=nn.Identity(),
+    )
+    query = torch.tensor([[[1.0, 0.0]]])
+    keys = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
+    mask = torch.tensor([[[[True, False]]]])
+
+    masked = QEffMolmoPointVisionAttention.forward(module, query, keys, mask)
+    unmasked = QEffMolmoPointVisionAttention.forward(module, query, keys, None)
+
+    torch.testing.assert_close(masked, unmasked)
 
 
 # ---------------------------------------------------------------------------

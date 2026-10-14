@@ -17,6 +17,7 @@ import onnx
 import torch
 from torch import nn
 from transformers import (
+    AutoConfig,
     AutoImageProcessor,
     AutoModel,
     AutoModelForCausalLM,
@@ -221,6 +222,30 @@ def _resolve_torch_dtype(kwargs: dict) -> None:
     # Keep the v5 alias in sync so HF from_pretrained and config see one dtype.
     if "dtype" in kwargs:
         kwargs["dtype"] = kwargs["torch_dtype"]
+
+
+def _normalize_molmo_point_rope_config(pretrained_model_name_or_path, kwargs: dict) -> None:
+    """Translate MolmoPoint's removed default RoPE initializer to an equivalent v5 form."""
+
+    config = kwargs.get("config")
+    model_path = str(pretrained_model_name_or_path).lower().replace("_", "").replace("-", "")
+    if config is None and "molmopoint" in model_path:
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path,
+            **{
+                key: kwargs[key]
+                for key in ("trust_remote_code", "revision", "token", "subfolder", "cache_dir")
+                if key in kwargs
+            },
+        )
+        kwargs["config"] = config
+    if getattr(config, "model_type", None) != "molmo_point":
+        return
+
+    rope_parameters = getattr(config.text_config, "rope_parameters", None) or {}
+    if rope_parameters.get("rope_type", "default") == "default":
+        config.text_config.rope_scaling = {"rope_type": "linear", "factor": 1.0}
+        config.text_config.standardize_rope_params()
 
 
 def _ignore_public_mdp_ts_num_devices(compiler_options: dict) -> None:
@@ -1638,6 +1663,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         )
 
         _resolve_torch_dtype(kwargs)
+        _normalize_molmo_point_rope_config(pretrained_model_name_or_path, kwargs)
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs)
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
@@ -2239,7 +2265,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             if output_name.startswith("past_"):
                 custom_io_vision[output_name] = kv_cache_dtype
             else:
-                custom_io_vision[output_name] = CUSTOM_IO_DTYPE_MAP[target_dtype]
+                custom_io_vision[output_name] = "float"
 
         if vision_onnx_path:
             self.vision_model.onnx_path = vision_onnx_path
@@ -2284,10 +2310,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         compiler_options.pop("continuous_batching", None)
         compiler_options.pop("kv_cache_batch_size", None)
         compiler_options.pop("full_batch_size", None)
+        vision_node_precision_info = compiler_options.pop("vision_node_precision_info", False)
         self.qpc_paths = {}
         if not skip_vision:
             compiler_options_vision = compiler_options.copy()
-            compiler_options_vision["node_precision_info"] = False
+            compiler_options_vision["node_precision_info"] = vision_node_precision_info
             vision_qpc_path = self.vision_model._compile(
                 onnx_path=self.vision_model.onnx_path,
                 compile_dir=compile_dir,
@@ -2313,7 +2340,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             for output_name in output_names["lang"]:
                 if output_name.endswith("_RetainedState"):
                     dtype = (
-                        CUSTOM_IO_DTYPE_MAP[target_dtype]
+                        "float"
                         if ("vision_embeds" in output_name or "deepstack_features" in output_name)
                         else kv_cache_dtype
                     )
@@ -2563,6 +2590,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             inputs["attention_mask"], (0, padded_len - input_ids_length), "constant", 0
         )
 
+        if "token_type_ids" in inputs:
+            inputs["token_type_ids"] = torch.nn.functional.pad(
+                inputs["token_type_ids"], (0, padded_len - input_ids_length), "constant", 0
+            )
+
         if "mm_token_type_ids" in inputs:
             inputs["mm_token_type_ids"] = torch.nn.functional.pad(
                 inputs["mm_token_type_ids"], (0, padded_len - input_ids_length), "constant", 0
@@ -2576,20 +2608,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         for k, v in inputs.items():
             inputs[k] = np.array(v)
 
-        vision_inputs = {
-            k: v
-            for k, v in inputs.items()
-            if k
-            in {
-                "pixel_values",
-                "image_masks",
-                "image_position_ids",
-                "image_input_idx",
-                "valid_idx",
-                "aspect_ratio_ids",
-                "aspect_ratio_mask",
-            }
-        }
+        vision_input_names = set(vision_session.input_names) if self.vision_model.qpc_path else set()
+        vision_inputs = {k: v for k, v in inputs.items() if k in vision_input_names}
 
         for k in constants.VISION_FP16_INPUTS:
             if k not in vision_inputs:
@@ -2616,7 +2636,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             vision_outputs = vision_session.run(vision_inputs)
         vision_end = perf_counter()
 
-        lang_inputs = {k: v for k, v in inputs.items() if k not in vision_inputs}
+        lang_inputs = {k: v for k, v in inputs.items() if k not in vision_input_names}
         if "position_ids" in inputs:
             lang_inputs["position_ids"] = inputs["position_ids"]
             lang_inputs.pop("attention_mask")
@@ -2731,7 +2751,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 )
                 lang_session.set_buffers({"logits": np.zeros(logits_shape, dtype=logits_dtype)})
             outputs = lang_session.run(chunk_inputs)
-            chunk_inputs["image_idx"] = outputs["image_idx_output"]
+            if "image_idx_output" in outputs and "image_idx" in lang_session.input_names:
+                chunk_inputs["image_idx"] = outputs["image_idx_output"]
 
         prefill_time = perf_counter() - lang_start + vision_end - vision_start
         # Skip inputs/outputs again
@@ -2753,6 +2774,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if "mm_token_type_ids" in lang_inputs:
             lang_inputs["mm_token_type_ids"] = np.zeros_like(
                 lang_inputs["input_ids"], dtype=lang_inputs["mm_token_type_ids"].dtype
+            )
+        if "token_type_ids" in lang_inputs:
+            lang_inputs["token_type_ids"] = np.zeros_like(
+                lang_inputs["input_ids"], dtype=lang_inputs["token_type_ids"].dtype
             )
         if num_kv_blocks:
             lang_inputs["slot_id"] = lang_inputs["position_ids"].reshape(-1, batch_size).max(axis=0) % kv_block_size
@@ -2798,6 +2823,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             if "mm_token_type_ids" in lang_inputs:
                 lang_inputs["mm_token_type_ids"] = np.zeros_like(
                     lang_inputs["input_ids"], dtype=lang_inputs["mm_token_type_ids"].dtype
+                )
+            if "token_type_ids" in lang_inputs:
+                lang_inputs["token_type_ids"] = np.zeros_like(
+                    lang_inputs["input_ids"], dtype=lang_inputs["token_type_ids"].dtype
                 )
             if num_kv_blocks:
                 lang_inputs["slot_id"] += 1
@@ -3614,6 +3643,7 @@ class QEFFAutoModelForImageTextToText:
         )
 
         _resolve_torch_dtype(kwargs)
+        _normalize_molmo_point_rope_config(pretrained_model_name_or_path, kwargs)
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs)
         if layerwise:

@@ -21,6 +21,7 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
     "transformers==5.5.4",
     "diffusers==0.38.0",
+    "einops>=0.8.0",
     "huggingface-hub==1.7.1",
     "hf_transfer==0.1.9",
     "peft==0.19.1",
