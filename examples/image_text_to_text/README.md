@@ -55,6 +55,29 @@ python basic_vlm_inference.py \
 
 **Note:** In Dual QPC mode (`kv_offload=True`), the vision encoder runs in one QPC and the language model in another, with outputs transferred via host. This provides flexibility for independent execution of vision and language components.
 
+### Disaggregated Vision/Prefill/Decode QPC Mode
+Use the unified model example to export and compile three independent QPCs, then run greedy generation by chaining vision outputs into chunked language prefill and language decode:
+
+```bash
+export HF_HUB_CACHE=/home/huggingface_hub
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+python models/generic_disagg_inference.py \
+    --model-name tiny-random/qwen3-vl-moe \
+    --text-num-hidden-layers 2 \
+    --vision-num-hidden-layers 2 \
+    --prefill-seq-len 128 \
+    --ctx-len 4096 \
+    --height 354 \
+    --width 536 \
+    --mxfp6-matmul \
+    --mxint8-kv-cache
+```
+
+The script chooses model-specific shape arguments automatically for Qwen-style (`height`/`width`), Kimi-style (`image_height`/`image_width`), and square-image (`img_size`) models. For a newly added model, use `--shape-arg-mode` plus `--compiler-options` for any wrapper-specific compile arguments.
+
+To only export and compile the three QPCs without running QAIC inference, add `--compile-only`. To run from precompiled artifacts, pass `--skip-compile --vision-qpc-path <path> --prefill-qpc-path <path> --decode-qpc-path <path>`.
+
 ### Text-Only Execution (Skip Vision)
 Run text-only inference without image processing:
 
