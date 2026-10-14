@@ -20,9 +20,19 @@ from diffusers.models.transformers.transformer_flux import (
     FluxTransformer2DModel,
     FluxTransformerBlock,
 )
+from diffusers.models.transformers.transformer_flux2 import (
+    Flux2Attention,
+    Flux2AttnProcessor,
+    Flux2ParallelSelfAttention,
+    Flux2ParallelSelfAttnProcessor,
+    Flux2SingleTransformerBlock,
+    Flux2Transformer2DModel,
+    Flux2TransformerBlock,
+)
 from diffusers.models.transformers.transformer_wan import WanAttention, WanAttnProcessor, WanTransformer3DModel
 from torch import nn
 from transformers.models.clip.modeling_clip import CLIPTextTransformer
+
 
 from QEfficient.base.pytorch_transforms import ModuleMappingTransform
 from QEfficient.customop.rms_norm import CustomRMSNormAIC
@@ -45,11 +55,21 @@ from QEfficient.diffusers.models.transformers.transformer_flux import (
     QEffFluxTransformer2DModel,
     QEffFluxTransformerBlock,
 )
+from QEfficient.diffusers.models.transformers.transformer_flux2 import (
+    QEffFlux2Attention,
+    QEffFlux2AttnProcessor,
+    QEffFlux2ParallelSelfAttention,
+    QEffFlux2ParallelSelfAttnProcessor,
+    QEffFlux2SingleTransformerBlock,
+    QEffFlux2Transformer2DModel,
+    QEffFlux2TransformerBlock,
+)
 from QEfficient.diffusers.models.transformers.transformer_wan import (
     QEffWanAttention,
     QEffWanAttnProcessor,
     QEffWanTransformer3DModel,
 )
+
 from QEfficient.transformers.models.clip.modeling_clip import QEffCLIPTextTransformer
 
 
@@ -73,6 +93,13 @@ class AttentionTransform(ModuleMappingTransform):
         FluxTransformer2DModel: QEffFluxTransformer2DModel,
         FluxAttention: QEffFluxAttention,
         FluxAttnProcessor: QEffFluxAttnProcessor,
+        Flux2SingleTransformerBlock: QEffFlux2SingleTransformerBlock,
+        Flux2TransformerBlock: QEffFlux2TransformerBlock,
+        Flux2Transformer2DModel: QEffFlux2Transformer2DModel,
+        Flux2Attention: QEffFlux2Attention,
+        Flux2AttnProcessor: QEffFlux2AttnProcessor,
+        Flux2ParallelSelfAttention: QEffFlux2ParallelSelfAttention,
+        Flux2ParallelSelfAttnProcessor: QEffFlux2ParallelSelfAttnProcessor,
         WanAttnProcessor: QEffWanAttnProcessor,
         WanAttention: QEffWanAttention,
         WanTransformer3DModel: QEffWanTransformer3DModel,

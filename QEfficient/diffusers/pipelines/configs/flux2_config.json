@@ -1,0 +1,88 @@
+{
+    "description": "Default configuration for Flux2-klein pipeline",
+    "modules": {
+        "text_encoder": {
+            "specializations": {
+                "batch_size": 1,
+                "seq_len": 512
+            },
+            "compilation": {
+                "onnx_path": null,
+                "compile_dir": null,
+                "mdp_ts_num_devices": 1,
+                "mxfp6_matmul": false,
+                "convert_to_fp16": true,
+                "aic_num_cores": 16
+            },
+            "execute": {
+                "device_ids": null,
+                "qpc_path": null
+            }
+        },
+        "transformer": {
+            "specializations": [
+                {
+                    "batch_size": 1,
+                    "cl": 3120,
+                    "seq_len": 512
+                }
+            ],
+            "compilation": {
+                "onnx_path": null,
+                "compile_dir": null,
+                "mdp_ts_num_devices": 4,
+                "mxfp6_matmul": true,
+                "convert_to_fp16": true,
+                "aic_num_cores": 16,
+                "mos": 1,
+                "mdts-mos": 1,
+                "aic-enable-depth-first": true
+            },
+            "execute": {
+                "device_ids": null,
+                "qpc_path": null
+            }
+        },
+        "vae_decoder": {
+            "specializations": {
+                "batch_size": 1,
+                "channels": 16,
+                "latent_height": 60,
+                "latent_width": 104
+            },
+            "compilation": {
+                "onnx_path": null,
+                "compile_dir": null,
+                "mdp_ts_num_devices": 8,
+                "mxfp6_matmul": false,
+                "convert_to_fp16": true,
+                "aic_num_cores": 16,
+                "aic-enable-depth-first": true
+            },
+            "execute": {
+                "device_ids": null,
+                "qpc_path": null
+            }
+        },
+        "vae_encoder": {
+            "specializations": {
+                "batch_size": 1,
+                "height": 480,
+                "width": 832
+            },
+            "compilation": {
+                "onnx_path": null,
+                "compile_dir": null,
+                "mdp_ts_num_devices": 1,
+                "mxfp6_matmul": false,
+                "convert_to_fp16": true,
+                "aic_num_cores": 16,
+                "aic-enable-depth-first": true
+            },
+            "execute": {
+                "device_ids": null,
+                "qpc_path": null
+            }
+        }
+    }
+}

@@ -24,6 +24,46 @@ from QEfficient.transformers.models.pytorch_transforms import (
 from QEfficient.utils import constants
 
 
+# ---------------------------------------------------------------------------
+# Flux2 VAE wrapper modules
+# ---------------------------------------------------------------------------
+
+
+class Flux2VaeEncoderWrapper(torch.nn.Module):
+    """
+    Input:  image
+    Output: latents
+    """
+
+    def __init__(self, vae: torch.nn.Module) -> None:
+        super().__init__()
+        self.vae = vae
+        self.config = vae.config  # expose config for QEFFBaseModel
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        encoder_output = self.vae.encode(image)
+        if hasattr(encoder_output, "latent_dist"):
+            return encoder_output.latent_dist.mode()
+        return encoder_output.latents
+
+
+class Flux2VaeDecoderWrapper(torch.nn.Module):
+    """
+    Input:  latent_sample
+    Output: sample
+    """
+
+    def __init__(self, vae: torch.nn.Module) -> None:
+        super().__init__()
+        self.vae = vae
+        self.config = vae.config  # expose config for QEFFBaseModel
+
+    def forward(self, latent_sample: torch.Tensor) -> torch.Tensor:
+        # return_dict=False -> plain tuple; take first element (decoded image)
+        decoded = self.vae.decode(latent_sample, return_dict=False)
+        return decoded[0]
+
+
 class QEffTextEncoder(QEFFBaseModel):
     """
     Wrapper for text encoder models with ONNX export and QAIC compilation capabilities.
@@ -253,7 +293,7 @@ class QEffVAE(QEFFBaseModel):
 
     def get_onnx_params(self, latent_height: int = 32, latent_width: int = 32) -> Tuple[Dict, Dict, List[str]]:
         """
-        Generate ONNX export configuration for the VAE decoder.
+        Generate ONNX export configuration for the VAE encoder or decoder.
 
         Args:
             latent_height (int): Height of latent representation (default: 32)
@@ -267,17 +307,34 @@ class QEffVAE(QEFFBaseModel):
         """
         bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
 
+        if self.type == "encoder":
+            sample_size = getattr(self.model.config, "sample_size", None)
+            height = sample_size if isinstance(sample_size, int) else 1024
+            width = sample_size if isinstance(sample_size, int) else 1024
+            example_inputs = {
+                "image": torch.randn(bs, 3, height, width),
+            }
+            output_names = ["latents"]
+            dynamic_axes = {
+                "image": {0: "batch_size", 2: "height", 3: "width"},
+            }
+            return example_inputs, dynamic_axes, output_names
+
+        # Read latent channel count from model config so this works for both
+        # Flux1 (AutoencoderKL, latent_channels=16) and
+        # Flux2 (AutoencoderKLFlux2, latent_channels=32) without hardcoding.
+        latent_channels = getattr(self.model.config, "latent_channels", 16)
+
         # VAE decoder takes latent representation as input
         example_inputs = {
-            "latent_sample": torch.randn(bs, 16, latent_height, latent_width),
+            "latent_sample": torch.randn(bs, latent_channels, latent_height, latent_width),
             "return_dict": False,
         }
 
         output_names = ["sample"]
 
-        # All dimensions except channels can be dynamic
         dynamic_axes = {
-            "latent_sample": {0: "batch_size", 1: "channels", 2: "latent_height", 3: "latent_width"},
+            "latent_sample": {0: "batch_size", 2: "latent_height", 3: "latent_width"},
         }
 
         return example_inputs, dynamic_axes, output_names
@@ -317,6 +374,27 @@ class QEffVAE(QEFFBaseModel):
             },
         }
 
+        return example_inputs, dynamic_axes, output_names
+
+    def get_flux2_encoder_onnx_params(self) -> Tuple[Dict, Dict, List[str]]:
+        """
+        Generate ONNX export configuration for the Flux2 VAE image encoder.
+        """
+        bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
+        # sample_size is the native spatial resolution (e.g. 1024 for Flux2)
+        # sample_size = getattr(self.model.config, "sample_size", 1024)
+        # height = sample_size if isinstance(sample_size, int) else 1024
+        # width  = sample_size if isinstance(sample_size, int) else 1024
+        height = 480
+        width = 832
+        example_inputs = {
+            "image": torch.randn(bs, 3, height, width),
+        }
+        output_names = ["latents"]
+        dynamic_axes = {
+            "image": {0: "batch_size", 2: "height", 3: "width"},
+            "latents": {0: "batch_size", 2: "latent_height", 3: "latent_width"},
+        }
         return example_inputs, dynamic_axes, output_names
 
     def get_video_onnx_params(self) -> Tuple[Dict, Dict, List[str]]:
@@ -383,6 +461,7 @@ class QEffVAE(QEFFBaseModel):
             output_names=output_names,
             dynamic_axes=dynamic_axes,
             export_dir=export_dir,
+            offload_pt_weights=False,  # shared vae ref — must not deallocate between encoder/decoder exports
             **export_kwargs,
         )
 
@@ -533,6 +612,224 @@ class QEffFluxTransformerModel(QEFFBaseModel):
             export_dir=export_dir,
             use_onnx_subfunctions=use_onnx_subfunctions,
             offload_pt_weights=False,  # As weights are needed with AdaLN changes
+        )
+
+    def compile(self, specializations: List[Dict], **compiler_options) -> None:
+        """
+        Compile the ONNX model for Qualcomm AI hardware.
+
+        Args:
+            specializations (List[Dict]): Model specialization configurations
+            **compiler_options: Additional compiler options (e.g., num_cores, aic_num_of_activations)
+        """
+        self._compile(specializations=specializations, **compiler_options)
+
+
+class QEffFlux2VAE(QEFFBaseModel):
+    """
+    Wrapper for the Flux2 (AutoencoderKLFlux2) VAE decoder with ONNX export and
+    QAIC compilation capabilities.
+
+    Attributes:
+        model (nn.Module): The wrapped AutoencoderKLFlux2 model
+        type (str): Always ``"decoder"`` for this class
+        _pytorch_transforms (List): Only CustomOpsTransform — no AttentionTransform
+        _onnx_transforms (List): Standard FP16 clip + tensor split
+    """
+
+    _pytorch_transforms = [CustomOpsTransform]
+    _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
+
+    @property
+    def get_model_config(self) -> Dict:
+        return self.model.config.__dict__
+
+    def __init__(self, model: nn.Module, type: str = "decoder") -> None:
+        """
+        Args:
+            model (nn.Module): The AutoencoderKLFlux2 instance.
+            type (str): VAE operation type — always ``"decoder"`` here.
+        """
+        super().__init__(model)
+        self.model = model
+        self.type = type
+
+    def get_onnx_params(self, latent_height: int = 32, latent_width: int = 32) -> Tuple[Dict, Dict, List[str]]:
+        """
+        Generate ONNX export configuration for the Flux2 VAE decoder.
+        """
+        bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
+        # self.model is Flux2VaeDecoderWrapper; .config is the VAE config
+        latent_channels = self.model.config.latent_channels  # 32 for Flux2
+        example_inputs = {
+            "latent_sample": torch.randn(bs, latent_channels, latent_height, latent_width),
+        }
+        output_names = ["sample"]
+        dynamic_axes = {
+            "latent_sample": {0: "batch_size", 2: "latent_height", 3: "latent_width"},
+        }
+        return example_inputs, dynamic_axes, output_names
+
+    def export(
+        self,
+        inputs: Dict,
+        output_names: List[str],
+        dynamic_axes: Dict,
+        export_dir: str = None,
+        export_kwargs: Dict = {},
+    ) -> str:
+        """
+        Export the Flux2 VAE decoder to ONNX format.
+        """
+        if hasattr(self.model.config, "_use_default_values"):
+            self.model.config["_use_default_values"].sort()
+
+        return self._export(
+            example_inputs=inputs,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            export_dir=export_dir,
+            offload_pt_weights=False,  # To do:
+            **export_kwargs,
+        )
+
+    def compile(self, specializations: List[Dict], **compiler_options) -> None:
+        """
+        Compile the ONNX model for Qualcomm AI hardware.
+        """
+        # self._compile(specializations=specializations, **compiler_options)
+        self._compile(specializations=specializations, offload_pt_weights=False, **compiler_options)
+
+
+class QEffFlux2TransformerModel(QEFFBaseModel):
+    """
+    Wrapper for Flux2 Transformer2D models with ONNX export and QAIC compilation capabilities.
+
+    This class handles Flux2 Transformer2D models with specific transformations and optimizations
+    for efficient inference on Qualcomm AI hardware. Flux2 uses a transformer-based diffusion
+    architecture with dual-stream and single-stream transformer blocks. AdaLN modulation
+    parameters are hoisted outside the model and passed as explicit ONNX inputs so that
+    the SiLU+Linear projection ops (Flux2Modulation) are not part of the exported graph.
+
+    Attributes:
+        model (nn.Module): The wrapped Flux2 transformer model
+        _pytorch_transforms (List): PyTorch transformations applied before ONNX export
+        _onnx_transforms (List): ONNX transformations applied after export
+    """
+
+    _pytorch_transforms = [AttentionTransform, NormalizationTransform, CustomOpsTransform]
+    _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
+
+    @property
+    def get_model_config(self) -> Dict:
+        """
+        Get the model configuration as a dictionary.
+
+        Returns:
+            Dict: The configuration dictionary of the underlying Flux transformer model
+        """
+        return self.model.config.__dict__
+
+    def __init__(self, model: nn.Module) -> None:
+        """
+        Initialize the Flux transformer wrapper.
+
+        Args:
+            model (nn.Module): The Flux transformer model to wrap
+        """
+        super().__init__(model)
+
+    def get_onnx_params(
+        self,
+        batch_size: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE,
+        seq_length: int = constants.FLUX2_ONNX_EXPORT_SEQ_LENGTH,
+        cl: int = constants.FLUX2_ONNX_EXPORT_COMPRESSED_LATENT_DIM,
+    ) -> Tuple[Dict, Dict, List[str]]:
+        """
+        Generate ONNX export configuration for the Flux2 transformer.
+
+        Args:
+            batch_size (int): Batch size for example inputs
+            seq_length (int): Text sequence length
+            cl (int): Compressed latent (image token) dimension
+
+        Returns:
+            Tuple containing:
+                - example_inputs (Dict): Sample inputs for ONNX export
+                - dynamic_axes (Dict): Specification of dynamic dimensions
+                - output_names (List[str]): Names of model outputs
+        """
+        # Derive inner_dim from model config — no hardcoded constants needed
+        inner_dim = self.model.config.num_attention_heads * self.model.config.attention_head_dim
+        num_layers = self.model.config.num_layers
+        num_single = self.model.config.num_single_layers
+
+        # axes_dims_rope has 4 entries for Flux2; RoPE ids have 4 coords per token
+        rope_dim = len(self.model.config.axes_dims_rope)
+
+        example_inputs = {
+            # Image latent tokens: [batch, cl, in_channels]
+            "hidden_states": torch.randn(batch_size, cl, self.model.config.in_channels, dtype=torch.float32),
+            # Text conditioning tokens: [batch, seq_length, joint_attention_dim]
+            "encoder_hidden_states": torch.randn(
+                batch_size, seq_length, self.model.config.joint_attention_dim, dtype=torch.float32
+            ),
+            "timestep": torch.tensor([1.0], dtype=torch.float32),
+            "img_ids": torch.randn(cl, rope_dim, dtype=torch.float32),
+            "txt_ids": torch.randn(seq_length, rope_dim, dtype=torch.float32),
+            "adaln_double_img": torch.randn(num_layers, inner_dim * 6, dtype=torch.float32),
+            # Dual-block txt-stream: same layout as img
+            "adaln_double_txt": torch.randn(num_layers, inner_dim * 6, dtype=torch.float32),
+            # Single-block: [mod_shift, mod_scale, mod_gate] per layer
+            "adaln_single": torch.randn(num_single, inner_dim * 3, dtype=torch.float32),
+            # Final AdaLayerNormContinuous: [scale, shift] — QEffAdaLayerNormContinuous
+            "adaln_out": torch.randn(batch_size, inner_dim * 2, dtype=torch.float32),
+        }
+
+        output_names = ["sample"]
+
+        dynamic_axes = {
+            "hidden_states": {0: "batch_size", 1: "cl"},
+            "encoder_hidden_states": {0: "batch_size", 1: "seq_len"},
+            "timestep": {0: "steps"},
+            "img_ids": {0: "cl"},
+            "sample": {0: "batch_size", 1: "cl"},
+        }
+
+        return example_inputs, dynamic_axes, output_names
+
+    def export(
+        self,
+        inputs: Dict,
+        output_names: List[str],
+        dynamic_axes: Dict,
+        export_dir: str = None,
+        use_onnx_subfunctions: bool = False,
+    ) -> str:
+        """
+        Export the Flux2 transformer model to ONNX format.
+
+        Args:
+            inputs (Dict): Example inputs for ONNX export
+            output_names (List[str]): Names of model outputs
+            dynamic_axes (Dict): Specification of dynamic dimensions
+            export_dir (str, optional): Directory to save ONNX model
+            use_onnx_subfunctions (bool): Whether to export transformer blocks as ONNX functions
+                                     for better modularity and potential optimization
+        Returns:
+            str: Path to the exported ONNX model
+        """
+
+        # Sort _use_default_values in config to ensure consistent hash generation during export
+        if "_use_default_values" in self.model.config:
+            self.model.config["_use_default_values"].sort()
+        return self._export(
+            example_inputs=inputs,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            export_dir=export_dir,
+            use_onnx_subfunctions=use_onnx_subfunctions,
+            offload_pt_weights=False,
         )
 
     def compile(self, specializations: List[Dict], **compiler_options) -> None:
