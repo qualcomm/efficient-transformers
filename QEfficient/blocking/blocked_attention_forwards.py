@@ -44,6 +44,16 @@ def _normalize_int(value: Optional[torch.Tensor | int]) -> int:
     return int(value) if value is not None else 0
 
 
+def _safe_running_max(running_max: torch.Tensor) -> torch.Tensor:
+    """Replace -inf running maxima (row fully masked so far) with 0 for use as the exp() reference."""
+    return torch.where(running_max == float("-inf"), torch.zeros_like(running_max), running_max)
+
+
+def _safe_denominator(denominator: torch.Tensor) -> torch.Tensor:
+    """Replace zero softmax denominators (row fully masked) with 1 so the row resolves to 0, not 0/0."""
+    return torch.where(denominator == 0, torch.ones_like(denominator), denominator)
+
+
 def update_running_softmax(
     current_max: torch.Tensor,
     attn_weights_block: torch.Tensor,
@@ -56,20 +66,25 @@ def update_running_softmax(
     # Update Running row maximum
     prev_max = current_max
     current_max_updated = torch.max(prev_max, attn_weights_block.max(dim=3).values)
-    delta_max = prev_max - current_max_updated
+    # A row whose keys have all been masked so far keeps max == -inf; subtracting it
+    # gives -inf - (-inf) = NaN. Use 0 as the reference for such rows so exp() yields 0.
+    safe_max = _safe_running_max(current_max_updated)
+    delta_max = prev_max - safe_max
 
-    current_exp = torch.exp(attn_weights_block - current_max_updated.unsqueeze(-1))
+    current_exp = torch.exp(attn_weights_block - safe_max.unsqueeze(-1))
 
     # update running denominator
     prev_denominator = current_denominator
     curr_exp_sum = current_exp.sum(dim=-1)
     current_denominator_updated = prev_denominator * torch.exp(delta_max) + curr_exp_sum
+    # Fully-masked rows have denominator 0; divide by 1 instead so they stay 0, not NaN.
+    safe_denominator = _safe_denominator(current_denominator_updated)
 
-    prob = current_exp / current_denominator_updated.unsqueeze(-1)
+    prob = current_exp / safe_denominator.unsqueeze(-1)
 
     prev_output = output
     # if updating running softmax with attention sinks, we don't have v_block
-    output_scale = ((prev_denominator / current_denominator_updated).unsqueeze(-1)) * torch.exp(delta_max.unsqueeze(-1))
+    output_scale = ((prev_denominator / safe_denominator).unsqueeze(-1)) * torch.exp(delta_max.unsqueeze(-1))
     if v_block is not None:
         value_output = torch.matmul(prob.to(v_block.dtype), v_block).to(prev_output.dtype)
         output_updated = output_scale.to(prev_output.dtype) * prev_output + value_output
@@ -99,8 +114,10 @@ def update_running_softmax_prefill(
 ):
     prev_max = current_max
     current_max_updated = torch.max(prev_max, attn_weights_block.max(dim=-1).values)
-    delta_max = prev_max - current_max_updated
-    current_exp = torch.exp(attn_weights_block - current_max_updated.unsqueeze(-1))
+    # See update_running_softmax: avoid -inf - (-inf) = NaN for rows with no visible key yet.
+    safe_max = _safe_running_max(current_max_updated)
+    delta_max = prev_max - safe_max
+    current_exp = torch.exp(attn_weights_block - safe_max.unsqueeze(-1))
     prev_denominator = current_denominator
     curr_exp_sum = current_exp.sum(dim=-1)
     current_denominator_updated = prev_denominator * torch.exp(delta_max) + curr_exp_sum
@@ -901,6 +918,10 @@ def blocked_qkv_attention_forward_prefill_online(
 
             k_abs = torch.arange(start_index, end_index, device=query.device)
             causal = k_abs[None, None, None, :] > pos_sub[:, None, :, None]
+            # Zero V at slots past the last valid position: stale/NaN values there would
+            # otherwise leak through 0 * NaN = NaN in the probs @ V matmul.
+            invalid_kv = k_abs[None, None, :, None] > position_ids.max(dim=-1).values[:, None, None, None]
+            v_block = torch.where(invalid_kv, torch.zeros_like(v_block), v_block)
 
             for acc in accs:
                 rc = acc["rc"]
@@ -923,7 +944,8 @@ def blocked_qkv_attention_forward_prefill_online(
         r_chunks = []
         for acc in accs:
             rc = acc["rc"]
-            out = acc["o_acc"] / acc["s_acc"].unsqueeze(-1)
+            # Fully-masked rows (e.g. padded queries) have s_acc == 0; avoid 0/0.
+            out = acc["o_acc"] / _safe_denominator(acc["s_acc"]).unsqueeze(-1)
             r_chunks.append(out.view(B, num_cores, rc, tc, D))
         t_chunks.append(torch.cat(r_chunks, dim=2))
 
