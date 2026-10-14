@@ -48,6 +48,7 @@ from QEfficient.transformers.moe import (
     delete_module_attrs,
     gptoss_clamped_glu_mlp,
 )
+from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 from QEfficient.utils.logging_utils import QEFFLogger
 
@@ -1180,6 +1181,7 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
         return_dict: Optional[bool] = None,
         output_router_logits: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        num_logits_to_keep: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeCausalLMOutputWithPast:
@@ -1238,8 +1240,11 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
 
         hidden_states = outputs.last_hidden_state
 
-        logit_index = position_ids.to(torch.int32).argmax(1, keepdim=True)
-        hidden_states = outputs[0][torch.arange(position_ids.shape[0]).view(-1, 1), logit_index]
+        if num_logits_to_keep is not None:
+            hidden_states = filter_hidden_states(hidden_states, position_ids, num_logits_to_keep)
+        else:
+            logit_index = position_ids.to(torch.int32).argmax(1, keepdim=True)
+            hidden_states = outputs[0][torch.arange(position_ids.shape[0]).view(-1, 1), logit_index]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 

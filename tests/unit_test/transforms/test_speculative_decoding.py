@@ -523,6 +523,283 @@ class TestSpDTransformQwen2:
 
 
 # ---------------------------------------------------------------------------
+# Tests: filter_hidden_states indexing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.transforms
+class TestFilterHiddenStates:
+    """filter_hidden_states must gather the K positions ending at argmax(position_ids)."""
+
+    def _hidden_states(self, batch=2, seq_len=4):
+        # hidden[b, s, :] == 10 * b + s, so gathered values identify (batch, position) directly.
+        values = 10 * torch.arange(batch).view(-1, 1) + torch.arange(seq_len).view(1, -1)
+        return values.unsqueeze(-1).expand(batch, seq_len, 3).float()
+
+    def test_keeps_last_k_positions_per_row(self):
+        from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
+
+        position_ids = torch.tensor([[0, 1, 2, 3], [0, 1, 2, -1]])
+        kept = filter_hidden_states(self._hidden_states(), position_ids, torch.arange(2).view(2, 1))
+        assert kept.shape == (2, 2, 3)
+        assert kept[..., 0].tolist() == [[2.0, 3.0], [11.0, 12.0]]
+
+    def test_k_is_clamped_to_sequence_start(self):
+        from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
+
+        position_ids = torch.tensor([[0, -1, -1, -1], [0, 1, 2, 3]])
+        kept = filter_hidden_states(self._hidden_states(), position_ids, torch.arange(3).view(3, 1))
+        assert kept[..., 0].tolist() == [[0.0, 1.0, 2.0], [11.0, 12.0, 13.0]]
+
+    def test_none_keeps_only_argmax_position(self):
+        from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
+
+        position_ids = torch.tensor([[0, 1, 2, 3], [0, 1, 2, -1]])
+        kept = filter_hidden_states(self._hidden_states(), position_ids, None)
+        assert kept[..., 0].tolist() == [[3.0], [12.0]]
+
+    def test_tensor_extent_not_value_selects_k(self):
+        from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
+
+        position_ids = torch.arange(4).view(1, 4)
+        hidden = self._hidden_states(batch=1)
+        assert filter_hidden_states(hidden, position_ids, torch.tensor([3])).shape[1] == 1
+        assert filter_hidden_states(hidden, position_ids, torch.arange(3).view(3, 1)).shape[1] == 3
+
+
+# ---------------------------------------------------------------------------
+# Tests: SpDTransform for MoE target models (GPT-OSS, Mixtral)
+# ---------------------------------------------------------------------------
+
+MOE_NUM_LAYERS = 2
+MOE_NUM_KV_HEADS = 2
+MOE_HEAD_DIM = 32
+GPT_OSS_SLIDING_WINDOW = 8
+
+
+def make_tiny_gpt_oss():
+    from transformers import GptOssConfig, GptOssForCausalLM
+
+    cfg = GptOssConfig(
+        num_hidden_layers=MOE_NUM_LAYERS,
+        num_attention_heads=2,
+        num_key_value_heads=MOE_NUM_KV_HEADS,
+        hidden_size=64,
+        intermediate_size=128,
+        vocab_size=VOCAB_SIZE,
+        max_position_embeddings=64,
+        head_dim=MOE_HEAD_DIM,
+        sliding_window=GPT_OSS_SLIDING_WINDOW,
+        layer_types=["sliding_attention", "full_attention"],
+        num_local_experts=4,
+        num_experts_per_tok=2,
+    )
+    return GptOssForCausalLM(cfg).eval(), cfg
+
+
+def make_tiny_mixtral():
+    from transformers import MixtralConfig, MixtralForCausalLM
+
+    cfg = MixtralConfig(
+        num_hidden_layers=MOE_NUM_LAYERS,
+        num_attention_heads=2,
+        num_key_value_heads=MOE_NUM_KV_HEADS,
+        hidden_size=64,
+        intermediate_size=128,
+        vocab_size=VOCAB_SIZE,
+        max_position_embeddings=CTX_LEN,
+        num_experts_per_tok=2,
+        num_local_experts=4,
+    )
+    return MixtralForCausalLM(cfg).eval(), cfg
+
+
+MOE_FACTORIES = {"gpt_oss": make_tiny_gpt_oss, "mixtral": make_tiny_mixtral}
+
+
+def make_kv_transformed_moe(arch):
+    torch.manual_seed(0)
+    model, cfg = MOE_FACTORIES[arch]()
+    transformed, _ = KVCacheTransform.apply(model)
+    return transformed, cfg
+
+
+def make_moe_past_key_values(cfg, batch):
+    layer_types = getattr(cfg, "layer_types", None) or ["full_attention"] * cfg.num_hidden_layers
+    return tuple(
+        tuple(
+            torch.zeros(
+                batch,
+                MOE_NUM_KV_HEADS,
+                GPT_OSS_SLIDING_WINDOW if layer_type == "sliding_attention" else CTX_LEN,
+                MOE_HEAD_DIM,
+            )
+            for _ in range(2)
+        )
+        for layer_type in layer_types
+    )
+
+
+def clone_past_key_values(past_key_values):
+    return tuple(tuple(state.clone() for state in layer) for layer in past_key_values)
+
+
+@pytest.mark.transforms
+@pytest.mark.parametrize("arch", ["gpt_oss", "mixtral"])
+class TestSpDTransformMoE:
+    """SpDTransform must accept QEff MoE wrappers as target models and keep K logits."""
+
+    def _run(self, model, cfg, input_ids, position_ids, **kwargs):
+        with torch.no_grad():
+            return model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=make_moe_past_key_values(cfg, input_ids.shape[0]),
+                **kwargs,
+            )
+
+    def _reference_logits(self, model, cfg, input_ids, position_ids):
+        """Logits for every position, computed from the unsliced backbone output."""
+        with torch.no_grad():
+            outputs = model.model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=make_moe_past_key_values(cfg, input_ids.shape[0]),
+            )
+            return model.lm_head(outputs.last_hidden_state).float()
+
+    def test_target_type_is_accepted(self, arch):
+        model, _ = make_kv_transformed_moe(arch)
+        transformed, applied = SpDTransform.apply(model, qaic_config={"speculative_model_type": "target"})
+        assert applied
+        assert transformed is model
+
+    def test_draft_type_is_rejected(self, arch):
+        model, _ = make_kv_transformed_moe(arch)
+        with pytest.raises(NotImplementedError, match="only supports speculative_model_type='target'"):
+            SpDTransform.apply(
+                model,
+                qaic_config={"speculative_model_type": "turbo", "pretrained_model_name_or_path": "unused"},
+            )
+
+    @pytest.mark.parametrize("num_logits_to_keep", [1, 3])
+    def test_keeps_k_logits_matching_reference(self, arch, num_logits_to_keep):
+        model, cfg = make_kv_transformed_moe(arch)
+        SpDTransform.apply(model, qaic_config={"speculative_model_type": "target"})
+
+        batch, seq_len = 2, num_logits_to_keep + 1
+        torch.manual_seed(1)
+        input_ids = torch.randint(0, VOCAB_SIZE, (batch, seq_len))
+        position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch, -1)
+
+        output = self._run(
+            model,
+            cfg,
+            input_ids,
+            position_ids,
+            num_logits_to_keep=torch.arange(num_logits_to_keep).view(num_logits_to_keep, 1),
+        )
+        reference = self._reference_logits(model, cfg, input_ids, position_ids)
+
+        assert output.logits.shape == (batch, num_logits_to_keep, VOCAB_SIZE)
+        assert torch.isfinite(output.logits).all()
+        torch.testing.assert_close(output.logits, reference[:, -num_logits_to_keep:], rtol=1e-5, atol=1e-5)
+
+    def test_moe_output_fields_match_non_spd_forward(self, arch):
+        model, cfg = make_kv_transformed_moe(arch)
+        SpDTransform.apply(model, qaic_config={"speculative_model_type": "target"})
+
+        input_ids = torch.randint(0, VOCAB_SIZE, (1, 4))
+        position_ids = torch.arange(4).view(1, 4)
+        spd = self._run(
+            model,
+            cfg,
+            input_ids,
+            position_ids,
+            output_router_logits=True,
+            num_logits_to_keep=torch.arange(4).view(4, 1),
+        )
+        base = self._run(model, cfg, input_ids, position_ids, output_router_logits=True)
+
+        assert type(spd) is type(base)
+        assert set(spd.keys()) == set(base.keys())
+        for field in ("aux_loss", "router_logits", "hidden_states", "attentions"):
+            if getattr(base, field) is None:
+                assert getattr(spd, field) is None, field
+            else:
+                torch.testing.assert_close(getattr(spd, field), getattr(base, field))
+        torch.testing.assert_close(spd.logits[:, -1:], base.logits, rtol=1e-5, atol=1e-5)
+
+    def test_non_spd_forward_is_unchanged(self, arch):
+        model, cfg = make_kv_transformed_moe(arch)
+        input_ids = torch.randint(0, VOCAB_SIZE, (2, 4))
+        position_ids = torch.tensor([[0, 1, 2, 3], [0, 1, 2, -1]])
+        before = self._run(model, cfg, input_ids, position_ids)
+
+        SpDTransform.apply(model, qaic_config={"speculative_model_type": "target"})
+        after = self._run(model, cfg, input_ids, position_ids)
+        reference = self._reference_logits(model, cfg, input_ids, position_ids)
+
+        assert after.logits.shape == (2, 1, VOCAB_SIZE)
+        assert torch.equal(before.logits, after.logits)
+        torch.testing.assert_close(after.logits[:, 0], reference[[0, 1], [3, 2]], rtol=1e-5, atol=1e-5)
+
+    def test_padded_batch_keeps_k_logits_ending_at_last_valid_position(self, arch):
+        model, cfg = make_kv_transformed_moe(arch)
+        SpDTransform.apply(model, qaic_config={"speculative_model_type": "target"})
+
+        num_logits_to_keep = 2
+        input_ids = torch.randint(0, VOCAB_SIZE, (2, 4))
+        position_ids = torch.tensor([[0, 1, 2, 3], [0, 1, 2, -1]])
+        output = self._run(
+            model,
+            cfg,
+            input_ids,
+            position_ids,
+            num_logits_to_keep=torch.arange(num_logits_to_keep).view(num_logits_to_keep, 1),
+        )
+        reference = self._reference_logits(model, cfg, input_ids, position_ids)
+
+        assert output.logits.shape == (2, num_logits_to_keep, VOCAB_SIZE)
+        torch.testing.assert_close(output.logits[0], reference[0, 2:4], rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(output.logits[1], reference[1, 1:3], rtol=1e-5, atol=1e-5)
+
+    def test_decode_after_prefill_keeps_k_logits_matching_reference(self, arch):
+        """Verify K+1 tokens against a populated cache, past the GPT-OSS sliding window."""
+        model, cfg = make_kv_transformed_moe(arch)
+        SpDTransform.apply(model, qaic_config={"speculative_model_type": "target"})
+
+        prefill_len, num_logits_to_keep = GPT_OSS_SLIDING_WINDOW + 2, 3
+        decode_len = num_logits_to_keep + 1
+        input_ids = torch.randint(0, VOCAB_SIZE, (1, prefill_len + decode_len))
+        position_ids = torch.arange(prefill_len + decode_len).view(1, -1)
+
+        with torch.no_grad():
+            prefill = model(
+                input_ids=input_ids[:, :prefill_len],
+                position_ids=position_ids[:, :prefill_len],
+                past_key_values=make_moe_past_key_values(cfg, 1),
+            )
+            decode = model(
+                input_ids=input_ids[:, prefill_len:],
+                position_ids=position_ids[:, prefill_len:],
+                past_key_values=clone_past_key_values(prefill.past_key_values),
+                num_logits_to_keep=torch.arange(num_logits_to_keep).view(num_logits_to_keep, 1),
+            )
+            reference = model.lm_head(
+                model.model(
+                    input_ids=input_ids[:, prefill_len:],
+                    position_ids=position_ids[:, prefill_len:],
+                    past_key_values=clone_past_key_values(prefill.past_key_values),
+                ).last_hidden_state
+            ).float()
+
+        assert decode.logits.shape == (1, num_logits_to_keep, VOCAB_SIZE)
+        assert torch.isfinite(decode.logits).all()
+        torch.testing.assert_close(decode.logits, reference[:, -num_logits_to_keep:], rtol=1e-5, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
 # Tests: post_processing.py registry
 # ---------------------------------------------------------------------------
 
@@ -648,3 +925,54 @@ class TestSpDONNXStructure:
 
         output_names = [out.name for out in onnx_model.graph.output]
         assert "logits" in output_names, f"TLM ONNX must have 'logits' output. Found: {output_names}"
+
+    @pytest.mark.onnx
+    @pytest.mark.slow
+    @pytest.mark.parametrize("arch", ["gpt_oss", "mixtral"])
+    def test_moe_tlm_onnx_keeps_k_logits_matching_pytorch(self, arch, tmp_export_dir):
+        """MoE TLM ONNX must expose num_logits_to_keep and match PyTorch logits for K kept positions."""
+        import numpy as np
+        import onnx
+        import onnxruntime as ort
+
+        from QEfficient.transformers.cache_utils import InvalidIndexProvider
+        from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+
+        torch.manual_seed(0)
+        model, cfg = MOE_FACTORIES[arch]()
+        qeff_model = QEFFAutoModelForCausalLM(model, qaic_config={"speculative_model_type": "target"})
+        InvalidIndexProvider.SUBFUNC_ENABLED = True
+        try:
+            onnx_path = qeff_model.export(export_dir=str(tmp_export_dir), offload_pt_weights=False)
+        finally:
+            InvalidIndexProvider.SUBFUNC_ENABLED = False
+
+        graph_inputs = {inp.name: inp for inp in onnx.load(str(onnx_path)).graph.input}
+        assert "num_logits_to_keep" in graph_inputs
+
+        session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+        for num_logits_to_keep in (1, 3):
+            seq_len = num_logits_to_keep + 1
+            input_ids = torch.randint(0, VOCAB_SIZE, (1, seq_len))
+            position_ids = torch.arange(seq_len).view(1, seq_len)
+            with torch.no_grad():
+                pt_logits = qeff_model.model(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    past_key_values=make_moe_past_key_values(cfg, 1),
+                    num_logits_to_keep=torch.arange(num_logits_to_keep).view(num_logits_to_keep, 1),
+                ).logits.numpy()
+
+            ort_inputs = {
+                "input_ids": input_ids.numpy(),
+                "position_ids": position_ids.numpy(),
+                "num_logits_to_keep": np.zeros((num_logits_to_keep, 1), dtype=np.int64),
+            }
+            for i, (key, value) in enumerate(make_moe_past_key_values(cfg, 1)):
+                ort_inputs[f"past_key.{i}"] = key.numpy()
+                ort_inputs[f"past_value.{i}"] = value.numpy()
+            assert set(ort_inputs) == {inp.name for inp in session.get_inputs()}
+            (ort_logits,) = session.run(["logits"], ort_inputs)
+
+            assert ort_logits.shape == (1, num_logits_to_keep, VOCAB_SIZE)
+            np.testing.assert_allclose(ort_logits, pt_logits, rtol=1e-4, atol=1e-4)
