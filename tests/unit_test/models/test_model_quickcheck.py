@@ -2859,6 +2859,17 @@ def test_resolve_torch_dtype_normalizes_dtype_alias(caplog):
     _resolve_torch_dtype(kwargs)
     assert kwargs["torch_dtype"] == torch.float32
 
+    # Original-checkpoint weight-free export needs FP16 graph consumers on AI100.
+    # The source BF16 tensor remains the external input and the exporter emits
+    # the BF16-to-FP16 Cast node explicitly.
+    kwargs = {}
+    _resolve_torch_dtype(kwargs, use_original_checkpoint=True)
+    assert kwargs["torch_dtype"] == torch.float16
+
+    kwargs = {"torch_dtype": torch.bfloat16}
+    _resolve_torch_dtype(kwargs, use_original_checkpoint=True)
+    assert kwargs["torch_dtype"] == torch.float16
+
 
 def test_qwen3_5_moe_gated_norm_preserves_float16():
     """GatedDeltaNet RMSNorm must keep the input dtype so the gated output feeds

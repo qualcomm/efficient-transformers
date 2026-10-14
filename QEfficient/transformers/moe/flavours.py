@@ -25,7 +25,11 @@ from QEfficient.customop import (
     ctx_scatter_3d_int,
 )
 from QEfficient.transformers.moe.profiles import MoEProfile
-from QEfficient.transformers.moe.weights import MoEWeights, validate_expert_parallel_moe_weights
+from QEfficient.transformers.moe.weights import (
+    MoEWeights,
+    validate_canonical_moe_weights,
+    validate_expert_parallel_moe_weights,
+)
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("MODEL")
@@ -158,6 +162,22 @@ def cumsum_scatter_gather_update_expert_blocked(
     return expert_out
 
 
+def _expert_parallel_layout(
+    tensor: Optional[torch.Tensor], num_pipeline_stages: int, num_parallelized_experts: int, packed: bool
+):
+    """Return weights in ``[E/P, P, ...]`` layout for expert-parallel execution.
+
+    Canonical weights are reshaped and transposed in the graph. This keeps the
+    checkpoint canonical while exposing the constant transforms that the
+    compiler can fold. Legacy packed weights already have this layout.
+    """
+    if tensor is None:
+        return None
+    if packed:
+        return tensor
+    return tensor.reshape(num_pipeline_stages, num_parallelized_experts, *tensor.shape[1:]).transpose(0, 1)
+
+
 def moe_expert_parallel(
     x: torch.Tensor,
     routing_weights: torch.Tensor,
@@ -171,13 +191,22 @@ def moe_expert_parallel(
     tree_reduce: bool = False,
     num_packed_chunks: int = 1,
 ) -> torch.Tensor:
-    """Prefill expert-parallel flavour with branch-style expert reshaping."""
+    """Run expert-parallel prefill using canonical or legacy packed weights."""
     T, H = x.shape
-    validate_expert_parallel_moe_weights(
-        weights,
-        num_parallelized_experts=num_parallelized_experts,
-        num_pipeline_stages=num_pipeline_stages,
-    )
+    packed = weights.gate.ndim == 4
+    if packed:
+        validate_expert_parallel_moe_weights(
+            weights,
+            num_parallelized_experts=num_parallelized_experts,
+            num_pipeline_stages=num_pipeline_stages,
+        )
+    else:
+        validate_canonical_moe_weights(weights)
+        if weights.num_experts != num_pipeline_stages * num_parallelized_experts:
+            raise ValueError(
+                "expert-parallel needs num_experts == num_pipeline_stages * num_parallelized_experts, got "
+                f"{weights.num_experts} != {num_pipeline_stages} * {num_parallelized_experts}"
+            )
     num_experts = weights.num_experts
     if routing_weights.shape != (T, num_experts):
         raise ValueError(
@@ -195,29 +224,29 @@ def moe_expert_parallel(
         .transpose(0, 1)
         .contiguous()
     )
-    W_g = weights.gate
-    W_u = weights.up
-    W_d = weights.down
-    b_g = weights.gate_bias
-    b_u = weights.up_bias
-    b_d = weights.down_bias
-
     expert_out = x.new_zeros((num_parallelized_experts, T, H))
     routing_weights_unsqueezed = rw.unsqueeze(-1)
     for slot in range(num_pipeline_stages):
         T2Ei = rw[:, slot, :] > 0
+
+        def slot_weights(tensor, slot=slot):
+            layout = _expert_parallel_layout(tensor, num_pipeline_stages, num_parallelized_experts, packed)
+            if layout is None:
+                return None
+            return layout[:, slot]
+
         expert_out = cumsum_scatter_gather_update_expert_blocked(
             x=x,
             T2Ei=T2Ei,
-            W_g=W_g[:, slot],
-            W_u=W_u[:, slot],
-            W_d=W_d[:, slot],
+            W_g=slot_weights(weights.gate),
+            W_u=slot_weights(weights.up),
+            W_d=slot_weights(weights.down),
             routing_weight=routing_weights_unsqueezed[:, slot],
             expert_out=expert_out,
             expert_mlp=profile.expert_mlp,
-            b_g=b_g[:, slot] if b_g is not None else None,
-            b_u=b_u[:, slot] if b_u is not None else None,
-            b_d=b_d[:, slot] if b_d is not None else None,
+            b_g=slot_weights(weights.gate_bias),
+            b_u=slot_weights(weights.up_bias),
+            b_d=slot_weights(weights.down_bias),
             num_packed_chunks=num_packed_chunks,
         )
 

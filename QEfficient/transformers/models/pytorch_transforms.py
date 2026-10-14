@@ -661,7 +661,6 @@ from QEfficient.transformers.models.whisper.modeling_whisper import (
 from QEfficient.transformers.moe import (
     MoEFlavour,
     QEffMoEBlockMixin,
-    pack_moe_weights_for_expert_parallel,
     unpack_moe_weights_from_expert_parallel,
 )
 from QEfficient.transformers.post_processing import build_and_attach_mlp, model_type_registry
@@ -1915,7 +1914,12 @@ def _replace_moe_weight_aliases(model: nn.Module, old_weights: nn.Module, new_we
 
 
 class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
-    """Pack or restore MoE weights according to the selected MoE export flavour."""
+    """Keep MoE weights canonical for every export flavour.
+
+    Expert-parallel prefill slices each pipeline slot's experts in the graph,
+    so prefill and decode can consume the same prepared checkpoint. Packed
+    weights supplied by older callers are restored to canonical here.
+    """
 
     @classmethod
     def apply(cls, model: nn.Module) -> tuple[nn.Module, bool]:
@@ -1924,26 +1928,10 @@ class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
             if not getattr(module, "weights_transformed", False):
                 continue
             weights = getattr(module, "moe_weights", None)
-            if weights is None:
+            if weights is None or getattr(module, "_qeff_original_checkpoint_layout", False):
                 continue
 
-            flavour = getattr(module, "_moe_flavour", MoEFlavour.DECODE_BMM)
-            if not isinstance(flavour, MoEFlavour):
-                flavour = MoEFlavour(flavour)
-
-            if flavour is MoEFlavour.EXPERT_PARALLEL:
-                num_pipeline_stages = getattr(module, "num_pipeline_stages", None)
-                num_parallelized_experts = getattr(module, "num_parallelized_experts", None)
-                if num_pipeline_stages is None or num_parallelized_experts is None:
-                    num_pipeline_stages = weights.gate.shape[1] if weights.gate.ndim == 4 else weights.num_experts
-                    num_parallelized_experts = weights.gate.shape[0] if weights.gate.ndim == 4 else 1
-                new_weights = pack_moe_weights_for_expert_parallel(
-                    weights,
-                    num_pipeline_stages=int(num_pipeline_stages),
-                    num_parallelized_experts=int(num_parallelized_experts),
-                )
-            else:
-                new_weights = unpack_moe_weights_from_expert_parallel(weights)
+            new_weights = unpack_moe_weights_from_expert_parallel(weights)
 
             if new_weights is weights:
                 continue

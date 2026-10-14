@@ -51,7 +51,6 @@ from QEfficient.exporter.weight_free import checkpoint_key_resolver
 from QEfficient.exporter.weight_free.checkpoint_key_resolver import find_checkpoint_key
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DtypeConversionCheckpointTransform,
-    ExpertParallelPackingCheckpointTransform,
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
     GraniteMoeFusedExpertSplitCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
@@ -60,7 +59,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
 from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_free_ort_inputs
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.transformers.moe.weights import MoEWeights, pack_moe_weights_for_expert_parallel
+from QEfficient.transformers.moe.weights import MoEWeights
 from QEfficient.utils import runtime_requirements
 from QEfficient.utils.checkpoint_utils import checkpoint_root
 from QEfficient.utils.export_utils import _generate_export_hash
@@ -232,6 +231,47 @@ def test_checkpoint_root_symlinked_shards(tmp_path, monkeypatch):
 
 
 class TestWeightFreeCheckpointTransforms:
+    def test_qwen3_original_layout_exposes_source_parameter_names(self):
+        from transformers import Qwen3MoeConfig
+
+        from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import QEffQwen3MoeExperts
+
+        experts = QEffQwen3MoeExperts(
+            Qwen3MoeConfig(num_experts=2, hidden_size=4, moe_intermediate_size=6, intermediate_size=6)
+        )
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+        parameter_names = {name for name, _ in experts.named_parameters()}
+
+        assert parameter_names == {
+            f"{expert}.{projection}.weight"
+            for expert in ("0", "1")
+            for projection in ("gate_proj", "up_proj", "down_proj")
+        }
+        assert tuple(weights.gate.shape) == (2, 4, 6)
+        assert tuple(weights.up.shape) == (2, 4, 6)
+        assert tuple(weights.down.shape) == (2, 6, 4)
+
+    def test_gpt_oss_original_layout_splits_fused_source_weights_in_forward(self):
+        from transformers import GptOssConfig
+
+        from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffGptOssExperts
+
+        experts = QEffGptOssExperts(GptOssConfig(num_local_experts=2, hidden_size=4, intermediate_size=6))
+        source = {name: parameter.detach().clone() for name, parameter in experts.named_parameters()}
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+
+        torch.testing.assert_close(weights.gate, source["gate_up_proj"][..., ::2])
+        torch.testing.assert_close(weights.up, source["gate_up_proj"][..., 1::2])
+        torch.testing.assert_close(weights.down, source["down_proj"])
+        torch.testing.assert_close(weights.gate_bias, source["gate_up_proj_bias"][..., ::2])
+        torch.testing.assert_close(weights.up_bias, source["gate_up_proj_bias"][..., 1::2])
+        torch.testing.assert_close(weights.down_bias, source["down_proj_bias"])
+        assert set(dict(experts.named_parameters())) == set(source)
+
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
@@ -352,7 +392,7 @@ class TestWeightFreeCheckpointTransforms:
         assert f"{prefix}.experts.gate_proj" not in tensors
         assert f"{prefix}.experts.down_proj_t" not in tensors
 
-    def test_pipeline_stacks_and_numerically_packs_experts_with_one_final_write(self, tmp_path):
+    def test_pipeline_keeps_expert_parallel_experts_canonical_with_one_final_write(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
         src.mkdir()
@@ -373,14 +413,10 @@ class TestWeightFreeCheckpointTransforms:
             tensors[f"{prefix}.experts.{expert_index}.w2.weight"] = down
         _write_safetensors_checkpoint(src, tensors)
 
-        expected_weights = pack_moe_weights_for_expert_parallel(
-            MoEWeights(
-                gate=torch.stack(gate_weights).transpose(1, 2),
-                up=torch.stack(up_weights).transpose(1, 2),
-                down=torch.stack(down_weights).transpose(1, 2),
-            ),
-            num_pipeline_stages=2,
-            num_parallelized_experts=4,
+        expected_weights = MoEWeights(
+            gate=torch.stack(gate_weights).transpose(1, 2),
+            up=torch.stack(up_weights).transpose(1, 2),
+            down=torch.stack(down_weights).transpose(1, 2),
         )
 
         pipeline = CheckpointTransformPipeline(
@@ -501,7 +537,7 @@ class TestWeightFreeCheckpointTransforms:
         assert set(index) == set(tensors)
         assert all((out / shard_name).is_file() for shard_name in index.values())
 
-    def test_pipeline_splits_and_packs_fused_experts_in_one_task(self, tmp_path):
+    def test_pipeline_splits_fused_experts_canonically_in_one_task(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
         src.mkdir()
@@ -520,7 +556,6 @@ class TestWeightFreeCheckpointTransforms:
         pipeline = CheckpointTransformPipeline(
             [
                 MoEFusedExpertSplitCheckpointTransform,
-                ExpertParallelPackingCheckpointTransform,
                 DtypeConversionCheckpointTransform,
             ]
         )
@@ -541,26 +576,22 @@ class TestWeightFreeCheckpointTransforms:
         task = plan.tasks[0]
         assert task.params.as_dict()["stages"] == (
             "split",
-            "expert_parallel_pack",
             "dtype",
             "final",
         )
         assert [stage.params.transform_id for stage in task.stages] == [
             MoEFusedExpertSplitCheckpointTransform.TRANSFORM_ID,
-            ExpertParallelPackingCheckpointTransform.TRANSFORM_ID,
             DtypeConversionCheckpointTransform.TRANSFORM_ID,
         ]
         assert {ref.stage for ref in task.stages[0].output_refs} == {"canonical"}
         assert set(task.stages[1].input_refs) == set(task.stages[0].output_refs)
-        assert {ref.stage for ref in task.stages[1].output_refs} == {"packed"}
-        assert set(task.stages[2].input_refs) == set(task.stages[1].output_refs)
-        assert {ref.stage for ref in task.stages[2].output_refs} == {"final"}
+        assert {ref.stage for ref in task.stages[1].output_refs} == {"final"}
 
         tensors = _load_prepared_tensors(out)
         moe_prefix = "model.layers.0.block_sparse_moe.moe_weights"
-        assert tensors[f"{moe_prefix}.gate"].shape == (2, 2, 4, 2)
-        assert tensors[f"{moe_prefix}.up"].shape == (2, 2, 4, 2)
-        assert tensors[f"{moe_prefix}.down"].shape == (2, 2, 2, 4)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.gate"], gate.transpose(1, 2))
+        torch.testing.assert_close(tensors[f"{moe_prefix}.up"], up.transpose(1, 2))
+        torch.testing.assert_close(tensors[f"{moe_prefix}.down"], down.transpose(1, 2))
         assert sorted(path.name for path in out.glob("*.safetensors")) == ["fused-group-00000.safetensors"]
 
     def test_fused_plan_rejects_missing_required_tensor_before_output(self, tmp_path):
@@ -606,7 +637,7 @@ class TestWeightFreeCheckpointTransforms:
 
         assert not (tmp_path / "out").exists()
 
-    def test_plan_fingerprint_tracks_expert_parallel_layout_not_chunk_size(self, tmp_path):
+    def test_prefill_and_decode_share_one_prepared_checkpoint(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
         prefix = "model.layers.0.block_sparse_moe"
@@ -621,72 +652,98 @@ class TestWeightFreeCheckpointTransforms:
         )
         config = SimpleNamespace(num_local_experts=4, model_type="mixtral")
 
-        plan_a, _ = pipeline.build_plan(
-            src,
-            torch.float32,
-            config=config,
-            hash_params={
-                "moe_prefill_flavour": "expert_parallel",
-                "moe_prefill_num_pipeline_stages": 2,
-                "moe_prefill_num_parallelized_experts": 2,
-                "moe_prefill_expert_parallel_chunk_size": 64,
-            },
-        )
-        plan_b, _ = pipeline.build_plan(
-            src,
-            torch.float32,
-            config=config,
-            hash_params={
-                "moe_prefill_flavour": "expert_parallel",
-                "moe_prefill_num_pipeline_stages": 4,
-                "moe_prefill_num_parallelized_experts": 1,
-                "moe_prefill_expert_parallel_chunk_size": 64,
-            },
-        )
-
-        plan_c, _ = pipeline.build_plan(
-            src,
-            torch.float32,
-            config=config,
-            hash_params={
-                "moe_prefill_flavour": "expert_parallel",
-                "moe_prefill_num_pipeline_stages": 2,
-                "moe_prefill_num_parallelized_experts": 2,
-                "moe_prefill_expert_parallel_chunk_size": 128,
-            },
-        )
-
-        assert plan_a.fingerprint_payload() != plan_b.fingerprint_payload()
-        assert plan_a.fingerprint_payload() == plan_c.fingerprint_payload()
-
         from QEfficient.exporter.weight_free.export import _prepared_checkpoint_hash
 
-        common_hash_args = {
-            "model_ref": str(src),
-            "target_dtype": torch.float32,
-            "active_group_transform_id": "moe_expert_stacking_v1",
-            "moe_prefill_flavour": "expert_parallel",
-            "moe_prefill_num_pipeline_stages": 2,
-            "moe_prefill_num_parallelized_experts": 2,
-        }
-        assert _prepared_checkpoint_hash(
-            **common_hash_args,
-            plan_payload=plan_a.fingerprint_payload(),
-        ) == _prepared_checkpoint_hash(
-            **common_hash_args,
-            plan_payload=plan_c.fingerprint_payload(),
-        )
-        assert _prepared_checkpoint_hash(
-            **common_hash_args,
-            plan_payload=plan_a.fingerprint_payload(),
-        ) != _prepared_checkpoint_hash(
-            **{
-                **common_hash_args,
+        hash_params = [
+            {"moe_prefill_flavour": "decode_bmm"},
+            {
+                "moe_prefill_flavour": "expert_parallel",
+                "moe_prefill_num_pipeline_stages": 2,
+                "moe_prefill_num_parallelized_experts": 2,
+                "moe_prefill_expert_parallel_chunk_size": 64,
+            },
+            {
+                "moe_prefill_flavour": "expert_parallel",
                 "moe_prefill_num_pipeline_stages": 4,
                 "moe_prefill_num_parallelized_experts": 1,
+                "moe_prefill_expert_parallel_chunk_size": 128,
             },
-            plan_payload=plan_b.fingerprint_payload(),
+        ]
+        hashes = set()
+        for params in hash_params:
+            plan, active_group = pipeline.build_plan(src, torch.float32, config=config, hash_params=params)
+            hashes.add(
+                _prepared_checkpoint_hash(
+                    model_ref=str(src),
+                    target_dtype=torch.float32,
+                    active_group_transform_id=active_group,
+                    plan_payload=plan.fingerprint_payload(),
+                )
+            )
+        assert len(hashes) == 1
+
+    def test_spec_builder_rejects_weight_shape_that_differs_from_checkpoint(self):
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _check_stored_shape
+
+        _check_stored_shape("w", [8, 4, 2], "w", [8, 4, 2])
+        _check_stored_shape("w", ["batch", 4, 2], "w", [8, 4, 2])
+        with pytest.raises(ValueError, match="stored layout"):
+            _check_stored_shape("moe.gate", [4, 2, 4, 2], "moe.gate", [8, 4, 2])
+
+    def test_safetensors_header_shapes_match_tensors(self, tmp_path):
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _safetensors_shapes
+
+        _write_safetensors_checkpoint(tmp_path, {"a": torch.ones(3, 5), "b": torch.ones(7)})
+        assert _safetensors_shapes(str(tmp_path / "model.safetensors")) == {"a": [3, 5], "b": [7]}
+
+    @staticmethod
+    def _weight_graph(source_dtype, target_dtype):
+        weight = ir.Value(name="weight", shape=[2, 2], type=ir.TensorType(target_dtype))
+        hidden = ir.Value(name="hidden", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+        output = ir.Value(name="output", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+        matmul = ir.Node(
+            domain="",
+            op_type="MatMul",
+            inputs=[weight, hidden],
+            outputs=[output],
+            name="matmul",
+            version=17,
         )
+        graph = ir.Graph(
+            inputs=[hidden],
+            outputs=[output],
+            nodes=[matmul],
+            initializers=[weight],
+            opset_imports={"": 17},
+        )
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _promote_initializer
+
+        _promote_initializer(SimpleNamespace(graph=graph), "weight", weight, source_dtype)
+        return graph
+
+    def test_original_bfloat16_weight_casts_to_fp16_graph_dtype(self):
+        graph = self._weight_graph(ir.DataType.BFLOAT16, ir.DataType.FLOAT16)
+
+        assert [(value.name, value.dtype) for value in graph.inputs] == [
+            ("hidden", ir.DataType.FLOAT),
+            ("weight", ir.DataType.BFLOAT16),
+        ]
+        assert [node.op_type for node in graph] == ["Cast", "MatMul"]
+        cast, matmul = list(graph)
+        assert cast.attributes["to"].value == int(ir.DataType.FLOAT16)
+        assert matmul.inputs[0].name == cast.outputs[0].name
+        assert not graph.initializers
+
+    def test_original_bfloat16_weight_has_no_cast_for_bfloat16_graph_dtype(self):
+        graph = self._weight_graph(ir.DataType.BFLOAT16, ir.DataType.BFLOAT16)
+
+        assert [(value.name, value.dtype) for value in graph.inputs] == [
+            ("hidden", ir.DataType.FLOAT),
+            ("weight", ir.DataType.BFLOAT16),
+        ]
+        assert [node.op_type for node in graph] == ["MatMul"]
+        assert list(graph)[0].inputs[0].name == "weight"
+        assert not graph.initializers
 
     def test_scheduler_waits_for_staged_dependency(self, tmp_path):
         execution_order = []

@@ -6,6 +6,7 @@
 # ----------------------------------------------------------------------------
 
 import json
+import struct
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -167,6 +168,108 @@ def find_checkpoint_key(
     )
 
 
+def _safetensors_shapes(checkpoint_file: str) -> Dict[str, List[int]]:
+    """Return ``{key: shape}`` from a safetensors header without reading tensor data."""
+    return {key: shape for key, (shape, _) in _safetensors_tensor_info(checkpoint_file).items()}
+
+
+def _safetensors_tensor_info(checkpoint_file: str) -> Dict[str, tuple[List[int], str]]:
+    """Return ``{key: (shape, dtype)}`` from a safetensors header without reading tensor data."""
+    with open(checkpoint_file, "rb") as handle:
+        (header_size,) = struct.unpack("<Q", handle.read(8))
+        header = json.loads(handle.read(header_size))
+    return {
+        key: ([int(dim) for dim in entry["shape"]], entry["dtype"])
+        for key, entry in header.items()
+        if key != "__metadata__"
+    }
+
+
+_SAFETENSORS_TO_ONNX_DTYPE = {
+    "BOOL": ir.DataType.BOOL,
+    "U8": ir.DataType.UINT8,
+    "I8": ir.DataType.INT8,
+    "U16": ir.DataType.UINT16,
+    "I16": ir.DataType.INT16,
+    "U32": ir.DataType.UINT32,
+    "I32": ir.DataType.INT32,
+    "U64": ir.DataType.UINT64,
+    "I64": ir.DataType.INT64,
+    "F16": ir.DataType.FLOAT16,
+    "BF16": ir.DataType.BFLOAT16,
+    "F32": ir.DataType.FLOAT,
+    "F64": ir.DataType.DOUBLE,
+}
+
+
+def _safetensors_onnx_dtype(dtype: str) -> ir.DataType:
+    try:
+        return _SAFETENSORS_TO_ONNX_DTYPE[dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported safetensors dtype '{dtype}' in weight-free export") from exc
+
+
+def _promote_initializer(
+    model_ir,
+    name: str,
+    init_value,
+    source_dtype: ir.DataType,
+) -> None:
+    """Promote one initializer, inserting a source-to-graph dtype cast when needed."""
+    graph = model_ir.graph
+    target_dtype = init_value.dtype
+    graph_input = ir.Value(
+        name=name,
+        shape=init_value.shape,
+        type=ir.TensorType(source_dtype),
+    )
+
+    if source_dtype == target_dtype:
+        if hasattr(init_value, "replace_all_uses_with"):
+            init_value.replace_all_uses_with(graph_input)
+        graph.inputs.append(graph_input)
+    else:
+        cast_name = f"{name}__qeff_cast_{source_dtype.name.lower()}_to_{target_dtype.name.lower()}"
+        cast_output = ir.Value(
+            name=cast_name,
+            shape=init_value.shape,
+            type=ir.TensorType(target_dtype),
+        )
+        cast_node = ir.Node(
+            domain="",
+            op_type="Cast",
+            inputs=[graph_input],
+            attributes={"to": ir.AttrInt64("to", int(target_dtype))},
+            outputs=[cast_output],
+            version=13,
+            name=cast_name,
+        )
+        consumers = init_value.consumers() if hasattr(init_value, "consumers") else ()
+        if hasattr(init_value, "replace_all_uses_with"):
+            init_value.replace_all_uses_with(cast_output)
+        graph.inputs.append(graph_input)
+        if consumers:
+            graph.insert_before(min(consumers, key=graph.index), cast_node)
+        else:
+            graph.append(cast_node)
+
+    del graph.initializers[name]
+
+
+def _check_stored_shape(name: str, graph_shape, checkpoint_key: str, stored_shape: List[int]) -> None:
+    """Fail the export when a graph weight input cannot bind to its stored tensor."""
+    try:
+        dims = [int(dim) for dim in graph_shape]
+    except (TypeError, ValueError):
+        return
+    if dims != stored_shape:
+        raise ValueError(
+            f"Weight input '{name}' expects shape {dims}, but checkpoint tensor '{checkpoint_key}' has shape "
+            f"{stored_shape}. Weight-free export requires the graph to consume weights in their stored layout; "
+            "express any layout change as graph ops instead of rewriting the checkpoint."
+        )
+
+
 def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name: str, qeff_model) -> WeightSpec:
     """Promote ONNX initializers to graph inputs and create the weight spec.
 
@@ -234,6 +337,7 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             pass  # no manifest → active_transform stays None, fallback to legacy aliases
 
     promoted_inputs: List[WeightSpecInput] = []
+    stored_tensor_info: Dict[str, Dict[str, tuple[List[int], str]]] = {}
 
     for name, init_value in list(model_ir.graph.initializers.items()):
         if name not in model_names:
@@ -251,14 +355,17 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             )
 
         checkpoint_file = checkpoint_index[checkpoint_key]
-        model_ir.graph.inputs.append(
-            ir.Value(
-                name=name,
-                shape=init_value.shape,
-                type=ir.TensorType(init_value.dtype),
-            )
-        )
-        del model_ir.graph.initializers[name]
+        if checkpoint_file not in stored_tensor_info:
+            stored_tensor_info[checkpoint_file] = _safetensors_tensor_info(checkpoint_file)
+        try:
+            stored_shape, stored_dtype = stored_tensor_info[checkpoint_file][checkpoint_key]
+        except KeyError as exc:
+            raise ValueError(
+                f"Checkpoint file '{checkpoint_file}' does not contain tensor '{checkpoint_key}' referenced by "
+                f"ONNX initializer '{name}'."
+            ) from exc
+        _check_stored_shape(name, init_value.shape, checkpoint_key, stored_shape)
+        _promote_initializer(model_ir, name, init_value, _safetensors_onnx_dtype(stored_dtype))
         promoted_inputs.append(
             WeightSpecInput(
                 name=name,

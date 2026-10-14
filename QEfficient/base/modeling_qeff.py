@@ -441,6 +441,11 @@ class QEFFBaseModel(ABC):
         # Flag for checking if weights are offloaded
         self._is_weights_offloaded: bool = False
         self._weight_free: bool = kwargs.get("weight_free", False)
+        self._use_original_checkpoint: bool = kwargs.get("use_original_checkpoint", False)
+        if self._use_original_checkpoint and not self._weight_free:
+            raise ValueError("use_original_checkpoint=True requires weight_free=True")
+        for module in self.model.modules():
+            module._qeff_use_original_checkpoint = self._use_original_checkpoint
         # Flag for checking if model has been transformed yet
         self.is_transformed: bool = False
 
@@ -1209,7 +1214,9 @@ class QEFFBaseModel(ABC):
         num_cores = compiler_options.get("num_cores", compiler_options.get("aic_num_cores"))
         if num_cores is None:
             num_cores = constants.DEFAULT_AIC_NUM_CORES
-        prefill_seq_len = compiler_options.get("prefill_seq_len", seq_len)
+        prefill_seq_len = compiler_options.get("prefill_seq_len")
+        if prefill_seq_len is None:
+            prefill_seq_len = seq_len
         mdp_num_partitions = compiler_options.get("mdp_num_partitions", 1)
         if mdp_num_partitions is None:
             mdp_num_partitions = 1

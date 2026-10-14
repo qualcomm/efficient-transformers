@@ -38,7 +38,6 @@ from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTrans
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DtypeConversionCheckpointTransform,
-    ExpertParallelPackingCheckpointTransform,
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
@@ -178,7 +177,7 @@ def _disable_unsupported_weight_free(kwargs: dict, qeff_auto_class_name: str) ->
     )
 
 
-def _resolve_torch_dtype(kwargs: dict) -> None:
+def _resolve_torch_dtype(kwargs: dict, *, use_original_checkpoint: bool = False) -> None:
     """
     Resolve torch_dtype in kwargs before calling from_pretrained.
 
@@ -187,14 +186,18 @@ def _resolve_torch_dtype(kwargs: dict) -> None:
     * If the caller already set torch_dtype to something other than
       bfloat16 (e.g. float16 or float32), leave it untouched.
     * If torch_dtype is bfloat16 **and** the target HW is ai100
-      (the default), leave it as bfloat16 so export/compile still run in
-      bfloat16, but warn that on-device generation is expected to fail
-      because the ai100 runtime does not support bfloat16.
+      (the default), leave it as bfloat16 for the regular path and warn that
+      on-device generation is expected to fail.  For original-checkpoint
+      weight-free export, select float16 so the graph contains the explicit
+      BF16-to-FP16 conversion required by AI100.
     * If torch_dtype is bfloat16 and the target HW is ai200,
       leave it as-is (ai200 supports bfloat16).
     * If torch_dtype is not set at all and the target HW is ai100 (the
       default), default to float32 so that models whose config.json
-      declares bfloat16 are not silently loaded in bfloat16.
+      declares bfloat16 are not silently loaded in bfloat16.  The original
+      checkpoint weight-free path is the exception: it defaults to float16 so
+      a BF16 source tensor can be represented as an explicit BF16-to-FP16
+      weight cast in ONNX.  This avoids the unsupported BF16-to-FP32 route.
 
     Transformers v5 renamed the ``torch_dtype`` argument to ``dtype``. To keep
     backward compatibility for callers (and examples) that pass either name,
@@ -210,13 +213,21 @@ def _resolve_torch_dtype(kwargs: dict) -> None:
 
     if aic_hw_version != "ai200":
         if current_dtype is None:
-            kwargs["torch_dtype"] = torch.float32
+            kwargs["torch_dtype"] = torch.float16 if use_original_checkpoint else torch.float32
         elif current_dtype == torch.bfloat16:
-            logger.warning(
-                "torch_dtype=bfloat16 is not supported on %s. Export and compilation will proceed in "
-                "bfloat16, but on-device generation is expected to fail.",
-                aic_hw_version,
-            )
+            if use_original_checkpoint:
+                kwargs["torch_dtype"] = torch.float16
+                logger.info(
+                    "Original-checkpoint weight-free export on %s uses float16 graph weights so BF16 "
+                    "safetensors are converted by explicit ONNX Cast nodes.",
+                    aic_hw_version,
+                )
+            else:
+                logger.warning(
+                    "torch_dtype=bfloat16 is not supported on %s. Export and compilation will proceed in "
+                    "bfloat16, but on-device generation is expected to fail.",
+                    aic_hw_version,
+                )
 
     # Keep the v5 alias in sync so HF from_pretrained and config see one dtype.
     if "dtype" in kwargs:
@@ -3690,7 +3701,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
-        ExpertParallelPackingCheckpointTransform,
         DtypeConversionCheckpointTransform,
     ]
 
@@ -3846,6 +3856,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         max_seq_len_cached: int | None = None,
         layerwise: bool = False,
         weight_free: bool = False,
+        use_original_checkpoint: bool = False,
         *args,
         **kwargs,
     ):
@@ -3891,6 +3902,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             ``QEFF_CHECKPOINT_HOME`` environment variable if set, otherwise next
             to the source checkpoint under the Hugging Face cache.
 
+        use_original_checkpoint : bool, optional
+            If True, weight-free export references the source safetensors
+            directly and skips checkpoint preparation. This is currently an
+            opt-in path for model layouts that expose source checkpoint keys in
+            the graph, such as the unfused Qwen3-MoE expert weights. The source
+            tensor dtype must be supported by the target compiler and hardware.
+
         *args :
             Positional arguments passed directly to `cls._hf_auto_class.from_pretrained`.
         **kwargs :
@@ -3910,6 +3928,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         if weight_free:
             validate_dynamo_export_requirements("weight_free=True")
+        if use_original_checkpoint and not weight_free:
+            raise ValueError("use_original_checkpoint=True requires weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
         if kwargs.pop("full_batch_size", None):
@@ -3934,7 +3954,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             }
         )
 
-        _resolve_torch_dtype(kwargs)
+        _resolve_torch_dtype(kwargs, use_original_checkpoint=use_original_checkpoint)
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs)
         if layerwise:
@@ -3978,6 +3998,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             max_seq_len_cached=max_seq_len_cached,
             weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
             **kwargs,
         )
         if layerwise:

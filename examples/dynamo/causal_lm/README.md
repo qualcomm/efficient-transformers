@@ -118,3 +118,23 @@ python examples/dynamo/causal_lm/disagg_weight_free_inference.py \
 ```
 
 The script prints separate QPC paths for the prefill and decode workers. In standard mode it then runs a prompt through prefill, transfers the retained KV state to decode, and prints generated text. With `--continuous-batching`, it compiles the CB QPCs and leaves the runtime KV-DMA handoff to the serving integration.
+
+## Original BF16 checkpoint compiler repro
+
+`original_checkpoint_dtype_artifacts.py` exports a weight-free graph that
+references the original BF16 safetensors directly and writes a compiler
+artifact directory without invoking QAIC. Use `--target-dtype float16` for an
+AI100 graph with explicit BF16-to-FP16 weight casts, or
+`--target-dtype bfloat16` for an AI200 graph with no weight casts:
+
+```bash
+HF_HUB_CACHE=/home/huggingface_hub \
+python examples/dynamo/causal_lm/original_checkpoint_dtype_artifacts.py \
+    --target-dtype float16 --hardware ai100 --stage decode \
+    --output-dir /tmp/qeff-original-artifacts/ai100-decode
+```
+
+The output includes `qaic-compile.sh`, `specializations.json`, the ONNX graph,
+and `weight_spec.json`. The source checkpoint is referenced by a symlink and is
+not copied into the output directory. The replay bundle can include the source
+files when it is archived for a compiler reproducer.
