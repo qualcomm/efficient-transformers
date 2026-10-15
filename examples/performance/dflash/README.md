@@ -76,6 +76,20 @@ python basic_inference_vision.py --model_name Qwen3-VL-32B-Instruct \
 `--height`/`--width` (qwen3-vl only) set the vision encoder's compiled input resolution;
 they default to `354`/`536` when omitted.
 
+### Qwen3.5-4B
+
+Qwen3.5 uses the VLM entry point with its DFlash target and draft checkpoints:
+
+```bash
+python basic_inference_vision.py --model_name Qwen3.5-4B \
+    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
+    --ctx_len 4096 --prefill_seq_len 128 \
+    --image --image_prompt "Describe this image in detail."
+```
+
+Use `--prompt "..."` instead of `--image --image_prompt ...` for text-only input.
+Prefill length can be any positive multiple of the draft block size; verification and replay remain block-sized.
+
 ---
 
 ## `--model_name`
@@ -107,6 +121,13 @@ python basic_inference_vision.py --model_name gemma-4-31B-it \
 ```
 
 ## Common flags
+
+DFlash targets use the existing SpD `num_logits_to_keep` input to project only
+the last valid position during prompt prefill. Verification still predicts every
+block position, and all hidden states needed by the DLM are preserved. This
+applies automatically to Qwen3, Llama, Gemma4, Qwen3-VL, Qwen3.5, and Qwen3.5-MoE.
+Existing TLM QPCs remain usable but need re-export/compilation for this change;
+DLM and vision QPCs are unchanged.
 
 | Flag | Default | Notes |
 |---|---|---|

@@ -23,6 +23,7 @@ from utils import (
     compile_gemma_vlm_qpcs,
     compile_qwen3vl_vlm_dlm_qpc,
     compile_qwen3vl_vlm_qpcs,
+    get_dflash_block_size,
     get_spd_prompt_chunk_size,
     load_spd_sessions,
     resolve_model_name,
@@ -76,7 +77,7 @@ def parse_args():
     parser.add_argument("--vision_devices", type=parse_device_list, default=[0, 1, 2, 3])
     parser.add_argument("--tlm_cores", type=int, default=8)
     parser.add_argument("--dlm_cores", type=int, default=8)
-    parser.add_argument("--ctx_len", type=int, default=2048)
+    parser.add_argument("--ctx_len", type=int, default=4096)
     parser.add_argument("--prefill_seq_len", type=int, default=128)
     parser.add_argument("--generation_len", type=int, default=1800)
     parser.add_argument("--iteration", type=int, default=300)
@@ -170,7 +171,7 @@ def _run_gemma(
         vocab_size=config.vocab_size,
         prompt_chunk_size=prompt_chunk_size,
         ctx_len=args.ctx_len,
-        block_size=config.block_size,
+        block_size=get_dflash_block_size(config),
         max_iterations=args.iteration,
         hidden_size=config.hidden_size,
         generation_len=args.generation_len,
@@ -223,7 +224,7 @@ def _run_qwen3_vl(
         vocab_size=config.vocab_size,
         prompt_chunk_size=prompt_chunk_size,
         ctx_len=args.ctx_len,
-        block_size=config.block_size,
+        block_size=get_dflash_block_size(config),
         max_iterations=args.iteration,
         hidden_size=config.hidden_size,
         generation_len=args.generation_len,
@@ -248,7 +249,7 @@ def main():
         raise ValueError(f"No default TLM HF path for '{args.model_name}'. Pass --tlm_hf_path.")
 
     tlm_config = AutoConfig.from_pretrained(tlm_repo, trust_remote_code=True, token=args.hf_token)
-    is_qwen3vl = tlm_config.model_type == "qwen3_vl"
+    is_qwen3vl = tlm_config.model_type in {"qwen3_vl", "qwen3_5", "qwen3_5_moe"}
 
     if args.tlm_qpc and args.vision_qpc:
         tlm_qpc, vision_qpc = args.tlm_qpc, args.vision_qpc
@@ -296,7 +297,8 @@ def main():
 
     dlm_session, tlm_session = load_spd_sessions(tlm_qpc, dlm_qpc, args.tlm_devices, args.dlm_devices)
     prompt_chunk_size = get_spd_prompt_chunk_size(tlm_session)
-    validate_spd_decode_specialization(tlm_session, config.block_size)
+    target_decode_length = get_dflash_block_size(config)
+    validate_spd_decode_specialization(tlm_session, target_decode_length)
 
     if is_qwen3vl:
         metrics, output_extra = _run_qwen3_vl(
@@ -336,7 +338,16 @@ def main():
     print("=" * width)
     print(f"  {'Acceptance Rate (tok/iter)':<30} {metrics.acceptance_rate():>6.2f}")
     print(f"  {'DLM Throughput  (tok/s)':<30} {metrics.dlm_tok_rate():>6.1f}")
-    print(f"  {'TLM Throughput  (tok/s)':<30} {metrics.tlm_tok_rate():>6.1f}")
+    if tlm_config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+        round_rate = metrics.num_total_iters / metrics.tlm_decode_time if metrics.tlm_decode_time > 0 else 0.0
+        print(f"  {'TLM Rounds (round/s)':<30} {round_rate:>6.1f}")
+    else:
+        print(f"  {'TLM Throughput  (tok/s)':<30} {metrics.tlm_tok_rate():>6.1f}")
+    if metrics.tlm_commit_time > 0 and metrics.tlm_verify_time > 0 and metrics.num_total_iters > 0:
+        print(f"  {'TLM Verify (ms/call)':<30} {1000 * metrics.tlm_verify_time / metrics.num_total_iters:>6.1f}")
+        print(f"  {'TLM Replay (ms/call)':<30} {1000 * metrics.tlm_commit_time / metrics.num_total_iters:>6.1f}")
+        verified_rate = metrics.block_size * metrics.num_total_iters / metrics.tlm_verify_time
+        print(f"  {'TLM Verified positions/s':<30} {verified_rate:>6.1f}")
     print(f"  {'SPD Decode Speed (tok/s)':<30} {metrics.spd_tok_rate():>6.1f}")
     print(f"  {'Generated tokens':<30} {metrics.total_generated_tokens:>6}")
     print(f"  {'Iterations':<30} {metrics.num_total_iters:>6}")

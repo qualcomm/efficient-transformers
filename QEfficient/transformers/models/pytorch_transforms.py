@@ -1274,11 +1274,12 @@ class DFlashDLMTransform:
         if not tlm_repo:
             return model, True
 
-        w = load_checkpoint_weights(tlm_repo, {"lm_head.weight", "lm_head.bias", "model.embed_tokens.weight"})
-        embed_w = w.get("model.embed_tokens.weight")
+        embed_key = qaic_config.get("dflash_tlm_embedding_key", "model.embed_tokens.weight")
+        w = load_checkpoint_weights(tlm_repo, {"lm_head.weight", "lm_head.bias", embed_key})
+        embed_w = w.get(embed_key)
         lm_head_w = w.get("lm_head.weight", embed_w)  # tie_word_embeddings: lm_head is a view of embed_tokens
         if lm_head_w is None or embed_w is None:
-            return model, True
+            raise ValueError(f"DFlash could not load target embeddings from {tlm_repo}: missing {embed_key}.")
 
         with torch.no_grad():
             model.lm_head.weight.data.copy_(lm_head_w.float())

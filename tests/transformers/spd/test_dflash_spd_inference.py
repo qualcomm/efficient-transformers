@@ -13,6 +13,9 @@ to real QPCs, and drives them through the SPD decode loop.
 """
 
 import os
+import runpy
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,24 +25,284 @@ from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.generation.dflash_generation import (
     SpecDecodingMetrics,
+    _run_spd_core,
     run_spd_inference_gemma4,
+    run_spd_inference_qwen3_vl,
     run_spd_inference_single,
 )
 
 VOCAB_SIZE = 64
 HIDDEN_SIZE = 64
 BLOCK_SIZE = 4  # DFlash decode block size; also the DLM's prefill_seq_len
-# TLM prompt-chunk size for prefill. Must differ from BLOCK_SIZE: the TLM's decode
-# specialization seq_len is always overridden to BLOCK_SIZE (see
-# build_decode_specialization's dflash_tlm branch), so a prefill spec with the same
-# seq_len would be indistinguishable from it and the AIC compiler would reject the
-# network ("No input that uniquely identifies specialization"). A multiple of
-# BLOCK_SIZE keeps the prefill loop's sub-block splitting exact (no remainder).
+# Different prefill and verification lengths exercise buffer resizing.
 PROMPT_CHUNK_SIZE = 2 * BLOCK_SIZE
 CTX_LEN = 32
 PAD_TOKEN_ID = 0
 EOS_TOKEN_ID = 1
 MASK_TOKEN_ID = 2
+
+
+@pytest.mark.parametrize("config", [{}, {"dflash_config": {}}], ids=["missing-block-size", "empty-dflash-config"])
+def test_get_dflash_block_size_rejects_missing_value(config):
+    from examples.performance.dflash import utils
+
+    with pytest.raises(ValueError, match="block_size >= 2"):
+        utils.get_dflash_block_size(config)
+
+
+@pytest.mark.parametrize("block_size", [None, "16", 16.0, -1, 0, 1])
+@pytest.mark.parametrize("nested", [False, True], ids=["top-level", "nested"])
+def test_get_dflash_block_size_rejects_invalid_value(block_size, nested):
+    from examples.performance.dflash import utils
+
+    config = {"block_size": block_size}
+    if nested:
+        config = {"dflash_config": config}
+    with pytest.raises(ValueError, match="block_size >= 2"):
+        utils.get_dflash_block_size(config)
+
+
+@pytest.mark.parametrize("ctx_len", [4096, 8192])
+def test_qwen35_compile_accepts_context_larger_than_draft_window(monkeypatch, ctx_len):
+    from examples.performance.dflash import utils
+
+    class ReachedWeightLoading(Exception):
+        pass
+
+    monkeypatch.setattr(
+        utils.AutoConfig,
+        "from_pretrained",
+        lambda repo, **kwargs: SimpleNamespace(model_type="qwen3_5", sliding_window=2048),
+    )
+    monkeypatch.setattr(utils, "read_dlm_meta", lambda *args: ({}, [1], 16))
+
+    def stop_loading(*args, **kwargs):
+        raise ReachedWeightLoading
+
+    monkeypatch.setattr(utils.QEFFAutoModelForImageTextToText, "from_pretrained", stop_loading)
+    with pytest.raises(ReachedWeightLoading):
+        utils.compile_qwen3vl_vlm_qpcs(
+            "Qwen/Qwen3.6-27B",
+            "z-lab/Qwen3.6-27B-DFlash",
+            ctx_len=ctx_len,
+            prefill_seq_len=16,
+            num_cores=8,
+            num_devices=4,
+        )
+
+
+@pytest.mark.parametrize("ctx_len", [4096, 8192])
+@pytest.mark.parametrize(
+    "model_type,model_name",
+    [
+        ("qwen3_5", "Qwen/Qwen3.6-27B"),
+        ("qwen3_5_moe", "Qwen/Qwen3.6-35B-A3B"),
+    ],
+)
+def test_qwen35_vision_cli_accepts_long_context(monkeypatch, ctx_len, model_type, model_name):
+    from examples.performance.dflash import utils
+
+    class ReachedCompilation(Exception):
+        pass
+
+    monkeypatch.setitem(sys.modules, "utils", utils)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["basic_inference_vision.py", "--model_name", model_name, "--image", "--ctx_len", str(ctx_len)],
+    )
+    monkeypatch.setattr(
+        utils.AutoConfig, "from_pretrained", lambda *args, **kwargs: SimpleNamespace(model_type=model_type)
+    )
+
+    def stop_compile(*args, **kwargs):
+        assert kwargs["ctx_len"] == ctx_len
+        raise ReachedCompilation
+
+    monkeypatch.setattr(utils, "compile_qwen3vl_vlm_qpcs", stop_compile)
+    with pytest.raises(ReachedCompilation):
+        runpy.run_path(os.path.join(os.path.dirname(utils.__file__), "basic_inference_vision.py"), run_name="__main__")
+
+
+@pytest.mark.parametrize("sequence_lengths", [[], [16, 64]])
+def test_dflash_decode_specialization_accepts_fixed_and_dynamic_shapes(sequence_lengths):
+    from examples.performance.dflash.utils import validate_spd_decode_specialization
+
+    session = SimpleNamespace(
+        binding_index_map={"input_ids": 0},
+        bindings=[SimpleNamespace(dims=[1, 64])],
+        allowed_shapes=[[(8, [1, length])] for length in sequence_lengths],
+    )
+    validate_spd_decode_specialization(session, 64)
+    with pytest.raises(ValueError, match="seq_len=32"):
+        validate_spd_decode_specialization(session, 32)
+
+
+@pytest.mark.parametrize("prompt_chunk_size", [8, 31, 127])
+def test_qwen3_5_runtime_rejects_unsupported_prefill_qpc(prompt_chunk_size):
+    with pytest.raises(ValueError, match="positive multiple of block_size"):
+        run_spd_inference_qwen3_vl(
+            prompt_text="test",
+            tokenizer=None,
+            processor=None,
+            tlm_config=SimpleNamespace(model_type="qwen3_5"),
+            dlm_session=None,
+            tlm_session=SimpleNamespace(input_names=["cache_commit"]),
+            mask_token_id=MASK_TOKEN_ID,
+            vocab_size=VOCAB_SIZE,
+            prompt_chunk_size=prompt_chunk_size,
+        )
+
+
+@pytest.mark.parametrize(
+    "model_type,prompt_chunk_size,target_seq_len",
+    [
+        ("qwen3_5", 16, 16),
+        ("qwen3_5", 64, 16),
+        ("qwen3_5", 128, 16),
+        ("qwen3_5", 256, 16),
+        ("qwen3_5_moe", 16, 16),
+        ("qwen3_5_moe", 128, 16),
+    ],
+)
+def test_qwen3_5_runtime_pads_verification_and_commit(monkeypatch, model_type, prompt_chunk_size, target_seq_len):
+    import torch
+
+    from QEfficient.generation import dflash_generation as generation
+
+    calls = []
+    buffers = []
+
+    def run(feeds):
+        calls.append({key: value.copy() for key, value in feeds.items()})
+        return {
+            "logits": np.zeros((1, target_seq_len), dtype=np.int32),
+            "hidden_states": np.zeros((1, target_seq_len, 32), dtype=np.float32),
+            "image_idx_output": np.zeros((1, 1), dtype=np.int64),
+        }
+
+    session = SimpleNamespace(
+        input_names=["cache_commit", "vision_embeds", "num_logits_to_keep"],
+        binding_index_map={"vision_embeds": 0, "input_ids": 1},
+        bindings=[SimpleNamespace(type=0, dims=(1, 1, 32)), SimpleNamespace(dims=(1, prompt_chunk_size))],
+        allowed_shapes=[[(0, [1, 1, 32]), (8, [1, length])] for length in {prompt_chunk_size, target_seq_len}],
+        aic_to_np_dtype_mapping={0: np.dtype(np.float32)},
+        run=run,
+        set_buffers=buffers.append,
+        skip_buffers=lambda names: None,
+    )
+    monkeypatch.setattr(
+        generation,
+        "build_inputs_qwen3_vl",
+        lambda *a, **k: {"input_ids": torch.ones((1, 5), dtype=torch.int64), "attention_mask": torch.ones((1, 5))},
+    )
+    monkeypatch.setattr(
+        generation,
+        "compute_position_ids_qwen3_vl",
+        lambda *a, **k: (torch.arange(5).view(1, 1, 5).repeat(4, 1, 1), torch.zeros((1, 1), dtype=torch.int64)),
+    )
+
+    def core(**kwargs):
+        kwargs["tlm_prefill"](0, prompt_chunk_size)
+        assert calls[-1]["input_ids"].shape[1] == prompt_chunk_size
+        assert calls[-1]["cache_commit"].item() == 1
+        assert calls[-1]["num_logits_to_keep"].shape == (1, 1)
+        kwargs["prepare_decode"]()
+        ids = np.arange(16, dtype=np.int64).reshape(1, 16)
+        positions = np.arange(5, 21, dtype=np.int64).reshape(1, 16)
+        logits, hidden = kwargs["tlm_decode"](ids, positions)
+        assert logits.shape == (1, 16)
+        assert hidden.shape == (1, 16, 32)
+        verify = calls[-1]
+        assert verify["input_ids"].shape == (1, target_seq_len)
+        np.testing.assert_array_equal(verify["position_ids"][0, :, :16], positions)
+        assert np.all(verify["position_ids"][..., 16:] == -1)
+        assert verify["cache_commit"].item() == 0
+        assert verify["num_logits_to_keep"].shape == (16, 1)
+        kwargs["tlm_commit"](ids, positions, 2)
+        commit = calls[-1]
+        assert commit["cache_commit"].item() == 1
+        assert commit["num_logits_to_keep"].shape == (16, 1)
+        np.testing.assert_array_equal(commit["position_ids"][0, :, :2], positions[:, :2])
+        assert np.all(commit["position_ids"][..., 2:] == -1)
+        return kwargs["metrics"]
+
+    monkeypatch.setattr(generation, "_run_spd_core", core)
+    generation.run_spd_inference_qwen3_vl(
+        prompt_text="test",
+        tokenizer=SimpleNamespace(pad_token_id=0, eos_token_id=None),
+        processor=None,
+        tlm_config=SimpleNamespace(model_type=model_type),
+        dlm_session=None,
+        tlm_session=session,
+        mask_token_id=2,
+        vocab_size=64,
+        prompt_chunk_size=prompt_chunk_size,
+        ctx_len=512,
+        block_size=16,
+        hidden_size=32,
+    )
+    assert [item["logits"].shape[1] for item in buffers if "logits" in item] == [1, target_seq_len]
+
+
+@pytest.mark.parametrize("with_image", [False, True])
+def test_qwen35_moe_runtime_mrope_matches_hf(with_image):
+    import torch
+
+    from QEfficient.generation.dflash_generation import compute_position_ids_qwen3_vl
+    from tests.unit_test.transforms.test_dflash_transform import make_tiny_qwen3_5_vlm
+
+    model = make_tiny_qwen3_5_vlm(moe=True)
+    ids = torch.tensor([[10, 5, 3, 3, 3, 3, 6, 11]] if with_image else [[10, 11, 12]])
+    mask = torch.ones_like(ids)
+    types = (ids == model.config.image_token_id).long()
+    grid = torch.tensor([[1, 4, 4]]) if with_image else None
+    expected, expected_delta = model.model.get_rope_index(ids, types, image_grid_thw=grid, attention_mask=mask)
+    actual, delta = compute_position_ids_qwen3_vl(ids, mask, grid, model.config, types)
+    torch.testing.assert_close(actual[0], torch.arange(ids.shape[1]).view(1, -1))
+    torch.testing.assert_close(actual[1:], expected)
+    torch.testing.assert_close(delta, expected_delta)
+
+
+@pytest.mark.parametrize("block_size", [8, 16])
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen35_compile_preserves_dflash_metadata(monkeypatch, block_size, model_type):
+    import torch
+
+    from examples.performance.dflash import utils
+
+    calls = []
+    text_model = SimpleNamespace(fc=torch.nn.Linear(8, 4, bias=False), hidden_norm=torch.nn.LayerNorm(4))
+    qaic_config = {"target_layer_ids": [2, 4]}
+
+    def compile_model(**kwargs):
+        calls.append(kwargs)
+        return {"lang_prefill_qpc_path": "target.qpc", "vision_qpc_path": "vision.qpc"}
+
+    def load_model(*args, **kwargs):
+        assert kwargs["qaic_config"] == qaic_config
+        assert kwargs["dtype"] == "float32"
+        return SimpleNamespace(
+            lang_model=SimpleNamespace(model=SimpleNamespace(language_model=text_model)), compile=compile_model
+        )
+
+    monkeypatch.setattr(utils.AutoConfig, "from_pretrained", lambda *a, **k: SimpleNamespace(model_type=model_type))
+    monkeypatch.setattr(
+        utils,
+        "read_dlm_meta",
+        lambda *a: ({"fc.weight": torch.ones(4, 8), "hidden_norm.weight": torch.ones(4)}, [1, 3], block_size),
+    )
+    monkeypatch.setattr(utils.QEFFAutoModelForImageTextToText, "from_pretrained", load_model)
+    assert utils.compile_qwen3vl_vlm_qpcs(
+        "target", "draft", ctx_len=8192, prefill_seq_len=128, num_cores=8, num_devices=4
+    ) == ("target.qpc", "vision.qpc")
+    assert calls[0]["prefill_only"]
+    assert calls[0]["prefill_seq_len"] == 128 and calls[0]["dflash_block_size"] == block_size
+    if model_type == "qwen3_5_moe":
+        assert calls[0]["qaic_config"] == qaic_config
+        assert calls[0]["enable_chunking"]
+        assert calls[0]["mxint8_kv_cache"]
 
 
 class _FakeTokenizer:
@@ -155,6 +418,51 @@ def test_dflash_acceptance_rate_uses_accepted_tokens():
     metrics.num_total_iters = 3
 
     assert metrics.acceptance_rate() == 2.0
+
+
+@pytest.mark.parametrize("accepted", [0, 1, 3])
+def test_dflash_commit_counts_seed_and_preserves_verification_features(accepted):
+    commits = []
+    hidden = np.ones((1, BLOCK_SIZE, HIDDEN_SIZE), dtype=np.float32)
+
+    class Draft(_FakeDLMSession):
+        def run(self, inputs):
+            if commits:
+                np.testing.assert_array_equal(inputs["target_hidden"], 1)
+            return super().run(inputs)
+
+    def verify(ids, positions):
+        hidden.fill(1)
+        logits = np.array([[6, 7, 8, 9]], dtype=np.int32)
+        if accepted < BLOCK_SIZE - 1:
+            logits[:, accepted] = 10
+        return logits, hidden
+
+    def commit(ids, positions, count):
+        commits.append(count)
+        hidden.fill(99)  # Simulate session output-buffer reuse by the replay call.
+
+    metrics = _run_spd_core(
+        input_ids=np.array([[3, 4, 0, 0]]),
+        flat_position_ids=np.array([[0, 1, -1, -1]]),
+        tlm_prefill=lambda start, end: (np.array([[0, 5, 0, 0]]), hidden),
+        prepare_decode=lambda: None,
+        tlm_decode=verify,
+        tlm_commit=commit,
+        dlm_session=Draft(),
+        mask_token_id=MASK_TOKEN_ID,
+        vocab_size=VOCAB_SIZE,
+        prompt_chunk_size=BLOCK_SIZE,
+        block_size=BLOCK_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        generation_len=16,
+        max_iterations=2,
+        eos_token_ids=set(),
+        generated_ids=np.zeros((1, 16), dtype=np.int64),
+        metrics=SpecDecodingMetrics(block_size=BLOCK_SIZE),
+    )
+    assert commits == [accepted + 1, accepted + 1]
+    assert metrics.tlm_decode_time == pytest.approx(metrics.tlm_verify_time + metrics.tlm_commit_time)
 
 
 def test_dflash_generation_len_caps_partial_block():

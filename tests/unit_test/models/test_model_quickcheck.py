@@ -861,6 +861,196 @@ def _ort_qwen_logits(onnx_path: Path, qeff_model, inputs):
     return outputs["logits"].astype(np.float32)
 
 
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen3_5_without_dflash_hf_qeff_ort_parity(tmp_path, model_type):
+    _assert_qwen_hf_qeff_ort_parity(model_type, tmp_path)
+
+
+@pytest.mark.parametrize("output_hidden_states", [False, True])
+@pytest.mark.parametrize("explicit_cache_position", [False, True])
+def test_qwen3_5_moe_without_dflash_preserves_forward_path(monkeypatch, output_hidden_states, explicit_cache_position):
+    from QEfficient.transformers.models.qwen3_5_moe import modeling_qwen3_5_moe as modeling
+    from tests.unit_test.transforms.test_dflash_transform import make_tiny_qwen3_5_vlm
+
+    qeff = QEFFAutoModelForImageTextToText(make_tiny_qwen3_5_vlm(moe=True), kv_offload=True)
+    model = qeff.lang_model.model.language_model
+    inputs = qeff.model.get_dummy_inputs(kv_offload=True)["lang"]
+    conv_update = modeling.qeff_torch_causal_conv1d_update
+    conv_calls = []
+
+    def baseline_conv_update(*args, **kwargs):
+        assert kwargs.get("dflash", False) is False
+        conv_calls.append(True)
+        return conv_update(*args, **kwargs)
+
+    def unexpected_dflash(*args, **kwargs):
+        raise AssertionError("Non-DFlash forward must not use DFlash operations")
+
+    monkeypatch.setattr(modeling, "qeff_torch_causal_conv1d_update", baseline_conv_update)
+    monkeypatch.setattr(modeling, "compute_dflash_target_hidden_states", unexpected_dflash)
+    monkeypatch.setattr(modeling, "dflash_chunk_gated_delta_scan", unexpected_dflash)
+    monkeypatch.setattr(modeling.QEffQwen3_5MoeGatedDeltaNet, "_dflash_triangular_inverse", unexpected_dflash)
+    with torch.no_grad():
+        output = model(
+            input_ids=inputs["input_ids"],
+            position_ids=inputs["position_ids"],
+            past_key_values=inputs["past_key_values"],
+            attention_mask=torch.ones_like(inputs["input_ids"]),
+            cache_position=torch.arange(inputs["input_ids"].shape[1]) if explicit_cache_position else None,
+            output_hidden_states=output_hidden_states,
+            use_cache=True,
+        )
+
+    assert len(conv_calls) == model.config.layer_types.count("linear_attention")
+    assert output.hidden_states is None
+    assert "cache_commit" not in inputs
+    assert "hidden_states" not in qeff.model.get_output_names(kv_offload=True)["lang"]
+    assert "hidden_states" not in qeff.model.get_onnx_dynamic_axes(kv_offload=True)["lang"]
+
+
+def test_dflash_mixed_window_ort_parity(tmp_path):
+    """One draft graph must retain per-layer masks as positions cross the local window."""
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    torch.manual_seed(27)
+    config = Qwen3Config(
+        hidden_size=32,
+        intermediate_size=64,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        num_hidden_layers=2,
+        vocab_size=64,
+        max_position_embeddings=8192,
+        use_sliding_window=True,
+        sliding_window=2048,
+        layer_types=["sliding_attention", "full_attention"],
+    )
+    qeff = QEFFAutoModelForCausalLM(Qwen3ForCausalLM(config).eval(), qaic_config={"dflash_dlm": True})
+    onnx_path = _exported_onnx_path(qeff.export(tmp_path / "dflash-window", offload_pt_weights=False))
+    session = _ort_session(onnx_path)
+    session_inputs = [item.name for item in session.get_inputs()]
+    session_outputs = [item.name for item in session.get_outputs()]
+    cache = tuple((torch.randn(1, 1, 8192, 16), torch.randn(1, 1, 8192, 16)) for _ in range(2))
+    previous = {}
+    for start, valid in [(16, 16), (2032, 16), (2047, 15), (2048, 1), (2064, 16), (4096, 16)]:
+        target_positions = torch.arange(start - valid, start - valid + 16).unsqueeze(0)
+        target_positions[:, valid:] = -1
+        inputs = {
+            "input_ids": torch.randint(0, 64, (1, 16)),
+            "target_hidden": torch.randn(1, 16, 32),
+            "position_ids": torch.arange(start, start + 16).unsqueeze(0),
+            "position_ids_target": target_positions,
+            "past_key_values": cache,
+        }
+        feed = {
+            name: value.copy() for name, value in _flatten_qwen_ort_inputs(inputs, session_inputs, qeff.model).items()
+        }
+        for name in session_inputs:
+            if name + "_RetainedState" in previous:
+                feed[name] = previous[name + "_RetainedState"]
+        with torch.no_grad():
+            expected = qeff.model(**inputs)
+        actual = dict(zip(session_outputs, session.run(session_outputs, feed)))
+        np.testing.assert_allclose(actual["logits"], expected.logits.numpy(), atol=3e-4, rtol=3e-4)
+        cache = expected.past_key_values
+        for layer_idx, layer_cache in enumerate(cache):
+            for name, tensor in zip((f"past_key.{layer_idx}", f"past_value.{layer_idx}"), layer_cache):
+                np.testing.assert_allclose(actual[name + "_RetainedState"], tensor.numpy(), atol=3e-4, rtol=3e-4)
+        previous = actual
+
+
+@pytest.mark.parametrize(
+    "moe,prefill_length,verification_length,dflash_chunk_size",
+    [
+        (False, 8, 16, 64),
+        (False, 64, 16, 64),
+        (False, 8, 64, 64),
+        (False, 64, 64, 64),
+        (False, 8, 16, 16),
+        (False, 16, 16, 16),
+        (False, 128, 16, 16),
+        (False, 256, 16, 16),
+        (True, 16, 16, 16),
+        (True, 128, 16, 16),
+        (True, 128, 8, 8),
+    ],
+)
+@pytest.mark.parametrize("matrix_solve", [False, True])
+def test_qwen3_5_dflash_ort_recurrent_commit(
+    tmp_path, prefill_length, verification_length, dflash_chunk_size, matrix_solve, moe
+):
+    from tests.unit_test.transforms.test_dflash_transform import make_tiny_qwen3_5_vlm
+
+    torch.manual_seed(11)
+    model = make_tiny_qwen3_5_vlm(moe=moe)
+    ctx_len = max(256, prefill_length + verification_length)
+    model.config.text_config.max_position_embeddings = ctx_len
+    qeff = QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config={"target_layer_ids": [1, 3]})
+    qeff.lang_model.model.language_model.dflash_chunk_size = dflash_chunk_size
+    for layer in qeff.lang_model.model.language_model.layers:
+        if layer.layer_type == "linear_attention":
+            layer.linear_attn.dflash_matrix_solve = matrix_solve
+    inputs, output_names, dynamic_axes = _qwen_export_io(qeff, prefill_seq_len=8)
+    inputs["num_logits_to_keep"] = torch.zeros(1, 1, dtype=torch.int64)
+    dynamic_axes["num_logits_to_keep"] = {0: "num_logits_to_keep"}
+    dynamic_axes["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}
+    for i, kind in enumerate(qeff.model.config.text_config.layer_types):
+        if kind == "full_attention":
+            inputs["past_key_values"][i] = [
+                tensor.new_zeros((tensor.shape[0], tensor.shape[1], ctx_len, tensor.shape[3]))
+                for tensor in inputs["past_key_values"][i]
+            ]
+    qeff.lang_model.export(
+        inputs=deepcopy(inputs),
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        export_dir=tmp_path / "qwen35-dflash",
+        offload_pt_weights=False,
+    )
+    session = _ort_session(Path(qeff.lang_model.onnx_path))
+    session_inputs = [item.name for item in session.get_inputs()]
+    assert "cache_commit" in session_inputs
+    decoder = qeff.lang_model.model
+    cache = deepcopy(inputs["past_key_values"])
+    batch_size = inputs["input_ids"].shape[0]
+    actual = {}
+    prompt_length = prefill_length - 3
+    verified_tokens = min(verification_length, 16)
+    # Keep one exported graph across different sequence lengths and acceptance lengths.
+    for start, length, valid, commit in [
+        (0, prefill_length, prompt_length, 1),
+        (prompt_length, verification_length, verified_tokens, 0),
+        (prompt_length, verification_length, 2, 1),
+        (prompt_length + 2, verification_length, verified_tokens, 0),
+        (prompt_length + 2, verification_length, 1, 1),
+        (prompt_length + 3, verification_length, verified_tokens, 0),
+    ]:
+        token = (10 + start) % model.config.text_config.vocab_size
+        inputs["input_ids"] = torch.full((batch_size, length), token, dtype=torch.int64)
+        positions = torch.arange(start, start + length).view(1, 1, -1).repeat(4, batch_size, 1)
+        positions[:, :, valid:] = -1
+        inputs["position_ids"] = positions
+        inputs["cache_commit"] = torch.tensor([commit])
+        num_logits = 1 if start == 0 else length
+        inputs["num_logits_to_keep"] = torch.zeros(num_logits, 1, dtype=torch.int64)
+        inputs["past_key_values"] = cache
+        feed = {name: value.copy() for name, value in _flatten_qwen_ort_inputs(inputs, session_inputs, decoder).items()}
+        if start:
+            for name in session_inputs:
+                if name + "_RetainedState" in actual:
+                    feed[name] = actual[name + "_RetainedState"]
+        with torch.no_grad():
+            predicted, _vision, _image_idx, hidden, cache = decoder(**inputs)
+        actual = dict(zip(output_names, session.run(output_names, feed)))
+        np.testing.assert_array_equal(actual["logits"][:, :valid], predicted.numpy()[:, :valid])
+        np.testing.assert_allclose(actual["hidden_states"][:, :valid], hidden.numpy()[:, :valid], atol=3e-4, rtol=3e-4)
+        for layer_idx, layer_state in enumerate(cache):
+            if qeff.model.config.text_config.layer_types[layer_idx] == "linear_attention":
+                for name, expected in zip(decoder.get_onnx_past_key_value_names(layer_idx), layer_state):
+                    np.testing.assert_allclose(actual[name + "_RetainedState"], expected.numpy(), atol=3e-4, rtol=3e-4)
+
+
 def _export_qwen_decoder_onnx(qeff_model, inputs, tmp_path, *, model_type: str, prefill_only: bool, layerwise: bool):
     export_dir = (
         tmp_path / f"{model_type}-{'layerwise' if layerwise else 'default'}-{'prefill' if prefill_only else 'decode'}"
@@ -3349,6 +3539,45 @@ def test_qwen3_5_moe_conv_decode_slice_keeps_prefill_gather_path():
 
     torch.testing.assert_close(output, expected_output.to(hidden_states.dtype))
     torch.testing.assert_close(state, expected_state)
+
+
+@pytest.mark.parametrize("dflash", [None, False, True])
+@pytest.mark.parametrize("grouped_state", [False, True])
+@pytest.mark.parametrize("valid_tokens", [0, 1, 2, 3, 4])
+def test_qwen3_5_moe_conv_history_dflash_guard(dflash, grouped_state, valid_tokens):
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        qeff_torch_causal_conv1d_update,
+    )
+
+    flat_state = torch.arange(24, dtype=torch.float32).reshape(1, 6, 4)
+    state = flat_state.reshape(1, 2, 3, 4) if grouped_state else flat_state
+    hidden = 100 + torch.arange(6 * 16, dtype=torch.float32).reshape(1, 6, 16)
+    positions = torch.full((4, 1, 16), -1, dtype=torch.int64)
+    positions[..., :valid_tokens] = torch.arange(40, 40 + valid_tokens)
+    kwargs = {} if dflash is None else {"dflash": dflash}
+    _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions, **kwargs)
+
+    if dflash:
+        expected = torch.cat([flat_state, hidden[..., :valid_tokens]], dim=-1)[..., -4:]
+    else:
+        # Preserve the original baseline ordering, including its tied cached keys.
+        zeros = flat_state[:, 0, :].to(positions.dtype) * 0
+        order = torch.argsort(torch.cat([zeros, positions[0]], dim=1), dim=1)
+        expected = torch.gather(torch.cat([flat_state, hidden], dim=-1), 2, order[:, None, -4:].expand(-1, 6, -1))
+    torch.testing.assert_close(actual, expected.reshape_as(state), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("valid_tokens", [0, 1, 2, 3, 4])
+def test_qwen3_5_conv_replay_preserves_history_order(valid_tokens):
+    from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import qeff_torch_causal_conv1d_update
+
+    state = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
+    hidden = 100 + torch.arange(6 * 64, dtype=torch.float32).reshape(1, 6, 64)
+    positions = torch.full((4, 1, 64), -1, dtype=torch.int64)
+    positions[..., :valid_tokens] = torch.arange(40, 40 + valid_tokens)
+    _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions)
+    expected = torch.cat([state.reshape(1, 6, 4), hidden[..., :valid_tokens]], dim=-1)[..., -4:]
+    torch.testing.assert_close(actual, expected.reshape_as(state), rtol=0, atol=0)
 
 
 def test_qwen3_5_conv_decode_slice_matches_gather_reference():
