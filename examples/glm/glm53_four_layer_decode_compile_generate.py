@@ -193,6 +193,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--skip-generate", action="store_true")
+    parser.add_argument(
+        "--dtype",
+        choices=("float32", "float16", "bfloat16"),
+        default="float32",
+        help="Target floating-point dtype for the model and prepared weight-free checkpoint.",
+    )
     parser.add_argument("--weight-free", action="store_true")
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
@@ -220,7 +226,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-json", default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-devices", type=int, default=None)
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.torch_dtype = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }[args.dtype]
+    return args
 
 
 def resolve_runtime_dimensions(args: argparse.Namespace) -> tuple[int, int, int, int]:
@@ -507,8 +519,8 @@ def main() -> None:
         )
     config.num_hidden_layers = args.num_layers
     config.use_cache = True
-    config.torch_dtype = torch.float32
-    config.dtype = torch.float32
+    config.torch_dtype = args.torch_dtype
+    config.dtype = args.torch_dtype
     validate_attention_runtime_dimensions(
         qaic_config,
         batch_size=args.batch_size,
@@ -531,7 +543,7 @@ def main() -> None:
                 "event": "config",
                 "model_id": args.model_id,
                 "num_layers": args.num_layers,
-                "dtype": "torch.float32",
+                "dtype": str(args.torch_dtype),
                 "prompt_len": args.prompt_len,
                 "ctx_len": args.ctx_len,
                 "generation_len": generation_len,
@@ -558,7 +570,7 @@ def main() -> None:
             args.model_id,
             config=config,
             cache_dir=args.hf_cache,
-            torch_dtype=torch.float32,
+            torch_dtype=args.torch_dtype,
             weight_free=True,
             qaic_config=qaic_config,
         )
@@ -606,7 +618,7 @@ def main() -> None:
             args.model_id,
             config=native_hf_config,
             cache_dir=args.hf_cache,
-            torch_dtype=torch.float32,
+            torch_dtype=args.torch_dtype,
             device_map="cpu",
         ).eval()
 
@@ -672,7 +684,7 @@ def main() -> None:
             args.model_id,
             config=native_hf_config,
             cache_dir=args.hf_cache,
-            torch_dtype=torch.float32,
+            torch_dtype=args.torch_dtype,
             device_map="cpu",
         ).eval()
         hf_generated = run_hf_decode_only(hf_model, input_ids, generation_len)
