@@ -2172,7 +2172,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         num_kv_blocks = max(1, int(blocking_config.num_kv_blocks or 1))
         ctx_len = int(blocking_config.ctx_len or (key_cache.shape[2] * cp))
         skip_kv = bool(blocking_config.skip_kv)
-        batch_local = int(batch) // dp
+        batch_local = batch // dp
         rows = dp * cp * hkv
         ql_eff = n_rep * query_len
         cache_slots = ctx_len // cp
@@ -3101,7 +3101,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         blocking_config,
         position_ids=None,
     ):
-        """Run retained sparse attention with contiguous context partitioning."""
+        """Run retained sparse attention with interleaved context partitioning."""
         batch, _, query_len, head_dim = query_states.shape
         cfg = self.config
         hkv = self.config.num_key_value_heads
@@ -3128,27 +3128,23 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 raise ValueError(
                     "MSA block-index CP gather requires ctx_len / msa_attn_cp divisible by index_block_size."
                 )
+            if cfg.index_block_size % cp:
+                raise ValueError("MSA index_block_size must be divisible by msa_attn_cp.")
 
             selected_blocks = token_indices.shape[-1]
-            selected_len = selected_blocks * cfg.index_block_size
-            blocks_per_cp = key_cache.shape[2] // cfg.index_block_size
+            local_block_size = cfg.index_block_size // cp
+            selected_len = selected_blocks * local_block_size
             block_ids_global = token_indices.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
             valid_global = token_valid.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
-            block_cp = block_ids_global // blocks_per_cp
-            block_cp_valid = (block_cp >= 0) & (block_cp < cp)
-            gather_block_local = block_ids_global - block_cp * blocks_per_cp
-            cp_idx = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1)
-            valid_cp_blocks = (
-                valid_global.unsqueeze(2) & block_cp_valid.unsqueeze(2) & (block_cp.unsqueeze(2) == cp_idx)
+            gather_block_ids = block_ids_global.unsqueeze(2).expand(
+                batch_local, dp, cp, hkv, selected_blocks
             )
-            gather_block_ids = torch.where(
-                valid_cp_blocks,
-                gather_block_local.unsqueeze(2),
-                torch.zeros_like(gather_block_local).unsqueeze(2),
-            ).reshape(batch_local, rows, selected_blocks)
+            valid_blocks = valid_global.unsqueeze(2).expand_as(gather_block_ids)
+            gather_block_ids = torch.where(valid_blocks, gather_block_ids, torch.zeros_like(gather_block_ids))
+            gather_block_ids = gather_block_ids.reshape(batch_local, rows, selected_blocks)
 
-            key_blocks = key_cache.reshape(batch_local, rows, -1, cfg.index_block_size, head_dim)
-            value_blocks = value_cache.reshape(batch_local, rows, -1, cfg.index_block_size, head_dim)
+            key_blocks = key_cache.reshape(batch_local, rows, -1, local_block_size, head_dim)
+            value_blocks = value_cache.reshape(batch_local, rows, -1, local_block_size, head_dim)
             selected_k = QEffMiniMaxSparseCache.gather_blocked_kv_dp(
                 key_blocks, gather_block_ids.to(torch.int32)
             ).reshape(batch_local, rows, selected_len, head_dim)
@@ -3156,17 +3152,18 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 value_blocks, gather_block_ids.to(torch.int32)
             ).reshape(batch_local, rows, selected_len, head_dim)
 
-            offsets = torch.arange(cfg.index_block_size, device=query_states.device).view(
-                1, 1, 1, 1, cfg.index_block_size
+            cp_offsets = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1, 1)
+            local_offsets = torch.arange(local_block_size, device=query_states.device).view(1, 1, 1, 1, 1, -1)
+            selected_token_ids = (
+                block_ids_global.unsqueeze(2).unsqueeze(-1) * cfg.index_block_size
+                + cp_offsets
+                + local_offsets * cp
             )
-            selected_token_ids = block_ids_global.unsqueeze(-1) * cfg.index_block_size + offsets
             position_ids_dp = position_ids.reshape(dp, batch_local, query_len).permute(1, 0, 2)
-            valid_tokens = valid_global.unsqueeze(-1)
+            valid_tokens = valid_blocks.unsqueeze(-1)
             valid_tokens = valid_tokens & (selected_token_ids < ctx_len)
-            valid_tokens = valid_tokens & (selected_token_ids <= position_ids_dp[:, :, None, :, None])
-            valid_idx = (valid_cp_blocks.unsqueeze(-1) & valid_tokens.unsqueeze(2)).reshape(
-                batch_local, rows, selected_len
-            )
+            valid_tokens = valid_tokens & (selected_token_ids <= position_ids_dp[:, :, None, None, None, :])
+            valid_idx = valid_tokens.reshape(batch_local, rows, selected_len)
         else:
             if token_indices.ndim == 4:
                 selected_len = token_indices.shape[-2] * token_indices.shape[-1]
@@ -3178,9 +3175,9 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 raise ValueError("Retained CP attention requires token indices shaped [batch, Hkv, ...].")
             global_idx = global_idx.reshape(dp, batch_local, hkv, selected_len).permute(1, 0, 2, 3)
             global_valid = global_valid.reshape(dp, batch_local, hkv, selected_len).permute(1, 0, 2, 3)
-            token_cp = global_idx // local_ctx_len
+            token_cp = global_idx.remainder(cp)
             token_cp_valid = (token_cp >= 0) & (token_cp < cp)
-            gather_idx_local = global_idx - token_cp * local_ctx_len
+            gather_idx_local = global_idx // cp
             cp_idx = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1)
             valid_cp = global_valid.unsqueeze(2) & token_cp_valid.unsqueeze(2) & (token_cp.unsqueeze(2) == cp_idx)
             gather_idx = (
