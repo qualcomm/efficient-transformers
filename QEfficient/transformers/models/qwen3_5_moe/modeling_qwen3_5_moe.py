@@ -1627,6 +1627,7 @@ class QEffQwen3_5MoeVisionModel(Qwen3_5MoeVisionModel):
         pos_ids = coords
         embeddings = freq_table[pos_ids]
         embeddings = embeddings.flatten(1)
+        embeddings = embeddings.unsqueeze(0).expand(bs, -1, -1).reshape(-1, embeddings.size(1))
         return embeddings
 
     def fast_pos_embed_interpolate(self, grid_thw):
@@ -2317,12 +2318,14 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
             bs,
             dummy_seq_len,
         )
-        inputs_shapes["pixel_values"] = (11008, 1536)
+        vision_grid_h = 86
+        vision_grid_w = 128
+        inputs_shapes["pixel_values"] = (bs * vision_grid_h * vision_grid_w, 1536)
         inputs_shapes["image_grid_thw"] = (
             bs,
             1,
-            86,
-            128,
+            vision_grid_h,
+            vision_grid_w,
         )
         inputs_shapes["vision_embeds"] = (
             bs,

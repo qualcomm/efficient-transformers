@@ -132,6 +132,30 @@ def _update_retained_states(target_inputs, source_outputs):
             target_inputs[target_name] = value
 
 
+def _binding_dtype(session, name):
+    binding_index = session.binding_index_map[name]
+    return session.aic_to_np_dtype_mapping[session.bindings[binding_index].type]
+
+
+def _binding_shape(session, name):
+    return tuple(session.bindings[session.binding_index_map[name]].dims)
+
+
+def _filter_session_inputs(session, inputs):
+    input_names = set(session.input_names)
+    input_names.update(name.rsplit("/", 1)[-1] for name in session.input_names)
+    return {
+        name: value.astype(_binding_dtype(session, name), copy=False)
+        for name, value in inputs.items()
+        if name in input_names
+    }
+
+
+def _close_session(session):
+    session.deactivate()
+    session.program.unload()
+
+
 qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
     model_id,
     attn_implementation="eager",
@@ -151,8 +175,9 @@ PREFILL_SEQ_LEN = 512
 # explicitly because the shared compile API does not infer model-specific options.
 gdn_chunk_size = PREFILL_SEQ_LEN
 CTX_LEN = 14 * 1024
-BATCH_SIZE = 512  # Per-slot prefill batch size
+BATCH_SIZE = 512  # Total decode slots
 BS = BATCH_SIZE
+VISION_BATCH_SIZE = 1  # Disaggregated prefill in this example serves one prompt slot.
 FULL_BATCH_SIZE = 512  # Total concurrent CB slots
 
 # Online-prefill KV blocking (matches GQA_Benchmark_Merged/qwen3_35b_a3b_online_prefill.sh:
@@ -212,8 +237,8 @@ elif args.vision_qpc_path:
     print(f"Using compiled vision QPC: {vision_qpc_path}")
 else:
     vision_compile_result = qeff_model.compile(
-        batch_size=BS,
-        full_batch_size=FULL_BATCH_SIZE,
+        batch_size=VISION_BATCH_SIZE,
+        full_batch_size=VISION_BATCH_SIZE,
         prefill_seq_len=PREFILL_SEQ_LEN,
         ctx_len=CTX_LEN,
         height=354,
@@ -363,9 +388,6 @@ if enable_blocking:
 
     print("=" * 80 + "\n")
 
-lang_prefill_session = QAICInferenceSession(prefill_qpc_path)
-lang_decode_session = QAICInferenceSession(decode_qpc_path)
-
 if skip_vision:
     messages = [
         {
@@ -432,10 +454,31 @@ for k, v in inputs.items():
     inputs[k] = np.array(v)
 
 
+if not skip_vision and "pixel_values" in inputs and "image_grid_thw" in inputs:
+    image_grid_thw = inputs["image_grid_thw"]
+    if image_grid_thw.ndim == 2:
+        vision_time, vision_grid_h, vision_grid_w = image_grid_thw[0].astype(np.int64).tolist()
+    else:
+        _, vision_time, vision_grid_h, vision_grid_w = image_grid_thw.shape
+    first_image_tokens = int(vision_time * vision_grid_h * vision_grid_w)
+    inputs["pixel_values"] = inputs["pixel_values"][:first_image_tokens]
+    inputs["image_grid_thw"] = np.zeros(
+        (VISION_BATCH_SIZE, int(vision_time), int(vision_grid_h), int(vision_grid_w)), dtype=np.int64
+    )
+
 vision_inputs = {
     k: v
     for k, v in inputs.items()
-    if k in {"pixel_values", "image_masks", "image_input_idx", "valid_idx", "aspect_ratio_ids", "aspect_ratio_mask"}
+    if k
+    in {
+        "pixel_values",
+        "image_grid_thw",
+        "image_masks",
+        "image_input_idx",
+        "valid_idx",
+        "aspect_ratio_ids",
+        "aspect_ratio_mask",
+    }
 }
 
 vision_inputs_fp16 = {"pixel_values", "image_masks"}
@@ -444,7 +487,8 @@ vision_inputs.update({k: vision_inputs[k].astype("float16") for k in vision_inpu
 vision_start = perf_counter()
 vision_outputs = {}
 if vision_inputs:
-    vision_outputs = vision_session.run(vision_inputs)
+    vision_outputs = vision_session.run(_filter_session_inputs(vision_session, vision_inputs))
+    _close_session(vision_session)
 vision_end = perf_counter()
 
 lang_inputs = {k: v for k, v in inputs.items() if k not in vision_inputs}
@@ -463,84 +507,108 @@ if not skip_vision:
 
 # RUN prefill
 lang_start = perf_counter()
-lang_prefill_session.set_buffers(vision_outputs)
+lang_prefill_session = QAICInferenceSession(
+    prefill_qpc_path,
+    kv_dma_share=True,
+    full_batch_size=FULL_BATCH_SIZE,
+    cluster_id="prefill",
+)
+kv_caches = [np.zeros(shape, dtype=dtype) for shape, dtype in lang_prefill_session.kv_cache_info]
 
 all_outputs = []
 chunk_inputs = lang_inputs.copy()
 chunk_inputs["batch_index"] = np.array([[0]], dtype=np.int64)
+exec_idx = None
 for i in range(num_chunks):
     chunk_inputs["input_ids"] = lang_inputs["input_ids"][0:1, i * PREFILL_SEQ_LEN : (i + 1) * PREFILL_SEQ_LEN]
     chunk_inputs["position_ids"] = lang_inputs["position_ids"][:, 0:1, i * PREFILL_SEQ_LEN : (i + 1) * PREFILL_SEQ_LEN]
-    outputs = lang_prefill_session.run(chunk_inputs)
-    _update_retained_states(chunk_inputs, outputs)
+    last_chunk = i == num_chunks - 1
+    exec_idx = lang_prefill_session.np_run_pipeline(
+        _filter_session_inputs(lang_prefill_session, chunk_inputs),
+        last_chunk=last_chunk,
+        kv_cache_buffers=[kv_cache[0:1] for kv_cache in kv_caches] if last_chunk else None,
+    )
+    lang_prefill_session.complete_inf(exec_idx, is_prefill=True)
+    outputs = lang_prefill_session.get_outputs(index=exec_idx)
     chunk_inputs["image_idx"] = outputs["image_idx_output"]
 prefill_time = perf_counter() - lang_start + vision_end - vision_start
 print(f"Prefill time : {prefill_time:.2f} secs")
 
-lang_prefill_session.deactivate()
-lang_decode_session = QAICInferenceSession(decode_qpc_path)
+_close_session(lang_prefill_session)
+lang_decode_session = QAICInferenceSession(
+    decode_qpc_path,
+    kv_dma_share=True,
+    full_batch_size=FULL_BATCH_SIZE,
+    cluster_id="decode",
+)
+decode_kv_map = lang_decode_session.decode_buff_map + lang_decode_session.decode_rs_kv_only_buff_map
 
-next_token_id = np.argmax(outputs["logits"])
-all_outputs.append(next_token_id)
-batch_index = np.random.default_rng(1234).permutation(BS).reshape(BS, 1).astype(np.int64)
-decode_inputs = {
-    "input_ids": np.full((BS, 1), next_token_id, dtype=lang_inputs["input_ids"].dtype),
-    "position_ids": np.max(lang_inputs["position_ids"], axis=-1, keepdims=True) + 1,
-    "batch_index": batch_index,
-}
 
-for layer_idx, layer_type in enumerate(config.text_config.layer_types):
-    state_names = (
-        (f"past_key.{layer_idx}", f"past_value.{layer_idx}")
-        if layer_type == "full_attention"
-        else (f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}")
+def _decode_step_inputs(token_id, phys_pos, mrope_pos, image_idx):
+    input_ids = np.full((BS, 1), -1, dtype=lang_inputs["input_ids"].dtype)
+    position_ids = np.full((lang_inputs["position_ids"].shape[0], BS, 1), -1, dtype=lang_inputs["position_ids"].dtype)
+    batch_index = np.full((BS, 1), -1, dtype=np.int64)
+    input_ids[0, 0] = token_id
+    position_ids[0, 0, 0] = phys_pos
+    if position_ids.shape[0] > 1:
+        position_ids[1:, 0, 0] = mrope_pos
+    batch_index[0, 0] = 0
+    return {
+        "input_ids": input_ids,
+        "position_ids": position_ids,
+        "batch_index": batch_index,
+        "image_idx": image_idx,
+    }
+
+
+def _run_decode_step(decode_inputs):
+    lang_decode_session.set_data_for_kv_handoff(
+        kv_caches + kv_caches,
+        [("batch_index", 0), ("ctx_start", 0)],
+        index=lang_decode_session.decode_execObj_idx,
+        buff_map=decode_kv_map,
     )
-    for logical_name in state_names:
-        target_name, value = _resolve_retained_state(outputs, logical_name)
-        logical_state = value[0:1]
-        physical_state = np.repeat(logical_state, BS, axis=0)
-        reordered_state = np.empty_like(physical_state)
-        reordered_state[batch_index[:, 0]] = physical_state
-        decode_inputs[target_name] = reordered_state
+    exec_idx = lang_decode_session.np_run(_filter_session_inputs(lang_decode_session, decode_inputs), is_prefill=False)
+    lang_decode_session.complete_inf(exec_idx, is_prefill=False)
+    return lang_decode_session.get_outputs(index=exec_idx)
 
-decode_inputs["image_idx"] = outputs["image_idx_output"]
 
-if not skip_vision:
-    decode_inputs["vision_embeds"] = outputs["vision_embeds_RetainedState"]
+def _next_token(logits):
+    return int(np.argmax(logits.reshape(logits.shape[0], -1, logits.shape[-1])[0, -1]))
+
+
+if not skip_vision and "vision_embeds" in lang_decode_session.binding_index_map:
+    lang_decode_session.set_persistent_inputs(
+        {"vision_embeds": np.zeros(_binding_shape(lang_decode_session, "vision_embeds"), dtype=np.float16)}
+    )
+
+next_token_id = _next_token(outputs["logits"])
+all_outputs.append(next_token_id)
+phys_pos = int(lang_inputs["position_ids"][0, 0].max()) + 1
+mrope_pos = int(lang_inputs["position_ids"][1:, 0].max()) + 1 if lang_inputs["position_ids"].shape[0] > 1 else phys_pos
+decode_inputs = _decode_step_inputs(next_token_id, phys_pos, mrope_pos, outputs["image_idx_output"])
 
 st = perf_counter()
-decode_out = lang_decode_session.run(decode_inputs)
+decode_out = _run_decode_step(decode_inputs)
 print(f"time for first run of decode with KV as input = {perf_counter() - st} sec\n")
 
-all_outputs.append(np.argmax(decode_out["logits"], axis=-1)[0, 0])
-pos_id = decode_inputs["position_ids"] + 1
-loop_decode_inputs = {
-    "input_ids": np.argmax(decode_out["logits"], axis=-1),
-    "position_ids": pos_id,
-    "batch_index": batch_index,
-}
-
-_update_retained_states(loop_decode_inputs, decode_out)
-
-loop_decode_inputs["image_idx"] = decode_out["image_idx_output"]
-
-if not skip_vision:
-    loop_decode_inputs["vision_embeds"] = decode_out["vision_embeds_RetainedState"]
+next_token_id = _next_token(decode_out["logits"])
+all_outputs.append(next_token_id)
+phys_pos += 1
+mrope_pos += 1
+loop_decode_inputs = _decode_step_inputs(next_token_id, phys_pos, mrope_pos, decode_out["image_idx_output"])
 
 
 st = perf_counter()
 for i in range(generation_len - 2):
-    decode_out = lang_decode_session.run(loop_decode_inputs)
-    all_outputs.append(np.argmax(decode_out["logits"], axis=-1)[0, 0])
-    pos_id += 1
-    _update_retained_states(loop_decode_inputs, decode_out)
-    loop_decode_inputs.update(
-        {
-            "input_ids": np.argmax(decode_out["logits"], axis=-1),
-            "position_ids": pos_id,
-            "batch_index": batch_index,
-        }
-    )
+    decode_out = _run_decode_step(loop_decode_inputs)
+    next_token_id = _next_token(decode_out["logits"])
+    all_outputs.append(next_token_id)
+    phys_pos += 1
+    mrope_pos += 1
+    loop_decode_inputs = _decode_step_inputs(next_token_id, phys_pos, mrope_pos, decode_out["image_idx_output"])
 ft = perf_counter()
 print(f"decode tok/sec={(generation_len - 2) / (ft - st)}")
 print(f"\noutput\n{tokenizer.decode(all_outputs)}")
+
+_close_session(lang_decode_session)

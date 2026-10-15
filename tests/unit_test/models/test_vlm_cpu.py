@@ -54,6 +54,40 @@ class _CompileOnlyVLM:
         return [{"batch_size": 1}], dict(kwargs)
 
 
+def test_qwen3_5_moe_vision_rotary_embeddings_match_batched_patch_tokens():
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeVisionConfig
+
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeVisionModel
+
+    config = Qwen3_5MoeVisionConfig(
+        depth=0,
+        hidden_size=32,
+        out_hidden_size=48,
+        intermediate_size=64,
+        num_heads=4,
+        patch_size=2,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        num_position_embeddings=64,
+    )
+    model = QEffQwen3_5MoeVisionModel(config)
+    batch_size, time, height, width = 3, 1, 4, 6
+    pixel_values = torch.zeros(
+        (
+            batch_size * time * height * width,
+            config.in_channels * config.temporal_patch_size * config.patch_size * config.patch_size,
+        )
+    )
+    grid_thw = torch.zeros((batch_size, time, height, width), dtype=torch.int64)
+
+    output = model(pixel_values, grid_thw)
+
+    assert output.shape == (
+        batch_size * time * height * width // config.spatial_merge_size**2,
+        config.out_hidden_size,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests: QEFFAutoModelForImageTextToText structure
 # ---------------------------------------------------------------------------
