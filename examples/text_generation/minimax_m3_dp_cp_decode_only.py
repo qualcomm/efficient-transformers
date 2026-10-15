@@ -177,7 +177,7 @@ def main():
     factory_kwargs["config"] = config
 
     t0 = time.perf_counter()
-    qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(args.model_id, weight_free=True, **factory_kwargs)
+    qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(args.model_id, weight_free=False, **factory_kwargs)
     print(f"[timing] model load:          {time.perf_counter() - t0:.2f}s")
 
     t0 = time.perf_counter()
