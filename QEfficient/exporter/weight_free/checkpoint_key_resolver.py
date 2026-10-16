@@ -44,7 +44,7 @@ _COMPUTED_INITIALIZER_NAMES = {
 }
 
 
-def _collect_tied_weights(model: nn.Module) -> list[TiedWeightAlias]:
+def _collect_tied_weights(model: nn.Module, prefix: str = "") -> list[TiedWeightAlias]:
     """Return aliases for tied weights, keyed by the model's own tied-weights contract.
 
     Uses ``get_expanded_tied_weights_keys`` instead of comparing live module identity
@@ -53,12 +53,19 @@ def _collect_tied_weights(model: nn.Module) -> list[TiedWeightAlias]:
     established — the mapping comes from ``model._tied_weights_keys``, not from
     whatever object graph happens to exist at export time.
     """
+    aliases = []
     get_expanded_tied_weights_keys = getattr(model, "get_expanded_tied_weights_keys", None)
-    if get_expanded_tied_weights_keys is None:
-        return []
+    if get_expanded_tied_weights_keys is not None:
+        tied_mapping = get_expanded_tied_weights_keys(all_submodels=True)
+        aliases.extend(
+            TiedWeightAlias(alias=f"{prefix}{alias}", canonical=canonical) for alias, canonical in tied_mapping.items()
+        )
 
-    tied_mapping = get_expanded_tied_weights_keys(all_submodels=True)
-    return [TiedWeightAlias(alias=alias, canonical=canonical) for alias, canonical in tied_mapping.items()]
+    for child_name, child in model.named_children():
+        aliases.extend(_collect_tied_weights(child, prefix=f"{prefix}{child_name}."))
+
+    unique_aliases = {entry.alias: entry for entry in aliases}
+    return list(unique_aliases.values())
 
 
 def _moe_weight_aliases(name: str) -> List[str]:
@@ -131,6 +138,19 @@ def _is_computed_initializer(name: str) -> bool:
     return name.rsplit(".", 1)[-1] in _COMPUTED_INITIALIZER_NAMES
 
 
+def _is_non_persistent_buffer(model: nn.Module, name: str) -> bool:
+    """Return True when a model buffer is explicitly excluded from checkpoints."""
+    parent_name, separator, buffer_name = name.rpartition(".")
+    if not separator:
+        parent = model
+    else:
+        try:
+            parent = model.get_submodule(parent_name)
+        except AttributeError:
+            return False
+    return buffer_name in getattr(parent, "_non_persistent_buffers_set", set())
+
+
 def find_checkpoint_key(
     onnx_name: str,
     checkpoint_index: Dict[str, str],
@@ -158,6 +178,41 @@ def find_checkpoint_key(
         # Some component wrappers expose the HF backbone below ``model`` in
         # the exported module, while the resolver receives names relative to
         # that component (for example ``language_model.embed_tokens``).
+        candidates.append(f"model.{stripped}")
+
+    collapsed = stripped
+    while collapsed.startswith("model.model."):
+        collapsed = collapsed.removeprefix("model.")
+        candidates.append(collapsed)
+
+    collapsed = stripped
+    while collapsed.startswith("model."):
+        collapsed = collapsed.removeprefix("model.")
+        candidates.append(collapsed)
+
+    for candidate in list(candidates):
+        if ".language_model." in candidate:
+            candidates.append(candidate.replace(".language_model.", ".", 1))
+        elif candidate.startswith("language_model."):
+            language_model_key = candidate.removeprefix("language_model.")
+            candidates.append(language_model_key)
+            candidates.append(f"model.{language_model_key}")
+        if ".vision_model." in candidate:
+            candidates.append(candidate.replace(".vision_model.", ".visual.", 1))
+        elif candidate.startswith("vision_model."):
+            candidates.append(candidate.replace("vision_model.", "visual.", 1))
+        if ".visual." in candidate:
+            candidates.append(candidate.replace(".visual.", ".vision_model.", 1))
+        elif candidate.startswith("visual."):
+            candidates.append(candidate.replace("visual.", "vision_model.", 1))
+        if candidate.startswith("model.visual."):
+            candidates.append(candidate.replace("model.visual.", "model.language_model.visual.", 1))
+        elif candidate.startswith("visual."):
+            candidates.append(f"model.language_model.{candidate}")
+
+    if stripped.startswith("model.lm_head."):
+        candidates.append(stripped.removeprefix("model."))
+    if stripped.startswith("language_model."):
         candidates.append(f"model.{stripped}")
 
     prefix = getattr(backbone, "base_model_prefix", "")
@@ -190,6 +245,14 @@ def find_checkpoint_key(
         checkpoint_index,
         onnx_name,
     )
+
+
+def _named_state_keys(module: nn.Module, iterator_name: str) -> set[str]:
+    iterator = getattr(module, iterator_name)
+    try:
+        return {name for name, _ in iterator(remove_duplicate=False)}
+    except TypeError:
+        return {name for name, _ in iterator()}
 
 
 def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name: str, qeff_model) -> WeightSpec:
@@ -267,7 +330,7 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
         onnx_name = tied_weight_map.get(name, name)
         checkpoint_key = find_checkpoint_key(onnx_name, checkpoint_index, backbone, active_transform)
         if checkpoint_key is None:
-            if _is_computed_initializer(onnx_name):
+            if _is_computed_initializer(onnx_name) or _is_non_persistent_buffer(qeff_model.model, name):
                 continue
             raise ValueError(
                 f"Could not resolve model initializer '{name}' to a safetensors checkpoint key "

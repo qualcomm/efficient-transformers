@@ -18,7 +18,6 @@ UTILS_DIR = os.path.dirname(os.path.abspath(__file__))
 QEFF_DIR = os.path.dirname(UTILS_DIR)
 ROOT_DIR = os.path.dirname(QEFF_DIR)
 QEFF_CACHE_DIR_NAME = "qeff_cache"
-
 ONNX_EXPORT_EXAMPLE_BATCH_SIZE = 1
 ONNX_EXPORT_EXAMPLE_SEQ_LEN = 32
 MOE_PREFILL_PACKED_CHUNK_SIZE = 256

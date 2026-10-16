@@ -822,9 +822,15 @@ class QEFFBaseModel(ABC):
             onnx_transforms = OnnxTransformPipeline(transforms=active_transforms)
             model, transformed = onnx_transforms.apply(model, **transform_kwargs)
 
-            # Keep this strictly layerwise-scoped so regular non-layerwise export
-            # remains backward compatible.
-            if QEFFBaseModel._layerwise_active:
+            # Nested Dynamo subfunctions use internal retained-state names inside
+            # their function bodies, but the top-level graph must expose the
+            # public names expected by the QAIC retained-state contract.
+            has_internal_retained_outputs = any(
+                "_InternalRetainedState" in output.name for output in model.graph.output
+            )
+            if has_internal_retained_outputs:
+                _restore_retained_state_output_names(model, output_names)
+            elif QEFFBaseModel._layerwise_active:
                 _restore_retained_state_output_names(model, output_names)
 
             transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]

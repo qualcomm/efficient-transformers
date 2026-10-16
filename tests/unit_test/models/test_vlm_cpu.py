@@ -54,6 +54,20 @@ class _CompileOnlyVLM:
         return [{"batch_size": 1}], dict(kwargs)
 
 
+class _ExportOnlyVLM(_CompileOnlyVLM):
+    def get_dummy_inputs(self, **kwargs):
+        return {
+            "vision": {"pixel_values": torch.zeros((1, 1), dtype=torch.float32)},
+            "lang": {"input_ids": torch.zeros((1, 1), dtype=torch.int64)},
+        }
+
+    def get_onnx_dynamic_axes(self, **kwargs):
+        return {
+            "vision": {"pixel_values": {0: "batch_size"}},
+            "lang": {"input_ids": {0: "batch_size"}},
+        }
+
+
 # ---------------------------------------------------------------------------
 # Tests: QEFFAutoModelForImageTextToText structure
 # ---------------------------------------------------------------------------
@@ -286,6 +300,40 @@ class TestQEffAutoModelForImageTextToTextDualQPCStructure:
         sig = inspect.signature(_QEffAutoModelForImageTextToTextDualQPC.compile)
         assert "skip_lang" in sig.parameters
         assert "skip_vision" in sig.parameters
+
+    def test_dual_qpc_export_initializes_weight_free_from_constructor(self, monkeypatch):
+        """Dual-QPC export must have the outer weight-free flag initialized by __init__."""
+        from QEfficient.transformers.models import modeling_auto
+
+        calls = []
+
+        class ExportOnlyVision:
+            onnx_path = None
+
+            def __init__(self, model, **kwargs):
+                self.model = model
+
+            def export(self, inputs, output_names, dynamic_axes, **kwargs):
+                calls.append(kwargs)
+
+        class ExportOnlyLang:
+            onnx_path = None
+
+            def __init__(self, model, **kwargs):
+                self.model = SimpleNamespace(qaic_config=None)
+
+        monkeypatch.setattr(modeling_auto, "QEffVisionEncoderForTextImageToTextModel", ExportOnlyVision)
+        monkeypatch.setattr(modeling_auto, "QEffCausalLMForTextImageToTextModel", ExportOnlyLang)
+        monkeypatch.setattr(
+            modeling_auto.SamplerTransform, "apply", lambda model, qaic_config, **kwargs: (model, False)
+        )
+
+        qeff_model = modeling_auto._QEffAutoModelForImageTextToTextDualQPC(_ExportOnlyVLM(), weight_free=True)
+        qeff_model.export(skip_lang=True)
+
+        assert calls == [
+            {"export_dir": None, "offload_pt_weights": False, "use_onnx_subfunctions": False, "dynamo": True}
+        ]
 
     def test_dual_qpc_compile_ignores_public_mdp_ts_num_devices(self, caplog):
         """Dual-QPC compile ignores public mdp_ts_num_devices before internal _compile calls."""

@@ -21,6 +21,7 @@ CPU-only. No QAIC hardware required.
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,6 +37,47 @@ from QEfficient.base.onnx_transforms import (
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils.torch_patches import preserve_subfunction_source_lines, temporarily_enable_nested_compile_regions
+
+
+def _make_export_region(operation):
+    graph = torch.fx.Graph()
+    value = graph.placeholder("value")
+    output = graph.call_function(operation, (value, 2))
+    graph.output(output)
+    return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+
+def _make_exported_region_program(second_operation=torch.ops.aten.add.Tensor):
+    class RegionHolder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.first = _make_export_region(torch.ops.aten.add.Tensor)
+            self.second = _make_export_region(second_operation)
+
+    holder = RegionHolder()
+    fake_mode = torch._subclasses.fake_tensor.FakeTensorMode()
+    fake_value = fake_mode.from_tensor(torch.ones(2))
+    graph = torch.fx.Graph()
+    value = graph.placeholder("value")
+    value.meta["val"] = fake_value
+    first_attr = graph.get_attr("first")
+    first_call = graph.call_function(
+        torch.ops.higher_order.invoke_subgraph,
+        (first_attr, "first", value),
+    )
+    second_attr = graph.get_attr("second")
+    second_call = graph.call_function(
+        torch.ops.higher_order.invoke_subgraph,
+        (second_attr, "second", value),
+    )
+    graph.output((first_call, second_call))
+    root = torch.fx.GraphModule(holder, graph)
+    for region_name in ("first", "second"):
+        for node in getattr(root, region_name).graph.nodes:
+            if node.op == "placeholder":
+                node.meta["example_value"] = fake_value
+    return SimpleNamespace(graph_module=root, validate=lambda: root.graph.lint()), first_call, second_call
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,6 +112,65 @@ def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch)
 
     assert invoke_subgraph.reenter_make_fx is fake_reenter_make_fx
     assert original_reenter_make_fx is not invoke_subgraph.reenter_make_fx
+
+
+def test_reuse_exported_subfunctions_merges_equivalent_regions():
+    from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
+
+    exported_program, first_call, second_call = _make_exported_region_program()
+
+    result = reuse_exported_subfunctions(exported_program)
+
+    assert result is exported_program
+    assert first_call.args[0] is second_call.args[0]
+    assert not hasattr(exported_program.graph_module, "second")
+
+
+def test_reuse_exported_subfunctions_keeps_non_equivalent_regions_separate():
+    from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
+
+    exported_program, first_call, second_call = _make_exported_region_program(torch.ops.aten.mul.Tensor)
+
+    reuse_exported_subfunctions(exported_program)
+
+    assert first_call.args[0] is not second_call.args[0]
+    assert hasattr(exported_program.graph_module, "first")
+    assert hasattr(exported_program.graph_module, "second")
+
+
+def test_reuse_exported_subfunctions_preserves_program_on_planning_failure(monkeypatch):
+    import QEfficient.utils.export_subfunctions as export_subfunctions
+
+    exported_program, _, _ = _make_exported_region_program()
+    original_graph = str(exported_program.graph_module.graph)
+
+    def fail_planning(_root):
+        raise RuntimeError("planning failure")
+
+    monkeypatch.setattr(export_subfunctions, "_plan_region_merges", fail_planning)
+
+    result = export_subfunctions.reuse_exported_subfunctions(exported_program)
+
+    assert result is exported_program
+    assert str(exported_program.graph_module.graph) == original_graph
+
+
+def test_preserve_mixed_export_subfunctions_restores_private_hooks():
+    import QEfficient.utils.torch_patches as torch_patches
+
+    utils = importlib.import_module("torch._higher_order_ops.utils")
+    original_hop_compile = utils._hop_compile_and_call
+    onnx_core = importlib.import_module("torch.onnx._internal.exporter._core")
+    original_prepare = getattr(onnx_core, "_prepare_exported_program_for_export", None)
+    if original_prepare is None:
+        pytest.skip("PyTorch ONNX exporter has no subfunction preparation hook")
+
+    with torch_patches.preserve_mixed_export_subfunctions():
+        assert utils._hop_compile_and_call is not original_hop_compile
+        assert onnx_core._prepare_exported_program_for_export is not original_prepare
+
+    assert utils._hop_compile_and_call is original_hop_compile
+    assert onnx_core._prepare_exported_program_for_export is original_prepare
 
 
 def make_tiny_llama():

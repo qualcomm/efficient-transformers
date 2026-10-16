@@ -13,11 +13,11 @@ from collections import Counter
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import onnx
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.export import Dim
 
 from QEfficient.base.onnx_transforms import (
@@ -105,9 +105,10 @@ def build_dynamo_export_kwargs(export_kwargs):
 
 
 def convert_dynamic_axes_to_dynamic_shapes(
-    dynamic_axes: Dict[str, Dict[int, str]],
+    dynamic_axes: dict[str, dict[int, str]],
     model_config=None,
-) -> Dict[str, Any]:
+    example_inputs=None,
+) -> dict[str, Any]:
     """
     Convert ONNX dynamic_axes format to torch.export dynamic_shapes format.
 
@@ -121,10 +122,12 @@ def convert_dynamic_axes_to_dynamic_shapes(
         The HuggingFace model config object (model.config). Used to read:
           - max_position_embeddings  -> upper bound for seq_len / ctx_len dims
           - sliding_window           -> upper bound for sliding_window dim
-          - model_type               -> controls batch_min and whether
-                                       compressed_kvs reconstruction runs
         When None, safe defaults are used for all bounds and model-type-specific
         passes are skipped.
+    example_inputs : optional
+        Concrete export inputs used to identify dimensions that are statically
+        specialized by the traced graph, such as singleton vision axes and
+        one-token decode sequence length.
 
     Returns
     -------
@@ -141,40 +144,73 @@ def convert_dynamic_axes_to_dynamic_shapes(
     model_type = getattr(model_config, "model_type", None)
     batch_min = 1 if model_type == "gpt_oss" else 2
 
-    dim_registry: Dict[str, Any] = {}
+    observed_dim_values: dict[str, set[int]] = {}
+    if example_inputs is not None:
+        for input_name, axes_map in dynamic_axes.items():
+            sample = example_inputs.get(input_name)
+            if not isinstance(sample, torch.Tensor):
+                continue
+            for axis_idx, dim_name in axes_map.items():
+                if axis_idx < sample.ndim:
+                    observed_dim_values.setdefault(dim_name, set()).add(int(sample.shape[axis_idx]))
+
+    dim_registry: dict[str, Any] = {}
 
     def resolve_dim(dim_name: str):
         if dim_name not in dim_registry:
-            if dim_name == "batch_size":
+            if (
+                "seq_len" in dim_name
+                and observed_dim_values.get(dim_name) == {1}
+                and model_type
+                in {
+                    "qwen3_vl",
+                    "qwen3_vl_moe",
+                    "qwen3_5",
+                    "qwen3_5_moe",
+                    "qwen3_5_text",
+                    "qwen3_5_moe_text",
+                }
+            ):
+                dim_registry[dim_name] = Dim.STATIC
+            elif dim_name == "time" and observed_dim_values.get(dim_name) == {1}:
+                dim_registry[dim_name] = Dim("time")
+            elif observed_dim_values.get(dim_name) == {1}:
+                dim_registry[dim_name] = Dim.AUTO
+            elif dim_name == "batch_size":
                 dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
             elif dim_name == "full_batch_size":
-                # CB pool capacity; different min prevents torch.export collapsing it with batch_size.
-                dim_registry[dim_name] = Dim("full_batch_size", min=batch_min + 1, max=DYNAMO_DIM_MAX_BATCH_SIZE)
+                dim_registry[dim_name] = Dim(
+                    "full_batch_size",
+                    min=batch_min + 1,
+                    max=DYNAMO_DIM_MAX_BATCH_SIZE,
+                )
             elif "seq_len" in dim_name:
-                dim_registry[dim_name] = Dim("seq_len", min=2, max=max_seq_len)
+                dim_registry[dim_name] = Dim("seq_len", min=1, max=max_seq_len)
             elif "comp_ctx_lengths" in dim_name:
-                dim_registry[dim_name] = Dim("comp_ctx_lengths", min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS, max=max_seq_len)
+                dim_registry[dim_name] = Dim(
+                    "comp_ctx_lengths",
+                    min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS,
+                    max=max_seq_len,
+                )
             elif "ctx_len" in dim_name:
-                dim_registry[dim_name] = Dim("ctx_len", min=2, max=max_seq_len)
+                dim_registry[dim_name] = Dim("ctx_len", min=1, max=max_seq_len)
             elif "sliding_window" in dim_name:
                 dim_registry[dim_name] = Dim(
                     "sliding_window",
-                    min=2,
+                    min=1,
                     max=getattr(model_config, "sliding_window", max_seq_len),
                 )
             else:
-                # Preserve specialization symbol names for model-specific axes
-                # such as grid_height, grid_h, grid_w, and vision_batch_size.
-                # Anonymous Dim.DYNAMIC values are exported as s0/s1/... and
-                # cannot be resolved from the compiler specialization file.
                 dim_registry[dim_name] = Dim(dim_name)
         return dim_registry[dim_name]
 
-    dynamic_shapes: Dict[str, Any] = {}
-    past_keys: Dict[int, Any] = {}
-    past_values: Dict[int, Any] = {}
-    compressed_kv_layers: Dict[int, Any] = {}
-    k_pe_layers: Dict[int, Any] = {}
+    dynamic_shapes: dict[str, Any] = {}
+    past_keys: dict[int, Any] = {}
+    past_values: dict[int, Any] = {}
+    conv_states: dict[int, Any] = {}
+    recurrent_states: dict[int, Any] = {}
+    compressed_kv_layers: dict[int, Any] = {}
+    k_pe_layers: dict[int, Any] = {}
 
     for input_name, axes_map in dynamic_axes.items():
         resolved = {axis_idx: resolve_dim(dim_name) for axis_idx, dim_name in axes_map.items()}
@@ -182,6 +218,10 @@ def convert_dynamic_axes_to_dynamic_shapes(
             past_keys[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("past_value."):
             past_values[int(input_name.split(".")[1])] = resolved
+        elif input_name.startswith("conv_state."):
+            conv_states[int(input_name.split(".")[1])] = resolved
+        elif input_name.startswith("recurrent_state."):
+            recurrent_states[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("compressed_kv."):
             compressed_kv_layers[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("k_pe."):
@@ -189,10 +229,15 @@ def convert_dynamic_axes_to_dynamic_shapes(
         else:
             dynamic_shapes[input_name] = resolved
 
-    if past_keys or past_values:
-        max_layer = max(list(past_keys.keys()) + list(past_values.keys()))
+    cache_layer_indices = set(past_keys) | set(past_values) | set(conv_states) | set(recurrent_states)
+    if cache_layer_indices:
+        max_layer = max(cache_layer_indices)
         dynamic_shapes["past_key_values"] = [
-            [past_keys.get(i, {}), past_values.get(i, {})] for i in range(max_layer + 1)
+            [
+                past_keys.get(i, conv_states.get(i, {})),
+                past_values.get(i, recurrent_states.get(i, {})),
+            ]
+            for i in range(max_layer + 1)
         ]
 
     if compressed_kv_layers or k_pe_layers:
@@ -395,7 +440,10 @@ def export_wrapper(func):
             dynamic_axes = bound_export_args.arguments.get("dynamic_axes")
             if dynamic_axes is not None:
                 model_config = getattr(self.model, "config", None)
-                kwargs["dynamic_shapes"] = convert_dynamic_axes_to_dynamic_shapes(dynamic_axes, model_config)
+                example_inputs = bound_export_args.arguments.get("example_inputs")
+                kwargs["dynamic_shapes"] = convert_dynamic_axes_to_dynamic_shapes(
+                    dynamic_axes, model_config, example_inputs
+                )
 
         # Cache probe flag (used for layerwise inspection runs)
         cache_probe = kwargs.pop("_layerwise_cache_probe", False)
@@ -441,10 +489,14 @@ def export_wrapper(func):
                 if use_onnx_subfunctions and dynamo
                 else nullcontext()
             )
+            # This is an inference export. Without no_grad, the first layer's
+            # input has requires_grad=False while later layer inputs have
+            # requires_grad=True. PyTorch's region comparison treats their
+            # otherwise identical bodies as different subgraphs.
+            grad_context = torch.no_grad() if use_onnx_subfunctions and dynamo else nullcontext()
             try:
-                with export_context:
-                    with dynamo_patch:
-                        onnx_path = func(self, *args, **kwargs)
+                with export_context, dynamo_patch, grad_context:
+                    onnx_path = func(self, *args, **kwargs)
             except Exception as export_exc:
                 QEFFLogger.log_api_failure("export", self.__class__.__name__, export_exc)
                 if use_onnx_subfunctions and dynamo:
@@ -554,7 +606,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
-        copy_of_hash_params["onnx_subfunction_version"] = 3
+        copy_of_hash_params["onnx_subfunction_version"] = 4
     # Generate hash from relevant parameters
     export_hash, filtered_hash_params = create_export_hash(
         model_params=copy_of_hash_params,
@@ -600,7 +652,7 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
     orig_hash_subfunction_version = qeff_model.hash_params.get("onnx_subfunction_version")
     qeff_model._use_onnx_subfunctions = True
     qeff_model.hash_params["use_onnx_subfunctions"] = True
-    qeff_model.hash_params["onnx_subfunction_version"] = 3
+    qeff_model.hash_params["onnx_subfunction_version"] = 4
     # TorchScript patches are irrelevant on the dynamo path.
     if not dynamo:
         apply_torch_patches()
@@ -713,7 +765,7 @@ def _cleanup_onnx_subfunctions(qeff_model, state=None):
             qeff_model.hash_params["onnx_subfunction_version"] = state["hash_subfunction_version"]
 
 
-def _save_export_metadata(export_dir: Path, filtered_hash_params: Dict):
+def _save_export_metadata(export_dir: Path, filtered_hash_params: dict):
     """
     Save export metadata to JSON file for reproducibility.
 

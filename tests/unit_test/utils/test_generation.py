@@ -1142,6 +1142,21 @@ def _make_vlg_stub(full_batch_size=None, prefill_seq_len=8):
     return obj
 
 
+def test_vlm_padding_uses_largest_vision_specialization():
+    from QEfficient.generation.vlm_generation import _max_allowed_sequence_length
+
+    session = SimpleNamespace(
+        binding_index_map={"vision_embeds": 1},
+        allowed_shapes=[
+            [(4, [1, 176, 8]), (2, [1, 176, 8])],
+            [(4, [1, 704, 8]), (2, [1, 704, 8])],
+        ],
+        bindings=[SimpleNamespace(dims=[1, 176, 8]), SimpleNamespace(dims=[1, 176, 8])],
+    )
+
+    assert _max_allowed_sequence_length(session, "vision_embeds", 1) == 704
+
+
 # ---------------------------------------------------------------------------
 # Tests: Gemma4 CB variant  (gemma4_cb.py / continuous_batching.py)
 #   full_batch_size=4, batch_size=1 per slot, continuous_batching=True,

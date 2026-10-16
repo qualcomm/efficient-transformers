@@ -40,6 +40,7 @@ from QEfficient.base.checkpoint_transforms import (
     CheckpointTransformPipeline,
     TaskParams,
     TensorRef,
+    detect_group_transform,
     execute_checkpoint_plan,
 )
 from QEfficient.base.onnx_transforms import (
@@ -48,7 +49,10 @@ from QEfficient.base.onnx_transforms import (
     RenameRepeatedSubgraphTransform,
 )
 from QEfficient.exporter.weight_free import checkpoint_key_resolver
-from QEfficient.exporter.weight_free.checkpoint_key_resolver import find_checkpoint_key
+from QEfficient.exporter.weight_free.checkpoint_key_resolver import (
+    _is_non_persistent_buffer,
+    find_checkpoint_key,
+)
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DtypeConversionCheckpointTransform,
     ExpertParallelPackingCheckpointTransform,
@@ -63,7 +67,7 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 from QEfficient.transformers.moe.weights import MoEWeights, pack_moe_weights_for_expert_parallel
 from QEfficient.utils import runtime_requirements
 from QEfficient.utils.checkpoint_utils import checkpoint_root
-from QEfficient.utils.export_utils import _generate_export_hash
+from QEfficient.utils.export_utils import _generate_export_hash, convert_dynamic_axes_to_dynamic_shapes
 from QEfficient.utils.runtime_requirements import validate_runtime_requirements
 from QEfficient.utils.torch_patches import temporarily_enable_nested_compile_regions
 
@@ -84,6 +88,33 @@ def make_tiny_llama():
     )
     model = LlamaForCausalLM(cfg).eval()
     return model, cfg
+
+
+def test_dynamic_shapes_accept_qwen_decode_sequence_length():
+    class Decode(torch.nn.Module):
+        def forward(self, input_ids):
+            return input_ids.float()
+
+    inputs = (torch.zeros((2, 1), dtype=torch.long),)
+    dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(
+        {"input_ids": {0: "batch_size", 1: "seq_len"}},
+        model_config=SimpleNamespace(model_type="qwen3_5"),
+        example_inputs={"input_ids": inputs[0]},
+    )
+
+    torch.export.export(Decode(), inputs, dynamic_shapes=dynamic_shapes, strict=True)
+
+    assert dynamic_shapes["input_ids"][1] is torch.export.Dim.STATIC
+
+
+def test_dynamic_shapes_preserve_qwen_vision_time_axis():
+    dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(
+        {"image_grid_thw": {0: "vision_batch_size", 1: "time", 2: "grid_h", 3: "grid_w"}},
+        model_config=SimpleNamespace(model_type="qwen3_5_moe"),
+        example_inputs={"image_grid_thw": torch.zeros((2, 1, 86, 128), dtype=torch.int64)},
+    )
+
+    assert dynamic_shapes["image_grid_thw"][1].__name__ == "time"
 
 
 def _make_minimal_onnx_with_repeated_subgraphs(
@@ -232,6 +263,17 @@ def test_checkpoint_root_symlinked_shards(tmp_path, monkeypatch):
 
 
 class TestWeightFreeCheckpointTransforms:
+    def test_detects_gptoss_layout_without_model_type(self):
+        prefix = "model.layers.0.mlp.experts"
+        weight_map = {
+            f"{prefix}.gate_up_proj_blocks": "experts.safetensors",
+            f"{prefix}.down_proj_blocks": "experts.safetensors",
+        }
+
+        transform = detect_group_transform(SimpleNamespace(num_local_experts=2), weight_map)
+
+        assert transform is GptOssMxfp4ExpertDequantSplitCheckpointTransform
+
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
@@ -452,6 +494,47 @@ class TestWeightFreeCheckpointTransforms:
         assert tensors[f"{moe_prefix}.up_bias"].dtype == torch.bfloat16
         assert tensors[f"{moe_prefix}.down_bias"].dtype == torch.bfloat16
         assert tensors["model.embed_tokens.weight"].dtype == torch.bfloat16
+
+    def test_pipeline_prefers_fused_layout_when_auxiliary_per_expert_keys_exist(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        main_prefix = "model.language_model.layers.0.mlp.experts"
+        auxiliary_prefix = "mtp.layers.0.mlp.experts"
+        canonical_prefix = "model.language_model.layers.0.mlp.moe_weights"
+        tensors = {
+            f"{main_prefix}.gate_up_proj": torch.ones((2, 4, 4)),
+            f"{main_prefix}.down_proj": torch.ones((2, 2, 4)),
+            f"{canonical_prefix}.gate": torch.ones((2, 4, 2)),
+            f"{canonical_prefix}.up": torch.ones((2, 4, 2)),
+            f"{canonical_prefix}.down": torch.ones((2, 2, 4)),
+        }
+        for expert_index in range(2):
+            tensors.update(
+                {
+                    f"{auxiliary_prefix}.{expert_index}.gate_proj.weight": torch.ones((2, 4)),
+                    f"{auxiliary_prefix}.{expert_index}.up_proj.weight": torch.ones((2, 4)),
+                    f"{auxiliary_prefix}.{expert_index}.down_proj.weight": torch.ones((4, 2)),
+                }
+            )
+        _write_safetensors_checkpoint(src, tensors)
+
+        pipeline = CheckpointTransformPipeline(
+            [
+                MoEExpertStackingCheckpointTransform,
+                MoEFusedExpertSplitCheckpointTransform,
+                DtypeConversionCheckpointTransform,
+            ]
+        )
+        plan, active_group_id = pipeline.build_plan(
+            src,
+            torch.float32,
+            config=SimpleNamespace(num_local_experts=2, model_type="qwen3_5_moe"),
+        )
+
+        assert active_group_id == MoEFusedExpertSplitCheckpointTransform.TRANSFORM_ID
+        assert MoEExpertStackingCheckpointTransform.TRANSFORM_ID not in plan.transform_ids
+        output_refs = [ref for task in plan.tasks for ref in task.output_refs]
+        assert len(output_refs) == len(set(output_refs))
 
     @pytest.mark.parametrize("layout", ["mixtral", "granite"])
     def test_pipeline_groups_fused_experts_across_source_shards(self, tmp_path, layout):
@@ -1001,6 +1084,63 @@ class TestWeightFreeCheckpointTransforms:
             == "model.layers.0.mlp.gate.weight"
         )
 
+    def test_resolver_strips_vlm_wrapper_prefix_before_visual_alias(self):
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert (
+            find_checkpoint_key(
+                "model.vision_model.patch_embed.proj.weight",
+                {"visual.patch_embed.proj.weight": "model.safetensors"},
+                backbone,
+            )
+            == "visual.patch_embed.proj.weight"
+        )
+
+    def test_resolver_maps_nested_qwen35_visual_prefix(self):
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert (
+            find_checkpoint_key(
+                "model.model.visual.patch_embed.proj.weight",
+                {"model.language_model.visual.patch_embed.proj.weight": "model.safetensors"},
+                backbone,
+            )
+            == "model.language_model.visual.patch_embed.proj.weight"
+        )
+
+    def test_resolver_strips_language_model_wrapper_for_tied_vlm_weights(self):
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert (
+            find_checkpoint_key(
+                "model.language_model.embed_tokens.weight",
+                {"model.embed_tokens.weight": "model.safetensors"},
+                backbone,
+            )
+            == "model.embed_tokens.weight"
+        )
+        assert (
+            find_checkpoint_key(
+                "language_model.embed_tokens.weight",
+                {"model.embed_tokens.weight": "model.safetensors"},
+                backbone,
+            )
+            == "model.embed_tokens.weight"
+        )
+
+    def test_non_persistent_buffers_are_classified_as_computed(self):
+        import torch.nn as nn
+
+        module = nn.Module()
+        module.register_buffer("generated_mask", torch.ones(2), persistent=False)
+        module.register_buffer("checkpoint_buffer", torch.ones(2), persistent=True)
+
+        assert _is_non_persistent_buffer(module, "generated_mask")
+        assert not _is_non_persistent_buffer(module, "checkpoint_buffer")
+
     def test_resolver_combines_router_gate_alias_with_active_transform(self):
         checkpoint_name = "model.layers.0.block_sparse_moe.router.weight"
         backbone = MagicMock()
@@ -1164,6 +1304,63 @@ class TestWeightFreeCheckpointTransforms:
         assert spec.inputs[0].name == "model.embed_tokens.weight"
         assert spec.inputs[0].location.key == "model.embed_tokens.weight"
         assert spec.external_data_root == str(tmp_path)
+
+    def test_promotes_lm_head_from_wrapped_tied_vlm(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        src.mkdir()
+        tied_weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+        checkpoint_key = "model.language_model.embed_tokens.weight"
+        _write_safetensors_checkpoint(src, {checkpoint_key: tied_weight})
+
+        class TiedVLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = torch.nn.Module()
+                self.model.language_model = torch.nn.Module()
+                self.model.language_model.embed_tokens = torch.nn.Embedding(4, 3)
+                self.lm_head = torch.nn.Linear(3, 4, bias=False)
+                self.lm_head.weight = self.model.language_model.embed_tokens.weight
+
+            def get_expanded_tied_weights_keys(self, all_submodels=True):
+                return {"lm_head.weight": checkpoint_key}
+
+        class DecoderWrapper(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = TiedVLM()
+                self.language_model = self.model.model.language_model
+
+        initializer = SimpleNamespace(shape=tied_weight.shape, dtype=ir.DataType.FLOAT)
+        graph = SimpleNamespace(initializers={"model.lm_head.weight": initializer}, inputs=[])
+        onnx_program = SimpleNamespace(model=SimpleNamespace(graph=graph))
+        monkeypatch.setattr(
+            checkpoint_key_resolver.ir,
+            "Value",
+            lambda name, shape, type: SimpleNamespace(name=name, shape=shape, type=type),
+        )
+
+        spec = checkpoint_key_resolver.promote_initializers_and_build_spec(
+            onnx_program=onnx_program,
+            model_ref=str(src),
+            model_name="tiny-wrapped-tied-vlm",
+            qeff_model=SimpleNamespace(model=DecoderWrapper()),
+        )
+
+        assert "model.lm_head.weight" not in graph.initializers
+        assert [value.name for value in graph.inputs] == ["model.lm_head.weight"]
+        assert spec.inputs[0].location.key == checkpoint_key
+
+    def test_resolves_repeated_model_wrapper_prefix(self):
+        checkpoint_key = "model.visual.patch_embed.proj.weight"
+        checkpoint_index = {checkpoint_key: "base-0000.safetensors"}
+        backbone = torch.nn.Module()
+
+        assert (
+            checkpoint_key_resolver.find_checkpoint_key(
+                "model.model.visual.patch_embed.proj.weight", checkpoint_index, backbone
+            )
+            == checkpoint_key
+        )
 
 
 def _fake_export(

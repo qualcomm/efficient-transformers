@@ -99,6 +99,49 @@ class TestONNXTransformsModuleStructure:
         assert default_domain_opset(legacy_proto) == constants.ONNX_LEGACY_EXPORT_OPSET
         assert default_domain_opset(dynamo_proto) == constants.ONNX_DYNAMO_EXPORT_OPSET
 
+    @pytest.mark.parametrize(
+        ("op_type", "function_name"),
+        [
+            ("CtxGatherBlockedKVBatch", "CtxGatherBlockedKVBatch"),
+            ("CtxChunkScatterBatch", "CtxChunkScatterBatch"),
+        ],
+    )
+    def test_batch_cache_custom_ops_register_function_protos(self, op_type, function_name):
+        import onnx
+        from onnx import TensorProto, helper
+
+        from QEfficient.base.onnx_transforms import CustomOpTransform
+
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    op_type,
+                    inputs=["data", "indices"] if "Gather" in op_type else ["data", "indices", "updates"],
+                    outputs=["output"],
+                    domain="com.qti.aisw.onnx",
+                )
+            ],
+            "batch_cache_custom_op",
+            [
+                helper.make_tensor_value_info("data", TensorProto.FLOAT, [1]),
+                helper.make_tensor_value_info("indices", TensorProto.INT32, [1]),
+                *(
+                    [
+                        helper.make_tensor_value_info("updates", TensorProto.FLOAT, [1]),
+                    ]
+                    if "Gather" not in op_type
+                    else []
+                ),
+            ],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("com.qti.aisw.onnx", 1)])
+
+        CustomOpTransform.apply(model)
+
+        assert function_name in {function.name for function in model.functions}
+        onnx.checker.check_model(model)
+
     def test_base_onnx_transform_importable(self):
         from QEfficient.base.onnx_transforms import BaseOnnxTransform
 
@@ -602,6 +645,21 @@ class TestCustomOpTransformStructure:
         from QEfficient.base.onnx_transforms import CustomOpTransform
 
         assert "CtxGatherFunc3DGeneralized" in CustomOpTransform._custom_ops
+
+    @pytest.mark.parametrize("op_name", ["CtxScatter3D", "CtxScatter3DInt"])
+    def test_ctx_scatter_3d_custom_ops_cast_position_ids_before_concat(self, op_name):
+        """ScatterND indices must concatenate tensors with matching INT32 element types."""
+        from QEfficient.customop.ctx_scatter_gather import CtxScatter3D, CtxScatter3DInt
+        from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
+
+        onnxscript_op = {"CtxScatter3D": CtxScatter3D, "CtxScatter3DInt": CtxScatter3DInt}[op_name]
+        function_proto = get_dynamo_onnxscript_func(onnxscript_op).to_function_proto()
+        cast_outputs = {
+            node.output[0] for node in function_proto.node if node.op_type == "Cast" and node.input == ["position_ids"]
+        }
+
+        assert cast_outputs
+        assert any(node.op_type == "Unsqueeze" and node.input[0] in cast_outputs for node in function_proto.node)
 
     def test_custom_op_transform_rms_norm_maps_to_custom_rms_norm(self):
         """CustomRMSNormFunc must map to CustomRMSNorm class."""

@@ -10,7 +10,6 @@ import os
 import warnings
 from pathlib import Path
 from time import perf_counter
-from typing import List, Optional, Union
 
 import numpy as np
 import onnx
@@ -173,7 +172,7 @@ def _disable_unsupported_weight_free(kwargs: dict, qeff_auto_class_name: str) ->
         return
 
     logger.warning(
-        "weight_free=True is only supported for QEFFAutoModelForCausalLM, QEffAutoModel; disabling it for %s.",
+        "weight_free=True is only supported for QEFFAutoModelForCausalLM and VLM wrappers; disabling it for %s.",
         qeff_auto_class_name,
     )
 
@@ -536,7 +535,11 @@ class QEFFAutoModel(QEFFTransformersBase):
     """
 
     _hf_auto_class = AutoModel
-    _pytorch_transforms = [CustomOpsTransform, AwqToMatmulNbitsTransform, GPTQToMatmulNbitsTransform]
+    _pytorch_transforms = [
+        CustomOpsTransform,
+        AwqToMatmulNbitsTransform,
+        GPTQToMatmulNbitsTransform,
+    ]
     # FP16Clip inlines external weights; without Split the saved protobuf exceeds 2GB for large embedders.
     _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
     _checkpoint_transforms = [DtypeConversionCheckpointTransform]
@@ -970,6 +973,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
         **kwargs :
             Additional keyword arguments passed to the base class constructor.
         """
+        _disable_unsupported_weight_free(kwargs, self.__class__.__name__)
         super().__init__(model, **kwargs)
         self.model.config.use_cache = True
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
@@ -1396,13 +1400,13 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
     ):
         if enable:
             if enable_chunking:
-                self.model, tf = PrefillOnlyChunkedTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyChunkedTransform.apply(self.model)
             else:
-                self.model, tf = PrefillOnlyTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyTransform.apply(self.model)
 
         else:
             if retain_full_kv:
-                self.model, tf = RevertPrefillKeepAttentionTransform.apply(self.model)
+                self.model, _tf = RevertPrefillKeepAttentionTransform.apply(self.model)
             else:
                 self.model, _tf = RevertPrefillOnlyTransform.apply(self.model)
 
@@ -1683,16 +1687,16 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         retain_full_kv: bool | None = False,
     ):
         if enable:
-            self.model, tf = PrefillOnlyExternalModuleMapperTransform.apply(self.model)
+            self.model, _tf = PrefillOnlyExternalModuleMapperTransform.apply(self.model)
             if enable_chunking:
-                self.model, tf = PrefillOnlyChunkedTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyChunkedTransform.apply(self.model)
             else:
-                self.model, tf = PrefillOnlyTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyTransform.apply(self.model)
 
         else:
-            self.model, tf = RevertPrefillOnlyExternalModuleMapperTransform.apply(self.model)
+            self.model, _tf = RevertPrefillOnlyExternalModuleMapperTransform.apply(self.model)
             if retain_full_kv:
-                self.model, tf = RevertPrefillKeepAttentionTransform.apply(self.model)
+                self.model, _tf = RevertPrefillKeepAttentionTransform.apply(self.model)
             else:
                 self.model, _tf = RevertPrefillOnlyTransform.apply(self.model)
 
@@ -1703,6 +1707,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         skip_vision: bool | None = False,
         skip_lang: bool | None = False,
         prefill_seq_len: int | None = None,
+        ctx_len: int | None = None,
         prefill_only: bool = False,
         enable_chunking: bool = False,
         num_cores: int = constants.DEFAULT_AIC_NUM_CORES,
@@ -1748,7 +1753,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 **kwargs,
             )
         bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
-        seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+        seq_len: int = prefill_seq_len or constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         qaic_config = kwargs.get("qaic_config", getattr(self.lang_model.model, "qaic_config", None))
         gdn_export_kwargs = _get_gdn_full_state_update_kwargs(
             self.model,
@@ -1761,7 +1766,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 self.__update_prefill_transform(enable=True, enable_chunking=enable_chunking)
             else:
                 self.__update_prefill_transform(False, retain_full_kv=kwargs.get("retain_full_kv", False))
-        onnx_kwargs = {"prefill_seq_len": seq_len, "batch_size": bs}
+        onnx_kwargs = {"prefill_seq_len": seq_len, "batch_size": bs, "ctx_len": ctx_len}
         dynamic_axes_kwargs = {
             "kv_offload": True,
             "continuous_batching": self.continuous_batching,
@@ -1791,7 +1796,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         output_names = self.model.get_output_names(kv_offload=True)
         # Prefix only the language-side KV-cache retained buffers (vision buffers are untouched).
         output_names = apply_kv_cache_prefix(output_names, validate_kv_cache_prefix(kv_cache_prefix))
-        if self.lang_model.qaic_config is not None and self.lang_model.qaic_config.get("include_sampler", False):
+        lang_qaic_config = getattr(self.lang_model, "qaic_config", None)
+        if lang_qaic_config is not None and lang_qaic_config.get("include_sampler", False):
             logits_index = output_names["lang"].index("logits")
             output_names["lang"][logits_index] = "next_tokens"
             inputs["lang"], output_names["lang"], dynamic_axes["lang"] = get_sampling_inputs_and_outputs(
@@ -1845,6 +1851,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 enable_chunking=enable_chunking,
                 num_cores=num_cores,
                 prefill_seq_len=prefill_seq_len,
+                ctx_len=ctx_len,
                 qaic_config=qaic_config,
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
@@ -2033,7 +2040,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         qaic_config: dict | None = None,
         layerwise: bool = False,
         layerwise_window_size: int = 1,
-        kv_cache_prefix: Optional[str] = None,
+        kv_cache_prefix: str | None = None,
         artifacts: bool = False,
         **compiler_options,
     ) -> str:
@@ -2275,6 +2282,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                     prefill_only=prefill_only,
                     enable_chunking=enable_chunking,
                     prefill_seq_len=prefill_seq_len,
+                    ctx_len=ctx_len,
                     num_cores=num_cores,
                     qaic_config=qaic_config,
                     _layerwise_cache_probe=layerwise_cache_probe,
@@ -2393,16 +2401,16 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         streamer: TextStreamer | None = None,
         device_ids: list[int] | None = None,
         runtime_ai100: bool = True,
-        generation_len: Optional[int] = None,
-        image_height: Optional[int] = None,
-        image_width: Optional[int] = None,
-        multi_specs: Optional[bool] = None,
-        num_frames: Optional[int] = None,
+        generation_len: int | None = None,
+        image_height: int | None = None,
+        image_width: int | None = None,
+        multi_specs: bool | None = None,
+        num_frames: int | None = None,
         skip_vision: bool = False,
         skip_lang: bool = False,
         artifacts: bool = False,
         **kwargs,
-    ) -> Union[torch.Tensor, np.ndarray, Path]:
+    ) -> torch.Tensor | np.ndarray | Path:
         """
         Generates output by executing the compiled QPC(s) on Cloud AI 100 Hardware cards.
 
@@ -2459,7 +2467,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         # Use VisionLanguageGeneration for image-prompt pairs
         if (processor and images) or (tokenizer and prompts) or multi_specs or num_frames:
             # Create VisionLanguageGeneration instance
-            batch_size_comp, ctx_len_comp, fbs, num_kv_blocks_comp = get_compilation_dims(self.lang_model.qpc_path)
+            _batch_size_comp, ctx_len_comp, fbs, num_kv_blocks_comp = get_compilation_dims(self.lang_model.qpc_path)
             vlm_gen = VisionLanguageGeneration(
                 qeff_model=self,
                 lang_qpc_path=self.lang_model.qpc_path,
@@ -2802,10 +2810,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
 
         decode_start = perf_counter()
         for num_token in range(1, generation_len):
-            if self.comp_ctx_lengths_decode is not None:
-                if max_position_id >= self.comp_ctx_lengths_decode[ccl_id] - 1:
-                    ccl_id = min(ccl_id + 1, max_ccl_id)
-                    lang_inputs["comp_ctx_lengths"] = list_of_comp_ctx_lengths_decode[ccl_id]
+            if self.comp_ctx_lengths_decode is not None and max_position_id >= self.comp_ctx_lengths_decode[ccl_id] - 1:
+                ccl_id = min(ccl_id + 1, max_ccl_id)
+                lang_inputs["comp_ctx_lengths"] = list_of_comp_ctx_lengths_decode[ccl_id]
 
             outputs = lang_session.run(lang_inputs)
 
@@ -2981,13 +2988,13 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
     ):
         if enable:
             if enable_chunking:
-                self.model, tf = PrefillOnlyChunkedTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyChunkedTransform.apply(self.model)
             else:
-                self.model, tf = PrefillOnlyTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyTransform.apply(self.model)
 
         else:
             if retain_full_kv:
-                self.model, tf = RevertPrefillKeepAttentionTransform.apply(self.model)
+                self.model, _tf = RevertPrefillKeepAttentionTransform.apply(self.model)
             else:
                 self.model, _tf = RevertPrefillOnlyTransform.apply(self.model)
 
@@ -3061,8 +3068,8 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         mxint8_kv_cache: bool = False,
         num_speculative_tokens: int | None = None,
         use_onnx_subfunctions: bool = False,
-        qaic_config: Optional[dict] = None,
-        kv_cache_prefix: Optional[str] = None,
+        qaic_config: dict | None = None,
+        kv_cache_prefix: str | None = None,
         artifacts: bool = False,
         **compiler_options,
     ) -> str:
@@ -3210,16 +3217,16 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
 
     def generate(
         self,
-        inputs: Optional[torch.Tensor] = None,
-        streamer: Optional[TextStreamer] = None,
-        device_ids: List[int] = None,
+        inputs: torch.Tensor | None = None,
+        streamer: TextStreamer | None = None,
+        device_ids: list[int] | None = None,
         runtime_ai100: bool = True,
         generation_len: int | None = None,
-        processor: Optional[AutoImageProcessor] = None,
-        images: List[str] = None,
-        prompts: List[str] = None,
+        processor: AutoImageProcessor | None = None,
+        images: list[str] | None = None,
+        prompts: list[str] | None = None,
         artifacts: bool = False,
-    ) -> Union[torch.Tensor, np.ndarray, Path]:
+    ) -> torch.Tensor | np.ndarray | Path:
         """
         Generates output by executing the compiled single QPC on Cloud AI 100 Hardware cards.
 
@@ -3424,10 +3431,9 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
 
         decode_start = perf_counter()
         for num_token in range(1, generation_len):
-            if self.comp_ctx_lengths_decode is not None:
-                if max_position_id >= self.comp_ctx_lengths_decode[ccl_id] - 1:
-                    ccl_id = min(ccl_id + 1, max_ccl_id)
-                    inputs["comp_ctx_lengths"] = list_of_comp_ctx_lengths_decode[ccl_id]
+            if self.comp_ctx_lengths_decode is not None and max_position_id >= self.comp_ctx_lengths_decode[ccl_id] - 1:
+                ccl_id = min(ccl_id + 1, max_ccl_id)
+                inputs["comp_ctx_lengths"] = list_of_comp_ctx_lengths_decode[ccl_id]
 
             outputs = qpc_session.run(inputs)
 
@@ -3533,7 +3539,7 @@ class QEFFAutoModelForImageTextToText:
     _hf_auto_class = AutoModelForImageTextToText
 
     def __new__(
-        self,
+        cls,
         model: nn.Module,
         kv_offload: bool | None = True,
         continuous_batching: bool = False,
@@ -3734,16 +3740,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         retain_full_kv: bool | None = False,
     ):
         if enable:
-            self.model, tf = PrefillOnlyExternalModuleMapperTransform.apply(self.model)
+            self.model, _tf = PrefillOnlyExternalModuleMapperTransform.apply(self.model)
             if enable_chunking:
-                self.model, tf = PrefillOnlyChunkedTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyChunkedTransform.apply(self.model)
             else:
-                self.model, tf = PrefillOnlyTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyTransform.apply(self.model)
 
         else:
-            self.model, tf = RevertPrefillOnlyExternalModuleMapperTransform.apply(self.model)
+            self.model, _tf = RevertPrefillOnlyExternalModuleMapperTransform.apply(self.model)
             if retain_full_kv:
-                self.model, tf = RevertPrefillKeepAttentionTransform.apply(self.model)
+                self.model, _tf = RevertPrefillKeepAttentionTransform.apply(self.model)
             else:
                 self.model, _tf = RevertPrefillOnlyTransform.apply(self.model)
 
@@ -3754,16 +3760,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         retain_full_kv: bool | None = False,
     ):
         if enable:
-            self.model, tf = PrefillOnlyExternalModuleMapperTransform.apply(self.model)
+            self.model, _tf = PrefillOnlyExternalModuleMapperTransform.apply(self.model)
             if enable_chunking:
-                self.model, tf = PrefillOnlyChunkedTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyChunkedTransform.apply(self.model)
             else:
-                self.model, tf = PrefillOnlyTransform.apply(self.model)
+                self.model, _tf = PrefillOnlyTransform.apply(self.model)
 
         else:
-            self.model, tf = RevertPrefillOnlyExternalModuleMapperTransform.apply(self.model)
+            self.model, _tf = RevertPrefillOnlyExternalModuleMapperTransform.apply(self.model)
             if retain_full_kv:
-                self.model, tf = RevertPrefillKeepAttentionTransform.apply(self.model)
+                self.model, _tf = RevertPrefillKeepAttentionTransform.apply(self.model)
             else:
                 self.model, _tf = RevertPrefillOnlyTransform.apply(self.model)
 
@@ -4326,7 +4332,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             output_names.append("logits")
 
         if supports_paged_attention:
-            batch, num_kv_heads, CL, dh = kv_cache_shape
+            batch, num_kv_heads, _CL, dh = kv_cache_shape
             total_num_kv_blocks = batch * num_kv_blocks
             kv_cache_shape = [total_num_kv_blocks, num_kv_heads, kv_block_size, dh]
             example_inputs["block_table"] = torch.arange((bs * num_kv_blocks), dtype=torch.int64).view(
@@ -4708,7 +4714,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         retain_full_kv: bool | None = None,
         layerwise: bool = False,
         layerwise_window_size: int = 1,
-        kv_cache_prefix: Optional[str] = None,
+        kv_cache_prefix: str | None = None,
         artifacts: bool = False,
         **compiler_options,
     ) -> str:
@@ -5097,7 +5103,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         runtime_ai100: bool = True,
         artifacts: bool = False,
         **kwargs,
-    ) -> Union[CloudAI100ExecInfoNew, Path]:
+    ) -> CloudAI100ExecInfoNew | Path:
         """
         Generate output by executing the compiled QPC on Cloud AI 100 hardware.
 
@@ -5246,7 +5252,12 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
     """
 
     _hf_auto_class = AutoModelForSpeechSeq2Seq
-    _pytorch_transforms = [CustomOpsTransform, AwqToMatmulNbitsTransform, GPTQToMatmulNbitsTransform, KVCacheTransform]
+    _pytorch_transforms = [
+        CustomOpsTransform,
+        AwqToMatmulNbitsTransform,
+        GPTQToMatmulNbitsTransform,
+        KVCacheTransform,
+    ]
     _onnx_transforms = []
 
     def __init__(self, model: nn.Module, **kwargs):
@@ -5265,6 +5276,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         TypeError
             If the model is not a supported speech-to-text model (i.e., not a `ForConditionalGeneration` model).
         """
+        _disable_unsupported_weight_free(kwargs, self.__class__.__name__)
         model_class_name = model.__class__.__name__
 
         if not (model_class_name.endswith("ForConditionalGeneration")):
@@ -5274,6 +5286,11 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         super().__init__(model, **kwargs)
         self.num_layers = model.config.num_hidden_layers
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs):
+        _disable_unsupported_weight_free(kwargs, cls.__name__)
+        return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
     @property
     def get_model_config(self) -> dict:
@@ -5596,10 +5613,15 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
     """
 
     _hf_auto_class = AutoModelForCTC
-    _pytorch_transforms = [CustomOpsTransform, AwqToMatmulNbitsTransform, GPTQToMatmulNbitsTransform]
+    _pytorch_transforms = [
+        CustomOpsTransform,
+        AwqToMatmulNbitsTransform,
+        GPTQToMatmulNbitsTransform,
+    ]
     _onnx_transforms = []
 
     def __init__(self, model: nn.Module, **kwargs):
+        _disable_unsupported_weight_free(kwargs, self.__class__.__name__)
         super().__init__(model, **kwargs)
         self.model.base_model.config.use_cache = True
 
