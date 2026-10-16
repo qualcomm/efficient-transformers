@@ -596,11 +596,11 @@
       "is_moe": false,
       "supports_blocking": false,
       "use_text_config": true,
-      "known_ccl_export_or_compile_issue": "Gemma3 CCL subfunction compilation fails because the attention mask and attention weights have incompatible context dimensions.",
       "layer_types": [
         "sliding_attention",
         "full_attention"
-      ]
+      ],
+      "known_bf16_compile_issue": "Gemma-3 bf16 compilation fails because qaic-compile glow error"
     },
     {
       "id": "qwen2_dense_text",
@@ -794,8 +794,7 @@
       "is_moe": true,
       "supports_blocking": false,
       "num_hidden_layers": 2,
-      "known_fp16_subfunction_compile_issue": "GPT-OSS FP16 subfunction compilation on AI100 fails because qaic-compile rejects the ONNX Clip operation emitted by torch.clamp.",
-      "known_ccl_export_or_compile_issue": "GPT-OSS CCL subfunction compilation fails because qaic-compile does not support the dynamic Slice ends tensor in the prefill decoder layer."
+      "known_bf16_compile_issue": "GPT-OSS bf16 compilation fails because qaic-compile glow error"
     },
     {
       "id": "glm4_moe_text",

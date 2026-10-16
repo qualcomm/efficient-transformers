@@ -206,6 +206,7 @@ class QEffGemma3Attention(Gemma3Attention):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
         comp_ctx_lengths: Optional[torch.LongTensor] = None,
+        ccl_length: Optional[int] = None,
         batch_index: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
@@ -245,8 +246,7 @@ class QEffGemma3Attention(Gemma3Attention):
                 "sliding_window": getattr(past_key_values, "sliding_window_len", self.config.sliding_window),
             }
             if comp_ctx_lengths is not None:
-                attention_mask = attention_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
-                cache_kwargs["CCL"] = attention_mask.shape[-1]
+                cache_kwargs["CCL"] = ccl_length if ccl_length is not None else attention_mask.shape[-1]
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -292,6 +292,7 @@ class QEffGemma3DecoderLayer(Gemma3DecoderLayer):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         comp_ctx_lengths: Optional[torch.LongTensor] = None,
+        ccl_length: Optional[int] = None,
         batch_index: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
@@ -314,6 +315,7 @@ class QEffGemma3DecoderLayer(Gemma3DecoderLayer):
             position_ids=position_ids,
             past_key_values=past_key_value,
             comp_ctx_lengths=comp_ctx_lengths,
+            ccl_length=ccl_length,
             batch_index=batch_index,
             output_attentions=output_attentions,
             use_cache=use_cache,
