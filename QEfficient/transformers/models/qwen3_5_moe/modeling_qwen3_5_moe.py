@@ -989,8 +989,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
         if cache_params is not None:
             conv_state_all = cache_params.conv_states[self.layer_idx]
             recurrent_state_all = cache_params.recurrent_states[self.layer_idx]
-            # Singleton disaggregated prefill replaces these states in full; decode still routes partial updates.
-            state_batch_index = None if self.gdn_full_state_update else batch_index
+            # The decoder wrapper clears batch_index only after placing a full
+            # compute batch into physical cache-slot order.
+            state_batch_index = batch_index
 
             # Continuous batching path: gather only active rows, then scatter updates back.
             if state_batch_index is not None:
@@ -1831,6 +1832,12 @@ class QEffQwen3_5MoeDecoderWrapper(nn.Module):
                 return blocking_config
         return None
 
+    def _uses_gdn_full_state_update(self) -> bool:
+        return any(
+            bool(getattr(getattr(layer, "linear_attn", None), "gdn_full_state_update", False))
+            for layer in getattr(self.language_model, "layers", ())
+        )
+
     def get_onnx_past_key_value_names(self, layer_idx: int, layer_state=None) -> List[str]:
         if self.config.text_config.layer_types[layer_idx] == "full_attention":
             return [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
@@ -1857,12 +1864,14 @@ class QEffQwen3_5MoeDecoderWrapper(nn.Module):
             and blocking_config is not None
             and bool(blocking_config.batch_fold)
         )
+        full_batch_state_update_cb = batch_index is not None and self._uses_gdn_full_state_update()
+        physical_batch_cb = batch_fold_cb or full_batch_state_update_cb
         gdn_num_head_blocks = get_gdn_num_head_blocks(blocking_config, batch_fold_cb)
         layerwise = is_layerwise_active()
         first_layer_window = not layerwise or QEffQwen3_5MoeTextModel._start == 0
 
-        if batch_fold_cb:
-            # Folded attention expects physical batch rows at the model input.
+        if physical_batch_cb:
+            # Full-batch retained-state updates expect physical cache-slot order.
             if first_layer_window:
                 if input_ids is not None:
                     input_ids = _batch_index_scatter(input_ids, batch_index)
@@ -1901,7 +1910,7 @@ class QEffQwen3_5MoeDecoderWrapper(nn.Module):
             )
             logit_index = position_ids[0].to(torch.int32).argmax(1, keepdim=True)
             hidden_states = outputs.last_hidden_state[torch.arange(position_ids[0].shape[0]).view(-1, 1), logit_index]
-            if batch_fold_cb:
+            if physical_batch_cb:
                 hidden_states = _batch_index_gather(hidden_states, batch_index)
             logits = self.model.lm_head(hidden_states).float()
             image_idx = (indices1.max() + 1).unsqueeze(0).unsqueeze(0)
@@ -1951,7 +1960,7 @@ class QEffQwen3_5MoeDecoderWrapper(nn.Module):
             )
             logit_index = position_ids[0].to(torch.int32).argmax(1, keepdim=True)
             hidden_states = outputs.last_hidden_state[torch.arange(position_ids[0].shape[0]).view(-1, 1), logit_index]
-            if batch_fold_cb:
+            if physical_batch_cb:
                 hidden_states = _batch_index_gather(hidden_states, batch_index)
             logits = self.model.lm_head(hidden_states).float()
             return logits, outputs.past_key_values
@@ -2079,15 +2088,30 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
         qaic_config: dict | None = None,
         *,
         prefill_only: bool,
+        prefill_seq_len: int | None = None,
         batch_size: int = 1,
         full_batch_size: int = 1,
+        kv_cache_batch_size: int = 1,
     ) -> dict:
         if not (qaic_config and qaic_config.get("gdn_full_state_update") is True):
             return {}
-        if prefill_only is not True or batch_size != 1 or full_batch_size != 1:
+        full_batch_size = batch_size if full_batch_size is None else full_batch_size
+        kv_cache_batch_size = full_batch_size if kv_cache_batch_size is None else kv_cache_batch_size
+        singleton_graph = batch_size == full_batch_size == kv_cache_batch_size == 1
+        full_batch_decode = (
+            prefill_only is False
+            and prefill_seq_len == 1
+            and full_batch_size > 0
+            and full_batch_size == kv_cache_batch_size
+        )
+        if (
+            batch_size < 1
+            or (prefill_only is not True and prefill_only is not False)
+            or not (singleton_graph or full_batch_decode)
+        ):
             raise ValueError(
-                "qaic_config['gdn_full_state_update'] requires qwen3_5_moe prefill with "
-                "prefill_only=True, batch_size=1, and full_batch_size=1"
+                "qaic_config['gdn_full_state_update'] requires qwen3_5_moe singleton prefill/decode or a "
+                "decode-only graph with prefill_seq_len=1 and full_batch_size=kv_cache_batch_size"
             )
         return {"gdn_full_state_update": True}
 
@@ -2253,8 +2277,9 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
     ):
         num_layers = self.config.text_config.num_hidden_layers
         batch_axis_name = "full_batch_size" if continuous_batching else "batch_size"
-        input_batch_axis = "full_batch_size" if continuous_batching and batch_fold else "batch_size"
-        linear_state_batch_axis = "batch_size" if gdn_full_state_update else batch_axis_name
+        physical_batch_update = continuous_batching and (batch_fold or gdn_full_state_update)
+        input_batch_axis = "full_batch_size" if physical_batch_update else "batch_size"
+        linear_state_batch_axis = input_batch_axis if gdn_full_state_update else batch_axis_name
 
         vision_dynamic_axes = {
             "pixel_values": {0: "grid_height", 1: "grid_width"},
@@ -2308,7 +2333,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
         fbs = constants.ONNX_EXPORT_EXAMPLE_FBS
         batch_fold = kwargs.pop("batch_fold", False)
         gdn_full_state_update = kwargs.pop("gdn_full_state_update", False)
-        if continuous_batching and batch_fold:
+        if continuous_batching and (batch_fold or gdn_full_state_update):
             bs = fbs
         inputs_shapes["input_ids"] = (bs, dummy_seq_len)
 

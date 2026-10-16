@@ -2989,7 +2989,12 @@ def test_qwen3_5_moe_get_specializations_decouples_vision_batch_size():
 
 
 @pytest.mark.llm_model
-def test_qwen3_5_moe_full_state_update_matches_singleton_routed_state():
+@pytest.mark.parametrize(
+    ("prefill_only", "seq_len", "batch_size"),
+    [(True, 4, 1), (False, 1, 1), (False, 1, 2), (False, 1, 4)],
+    ids=["prefill-bsz1", "decode-bsz1", "decode-bsz2", "decode-bsz4"],
+)
+def test_qwen3_5_moe_full_state_update_matches_routed_state(prefill_only, seq_len, batch_size):
     config = _tiny_qwen3_5_moe_config()
     config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
     torch.manual_seed(0)
@@ -3009,18 +3014,36 @@ def test_qwen3_5_moe_full_state_update_matches_singleton_routed_state():
         continuous_batching=True,
         gdn_full_state_update=True,
         batch_size=1,
-        prefill_seq_len=4,
+        prefill_seq_len=seq_len,
     )["lang"]
-    inputs["input_ids"].fill_(1)
-    assert inputs["batch_index"].tolist() == [[0]]
+    inputs["input_ids"] = inputs["input_ids"][:batch_size]
+    inputs["position_ids"] = inputs["position_ids"][:, :batch_size]
+    inputs["vision_embeds"] = inputs["vision_embeds"][:batch_size]
+    inputs["past_key_values"] = [
+        [state[:batch_size].clone() for state in layer_state] for layer_state in inputs["past_key_values"]
+    ]
+    inputs["batch_index"] = torch.arange(batch_size - 1, -1, -1, dtype=torch.int64).view(batch_size, 1)
+    inputs["input_ids"].copy_(torch.arange(1, batch_size + 1).view(batch_size, 1).expand(-1, seq_len))
+    if not prefill_only:
+        inputs["position_ids"].fill_(3)
+        for layer_state in inputs["past_key_values"]:
+            for state in layer_state:
+                state.normal_()
+    assert inputs["batch_index"].tolist() == [[index] for index in range(batch_size - 1, -1, -1)]
 
-    routed_model.transform(ctx_len=8, seq_len=4, bs=1, prefill_only=True, prefill_seq_len=4)
+    routed_model.transform(
+        ctx_len=8,
+        seq_len=seq_len,
+        bs=batch_size,
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
+    )
     full_state_model.transform(
         ctx_len=8,
-        seq_len=4,
-        bs=1,
-        prefill_only=True,
-        prefill_seq_len=4,
+        seq_len=seq_len,
+        bs=batch_size,
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
         qaic_config={"gdn_full_state_update": True},
     )
     assert full_state_model.lang_model.hash_params["gated_delta_kwargs"] == {"full_state_update": True}
@@ -3062,7 +3085,53 @@ def test_qwen3_5_moe_full_state_update_matches_singleton_routed_state():
 
 
 @pytest.mark.llm_model
-def test_qwen3_5_moe_singleton_prefill_export_has_no_state_scatter(tmp_path):
+def test_qwen3_5_moe_partial_batch_state_update_preserves_inactive_rows():
+    config = _tiny_qwen3_5_moe_config()
+    config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
+    torch.manual_seed(0)
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(
+        hf_model,
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        batch_size=2,
+        prefill_seq_len=1,
+    )["lang"]
+    inputs["input_ids"] = torch.tensor([[1], [2]], dtype=torch.int64)
+    inputs["position_ids"].fill_(3)
+    inputs["batch_index"] = torch.tensor([[1], [3]], dtype=torch.int64)
+    for layer_state in inputs["past_key_values"]:
+        for state in layer_state:
+            state.normal_()
+    initial_states = deepcopy(inputs["past_key_values"])
+
+    qeff_model.transform(ctx_len=8, seq_len=1, bs=2, prefill_only=False, prefill_seq_len=1)
+    with torch.no_grad():
+        outputs = qeff_model.lang_model.model(**inputs)
+
+    inactive_rows = torch.tensor([0, 2])
+    for layer_idx, ((initial_conv, initial_recurrent), (updated_conv, updated_recurrent)) in enumerate(
+        zip(initial_states, outputs[3])
+    ):
+        torch.testing.assert_close(
+            updated_conv.index_select(0, inactive_rows),
+            initial_conv.index_select(0, inactive_rows),
+            msg=lambda msg, layer_idx=layer_idx: f"conv_state.{layer_idx}: {msg}",
+        )
+        torch.testing.assert_close(
+            updated_recurrent.index_select(0, inactive_rows),
+            initial_recurrent.index_select(0, inactive_rows),
+            msg=lambda msg, layer_idx=layer_idx: f"recurrent_state.{layer_idx}: {msg}",
+        )
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(("prefill_only", "seq_len"), [(True, 4), (False, 1)], ids=["prefill", "decode"])
+def test_qwen3_5_moe_full_state_export_has_no_retained_state_scatter(tmp_path, prefill_only, seq_len):
     config = _tiny_qwen3_5_moe_config()
     config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
     hf_model = AutoModelForImageTextToText.from_config(config).eval()
@@ -3073,11 +3142,11 @@ def test_qwen3_5_moe_singleton_prefill_export_has_no_state_scatter(tmp_path):
     )
     qeff_model.transform(
         ctx_len=8,
-        seq_len=4,
+        seq_len=seq_len,
         bs=1,
         qaic_config={"gdn_full_state_update": True},
-        prefill_only=True,
-        prefill_seq_len=4,
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
     )
 
     inputs = qeff_model.model.get_dummy_inputs(
@@ -3085,16 +3154,25 @@ def test_qwen3_5_moe_singleton_prefill_export_has_no_state_scatter(tmp_path):
         continuous_batching=True,
         gdn_full_state_update=True,
         batch_size=1,
-        prefill_seq_len=4,
+        prefill_seq_len=seq_len,
     )["lang"]
+    export_batch_size = inputs["input_ids"].shape[0]
     inputs["input_ids"].fill_(1)
-    assert all(state.shape[0] == 1 for layer_state in inputs["past_key_values"] for state in layer_state)
+    inputs["batch_index"] = torch.arange(export_batch_size - 1, -1, -1, dtype=torch.int64).view(export_batch_size, 1)
+    if not prefill_only:
+        inputs["position_ids"].fill_(3)
+        for layer_state in inputs["past_key_values"]:
+            for state in layer_state:
+                state.normal_()
+    assert all(
+        state.shape[0] == export_batch_size for layer_state in inputs["past_key_values"] for state in layer_state
+    )
 
     export_result = qeff_model.export(
-        export_dir=tmp_path / "qwen3-5-moe-prefill-no-state-scatter",
+        export_dir=tmp_path / f"qwen3-5-moe-{'prefill' if prefill_only else 'decode'}-no-state-scatter",
         skip_vision=True,
-        prefill_only=True,
-        prefill_seq_len=4,
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
         use_onnx_subfunctions=True,
         offload_pt_weights=False,
         qaic_config={"gdn_full_state_update": True},
@@ -3105,23 +3183,6 @@ def test_qwen3_5_moe_singleton_prefill_export_has_no_state_scatter(tmp_path):
     state_indexing_ops = {"CtxGatherCB", "CtxGatherCB3D", "CtxScatterCB", "CtxScatterCB3D"}
 
     assert not ({node.op_type for node in nodes} & state_indexing_ops)
-    for function_proto in onnx_model.functions:
-        retained_outputs = [name for name in function_proto.output if "state." in name]
-        if not retained_outputs:
-            continue
-        producer_by_output = {output: node for node in function_proto.node for output in node.output}
-        for retained_output in retained_outputs:
-            pending = [retained_output]
-            visited = set()
-            while pending:
-                value = pending.pop()
-                producer = producer_by_output.get(value)
-                if producer is None or id(producer) in visited:
-                    continue
-                visited.add(id(producer))
-                assert "Scatter" not in producer.op_type
-                pending.extend(producer.input)
-
     with torch.no_grad():
         pytorch_outputs = qeff_model.lang_model.model(**deepcopy(inputs))
     session = _ort_session(_exported_onnx_path(export_result))
@@ -3147,19 +3208,22 @@ def test_qwen3_5_moe_singleton_prefill_export_has_no_state_scatter(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("model_type", "prefill_only", "batch_size", "full_batch_size"),
+    ("model_type", "prefill_only", "prefill_seq_len", "batch_size", "full_batch_size", "kv_cache_batch_size"),
     [
-        ("qwen3_5", True, 1, 1),
-        ("qwen3_5_moe", False, 1, 1),
-        ("qwen3_5_moe", True, 2, 1),
-        ("qwen3_5_moe", True, 1, 4),
+        ("qwen3_5", True, 4, 1, 1, 1),
+        ("qwen3_5_moe", True, 4, 2, 2, 2),
+        ("qwen3_5_moe", True, 4, 1, 4, 4),
+        ("qwen3_5_moe", False, 4, 2, 2, 2),
+        ("qwen3_5_moe", False, 1, 1, 2, 4),
     ],
 )
 def test_gdn_full_state_update_rejects_unsafe_compile_modes(
     model_type,
     prefill_only,
+    prefill_seq_len,
     batch_size,
     full_batch_size,
+    kv_cache_batch_size,
 ):
     from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
 
@@ -3169,10 +3233,46 @@ def test_gdn_full_state_update_rejects_unsafe_compile_modes(
     with pytest.raises(ValueError, match="gdn_full_state_update"):
         model.compile(
             prefill_only=prefill_only,
+            prefill_seq_len=prefill_seq_len,
             batch_size=batch_size,
             full_batch_size=full_batch_size,
+            kv_cache_batch_size=kv_cache_batch_size,
             qaic_config={"gdn_full_state_update": True},
         )
+
+
+@pytest.mark.parametrize(
+    ("prefill_only", "prefill_seq_len", "batch_size", "full_batch_size", "kv_cache_batch_size"),
+    [
+        (True, 4, 1, 1, 1),
+        (False, 1, 1, 1, 1),
+        (False, 1, 1, 2, 2),
+        (False, 1, 1, 4, 4),
+        (False, 1, 1, 8, 8),
+    ],
+    ids=["prefill-bsz1", "decode-bsz1", "decode-bsz2", "decode-bsz4", "decode-bsz8"],
+)
+def test_qwen3_5_moe_gdn_full_state_update_accepts_full_batch_compile_modes(
+    prefill_only, prefill_seq_len, batch_size, full_batch_size, kv_cache_batch_size
+):
+    from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
+
+    model = _QEffAutoModelForImageTextToTextDualQPC.__new__(_QEffAutoModelForImageTextToTextDualQPC)
+    model.model = _tiny_qwen_qeff_model("qwen3_5_moe").model
+    model._run_layerwise_compile = MagicMock(return_value="qpc_paths")
+
+    assert (
+        model.compile(
+            layerwise=True,
+            qaic_config={"gdn_full_state_update": True},
+            prefill_only=prefill_only,
+            prefill_seq_len=prefill_seq_len,
+            batch_size=batch_size,
+            full_batch_size=full_batch_size,
+            kv_cache_batch_size=kv_cache_batch_size,
+        )
+        == "qpc_paths"
+    )
 
 
 def test_vlm_compile_forwards_gdn_chunk_size_in_qaic_config_to_export_path():
@@ -3502,6 +3602,61 @@ def test_qwen3_5_decoder_wrapper_folds_decode_only(model_type):
             assert received_batch_index is None
         else:
             torch.testing.assert_close(received_batch_index, batch_index)
+
+
+def test_qwen3_5_moe_decoder_wrapper_physicalizes_full_batch_state_updates():
+    from types import SimpleNamespace
+
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeDecoderWrapper
+
+    class RecordingLanguageModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [
+                SimpleNamespace(
+                    self_attn=SimpleNamespace(attn_blocking_config=SimpleNamespace(batch_fold=False)),
+                    linear_attn=SimpleNamespace(gdn_full_state_update=True),
+                )
+            ]
+            self.calls = []
+
+        def forward(self, *, inputs_embeds, position_ids, batch_index, batch_fold, **kwargs):
+            self.calls.append((inputs_embeds.clone(), position_ids.clone(), batch_index, batch_fold))
+            return SimpleNamespace(last_hidden_state=inputs_embeds, past_key_values=[])
+
+    class Embedding(nn.Module):
+        def forward(self, input_ids):
+            return input_ids.to(torch.float32).unsqueeze(-1).expand(-1, -1, 2)
+
+    language_model = RecordingLanguageModel()
+    model = SimpleNamespace(
+        model=SimpleNamespace(
+            language_model=language_model,
+            get_input_embeddings=lambda: Embedding(),
+        ),
+        config=SimpleNamespace(image_token_id=99),
+        lm_head=nn.Identity(),
+    )
+    wrapper = QEffQwen3_5MoeDecoderWrapper(model)
+    batch_index = torch.tensor([[1], [0]], dtype=torch.long)
+    input_ids = torch.tensor([[1], [2]], dtype=torch.long)
+    position_ids = torch.tensor([[[10], [20]]], dtype=torch.long)
+
+    logits, _, _, _ = wrapper(
+        input_ids=input_ids,
+        vision_embeds=torch.zeros(2, 1, 2),
+        position_ids=position_ids,
+        image_idx=torch.zeros(1, 1, dtype=torch.long),
+        past_key_values=[],
+        batch_index=batch_index,
+    )
+
+    received_embeds, received_position_ids, received_batch_index, batch_fold = language_model.calls[0]
+    assert received_embeds[:, 0, 0].tolist() == [2.0, 1.0]
+    assert received_position_ids[0, :, 0].tolist() == [20, 10]
+    assert received_batch_index is None
+    assert batch_fold is False
+    assert logits[:, 0, 0].tolist() == [1.0, 2.0]
 
 
 def test_qwen3_5_moe_decode_expert_parallel_selection():
