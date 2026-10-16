@@ -1284,14 +1284,20 @@ class QEffGemma4EncoderWrapper(nn.Module):
             output_length = pixel_values.shape[-2] // (
                 vision_tower.config.pooling_kernel_size * vision_tower.config.pooling_kernel_size
             )
-        hidden_states, pooler_mask = vision_tower.pooler(
-            hidden_states=hidden_states,
-            pixel_position_ids=image_position_ids,
-            padding_positions=padding_positions,
-            output_length=output_length,
-        )
+        pooler = vision_tower.pooler
+        hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0.0)
+        if hidden_states.shape[1] != output_length:
+            hidden_states, _ = pooler._avg_pool_by_positions(hidden_states, image_position_ids, output_length)
+        # HF computes (pooled * sqrt(hidden_size) - std_bias) * std_scale. The intermediate
+        # pooled * sqrt(hidden_size) exceeds the fp16 range (|std_bias| reaches ~5.4e4), so fold
+        # both scales into per-channel constants: pooled * (sqrt(hidden_size) * std_scale) - std_bias * std_scale.
         if vision_tower.config.standardize:
-            hidden_states = (hidden_states - vision_tower.std_bias) * vision_tower.std_scale
+            hidden_states = (
+                hidden_states * (pooler.root_hidden_size * vision_tower.std_scale)
+                - vision_tower.std_bias * vision_tower.std_scale
+            )
+        else:
+            hidden_states = hidden_states * pooler.root_hidden_size
 
         vision_embeds = self.model.model.embed_vision(inputs_embeds=hidden_states)
         if vision_embeds.dim() == 2:
@@ -1301,7 +1307,6 @@ class QEffGemma4EncoderWrapper(nn.Module):
         # Gemma4 uses vision_config.default_output_length/image_seq_length
         # image placeholders (280), while the vision pooler may emit extra
         # padded bins for the max-patch canvas.
-        del pooler_mask
         return vision_embeds[:, : self.mm_tokens_per_image, :]
 
 
