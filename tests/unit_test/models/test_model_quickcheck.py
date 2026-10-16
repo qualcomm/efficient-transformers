@@ -290,7 +290,10 @@ def test_deepseek_v4_example_parallel_layout_controls():
         build_ffn_blocking_config,
         configure_qeff_parallel_layout,
     )
-    from examples.text_generation.deepseek_v4_flash_decode_micro_benmark import MICROBENCH_DEFAULTS
+    from examples.text_generation.deepseek_v4_flash_decode_micro_benmark import (
+        MICROBENCH_DEFAULTS,
+        PREFILL_MICROBENCH_DEFAULTS,
+    )
 
     assert MICROBENCH_DEFAULTS["attn_dp"] == 16
     assert MICROBENCH_DEFAULTS["indexer_cp"] == 16
@@ -301,6 +304,9 @@ def test_deepseek_v4_example_parallel_layout_controls():
     assert MICROBENCH_DEFAULTS["hw_version"] == "ai100"
     assert MICROBENCH_DEFAULTS["ffn_blocking_mode"] == "token"
     assert MICROBENCH_DEFAULTS["ffn_token_block_size"] == 1
+    assert PREFILL_MICROBENCH_DEFAULTS["csa_prefill_attn_gather_sub_qc"] == 4
+    assert PREFILL_MICROBENCH_DEFAULTS["csa_prefill_indexer_kv_block_size"] == 512
+    assert PREFILL_MICROBENCH_DEFAULTS["csa_prefill_indexer_topk_per_block"] == 4
 
     assert build_ffn_blocking_config(
         Namespace(ffn_blocking_mode="default", ffn_token_block_size=None, ffn_weight_block_size=None)
@@ -317,6 +323,9 @@ def test_deepseek_v4_example_parallel_layout_controls():
             batch_size=4,
             attn_dp=2,
             indexer_cp=2,
+            csa_prefill_attn_gather_sub_qc=4,
+            csa_prefill_indexer_kv_block_size=512,
+            csa_prefill_indexer_topk_per_block=4,
             num_kv_blocks=1,
             hca_compressed_kv_cp=2,
             hca_attn_blocks=2,
@@ -330,6 +339,9 @@ def test_deepseek_v4_example_parallel_layout_controls():
     assert config.qeff_csa_indexer_cp == 2
     assert config.qeff_csa_num_kv_blocks == 1
     assert config.qeff_csa_folded_row_cache is True
+    assert config.qeff_csa_prefill_attn_gather_sub_qc == 4
+    assert config.qeff_csa_prefill_indexer_kv_block_size == 512
+    assert config.qeff_csa_prefill_indexer_topk_per_block == 4
     assert config.qeff_hca_attention_dp == 2
     assert config.qeff_hca_compressed_kv_cp == 2
     assert config.qeff_hca_attn_blocks == 2
@@ -418,11 +430,14 @@ def test_deepseek_v4_csa_prefill_rotates_indexer_queries_per_chunk():
     config.layer_types = ["compressed_sparse_attention"]
     config.mlp_layer_types = ["hash_moe"]
     config.qeff_csa_prefill_only = True
-    config.qeff_csa_prefill_q_block_size = 4
-    config.sliding_window = 4
+    config.qeff_csa_prefill_q_block_size = 8
+    config.qeff_csa_prefill_attn_gather_sub_qc = 4
+    config.qeff_csa_prefill_indexer_kv_block_size = 2
+    config.qeff_csa_prefill_indexer_topk_per_block = 1
+    config.sliding_window = 8
 
     qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
-    cache = qeff_model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=8)
+    cache = qeff_model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=32)
     input_ids = torch.randint(0, config.vocab_size, (1, 8))
     position_ids = torch.arange(8).unsqueeze(0)
 

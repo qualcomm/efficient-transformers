@@ -44,6 +44,9 @@ PREFILL_MICROBENCH_DEFAULTS = {
     "num_kv_blocks": 1,
     "hca_compressed_kv_cp": 1,
     "hca_attn_blocks": 1,
+    "csa_prefill_attn_gather_sub_qc": 4,
+    "csa_prefill_indexer_kv_block_size": 512,
+    "csa_prefill_indexer_topk_per_block": 4,
     "hw_version": "ai100",
 }
 
