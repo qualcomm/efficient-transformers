@@ -5,16 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""
-Pytest fixtures and hooks for the dynamo nightly test suite (tests/dynamo/nightly/).
-
-Provides a separate artifacts fixture (dynamo_causal_model_artifacts) so dynamo
-nightly results are stored independently from regular nightly results.
-
-Reuses all session-scoped fixtures from tests/nightly_pipeline/conftest.py
-(artifacts_dir, get_pipeline_config, save_artifacts, load_artifacts) — those
-are discovered automatically by pytest when this suite runs from the repo root.
-"""
+"""Dynamo nightly fixtures and artifact storage."""
 
 from __future__ import annotations
 
@@ -41,7 +32,7 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(scope="session")
 def dynamo_causal_model_artifacts_file(artifacts_dir):
-    """Separate JSON file for dynamo nightly artifacts — does not overwrite regular nightly results."""
+    """JSON file for Dynamo nightly artifacts."""
     return artifacts_dir / "dynamo_causal_model_artifacts.json"
 
 

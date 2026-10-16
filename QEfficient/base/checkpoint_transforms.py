@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
@@ -411,6 +412,8 @@ def execute_checkpoint_plan(
 # Marks a prepared checkpoint directory as complete, so re-runs can skip work.
 CHECKPOINT_PREPARED_SENTINEL = ".checkpoint_prepared"
 CHECKPOINT_PREPARED_MANIFEST = ".checkpoint_prepared.json"
+_CHECKPOINT_PREPARED_LOCK_SUFFIX = ".lock"
+_CHECKPOINT_PREPARED_LOCK_TIMEOUT_SECONDS = 1800.0
 
 
 def _checkpoint_files(root: Path) -> List[Path]:
@@ -459,6 +462,34 @@ def _manifest_matches(out: Path, expected: dict) -> bool:
         return all((out / file_name).is_file() for file_name in expected.get("output_files", []))
     except (OSError, json.JSONDecodeError):
         return False
+
+
+def _prepared_checkpoint_ready(out: Path, expected_manifest: dict) -> bool:
+    return (
+        (out / CHECKPOINT_PREPARED_SENTINEL).exists()
+        and _manifest_matches(out, expected_manifest)
+        and _prepared_checkpoint_is_readable(out)
+    )
+
+
+def _acquire_prepared_checkpoint_lock(out: Path, expected_manifest: dict) -> Optional[Path]:
+    """Acquire an inter-process lock for publishing one prepared checkpoint directory.
+
+    Returns None when another worker completed the directory while this worker
+    was waiting.
+    """
+    lock_dir = out.with_name(out.name + _CHECKPOINT_PREPARED_LOCK_SUFFIX)
+    deadline = time.monotonic() + _CHECKPOINT_PREPARED_LOCK_TIMEOUT_SECONDS
+    while True:
+        if _prepared_checkpoint_ready(out, expected_manifest):
+            return None
+        try:
+            lock_dir.mkdir(parents=True)
+            return lock_dir
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for prepared checkpoint lock: {lock_dir}")
+            time.sleep(0.2)
 
 
 def _prepared_checkpoint_is_readable(out: Path) -> bool:
@@ -770,29 +801,39 @@ class CheckpointTransformPipeline:
             active_group_id,
             plan_payload,
         )
-        if (out / CHECKPOINT_PREPARED_SENTINEL).exists() and _manifest_matches(out, expected_manifest):
-            if _prepared_checkpoint_is_readable(out):
-                return out
-            logger.warning("Prepared checkpoint at %s is incomplete or unreadable; rebuilding.", out)
+        if _prepared_checkpoint_ready(out, expected_manifest):
+            return out
 
-        _clear_stale_prepared_dir(out, src)
-        out.mkdir(parents=True, exist_ok=True)
-
+        lock_dir = _acquire_prepared_checkpoint_lock(out, expected_manifest)
+        if lock_dir is None:
+            return out
+        work_out = out.with_name(f".{out.name}.tmp-{os.getpid()}-{time.time_ns()}")
         try:
+            if _prepared_checkpoint_ready(out, expected_manifest):
+                return out
+            if out.exists():
+                logger.warning("Prepared checkpoint at %s is incomplete or unreadable; rebuilding.", out)
+                _clear_stale_prepared_dir(out, src)
+            _clear_stale_prepared_dir(work_out, src)
+            work_out.mkdir(parents=True, exist_ok=True)
+
             new_weight_map = execute_checkpoint_plan(
                 plan,
                 src,
-                out,
+                work_out,
                 target_dtype,
                 max_ram_bytes=max_ram_bytes,
                 max_workers=max_workers,
             )
-            _validate_final_weight_map(out, new_weight_map)
-            copy_checkpoint_aux_files(src, out)
-            write_index(out, new_weight_map)
-            _write_manifest(out, expected_manifest)
-            (out / CHECKPOINT_PREPARED_SENTINEL).touch()
+            _validate_final_weight_map(work_out, new_weight_map)
+            copy_checkpoint_aux_files(src, work_out)
+            write_index(work_out, new_weight_map)
+            _write_manifest(work_out, expected_manifest)
+            (work_out / CHECKPOINT_PREPARED_SENTINEL).touch()
+            work_out.rename(out)
         except Exception:
-            _clear_stale_prepared_dir(out, src)
+            _clear_stale_prepared_dir(work_out, src)
             raise
+        finally:
+            _clear_stale_prepared_dir(lock_dir, src)
         return out

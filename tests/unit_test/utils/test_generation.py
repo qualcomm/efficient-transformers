@@ -175,6 +175,11 @@ class TestGenerationModuleImportability:
 
         assert QEfficient.generation.text_generation_inference is not None
 
+    def test_retained_state_name_accepts_subfunction_prefix(self):
+        from QEfficient.generation.cloud_infer import is_retained_state_name
+
+        assert is_retained_state_name("repeated_subgraph0/past_key.0_InternalRetainedState")
+
     def test_vlm_generation_importable(self):
         import QEfficient.generation.vlm_generation
 
@@ -859,7 +864,7 @@ class TestPrefillChunking:
 class TestContinuousBatching:
     """run_continuous_batching_decode must handle the CB decode loop correctly."""
 
-    def _make_cb_instance(self, full_batch_size=2):
+    def _make_cb_instance(self, full_batch_size=2, enable_full_batch_prefill=False):
         from QEfficient.generation.text_generation_inference import QEffTextGenerationBase
 
         tok = _make_tokenizer()
@@ -910,6 +915,7 @@ class TestContinuousBatching:
                 qpc_path="/fake/path/model.qpc",
                 ctx_len=CTX_LEN,
                 full_batch_size=full_batch_size,
+                enable_full_batch_prefill=enable_full_batch_prefill,
             )
         return obj, tok, mock_session
 
@@ -948,6 +954,49 @@ class TestContinuousBatching:
         prompt_queue = deque(["Hello", "World"])
         obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
         assert len(prompt_queue) == 0
+
+    def test_full_batch_prefill_uses_full_batch_bindings(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        prefill_inputs = mock_session.run.call_args_list[0][0][0]
+        assert prefill_inputs["input_ids"].shape == (2, PREFILL_LEN)
+        assert prefill_inputs["position_ids"].shape == (2, PREFILL_LEN)
+        assert prefill_inputs["batch_index"].shape == (2, 1)
+        assert prefill_inputs["batch_index"].tolist() == [[0], [1]]
+
+    def test_full_batch_prefill_supports_decode_sized_chunks(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj._prefill_seq_len = 1
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        first_chunk_inputs = mock_session.run.call_args_list[0][0][0]
+        assert first_chunk_inputs["input_ids"].shape == (2, 1)
+        assert first_chunk_inputs["position_ids"].shape == (2, 1)
+        assert first_chunk_inputs["batch_index"].shape == (2, 1)
+
+    def test_full_batch_prefill_sends_block_table_and_slot_id_when_kv_blocked(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj._prefill_seq_len = 1
+        obj.num_kv_blocks = 2
+        obj.kv_block_size = 16
+        obj.block_table = np.arange(4, dtype=np.int64).reshape(2, 2)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        first_chunk_inputs = mock_session.run.call_args_list[0][0][0]
+        assert first_chunk_inputs["block_table"].shape == (2, 2)
+        assert first_chunk_inputs["block_table"].tolist() == [[0, 1], [2, 3]]
+        assert first_chunk_inputs["slot_id"].shape == (2,)
+        assert first_chunk_inputs["slot_id"].tolist() == [0, 0]
 
 
 # ---------------------------------------------------------------------------

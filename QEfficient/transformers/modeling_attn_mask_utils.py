@@ -15,15 +15,17 @@ def _create_causal_mask(
     target_length,
     sliding_window: Optional[int] = None,
     start_index: Optional[int] = 0,
+    arange_end: Optional[int] = None,
 ):
     """
     A utility attention mask class that allows one to:
         - Create a causal 4d mask
         - Create a causal 4d mask with slided window
     """
+    range_end = target_length if arange_end is None else arange_end
     if sliding_window is not None:
         query_indices = position_ids.unsqueeze(-1)
-        kv_indices = torch.arange(target_length, device=position_ids.device).view(1, -1)
+        kv_indices = torch.arange(range_end, device=position_ids.device).view(1, -1)
         # --- Rolling buffer ---
         pos_max = position_ids.max(1, keepdim=True).values
         # kv_start = (pos_max // target_length) * target_length
@@ -35,6 +37,8 @@ def _create_causal_mask(
         # ------
         causal_mask = kv_indices > query_indices
         attention_mask = causal_mask
+        if arange_end is not None:
+            attention_mask = attention_mask | (kv_indices >= target_length)
 
         window_indices = query_indices - sliding_window + 1
         window_mask = kv_indices < window_indices
@@ -42,8 +46,10 @@ def _create_causal_mask(
         attention_mask = attention_mask.unsqueeze(1)
     else:
         query_indices = position_ids.unsqueeze(-1)
-        kv_indices = torch.arange(start=start_index, end=target_length, device=position_ids.device).view(1, 1, -1)
+        kv_indices = torch.arange(start=start_index, end=range_end, device=position_ids.device).view(1, 1, -1)
         attention_mask = kv_indices > query_indices
+        if arange_end is not None:
+            attention_mask = attention_mask | (kv_indices >= target_length)
         attention_mask = attention_mask.unsqueeze(1)
 
     return attention_mask

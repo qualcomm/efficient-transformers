@@ -272,6 +272,31 @@ class TestWeightFreeCheckpointTransforms:
         assert prepared == out
         torch.testing.assert_close(_load_prepared_tensors(out)["weight"], torch.ones(2, dtype=torch.float32))
 
+    def test_checkpoint_pipeline_publishes_prepared_dir_after_execution(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        _write_safetensors_checkpoint(src, {"weight": torch.ones(2, dtype=torch.float16)})
+
+        def fake_execute_checkpoint_plan(plan, src_path, work_out, target_dtype, **kwargs):
+            del plan, src_path, target_dtype, kwargs
+            assert work_out != out
+            assert not out.exists()
+            save_file({"weight": torch.ones(2, dtype=torch.float32)}, str(work_out / "base-0000.safetensors"))
+            return {"weight": "base-0000.safetensors"}
+
+        monkeypatch.setattr(
+            "QEfficient.base.checkpoint_transforms.execute_checkpoint_plan",
+            fake_execute_checkpoint_plan,
+        )
+
+        pipeline = CheckpointTransformPipeline([DtypeConversionCheckpointTransform])
+        prepared = pipeline.apply(src, out, target_dtype=torch.float32)
+
+        assert prepared == out
+        assert (out / CHECKPOINT_PREPARED_MANIFEST).is_file()
+        torch.testing.assert_close(_load_prepared_tensors(out)["weight"], torch.ones(2, dtype=torch.float32))
+
     def test_ort_weight_injection_resolves_cache_relative_spec_for_absolute_model_id(self, tmp_path):
         hf_cache = tmp_path / "hf_cache"
         prepared = hf_cache / "models--org--model" / "snapshots" / "prepared"
@@ -968,6 +993,18 @@ class TestWeightFreeCheckpointTransforms:
         with pytest.raises(ValueError, match="Ambiguous checkpoint key"):
             find_checkpoint_key("base_model.model.embed_tokens.weight", checkpoint_index, backbone)
 
+    def test_resolver_accepts_language_model_prefix_alias(self):
+        checkpoint_index = {
+            "model.language_model.embed_tokens.weight": "model.safetensors",
+        }
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert (
+            find_checkpoint_key("model.embed_tokens.weight", checkpoint_index, backbone)
+            == "model.language_model.embed_tokens.weight"
+        )
+
     @pytest.mark.parametrize(
         "state_kind,state_name",
         [
@@ -1011,6 +1048,7 @@ class TestWeightFreeCheckpointTransforms:
             ("buffer", "rotary_emb.inv_freq"),
             ("buffer", "transformer.h.0.attn.embed_positions"),
             ("buffer", "model.embed_tokens.embed_scale"),
+            ("buffer", "model.layers.0.linear_attn._mask_causal"),
             ("parameter", "model.sin_cached"),
             ("parameter", "model.cos_cached"),
         ],

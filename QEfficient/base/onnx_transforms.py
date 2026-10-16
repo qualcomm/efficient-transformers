@@ -340,14 +340,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                 and fn_node.output
             ]
             if len(writers) != 1:
-                writer_names = [
-                    f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
-                ]
-                raise ValueError(
-                    f"Could not uniquely resolve the nested past_{kind}.{layer_idx} cache writer in function "
-                    f"'{fn.name}': expected one CtxScatter* with data input '{function_input}', "
-                    f"found {len(writers)} ({writer_names})."
-                )
+                return None
             scatter_outputs[kind] = writers[0].output[0]
 
         return scatter_outputs
@@ -406,7 +399,10 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
             scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx)
             if scatter_outputs is None:
-                continue
+                raise ValueError(
+                    f"Could not uniquely resolve KV cache writers for nested function '{fn.name}' "
+                    f"and layer {layer_idx}."
+                )
 
             # Expose scatter outputs in the function's output list, rename KV
             # inputs and append retained-state output names to the call node.

@@ -35,6 +35,7 @@ def _parse_torch_version() -> tuple:
 def pytest_configure(config):
     config.addinivalue_line("markers", "weight_free: mark a test as part of the weight-free export test suite")
     config.addinivalue_line("markers", "weight_free_export: CPU-only weight-free export smoke and parity tests")
+    config.addinivalue_line("markers", "weight_free_blocking: weight-free CausalLM blocking parity tests")
 
 
 _XFAIL_MODELS = {}

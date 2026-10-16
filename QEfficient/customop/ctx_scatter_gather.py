@@ -333,7 +333,7 @@ class CtxGatherFuncBlockedKV(torch.autograd.Function):
 # compile time) so batch and KV-head are pre-flattened onto one axis that
 # matches a B*Hkv physical core/device layout 1:1.
 # ─────────────────────────────────────────────────────────────────────────────
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
+@qeff_custom_op("com.qti.aisw.onnx", 1)
 def CtxChunkScatterBatch(
     data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates: onnxscript.FLOAT
 ) -> onnxscript.FLOAT:
@@ -412,7 +412,7 @@ class CtxChunkScatterBatchFunc(torch.autograd.Function):
         return g.onnxscript_op(CtxChunkScatterBatch, data, position_ids, updates).setTypeAs(data)
 
 
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
+@qeff_custom_op("com.qti.aisw.onnx", 1)
 def CtxGatherBlockedKVBatch(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxscript.FLOAT:
     # data [1, BH, T, D], ctx_indices [1, BH, T_block]  (BH = B*NKVH, static at compile time)
     # batch_dims=2: checks data.shape[0]==indices.shape[0] (1==1) and

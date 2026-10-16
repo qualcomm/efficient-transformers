@@ -12,11 +12,47 @@ Requires PyTorch >= 2.13. Install dependencies before running:
 """
 
 import argparse
+import time
+from pathlib import Path
 
 from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.utils import constants
+
+
+def _path_size_bytes(path):
+    path = Path(path)
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _format_size(num_bytes):
+    size = float(num_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024.0 or unit == "TiB":
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+
+
+def _build_qaic_config(args):
+    if args.blocking_mode is None:
+        return None
+
+    qaic_config = {"blocking_mode": args.blocking_mode}
+    optional_blocking_args = (
+        ("num_kv_blocks", args.num_kv_blocks),
+        ("num_q_blocks", args.num_q_blocks),
+        ("head_block_size", args.head_block_size),
+        ("headpar_split", args.headpar_split),
+    )
+    for key, value in optional_blocking_args:
+        if value is not None:
+            qaic_config[key] = value
+    if args.disable_skip_kv:
+        qaic_config["skip_kv"] = False
+    return qaic_config
 
 
 def main():
@@ -45,7 +81,23 @@ def main():
         default=None,
         help="Device IDs (comma-separated), e.g. [0,1]",
     )
+    parser.add_argument(
+        "--blocking-mode",
+        choices=("kv", "qkv", "hqkv", "kv_headpar"),
+        default=None,
+        help="Enable CausalLM attention blocking through qaic_config",
+    )
+    parser.add_argument("--num-kv-blocks", type=int, default=None, help="Number of K/V cache blocks")
+    parser.add_argument("--num-q-blocks", type=int, default=None, help="Number of query blocks")
+    parser.add_argument("--head-block-size", type=int, default=None, help="Number of attention heads per head block")
+    parser.add_argument("--headpar-split", type=int, default=None, help="Head-parallel split count for kv_headpar")
+    parser.add_argument(
+        "--disable-skip-kv",
+        action="store_true",
+        help="Set qaic_config['skip_kv']=False for blocking modes",
+    )
     args = parser.parse_args()
+    qaic_config = _build_qaic_config(args)
 
     # Load tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -56,9 +108,11 @@ def main():
         args.model_name,
         config=config,
         weight_free=args.weight_free,
+        qaic_config=qaic_config,
     )
 
     # Export (via torch.export / dynamo) + compile to QPC
+    compile_start = time.perf_counter()
     qpc_path = model.compile(
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
@@ -68,8 +122,13 @@ def main():
         num_devices=(4 if args.device_group is None else len(args.device_group)),
         dynamo=True,
         use_onnx_subfunctions=True,
+        qaic_config=qaic_config,
     )
+    compile_time_seconds = time.perf_counter() - compile_start
+    qpc_size_bytes = _path_size_bytes(qpc_path)
     print(f"Model compiled to: {qpc_path}")
+    print(f"QPC compile time: {compile_time_seconds:.2f} seconds")
+    print(f"QPC size: {_format_size(qpc_size_bytes)} ({qpc_size_bytes} bytes)")
 
     # Run inference on device
     exec_info = model.generate(
