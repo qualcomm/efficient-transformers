@@ -21,6 +21,8 @@ CPU-only. No QAIC hardware required.
 from __future__ import annotations
 
 import importlib
+import operator
+from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
@@ -33,9 +35,16 @@ from QEfficient.base.onnx_transforms import (
     PruneFakeInitializersTransform,
     RenameRepeatedSubgraphTransform,
 )
+from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.utils.torch_patches import preserve_subfunction_source_lines, temporarily_enable_nested_compile_regions
+from QEfficient.utils import export_subfunctions
+from QEfficient.utils.torch_patches import (
+    _same_export_region,
+    preserve_mixed_export_subfunctions,
+    preserve_subfunction_source_lines,
+    temporarily_enable_nested_compile_regions,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,6 +57,96 @@ class _InterpreterSpy:
 
     def run(self, *operands):
         return self.graph_module(*operands)
+
+
+def test_minimax_ctx_scatter_gather_ops_have_fake_kernels_and_translations():
+    def float_tensor(*shape):
+        return torch.empty(shape, dtype=torch.float32, device="meta")
+
+    def int_tensor(*shape):
+        return torch.empty(shape, dtype=torch.int32, device="meta")
+
+    cases = (
+        (
+            torch.ops.qefficient.ctx_scatter_paged_attention.default,
+            (float_tensor(4, 2, 8, 3), int_tensor(2, 1), int_tensor(2, 2), float_tensor(2, 2, 2, 3)),
+            (4, 2, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_chunk_scatter_batch.default,
+            (float_tensor(1, 4, 8, 3), int_tensor(2, 2), float_tensor(2, 2, 2, 3)),
+            (1, 4, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_blocked_kv_batch.default,
+            (float_tensor(1, 4, 8, 3), int_tensor(1, 4, 5)),
+            (1, 4, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_paged_attention.default,
+            (float_tensor(4, 2, 8, 3), int_tensor(2, 1), int_tensor(2, 5)),
+            (2, 2, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_paged_kv_dp.default,
+            (float_tensor(8, 4, 16, 3), int_tensor(2, 4)),
+            (1, 4, 32, 3),
+        ),
+        (
+            torch.ops.qefficient.m3_ctx_scatter.default,
+            (float_tensor(2, 1, 8, 3), int_tensor(2, 2), float_tensor(2, 1, 2, 3)),
+            (2, 1, 8, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_paged_scatter_dp.default,
+            (float_tensor(8, 4, 16, 3), int_tensor(1, 4, 2), int_tensor(1, 4, 2), float_tensor(1, 4, 2, 3)),
+            (8, 4, 16, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_blocked_kv_dp.default,
+            (float_tensor(2, 4, 8, 3), int_tensor(2, 4, 5)),
+            (2, 4, 5, 3),
+        ),
+        (
+            torch.ops.qefficient.ctx_gather_block_range_kv_dp.default,
+            (float_tensor(2, 4, 6, 8, 3), int_tensor(2, 4, 2)),
+            (2, 4, 2, 8, 3),
+        ),
+    )
+
+    for op, args, expected_shape in cases:
+        assert op in DYNAMO_CUSTOM_OP_TABLE
+        output = op(*args)
+        assert output.shape == expected_shape
+        assert output.dtype == torch.float32
+        assert output.device.type == "meta"
+
+
+def test_minimax_sequence_chunk_is_safe_inside_nested_compile_region():
+    from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import _dynamic_sequence_chunks
+
+    op = torch.ops.qefficient.compile_length_sequence_chunk.default
+    fake_result = op(torch.empty((2, 3, 16), dtype=torch.bool, device="meta"), -1, 4, 2, 16)
+
+    assert fake_result.shape == (2, 3, 4)
+    assert fake_result.dtype == torch.bool
+    assert op in DYNAMO_CUSTOM_OP_TABLE
+
+    class ChunkModule(torch.nn.Module):
+        @torch.compiler.nested_compile_region
+        def forward(self, tensor):
+            return _dynamic_sequence_chunks(tensor, num_chunks=4, dim=1, compile_axis_size=16)[1]
+
+    source = torch.arange(128).view(1, 16, 8)
+    sequence_length = torch.export.Dim("sequence_length", min=4, max=16)
+    exported = torch.export.export(
+        ChunkModule(),
+        (source,),
+        dynamic_shapes={"args": ({1: sequence_length},)},
+    )
+    result = exported.module()(source)
+
+    assert torch.equal(result, source[:, 4:8])
 
 
 def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch):
@@ -72,6 +171,36 @@ def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch)
     assert original_reenter_make_fx is not invoke_subgraph.reenter_make_fx
 
 
+def test_preserve_mixed_export_subfunctions_is_scoped_to_supported_pytorch_hook():
+    utils = importlib.import_module("torch._higher_order_ops.utils")
+    onnx_core = importlib.import_module("torch.onnx._internal.exporter._core")
+    original_hop_compile_and_call = getattr(utils, "_hop_compile_and_call", None)
+    original_prepare = getattr(onnx_core, "_prepare_exported_program_for_export", None)
+
+    with preserve_mixed_export_subfunctions():
+        if original_hop_compile_and_call is not None:
+            assert utils._hop_compile_and_call is not original_hop_compile_and_call
+        if original_prepare is not None:
+            assert onnx_core._prepare_exported_program_for_export is not original_prepare
+
+    if original_hop_compile_and_call is not None:
+        assert utils._hop_compile_and_call is original_hop_compile_and_call
+    assert getattr(onnx_core, "_prepare_exported_program_for_export", None) is original_prepare
+
+
+def test_preserve_mixed_export_subfunctions_tolerates_missing_onnx_hook(monkeypatch):
+    """A missing private ONNX hook disables reuse without breaking export setup."""
+    utils = importlib.import_module("torch._higher_order_ops.utils")
+    if getattr(utils, "_hop_compile_and_call", None) is None:
+        pytest.skip("PyTorch build has no _hop_compile_and_call hook")
+    onnx_core = importlib.import_module("torch.onnx._internal.exporter._core")
+    monkeypatch.delattr(onnx_core, "_prepare_exported_program_for_export", raising=False)
+
+    with preserve_mixed_export_subfunctions():
+        assert not hasattr(onnx_core, "_prepare_exported_program_for_export")
+    assert not hasattr(onnx_core, "_prepare_exported_program_for_export")
+
+
 def make_tiny_llama():
     cfg = LlamaConfig(
         num_hidden_layers=2,
@@ -84,6 +213,139 @@ def make_tiny_llama():
     )
     model = LlamaForCausalLM(cfg).eval()
     return model, cfg
+
+
+def _make_graph_module_with_attribute(attribute):
+    root = torch.nn.Module()
+    root.captured = attribute
+    graph = torch.fx.Graph()
+    captured = graph.get_attr("captured")
+    graph.output(captured)
+    return torch.fx.GraphModule(root, graph)
+
+
+def test_same_export_region_accepts_nested_graphmodule_attributes(monkeypatch):
+    """Nested GraphModules compare recursively, while tensor captures stay unsupported."""
+    comparator = importlib.import_module("torch._dynamo.variables.higher_order_ops")
+    monkeypatch.setattr(comparator, "are_same_graph_modules", lambda *args: True)
+
+    nested_left = _make_graph_module_with_attribute(torch.fx.symbolic_trace(torch.nn.Identity()))
+    nested_right = _make_graph_module_with_attribute(torch.fx.symbolic_trace(torch.nn.Identity()))
+    assert _same_export_region(nested_left, nested_right, fake_mode=None)
+
+    tensor_left = _make_graph_module_with_attribute(torch.ones(2))
+    tensor_right = _make_graph_module_with_attribute(torch.ones(2))
+    assert not _same_export_region(tensor_left, tensor_right, fake_mode=None)
+
+
+def _make_identity_region(example_value):
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["example_value"] = example_value
+    graph.output(x)
+    return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+
+def test_same_export_region_compares_call_operands_and_restores_metadata(monkeypatch):
+    comparator = importlib.import_module("torch._dynamo.variables.higher_order_ops")
+    seen = []
+
+    def fake_are_same(_name, left, right, _fake_mode):
+        seen.extend(next(iter(gm.graph.nodes)).meta["example_value"] for gm in (left, right))
+        return True
+
+    monkeypatch.setattr(comparator, "are_same_graph_modules", fake_are_same)
+    original_left, original_right = torch.zeros(1), torch.zeros(1)
+    left, right = _make_identity_region(original_left), _make_identity_region(original_right)
+    operand_left, operand_right = torch.ones(2), torch.ones(2)
+
+    assert _same_export_region(left, right, None, (operand_left,), (operand_right,))
+    assert seen == [operand_left, operand_right]
+    assert next(iter(left.graph.nodes)).meta["example_value"] is original_left
+    assert next(iter(right.graph.nodes)).meta["example_value"] is original_right
+
+
+def _make_sized_region(size_input_index):
+    graph = torch.fx.Graph()
+    a, b = graph.placeholder("a"), graph.placeholder("b")
+    size = graph.call_function(torch.ops.aten.sym_size.int, ((a, b)[size_input_index], 0))
+    graph.call_function(operator.eq, (size, 2))
+    graph.output(graph.call_function(torch.ops.aten.add.Tensor, (a, b)))
+    return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+
+def test_canonical_region_normalizes_dead_size_reads():
+    operands = (torch.zeros(2, 3), torch.zeros(2, 3))
+    left = export_subfunctions._canonical_region(_make_sized_region(0), operands)
+    right = export_subfunctions._canonical_region(_make_sized_region(1), operands)
+
+    targets = lambda gm: [node.target for node in gm.graph.nodes if node.op == "call_function"]  # noqa: E731
+    assert targets(left) == targets(right) == [torch.ops.aten.add.Tensor]
+
+
+def test_apply_region_merges_prunes_orphaned_root_region():
+    root_module = torch.nn.Module()
+    for index in range(2):
+        setattr(
+            root_module,
+            f"region_{index}",
+            _make_graph_module_with_attribute(torch.fx.symbolic_trace(torch.nn.Identity())),
+        )
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    calls = [
+        graph.call_function(
+            torch.ops.higher_order.invoke_subgraph,
+            (graph.get_attr(f"region_{index}"), f"subgraph_{index}", x),
+        )
+        for index in range(2)
+    ]
+    graph.output(tuple(calls))
+    root = torch.fx.GraphModule(root_module, graph)
+    representative = export_subfunctions._RegionCall(None, calls[0].args[0], "subgraph_0", ())
+
+    export_subfunctions._apply_region_merges(root, [(calls[1], representative)])
+
+    assert calls[1].args[:2] == (calls[0].args[0], "subgraph_0")
+    assert "region_1" not in dict(root.named_modules())
+    assert "region_0" in dict(root.named_modules())
+
+
+def test_reuse_exported_subfunctions_leaves_program_untouched_when_planning_fails(monkeypatch):
+    monkeypatch.setattr(export_subfunctions, "_plan_region_merges", lambda _root: (_ for _ in ()).throw(RuntimeError()))
+    program = MagicMock()
+    assert export_subfunctions.reuse_exported_subfunctions(program) is program
+    program.validate.assert_not_called()
+
+
+def test_export_wrapper_disables_grad_for_dynamo_subfunction_exports(monkeypatch, tmp_path):
+    """Repeated subfunction bodies see the same inference grad state at every layer."""
+    from QEfficient.utils import export_utils
+
+    grad_states = []
+
+    class DummyQEff:
+        model = torch.nn.Identity()
+
+        @export_utils.export_wrapper
+        def export(self, **kwargs):
+            grad_states.append(torch.is_grad_enabled())
+            return kwargs["export_dir"] / "dummy.onnx"
+
+    monkeypatch.setattr(export_utils, "validate_dynamo_export_requirements", lambda *args: None)
+    monkeypatch.setattr(export_utils, "_setup_onnx_subfunctions", lambda *args, **kwargs: (args[1], args[2], {}))
+    monkeypatch.setattr(
+        export_utils, "temporarily_enable_nested_compile_regions", lambda *args, **kwargs: nullcontext()
+    )
+    monkeypatch.setattr(export_utils, "_prepare_export_directory", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(export_utils, "_generate_export_hash", lambda *args: ("test-hash", {}))
+    monkeypatch.setattr(export_utils, "_save_export_metadata", lambda *args: None)
+    monkeypatch.setattr(export_utils, "_cleanup_onnx_subfunctions", lambda *args, **kwargs: None)
+
+    with pytest.warns(DeprecationWarning):
+        DummyQEff().export(export_dir=tmp_path, dynamo=True, use_onnx_subfunctions=True)
+
+    assert grad_states == [False]
 
 
 def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_count_per_fn: int = 2):
@@ -238,6 +500,62 @@ class TestPreserveNestedCacheRetainedStateTransform:
         changed = PreserveNestedCacheRetainedStateTransform.apply(model)
         assert not changed, "Transform should be a no-op when there are no dangling _RetainedState outputs"
 
+    def test_exposes_index_key_retained_state_for_sparse_layers(self):
+        layer_idx = 3
+        fn = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=["index_key_arg", "past_key_arg", "past_value_arg", "update"],
+            outputs=["hidden_out"],
+            nodes=[
+                helper.make_node(
+                    "M3CtxScatter", ["index_key_arg", "pos", "update"], ["index_scatter"], domain="qti.aisw"
+                ),
+                helper.make_node("CtxScatter", ["past_key_arg", "pos", "update"], ["key_scatter"], domain="qti.aisw"),
+                helper.make_node(
+                    "CtxScatter", ["past_value_arg", "pos", "update"], ["value_scatter"], domain="qti.aisw"
+                ),
+                helper.make_node("Identity", ["update"], ["hidden_out"]),
+            ],
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("qti.aisw", 1)],
+        )
+        call_inputs = [
+            f"index_key.{layer_idx}_RetainedState",
+            f"past_key.{layer_idx}",
+            f"past_value.{layer_idx}",
+            "update",
+        ]
+        graph = helper.make_graph(
+            [helper.make_node("repeated_subgraph0", call_inputs, ["hidden_out"])],
+            "sparse_graph",
+            [helper.make_tensor_value_info(name, TensorProto.FLOAT, None) for name in call_inputs],
+            [
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, None)
+                for name in (
+                    "hidden_out",
+                    f"past_key.{layer_idx}_RetainedState",
+                    f"past_value.{layer_idx}_RetainedState",
+                    f"index_key.{layer_idx}_RetainedState",
+                )
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(fn)
+
+        assert PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert list(model.functions[0].output) == ["hidden_out", "key_scatter", "value_scatter", "index_scatter"]
+        call_node = model.graph.node[0]
+        assert list(call_node.output) == [
+            "hidden_out",
+            f"past_key.{layer_idx}_RetainedState",
+            f"past_value.{layer_idx}_RetainedState",
+            f"index_key.{layer_idx}_RetainedState",
+        ]
+        input_names = [value.name for value in model.graph.input]
+        assert f"index_key.{layer_idx}" in input_names
+        assert f"index_key.{layer_idx}_RetainedState" not in input_names
+
     def test_rejects_missing_cache_writer_without_partial_rewire(self):
         # Build model where function has only 1 scatter node
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=1, scatter_count_per_fn=1)
@@ -268,6 +586,29 @@ class TestRenameRepeatedSubgraphTransform:
         node_op_types = [n.op_type for n in model.graph.node]
         assert "QEffLlamaDecoderLayer" in node_op_types
         assert "QEffLlamaDecoderLayer_1" in node_op_types
+
+        # Call nodes get readable names instead of dynamo's invoke_subgraph names
+        assert [n.name for n in model.graph.node] == ["QEffLlamaDecoderLayer.0", "QEffLlamaDecoderLayer_1.1"]
+
+    def test_renames_stale_subgraph_names_inside_loop_bodies(self):
+        model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=1)
+        body = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0__while_loop_cond_graph_0",
+            inputs=["x"],
+            outputs=["y"],
+            nodes=[
+                helper.make_node("Identity", ["x"], ["y"], name="node_repeated_subgraph0__while_loop_cond_graph_0_7")
+            ],
+            opset_imports=[helper.make_opsetid("", 17)],
+        )
+        model.functions.append(body)
+
+        RenameRepeatedSubgraphTransform.apply(model, target_classnames=["QEffLlamaDecoderLayer"])
+
+        body_fn = next(fn for fn in model.functions if fn.name.endswith("__while_loop_cond_graph_0"))
+        assert body_fn.name == "QEffLlamaDecoderLayer__while_loop_cond_graph_0"
+        assert body_fn.node[0].name == "node_QEffLlamaDecoderLayer__while_loop_cond_graph_0_7"
 
     def test_noop_on_empty_classnames(self):
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=2)

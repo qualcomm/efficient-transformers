@@ -32,6 +32,7 @@ Welcome to Efficient-Transformers Documentation!
 
    source/quick_start
    source/features_enablement
+   source/moe_canonical_expert_parallel
 
 .. toctree::
    :caption: API Reference

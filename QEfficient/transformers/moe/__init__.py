@@ -32,6 +32,7 @@ from QEfficient.transformers.moe.profiles import (
     SILU_GLU_PROFILE,
     MoEProfile,
     gptoss_clamped_glu_mlp,
+    minimax_m3_clamped_glu_mlp,
     silu_glu_mlp,
 )
 from QEfficient.transformers.moe.weights import (
@@ -63,6 +64,7 @@ __all__ = [
     "SILU_GLU_PROFILE",
     "MoEProfile",
     "gptoss_clamped_glu_mlp",
+    "minimax_m3_clamped_glu_mlp",
     "silu_glu_mlp",
     "MoEWeights",
     "as_parameters",

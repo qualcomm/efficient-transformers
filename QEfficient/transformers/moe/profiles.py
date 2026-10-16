@@ -79,4 +79,28 @@ def gptoss_clamped_glu_mlp(
     return (intermediate @ W_d) + b_d.unsqueeze(-2)
 
 
+def minimax_m3_clamped_glu_mlp(
+    x: torch.Tensor,
+    W_g: torch.Tensor,
+    W_u: torch.Tensor,
+    W_d: torch.Tensor,
+    b_g: Optional[torch.Tensor] = None,
+    b_u: Optional[torch.Tensor] = None,
+    b_d: Optional[torch.Tensor] = None,
+    *,
+    limit: float,
+    alpha: float,
+) -> torch.Tensor:
+    """MiniMax-M3 clamped GLU: ``(up + 1) * gate * sigmoid(gate * alpha)``."""
+    del b_g, b_u, b_d
+    gate = x @ W_g
+    up = x @ W_u
+    gate = torch.minimum(gate, torch.full_like(gate, limit, dtype=gate.dtype, device=gate.device))
+    limit_tensor = torch.full_like(up, limit, dtype=up.dtype, device=up.device)
+    up = torch.maximum(up, -limit_tensor)
+    up = torch.minimum(up, limit_tensor)
+    glu = gate * torch.sigmoid(gate * alpha)
+    return ((up + 1.0) * glu) @ W_d
+
+
 SILU_GLU_PROFILE = MoEProfile(expert_mlp=silu_glu_mlp, has_bias=False)

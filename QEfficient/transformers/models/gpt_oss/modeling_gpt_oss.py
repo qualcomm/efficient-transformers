@@ -54,6 +54,30 @@ from QEfficient.utils.logging_utils import QEFFLogger
 logger = QEFFLogger.get_logger("MODEL")
 
 
+class _QEffGptOssOriginalWeights:
+    """Canonical views assembled from the fused source checkpoint tensors."""
+
+    def __init__(self, gate, up, down, gate_bias, up_bias, down_bias):
+        self.gate = gate
+        self.up = up
+        self.down = down
+        self.gate_bias = gate_bias
+        self.up_bias = up_bias
+        self.down_bias = down_bias
+
+    @property
+    def num_experts(self) -> int:
+        return self.gate.shape[0]
+
+    @property
+    def hidden_size(self) -> int:
+        return self.gate.shape[1]
+
+    @property
+    def intermediate_size(self) -> int:
+        return self.gate.shape[2]
+
+
 def override_gptoss_prefill_chunking(
     config, prefill_only: Optional[bool], enable_chunking: Optional[bool]
 ) -> Optional[bool]:
@@ -73,6 +97,11 @@ class QEffGptOssExperts(GptOssExperts):
     def transform_weights(self) -> MoEWeights:
         if getattr(self, "weights_transformed", False):
             return self.moe_weights
+        if getattr(self, "_qeff_use_original_checkpoint", False):
+            self._qeff_original_checkpoint_layout = True
+            self.weights_transformed = True
+            self.moe_weights = self.original_moe_weights()
+            return self.moe_weights
         self.moe_weights = build_canonical_expert_weights(
             gate_up=self.gate_up_proj,
             down=self.down_proj,
@@ -89,6 +118,18 @@ class QEffGptOssExperts(GptOssExperts):
         self.weights_transformed = True
         return self.moe_weights
 
+    def original_moe_weights(self) -> _QEffGptOssOriginalWeights:
+        gate_up = self.gate_up_proj
+        gate_up_bias = self.gate_up_proj_bias
+        return _QEffGptOssOriginalWeights(
+            gate=gate_up[..., ::2],
+            up=gate_up[..., 1::2],
+            down=self.down_proj,
+            gate_bias=gate_up_bias[..., ::2],
+            up_bias=gate_up_bias[..., 1::2],
+            down_bias=self.down_proj_bias,
+        )
+
 
 class _QEffGptOssLegacyBlockedMixin:
     def forward(self, hidden: torch.Tensor):
@@ -102,7 +143,7 @@ class _QEffGptOssLegacyBlockedMixin:
         B, S, H = hidden.shape
         T = B * S
         hidden = hidden.view(T, H)
-        weights = self.moe_weights
+        weights = self._moe_weights_for_forward()
 
         # Router computation
         router_logits = F.linear(hidden, self.router.weight, self.router.bias)
@@ -177,7 +218,7 @@ class _QEffGptOssLegacyBlockedMixin:
         B, S, H = hidden.shape
         T = B * S
         hidden = hidden.view(T, H)
-        weights = self.moe_weights
+        weights = self._moe_weights_for_forward()
 
         # Router computation
         router_logits = F.linear(hidden, self.router.weight, self.router.bias)
@@ -276,7 +317,14 @@ class QEffGptOssMLP(_QEffGptOssLegacyBlockedMixin, QEffMoEBlockMixin, GptOssMLP)
             return self.moe_weights
         weights = self.experts.transform_weights()
         self.moe_weights = weights
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            self._qeff_original_checkpoint_layout = True
         self.weights_transformed = True
+        return self.moe_weights
+
+    def _moe_weights_for_forward(self):
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            return self.experts.original_moe_weights()
         return self.moe_weights
 
     @property
@@ -298,7 +346,7 @@ class QEffGptOssMLP(_QEffGptOssLegacyBlockedMixin, QEffMoEBlockMixin, GptOssMLP)
             raise RuntimeError(f"{type(self).__name__} weights are not transformed; run OptimizedMoEWeightsTransform")
         bs, seq_len, _ = hidden_states.shape
         hidden_states = hidden_states.view(bs * seq_len, self.experts.hidden_size)
-        weights = self.moe_weights
+        weights = self._moe_weights_for_forward()
 
         # Router computation
         router_logits = F.linear(hidden_states, self.router.weight, self.router.bias)
@@ -353,7 +401,7 @@ class QEffGptOssMLP(_QEffGptOssLegacyBlockedMixin, QEffMoEBlockMixin, GptOssMLP)
         B, S, H = hidden_states.shape
         T = B * S
         hidden_states = hidden_states.view(T, H)
-        weights = self.moe_weights
+        weights = self._moe_weights_for_forward()
 
         # Router computation
         router_logits = F.linear(hidden_states, self.router.weight, self.router.bias)

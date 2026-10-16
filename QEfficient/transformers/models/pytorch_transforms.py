@@ -143,6 +143,19 @@ from transformers.models.llava.modeling_llava import (
 from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextForConditionalGeneration,
 )
+from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+    MiniMaxM3SparseForConditionalGeneration,
+    MiniMaxM3VLAttention,
+    MiniMaxM3VLDecoderLayer,
+    MiniMaxM3VLDenseMLP,
+    MiniMaxM3VLForCausalLM,
+    MiniMaxM3VLIndexer,
+    MiniMaxM3VLRMSNorm,
+    MiniMaxM3VLRotaryEmbedding,
+    MiniMaxM3VLSparseMoeBlock,
+    MiniMaxM3VLTextModel,
+    MiniMaxM3VLTopKRouter,
+)
 from transformers.models.mistral.modeling_mistral import (
     MistralAttention,
     MistralDecoderLayer,
@@ -493,6 +506,18 @@ from QEfficient.transformers.models.llava_next.modeling_llava_next import (
     QEffLlavaNextDecoderWrapper,
     QEffLlavaNextForConditionalGeneration,
 )
+from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+    QEffMiniMaxM3SparseForConditionalGeneration,
+    QEffMiniMaxM3VLAttention,
+    QEffMiniMaxM3VLDecoderLayer,
+    QEffMiniMaxM3VLDenseMLP,
+    QEffMiniMaxM3VLForCausalLM,
+    QEffMiniMaxM3VLIndexer,
+    QEffMiniMaxM3VLRotaryEmbedding,
+    QEffMiniMaxM3VLSparseMoeBlock,
+    QEffMiniMaxM3VLTextModel,
+    QEffMiniMaxM3VLTopKRouter,
+)
 from QEfficient.transformers.models.mistral.modeling_mistral import (
     QEffMistralAttention,
     QEffMistralDecoderLayer,
@@ -661,7 +686,6 @@ from QEfficient.transformers.models.whisper.modeling_whisper import (
 from QEfficient.transformers.moe import (
     MoEFlavour,
     QEffMoEBlockMixin,
-    pack_moe_weights_for_expert_parallel,
     unpack_moe_weights_from_expert_parallel,
 )
 from QEfficient.transformers.post_processing import build_and_attach_mlp, model_type_registry
@@ -721,6 +745,7 @@ class CustomOpsTransform(ModuleMappingTransform):
         Qwen3VLMoeTextRMSNorm: CustomRMSNormAIC,
         Qwen3VLTextRMSNorm: CustomRMSNormAIC,
         Glm4MoeRMSNorm: CustomRMSNormAIC,
+        MiniMaxM3VLRMSNorm: GemmaCustomRMSNormAIC,
         Wav2Vec2Encoder: QEffWav2Vec2Encoder,
         Wav2Vec2EncoderStableLayerNorm: QEffWav2Vec2EncoderStableLayerNorm,
         # BERT-family: replace _create_attention_masks (uses create_bidirectional_mask,
@@ -815,6 +840,17 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen3VLVisionModel: QEffQwen3VLVisionModel,
         Qwen3VLTextModel: QEffQwen3VLTextModel,
         Qwen3VLTextRotaryEmbedding: QEffQwen3VLTextRotaryEmbedding,
+        # MiniMaxM3VL
+        MiniMaxM3SparseForConditionalGeneration: QEffMiniMaxM3SparseForConditionalGeneration,
+        MiniMaxM3VLAttention: QEffMiniMaxM3VLAttention,
+        MiniMaxM3VLDecoderLayer: QEffMiniMaxM3VLDecoderLayer,
+        MiniMaxM3VLDenseMLP: QEffMiniMaxM3VLDenseMLP,
+        MiniMaxM3VLForCausalLM: QEffMiniMaxM3VLForCausalLM,
+        MiniMaxM3VLIndexer: QEffMiniMaxM3VLIndexer,
+        MiniMaxM3VLRotaryEmbedding: QEffMiniMaxM3VLRotaryEmbedding,
+        MiniMaxM3VLSparseMoeBlock: QEffMiniMaxM3VLSparseMoeBlock,
+        MiniMaxM3VLTextModel: QEffMiniMaxM3VLTextModel,
+        MiniMaxM3VLTopKRouter: QEffMiniMaxM3VLTopKRouter,
         # Gemma2
         Gemma2Attention: QEffGemma2Attention,
         Gemma2DecoderLayer: QEffGemma2DecoderLayer,
@@ -1365,6 +1401,90 @@ class VlmNoKVOffloadTransform(ModuleMappingTransform):
     }
 
 
+class PagedAttentionMinimax(PytorchTransform):
+    """Install the paged indexer local-position layout for MiniMax models."""
+
+    @classmethod
+    def apply(cls, model: nn.Module, qaic_config, ctx_len) -> tuple[nn.Module, bool]:
+        transformed = False
+        for module in model.modules():
+            if not isinstance(module, QEffMiniMaxM3VLIndexer):
+                continue
+            config = module.config
+
+            def get_config(name, default=None):
+                return qaic_config.get(name, getattr(config, name, default))
+
+            num_kv_blocks = get_config("indexer_num_blocks")
+            if num_kv_blocks is None:
+                num_kv_blocks = get_config("num_kv_blocks")
+            indexer_cp = get_config("msa_indexer_cp", 1)
+            indexer_dp = get_config("msa_indexer_dp", 1)
+            indexer_hkv = get_config("indexer_n_head", 1)
+            page_block_size = get_config("page_block_size", config.index_block_size)
+            num_logical_pages = get_config("msa_indexer_num_logical_pages", get_config("num_logical_pages"))
+            num_cores = get_config("num_cores_per_device", 1)
+            if ctx_len is None or num_kv_blocks is None:
+                raise ValueError("Paged MiniMax attention requires ctx_len and num_kv_blocks.")
+            if page_block_size != config.index_block_size:
+                raise ValueError("Paged MiniMax decode requires page_block_size == index_block_size.")
+            logical_ctx_len = ctx_len if num_logical_pages is None else int(num_logical_pages) * page_block_size
+            if logical_ctx_len < ctx_len:
+                raise ValueError(
+                    f"num_logical_pages ({num_logical_pages}) with page_block_size ({page_block_size}) "
+                    f"cannot hold ctx_len ({ctx_len})."
+                )
+            logical_kv_block_size = logical_ctx_len // num_kv_blocks
+            kv_block_size = logical_kv_block_size // indexer_cp
+            num_groups_blk = kv_block_size // page_block_size
+            if num_groups_blk % num_cores:
+                raise ValueError("Paged MiniMax indexer groups must divide evenly across cores.")
+            groups_per_core = num_groups_blk // num_cores
+            tokens_per_core = groups_per_core * page_block_size
+            rows = indexer_dp * indexer_cp * indexer_hkv
+            t_idx = torch.arange(tokens_per_core, device=next(module.parameters()).device).view(
+                1, 1, 1, 1, tokens_per_core
+            )
+            core_idx = torch.arange(num_cores, device=t_idx.device).view(1, 1, num_cores, 1, 1)
+            cp_idx = torch.arange(indexer_cp, device=t_idx.device).view(1, indexer_cp, 1, 1, 1)
+            local_group = (t_idx // page_block_size) * num_cores + core_idx
+            local_pos = (
+                local_group * (indexer_cp * page_block_size) + cp_idx * page_block_size + t_idx % page_block_size
+            ).to(torch.int32)
+            local_pos = (
+                local_pos.view(1, 1, indexer_cp, 1, num_cores, 1, tokens_per_core)
+                .expand(1, indexer_dp, indexer_cp, indexer_hkv, num_cores, 1, tokens_per_core)
+                .reshape(1, rows, num_cores, 1, tokens_per_core)
+            )
+            module.register_buffer("indexer_paged_local_pos", local_pos)
+            if indexer_dp > 1:
+                module.register_buffer(
+                    "indexer_paged_q_proj_weight",
+                    module.q_proj.weight.detach().repeat(indexer_dp, 1),
+                    persistent=False,
+                )
+                module.register_buffer(
+                    "indexer_paged_k_proj_weight",
+                    module.k_proj.weight.detach().repeat(indexer_dp, 1),
+                    persistent=False,
+                )
+                if module.q_proj.bias is not None:
+                    module.register_buffer(
+                        "indexer_paged_q_proj_bias",
+                        module.q_proj.bias.detach().repeat(indexer_dp),
+                        persistent=False,
+                    )
+                if module.k_proj.bias is not None:
+                    module.register_buffer(
+                        "indexer_paged_k_proj_bias",
+                        module.k_proj.bias.detach().repeat(indexer_dp),
+                        persistent=False,
+                    )
+            module.indexer_paged_projection_dp = indexer_dp
+            transformed = True
+        return model, transformed
+
+
 class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
     _match_class_replace_method = {}
     _match_string_replace_method = {
@@ -1458,6 +1578,21 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
         "DeepseekV3RMSNorm": {
             "forward": QEffDeepseekV3CustomRMSNormAIC.forward,
         },
+        "MiniMaxM3SparseForConditionalGeneration": {"forward": QEffMiniMaxM3SparseForConditionalGeneration.forward},
+        "MiniMaxM3VLForCausalLM": {
+            "forward": QEffMiniMaxM3VLForCausalLM.forward,
+            "get_submodules_for_export": QEffMiniMaxM3VLForCausalLM.get_submodules_for_export,
+        },
+        "MiniMaxM3VLTextModel": {
+            "forward": QEffMiniMaxM3VLTextModel.forward,
+            "__qeff_init__": QEffMiniMaxM3VLTextModel.__qeff_init__,
+        },
+        "MiniMaxM3VLDecoderLayer": {"forward": QEffMiniMaxM3VLDecoderLayer.forward},
+        "MiniMaxM3VLDenseMLP": {"forward": QEffMiniMaxM3VLDenseMLP.forward},
+        "MiniMaxM3VLAttention": {"forward": QEffMiniMaxM3VLAttention.forward},
+        "MiniMaxM3VLRotaryEmbedding": {"forward": QEffMiniMaxM3VLRotaryEmbedding.forward},
+        "MiniMaxM3VLTopKRouter": {"forward": QEffMiniMaxM3VLTopKRouter.forward},
+        "MiniMaxM3VLSparseMoeBlock": {"forward": QEffMiniMaxM3VLSparseMoeBlock.forward},
     }
 
 
@@ -1710,6 +1845,8 @@ class OptimizedMoEMapperTransform(ModuleMappingTransform):
         GraniteMoeTopKGating: QEffGraniteMoeTopKGating,
         # Mixtral
         MixtralSparseMoeBlock: QEffMixtralSparseMoeBlock,
+        # MiniMax M3
+        MiniMaxM3VLSparseMoeBlock: QEffMiniMaxM3VLSparseMoeBlock,
     }
 
     @classmethod
@@ -1915,7 +2052,12 @@ def _replace_moe_weight_aliases(model: nn.Module, old_weights: nn.Module, new_we
 
 
 class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
-    """Pack or restore MoE weights according to the selected MoE export flavour."""
+    """Keep MoE weights canonical for every export flavour.
+
+    Expert-parallel prefill slices each pipeline slot's experts in the graph,
+    so prefill and decode can consume the same prepared checkpoint. Packed
+    weights supplied by older callers are restored to canonical here.
+    """
 
     @classmethod
     def apply(cls, model: nn.Module) -> tuple[nn.Module, bool]:
@@ -1924,26 +2066,10 @@ class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
             if not getattr(module, "weights_transformed", False):
                 continue
             weights = getattr(module, "moe_weights", None)
-            if weights is None:
+            if weights is None or getattr(module, "_qeff_original_checkpoint_layout", False):
                 continue
 
-            flavour = getattr(module, "_moe_flavour", MoEFlavour.DECODE_BMM)
-            if not isinstance(flavour, MoEFlavour):
-                flavour = MoEFlavour(flavour)
-
-            if flavour is MoEFlavour.EXPERT_PARALLEL:
-                num_pipeline_stages = getattr(module, "num_pipeline_stages", None)
-                num_parallelized_experts = getattr(module, "num_parallelized_experts", None)
-                if num_pipeline_stages is None or num_parallelized_experts is None:
-                    num_pipeline_stages = weights.gate.shape[1] if weights.gate.ndim == 4 else weights.num_experts
-                    num_parallelized_experts = weights.gate.shape[0] if weights.gate.ndim == 4 else 1
-                new_weights = pack_moe_weights_for_expert_parallel(
-                    weights,
-                    num_pipeline_stages=int(num_pipeline_stages),
-                    num_parallelized_experts=int(num_parallelized_experts),
-                )
-            else:
-                new_weights = unpack_moe_weights_from_expert_parallel(weights)
+            new_weights = unpack_moe_weights_from_expert_parallel(weights)
 
             if new_weights is weights:
                 continue

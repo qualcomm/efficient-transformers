@@ -44,6 +44,7 @@ _KV_RETAINED_STEMS = (
     "k_pe.",
     "conv_state.",
     "recurrent_state.",
+    "index_key.",
 )
 _RETAINED_STATE_SUFFIX = "_RetainedState"
 _INTERNAL_RETAINED_STATE_SUFFIX = "_InternalRetainedState"

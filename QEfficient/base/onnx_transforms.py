@@ -23,11 +23,23 @@ from QEfficient.customop.ctx_scatter_gather import (
     CtxGather3D,
     CtxGatherBlockedKV,
     CtxGatherBlockedKVBatch,
+    CtxGatherBlockedKVDP,
+    CtxGatherBlockRangeKVDP,
     CtxGatherFunc,
     CtxGatherFunc3D,
     CtxGatherFunc3DGeneralized,
     CtxGatherFuncBlockedKV,
     CtxGatherFuncBlockedKVBatch,
+    CtxGatherFuncBlockedKVDP,
+    CtxGatherFuncBlockRangeKVDP,
+    CtxGatherFuncPagedKVDP,
+    CtxGatherFuncPagedKVHeads,
+    CtxGatherPagedKVDP,
+    CtxGatherPagedKVHeads,
+    CtxPagedScatterDP,
+    CtxPagedScatterFuncDP,
+    CtxPagedScatterFuncPage,
+    CtxPagedScatterPage,
     CtxScatter,
     CtxScatter3D,
     CtxScatter3DInt,
@@ -35,6 +47,8 @@ from QEfficient.customop.ctx_scatter_gather import (
     CtxScatterFunc3D,
     CtxScatterFunc3DGeneralized,
     CtxScatterFunc3DInt,
+    M3CtxScatter,
+    M3CtxScatterFunc,
 )
 from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxGatherBlockedKVCB,
@@ -53,6 +67,7 @@ from QEfficient.customop.quantization_ops import CastToUInt4, CastToUInt4Func
 from QEfficient.customop.rms_norm import CustomRMSNorm, CustomRMSNormFunc
 from QEfficient.utils import constants
 from QEfficient.utils.constants import FILE_CHUNK_SIZE_DEFAULT, SIZE_THRESHOLD_DEFAULT
+from QEfficient.utils.export_profiler import PROFILER
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +118,7 @@ class CustomOpTransform(BaseOnnxTransform):
     _custom_ops: Dict[str, Tuple[Any, Any]] = {
         "CustomRMSNormFunc": (CustomRMSNormFunc, CustomRMSNorm),
         "CtxScatterFunc": (CtxScatterFunc, CtxScatter),
+        "M3CtxScatterFunc": (M3CtxScatterFunc, M3CtxScatter),
         "CtxScatterFunc3D": (CtxScatterFunc3D, CtxScatter3D),
         "CtxScatterFunc3DInt": (CtxScatterFunc3DInt, CtxScatter3DInt),
         "CtxScatterFunc3DGeneralized": (CtxScatterFunc3DGeneralized, CtxScatter3D),
@@ -112,6 +128,12 @@ class CustomOpTransform(BaseOnnxTransform):
         "CtxScatterFuncCB3D": (CtxScatterFuncCB3D, CtxScatterCB3D),
         "CtxGatherFuncCB3D": (CtxGatherFuncCB3D, CtxGatherCB3D),
         "CtxGatherFuncBlockedKV": (CtxGatherFuncBlockedKV, CtxGatherBlockedKV),
+        "CtxGatherFuncBlockedKVDP": (CtxGatherFuncBlockedKVDP, CtxGatherBlockedKVDP),
+        "CtxGatherFuncBlockRangeKVDP": (CtxGatherFuncBlockRangeKVDP, CtxGatherBlockRangeKVDP),
+        "CtxGatherFuncPagedKVDP": (CtxGatherFuncPagedKVDP, CtxGatherPagedKVDP),
+        "CtxPagedScatterFuncDP": (CtxPagedScatterFuncDP, CtxPagedScatterDP),
+        "CtxGatherFuncPagedKVHeads": (CtxGatherFuncPagedKVHeads, CtxGatherPagedKVHeads),
+        "CtxPagedScatterFuncPage": (CtxPagedScatterFuncPage, CtxPagedScatterPage),
         "CtxGatherFuncBlockedKVCB": (CtxGatherFuncBlockedKVCB, CtxGatherBlockedKVCB),
         "CtxScatterFuncCB": (CtxScatterFuncCB, CtxScatterCB),
         "CtxGatherFuncCB": (CtxGatherFuncCB, CtxGatherCB),
@@ -289,6 +311,8 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     # Match past_key.N / past_value.N regardless of any suffix that follows
     # (plain, _RetainedState, or _<prefix>_RetainedState for kv_cache_prefix).
     _KV_INPUT_RE = re.compile(r"^past_(key|value)\.(\d+)")
+    # Sparse-attention layers also carry an index_key.N cache that is scattered into the same way.
+    _INDEX_KEY_INPUT_RE = re.compile(r"^index_key\.(\d+)")
 
     # All scatter op_type names that write back a KV cache tensor.
     # Keep in sync with CustomOpTransform._custom_ops and the dynamo
@@ -296,10 +320,13 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     _SCATTER_OP_TYPES = frozenset(
         {
             "CtxScatter",
+            "M3CtxScatter",
             "CtxScatterCB",
             "CtxScatter3D",
             "CtxScatter3DInt",
             "CtxScatterCB3D",
+            "CtxPagedScatterDP",
+            "CtxPagedScatterPage",
         }
     )
 
@@ -312,11 +339,18 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         from that buffer's function argument rather than output names or node order.
         """
         function_cache_inputs: dict[str, str] = {}
+        cache_names: dict[str, str] = {}
         for input_index, input_name in enumerate(node.input):
             match = cls._KV_INPUT_RE.match(input_name)
-            if match is None:
-                continue
-            kind, input_layer_idx = match.groups()
+            if match is not None:
+                kind, input_layer_idx = match.groups()
+                cache_name = f"past_{kind}.{input_layer_idx}"
+            else:
+                match = cls._INDEX_KEY_INPUT_RE.match(input_name)
+                if match is None:
+                    continue
+                kind, input_layer_idx = "index_key", match.group(1)
+                cache_name = f"index_key.{input_layer_idx}"
             if input_layer_idx != layer_idx:
                 continue
             if input_index >= len(fn.input):
@@ -325,18 +359,38 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                     f"call-node cache input '{input_name}'."
                 )
             function_cache_inputs[kind] = fn.input[input_index]
+            cache_names[kind] = cache_name
 
-        if set(function_cache_inputs) != {"key", "value"}:
+        if not {"key", "value"} <= set(function_cache_inputs):
             return None
 
         scatter_outputs = {}
+        producers = {output: fn_node for fn_node in fn.node for output in fn_node.output}
+        consumers: dict[str, list] = {}
+        for fn_node in fn.node:
+            for fn_input in fn_node.input:
+                consumers.setdefault(fn_input, []).append(fn_node)
+
+        def reshape_source(name: str) -> str:
+            """Follow Reshape producers back to the tensor whose layout the cache buffer has."""
+            while (producer := producers.get(name)) is not None and producer.op_type == "Reshape":
+                name = producer.input[0]
+            return name
+
+        def restore_cache_layout(name: str) -> str:
+            """Return the Reshape output that folds the scatter result back to the cache layout."""
+            next_nodes = consumers.get(name, [])
+            if len(next_nodes) != 1 or next_nodes[0].op_type != "Reshape":
+                raise ValueError(f"Could not restore the cache layout after nested scatter output '{name}'.")
+            return next_nodes[0].output[0]
+
         for kind, function_input in function_cache_inputs.items():
             writers = [
                 fn_node
                 for fn_node in fn.node
                 if fn_node.op_type in cls._SCATTER_OP_TYPES
                 and fn_node.input
-                and fn_node.input[0] == function_input
+                and reshape_source(fn_node.input[0]) == function_input
                 and fn_node.output
             ]
             if len(writers) != 1:
@@ -344,11 +398,14 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                     f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
                 ]
                 raise ValueError(
-                    f"Could not uniquely resolve the nested past_{kind}.{layer_idx} cache writer in function "
+                    f"Could not uniquely resolve the nested {cache_names[kind]} cache writer in function "
                     f"'{fn.name}': expected one CtxScatter* with data input '{function_input}', "
                     f"found {len(writers)} ({writer_names})."
                 )
-            scatter_outputs[kind] = writers[0].output[0]
+            writer_output = writers[0].output[0]
+            scatter_outputs[kind] = (
+                writer_output if writers[0].input[0] == function_input else restore_cache_layout(writer_output)
+            )
 
         return scatter_outputs
 
@@ -408,19 +465,34 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             if scatter_outputs is None:
                 continue
 
-            # Expose scatter outputs in the function's output list, rename KV
+            cache_inputs = {"key": kv_inputs["key"], "value": kv_inputs["value"]}
+            plain_inputs = {kind: f"past_{kind}.{layer_idx}" for kind in cache_inputs}
+            index_input = next(
+                (
+                    name
+                    for name in node.input
+                    if (match := cls._INDEX_KEY_INPUT_RE.match(name)) is not None and match.group(1) == layer_idx
+                ),
+                None,
+            )
+            index_output = f"index_key.{layer_idx}_RetainedState"
+            if index_input is not None and index_output in dangling_retained_outputs:
+                cache_inputs["index_key"] = index_input
+                plain_inputs["index_key"] = f"index_key.{layer_idx}"
+                desired_outputs.append(index_output)
+
+            # Expose scatter outputs in the function's output list, rename cache
             # inputs and append retained-state output names to the call node.
-            # Both writers are resolved before this block, so graph rewiring is atomic.
-            for kind, desired_output in zip(("key", "value"), desired_outputs):
+            # All writers are resolved before this block, so graph rewiring is atomic.
+            for kind, desired_output in zip(cache_inputs, desired_outputs):
                 scatter_output = scatter_outputs[kind]
                 if scatter_output not in fn.output:
                     fn.output.append(scatter_output)
                     changed = True
 
-                retained_input = kv_inputs[kind]
-                plain_input = f"past_{kind}.{layer_idx}"
+                retained_input = cache_inputs[kind]
                 if retained_input.endswith("_RetainedState"):
-                    kv_rename_map[retained_input] = plain_input
+                    kv_rename_map[retained_input] = plain_inputs[kind]
 
                 if desired_output not in node.output:
                     node.output.append(desired_output)
@@ -536,6 +608,12 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
         if not old_to_new:
             return False
 
+        # Loop-body functions are named "<subgraph>__<body>"; keep them attached to the renamed parent.
+        for fn in model.functions:
+            parent, separator, body = fn.name.partition("__")
+            if separator and parent in old_to_new:
+                old_to_new[fn.name] = f"{old_to_new[parent]}__{body}"
+
         for fn in model.functions:
             if fn.name in old_to_new:
                 fn.name = old_to_new[fn.name]
@@ -543,8 +621,27 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
         cls._rename_op_types(model.graph.node, old_to_new)
         for fn in model.functions:
             cls._rename_op_types(fn.node, old_to_new)
+        cls._rename_node_names(model, old_to_new)
 
         return True
+
+    @classmethod
+    def _rename_node_names(cls, model: ModelProto, old_to_new: Dict[str, str]) -> None:
+        """Give call nodes readable names (``<Layer>.<n>``) and drop stale subgraph names from inner nodes."""
+        new_op_types = set(old_to_new.values())
+        call_ordinal = 0
+        for node in model.graph.node:
+            if node.op_type in new_op_types:
+                node.name = f"{node.op_type}.{call_ordinal}"
+                call_ordinal += 1
+
+        # Longest names first so loop-body names are replaced before their parent subgraph name.
+        replacements = sorted(old_to_new.items(), key=lambda item: len(item[0]), reverse=True)
+        for fn in model.functions:
+            for node in cls._iter_all_nodes(fn.node):
+                for old, new in replacements:
+                    if old in node.name:
+                        node.name = node.name.replace(old, new)
 
 
 class AdapterWeightsToInputsTransform(BaseOnnxTransform):
@@ -952,6 +1049,11 @@ class OnnxTransformPipeline(BaseOnnxTransform):
 
         if AdapterWeightsToInputsTransform in requested:
             applied[AdapterWeightsToInputsTransform] = AdapterWeightsToInputsTransform.apply(model, **kwargs)
+
+        for transform in self.transforms:
+            if getattr(transform, "_apply_with_pipeline_kwargs", False):
+                with PROFILER.stage(f"onnx transform {transform.__name__}"):
+                    applied[transform] = transform.apply(model, **kwargs)
 
         for t, done in applied.items():
             logger.info(f"Transform '{t.__name__}' applied={done}")

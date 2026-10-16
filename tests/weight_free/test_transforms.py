@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -51,18 +50,16 @@ from QEfficient.exporter.weight_free import checkpoint_key_resolver
 from QEfficient.exporter.weight_free.checkpoint_key_resolver import find_checkpoint_key
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DtypeConversionCheckpointTransform,
-    ExpertParallelPackingCheckpointTransform,
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
     GraniteMoeFusedExpertSplitCheckpointTransform,
+    MiniMaxM3DenseGateUpCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
 )
-from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_free_ort_inputs
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.transformers.moe.weights import MoEWeights, pack_moe_weights_for_expert_parallel
+from QEfficient.transformers.moe.weights import MoEWeights
 from QEfficient.utils import runtime_requirements
-from QEfficient.utils.checkpoint_utils import checkpoint_root
 from QEfficient.utils.export_utils import _generate_export_hash
 from QEfficient.utils.runtime_requirements import validate_runtime_requirements
 from QEfficient.utils.torch_patches import temporarily_enable_nested_compile_regions
@@ -209,29 +206,53 @@ def _load_prepared_tensors(root):
     return loaded
 
 
-def test_checkpoint_root_symlinked_shards(tmp_path, monkeypatch):
-    hub = tmp_path / "hub"
-    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
-    blob = hub / "models--org--m" / "blobs" / "abc"
-    blob.parent.mkdir(parents=True)
-    blob.write_bytes(b"x")
-    local = tmp_path / "mymodel"
-    local.mkdir()
-    shard = local / "model.safetensors"
-    shard.symlink_to(blob)
-
-    root = checkpoint_root(str(local), [str(shard)])
-
-    assert root == tmp_path
-    assert shard.relative_to(root) == Path("mymodel/model.safetensors")
-
-
 # ---------------------------------------------------------------------------
 # Test checkpoint layout transforms
 # ---------------------------------------------------------------------------
 
 
 class TestWeightFreeCheckpointTransforms:
+    def test_qwen3_original_layout_exposes_source_parameter_names(self):
+        from transformers import Qwen3MoeConfig
+
+        from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import QEffQwen3MoeExperts
+
+        experts = QEffQwen3MoeExperts(
+            Qwen3MoeConfig(num_experts=2, hidden_size=4, moe_intermediate_size=6, intermediate_size=6)
+        )
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+        parameter_names = {name for name, _ in experts.named_parameters()}
+
+        assert parameter_names == {
+            f"{expert}.{projection}.weight"
+            for expert in ("0", "1")
+            for projection in ("gate_proj", "up_proj", "down_proj")
+        }
+        assert tuple(weights.gate.shape) == (2, 4, 6)
+        assert tuple(weights.up.shape) == (2, 4, 6)
+        assert tuple(weights.down.shape) == (2, 6, 4)
+
+    def test_gpt_oss_original_layout_splits_fused_source_weights_in_forward(self):
+        from transformers import GptOssConfig
+
+        from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffGptOssExperts
+
+        experts = QEffGptOssExperts(GptOssConfig(num_local_experts=2, hidden_size=4, intermediate_size=6))
+        source = {name: parameter.detach().clone() for name, parameter in experts.named_parameters()}
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+
+        torch.testing.assert_close(weights.gate, source["gate_up_proj"][..., ::2])
+        torch.testing.assert_close(weights.up, source["gate_up_proj"][..., 1::2])
+        torch.testing.assert_close(weights.down, source["down_proj"])
+        torch.testing.assert_close(weights.gate_bias, source["gate_up_proj_bias"][..., ::2])
+        torch.testing.assert_close(weights.up_bias, source["gate_up_proj_bias"][..., 1::2])
+        torch.testing.assert_close(weights.down_bias, source["down_proj_bias"])
+        assert set(dict(experts.named_parameters())) == set(source)
+
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
@@ -254,53 +275,6 @@ class TestWeightFreeCheckpointTransforms:
 
         assert prepared == out
         torch.testing.assert_close(_load_prepared_tensors(out)["weight"], torch.ones(3, dtype=torch.float32))
-
-    def test_checkpoint_pipeline_rebuilds_incomplete_prepared_dir(self, tmp_path):
-        src = tmp_path / "src"
-        out = tmp_path / "out"
-        src.mkdir()
-        _write_safetensors_checkpoint(src, {"weight": torch.ones(2, dtype=torch.float16)})
-
-        pipeline = CheckpointTransformPipeline([DtypeConversionCheckpointTransform])
-        prepared = pipeline.apply(src, out, target_dtype=torch.float32)
-        prepared_weight_map = json.loads((prepared / "model.safetensors.index.json").read_text())["weight_map"]
-        prepared_shard = next(iter(set(prepared_weight_map.values())))
-        (prepared / prepared_shard).unlink()
-
-        prepared = pipeline.apply(src, out, target_dtype=torch.float32)
-
-        assert prepared == out
-        torch.testing.assert_close(_load_prepared_tensors(out)["weight"], torch.ones(2, dtype=torch.float32))
-
-    def test_ort_weight_injection_resolves_cache_relative_spec_for_absolute_model_id(self, tmp_path):
-        hf_cache = tmp_path / "hf_cache"
-        prepared = hf_cache / "models--org--model" / "snapshots" / "prepared"
-        export_dir = tmp_path / "export"
-        prepared.mkdir(parents=True)
-        export_dir.mkdir()
-        save_file({"weight": torch.tensor([1.0, 2.0])}, str(prepared / "model.safetensors"))
-
-        weight_spec_path = export_dir / "weight_spec.json"
-        weight_spec_path.write_text(
-            json.dumps(
-                {
-                    "files": [
-                        {
-                            "format": "safetensors",
-                            "path": "models--org--model/snapshots/prepared/model.safetensors",
-                        }
-                    ],
-                    "inputs": [{"name": "weight", "location": {"file": 0, "key": "weight"}}],
-                    "model_id": str(prepared),
-                    "model_name": "tiny",
-                    "version": 5,
-                }
-            )
-        )
-
-        ort_inputs = load_weight_free_ort_inputs(weight_spec_path, {})
-
-        assert ort_inputs["weight"].tolist() == [1.0, 2.0]
 
     def test_stacks_per_expert_weights_to_moe_weights(self, tmp_path):
         src = tmp_path / "src"
@@ -352,7 +326,7 @@ class TestWeightFreeCheckpointTransforms:
         assert f"{prefix}.experts.gate_proj" not in tensors
         assert f"{prefix}.experts.down_proj_t" not in tensors
 
-    def test_pipeline_stacks_and_numerically_packs_experts_with_one_final_write(self, tmp_path):
+    def test_pipeline_keeps_expert_parallel_experts_canonical_with_one_final_write(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
         src.mkdir()
@@ -373,14 +347,10 @@ class TestWeightFreeCheckpointTransforms:
             tensors[f"{prefix}.experts.{expert_index}.w2.weight"] = down
         _write_safetensors_checkpoint(src, tensors)
 
-        expected_weights = pack_moe_weights_for_expert_parallel(
-            MoEWeights(
-                gate=torch.stack(gate_weights).transpose(1, 2),
-                up=torch.stack(up_weights).transpose(1, 2),
-                down=torch.stack(down_weights).transpose(1, 2),
-            ),
-            num_pipeline_stages=2,
-            num_parallelized_experts=4,
+        expected_weights = MoEWeights(
+            gate=torch.stack(gate_weights).transpose(1, 2),
+            up=torch.stack(up_weights).transpose(1, 2),
+            down=torch.stack(down_weights).transpose(1, 2),
         )
 
         pipeline = CheckpointTransformPipeline(
@@ -501,7 +471,7 @@ class TestWeightFreeCheckpointTransforms:
         assert set(index) == set(tensors)
         assert all((out / shard_name).is_file() for shard_name in index.values())
 
-    def test_pipeline_splits_and_packs_fused_experts_in_one_task(self, tmp_path):
+    def test_pipeline_splits_fused_experts_canonically_in_one_task(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
         src.mkdir()
@@ -520,7 +490,6 @@ class TestWeightFreeCheckpointTransforms:
         pipeline = CheckpointTransformPipeline(
             [
                 MoEFusedExpertSplitCheckpointTransform,
-                ExpertParallelPackingCheckpointTransform,
                 DtypeConversionCheckpointTransform,
             ]
         )
@@ -541,26 +510,22 @@ class TestWeightFreeCheckpointTransforms:
         task = plan.tasks[0]
         assert task.params.as_dict()["stages"] == (
             "split",
-            "expert_parallel_pack",
             "dtype",
             "final",
         )
         assert [stage.params.transform_id for stage in task.stages] == [
             MoEFusedExpertSplitCheckpointTransform.TRANSFORM_ID,
-            ExpertParallelPackingCheckpointTransform.TRANSFORM_ID,
             DtypeConversionCheckpointTransform.TRANSFORM_ID,
         ]
         assert {ref.stage for ref in task.stages[0].output_refs} == {"canonical"}
         assert set(task.stages[1].input_refs) == set(task.stages[0].output_refs)
-        assert {ref.stage for ref in task.stages[1].output_refs} == {"packed"}
-        assert set(task.stages[2].input_refs) == set(task.stages[1].output_refs)
-        assert {ref.stage for ref in task.stages[2].output_refs} == {"final"}
+        assert {ref.stage for ref in task.stages[1].output_refs} == {"final"}
 
         tensors = _load_prepared_tensors(out)
         moe_prefix = "model.layers.0.block_sparse_moe.moe_weights"
-        assert tensors[f"{moe_prefix}.gate"].shape == (2, 2, 4, 2)
-        assert tensors[f"{moe_prefix}.up"].shape == (2, 2, 4, 2)
-        assert tensors[f"{moe_prefix}.down"].shape == (2, 2, 2, 4)
+        torch.testing.assert_close(tensors[f"{moe_prefix}.gate"], gate.transpose(1, 2))
+        torch.testing.assert_close(tensors[f"{moe_prefix}.up"], up.transpose(1, 2))
+        torch.testing.assert_close(tensors[f"{moe_prefix}.down"], down.transpose(1, 2))
         assert sorted(path.name for path in out.glob("*.safetensors")) == ["fused-group-00000.safetensors"]
 
     def test_fused_plan_rejects_missing_required_tensor_before_output(self, tmp_path):
@@ -606,7 +571,7 @@ class TestWeightFreeCheckpointTransforms:
 
         assert not (tmp_path / "out").exists()
 
-    def test_plan_fingerprint_tracks_expert_parallel_layout_not_chunk_size(self, tmp_path):
+    def test_prefill_and_decode_share_one_prepared_checkpoint(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
         prefix = "model.layers.0.block_sparse_moe"
@@ -621,72 +586,98 @@ class TestWeightFreeCheckpointTransforms:
         )
         config = SimpleNamespace(num_local_experts=4, model_type="mixtral")
 
-        plan_a, _ = pipeline.build_plan(
-            src,
-            torch.float32,
-            config=config,
-            hash_params={
-                "moe_prefill_flavour": "expert_parallel",
-                "moe_prefill_num_pipeline_stages": 2,
-                "moe_prefill_num_parallelized_experts": 2,
-                "moe_prefill_expert_parallel_chunk_size": 64,
-            },
-        )
-        plan_b, _ = pipeline.build_plan(
-            src,
-            torch.float32,
-            config=config,
-            hash_params={
-                "moe_prefill_flavour": "expert_parallel",
-                "moe_prefill_num_pipeline_stages": 4,
-                "moe_prefill_num_parallelized_experts": 1,
-                "moe_prefill_expert_parallel_chunk_size": 64,
-            },
-        )
-
-        plan_c, _ = pipeline.build_plan(
-            src,
-            torch.float32,
-            config=config,
-            hash_params={
-                "moe_prefill_flavour": "expert_parallel",
-                "moe_prefill_num_pipeline_stages": 2,
-                "moe_prefill_num_parallelized_experts": 2,
-                "moe_prefill_expert_parallel_chunk_size": 128,
-            },
-        )
-
-        assert plan_a.fingerprint_payload() != plan_b.fingerprint_payload()
-        assert plan_a.fingerprint_payload() == plan_c.fingerprint_payload()
-
         from QEfficient.exporter.weight_free.export import _prepared_checkpoint_hash
 
-        common_hash_args = {
-            "model_ref": str(src),
-            "target_dtype": torch.float32,
-            "active_group_transform_id": "moe_expert_stacking_v1",
-            "moe_prefill_flavour": "expert_parallel",
-            "moe_prefill_num_pipeline_stages": 2,
-            "moe_prefill_num_parallelized_experts": 2,
-        }
-        assert _prepared_checkpoint_hash(
-            **common_hash_args,
-            plan_payload=plan_a.fingerprint_payload(),
-        ) == _prepared_checkpoint_hash(
-            **common_hash_args,
-            plan_payload=plan_c.fingerprint_payload(),
-        )
-        assert _prepared_checkpoint_hash(
-            **common_hash_args,
-            plan_payload=plan_a.fingerprint_payload(),
-        ) != _prepared_checkpoint_hash(
-            **{
-                **common_hash_args,
+        hash_params = [
+            {"moe_prefill_flavour": "decode_bmm"},
+            {
+                "moe_prefill_flavour": "expert_parallel",
+                "moe_prefill_num_pipeline_stages": 2,
+                "moe_prefill_num_parallelized_experts": 2,
+                "moe_prefill_expert_parallel_chunk_size": 64,
+            },
+            {
+                "moe_prefill_flavour": "expert_parallel",
                 "moe_prefill_num_pipeline_stages": 4,
                 "moe_prefill_num_parallelized_experts": 1,
+                "moe_prefill_expert_parallel_chunk_size": 128,
             },
-            plan_payload=plan_b.fingerprint_payload(),
+        ]
+        hashes = set()
+        for params in hash_params:
+            plan, active_group = pipeline.build_plan(src, torch.float32, config=config, hash_params=params)
+            hashes.add(
+                _prepared_checkpoint_hash(
+                    model_ref=str(src),
+                    target_dtype=torch.float32,
+                    active_group_transform_id=active_group,
+                    plan_payload=plan.fingerprint_payload(),
+                )
+            )
+        assert len(hashes) == 1
+
+    def test_spec_builder_rejects_weight_shape_that_differs_from_checkpoint(self):
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _check_stored_shape
+
+        _check_stored_shape("w", [8, 4, 2], "w", [8, 4, 2])
+        _check_stored_shape("w", ["batch", 4, 2], "w", [8, 4, 2])
+        with pytest.raises(ValueError, match="stored layout"):
+            _check_stored_shape("moe.gate", [4, 2, 4, 2], "moe.gate", [8, 4, 2])
+
+    def test_safetensors_header_shapes_match_tensors(self, tmp_path):
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _safetensors_shapes
+
+        _write_safetensors_checkpoint(tmp_path, {"a": torch.ones(3, 5), "b": torch.ones(7)})
+        assert _safetensors_shapes(str(tmp_path / "model.safetensors")) == {"a": [3, 5], "b": [7]}
+
+    @staticmethod
+    def _weight_graph(source_dtype, target_dtype):
+        weight = ir.Value(name="weight", shape=[2, 2], type=ir.TensorType(target_dtype))
+        hidden = ir.Value(name="hidden", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+        output = ir.Value(name="output", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+        matmul = ir.Node(
+            domain="",
+            op_type="MatMul",
+            inputs=[weight, hidden],
+            outputs=[output],
+            name="matmul",
+            version=17,
         )
+        graph = ir.Graph(
+            inputs=[hidden],
+            outputs=[output],
+            nodes=[matmul],
+            initializers=[weight],
+            opset_imports={"": 17},
+        )
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _promote_initializer
+
+        _promote_initializer(SimpleNamespace(graph=graph), "weight", weight, source_dtype)
+        return graph
+
+    def test_original_bfloat16_weight_casts_to_fp16_graph_dtype(self):
+        graph = self._weight_graph(ir.DataType.BFLOAT16, ir.DataType.FLOAT16)
+
+        assert [(value.name, value.dtype) for value in graph.inputs] == [
+            ("hidden", ir.DataType.FLOAT),
+            ("weight", ir.DataType.BFLOAT16),
+        ]
+        assert [node.op_type for node in graph] == ["Cast", "MatMul"]
+        cast, matmul = list(graph)
+        assert cast.attributes["to"].value == int(ir.DataType.FLOAT16)
+        assert matmul.inputs[0].name == cast.outputs[0].name
+        assert not graph.initializers
+
+    def test_original_bfloat16_weight_has_no_cast_for_bfloat16_graph_dtype(self):
+        graph = self._weight_graph(ir.DataType.BFLOAT16, ir.DataType.BFLOAT16)
+
+        assert [(value.name, value.dtype) for value in graph.inputs] == [
+            ("hidden", ir.DataType.FLOAT),
+            ("weight", ir.DataType.BFLOAT16),
+        ]
+        assert [node.op_type for node in graph] == ["MatMul"]
+        assert list(graph)[0].inputs[0].name == "weight"
+        assert not graph.initializers
 
     def test_scheduler_waits_for_staged_dependency(self, tmp_path):
         execution_order = []
@@ -883,6 +874,50 @@ class TestWeightFreeCheckpointTransforms:
         torch.testing.assert_close(tensors[f"{prefix}.moe_weights.up"], gate_up[:, 2:, :].transpose(1, 2))
         torch.testing.assert_close(tensors[f"{prefix}.moe_weights.down"], down.transpose(1, 2))
 
+    def test_minimax_m3_dense_gate_up_fusion(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        dense_prefix = "language_model.model.layers.0.mlp"
+        shared_prefix = "language_model.model.layers.3.block_sparse_moe.shared_experts"
+        dense_gate = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+        dense_up = dense_gate + 20
+        shared_gate = dense_gate + 40
+        shared_up = dense_gate + 60
+        dense_down = torch.ones((3, 4), dtype=torch.float32)
+        _write_safetensors_checkpoint(
+            src,
+            {
+                f"{dense_prefix}.gate_proj.weight": dense_gate,
+                f"{dense_prefix}.up_proj.weight": dense_up,
+                f"{dense_prefix}.down_proj.weight": dense_down,
+                f"{shared_prefix}.gate_proj.weight": shared_gate,
+                f"{shared_prefix}.up_proj.weight": shared_up,
+            },
+        )
+
+        config = SimpleNamespace(
+            model_type="minimax_m3_vl",
+            text_config=SimpleNamespace(model_type="minimax_m3_vl_text", num_local_experts=16),
+        )
+        pipeline = CheckpointTransformPipeline(
+            [MiniMaxM3DenseGateUpCheckpointTransform, DtypeConversionCheckpointTransform]
+        )
+        pipeline.apply(src, out, target_dtype=torch.float16, config=config)
+
+        tensors = _load_prepared_tensors(out)
+        torch.testing.assert_close(
+            tensors[f"{dense_prefix}.gate_up_proj.weight"],
+            torch.cat((dense_gate, dense_up), dim=0).to(torch.float16),
+        )
+        torch.testing.assert_close(
+            tensors[f"{shared_prefix}.gate_up_proj.weight"],
+            torch.cat((shared_gate, shared_up), dim=0).to(torch.float16),
+        )
+        torch.testing.assert_close(tensors[f"{dense_prefix}.down_proj.weight"], dense_down.to(torch.float16))
+        assert f"{dense_prefix}.gate_proj.weight" not in tensors
+        assert f"{dense_prefix}.up_proj.weight" not in tensors
+
     def test_resolver_accepts_moe_weight_aliases(self):
         checkpoint_index = {
             "model.layers.0.mlp.moe_weights.gate": "model.safetensors",
@@ -917,6 +952,65 @@ class TestWeightFreeCheckpointTransforms:
         backbone.base_model_prefix = "model"
 
         assert find_checkpoint_key(onnx_name, {checkpoint_name: "model.safetensors"}, backbone) == checkpoint_name
+
+    @pytest.mark.parametrize(
+        ("onnx_name", "checkpoint_name"),
+        [
+            (
+                "model.model.language_model.embed_tokens.weight",
+                "language_model.model.embed_tokens.weight",
+            ),
+            (
+                "model.model.language_model.layers.0.input_layernorm.weight",
+                "language_model.model.layers.0.input_layernorm.weight",
+            ),
+            ("model.lm_head.weight", "language_model.lm_head.weight"),
+        ],
+    )
+    def test_resolver_accepts_vlm_language_model_aliases(self, onnx_name, checkpoint_name):
+        backbone = MagicMock()
+        backbone.base_model_prefix = ""
+
+        assert find_checkpoint_key(onnx_name, {checkpoint_name: "model.safetensors"}, backbone) == checkpoint_name
+
+    @pytest.mark.parametrize("parameter_name", ["q_proj", "k_proj", "q_norm", "k_norm"])
+    def test_resolver_accepts_minimax_vlm_indexer_aliases(self, parameter_name):
+        onnx_name = f"model.model.language_model.layers.3.self_attn.indexer.{parameter_name}.weight"
+        checkpoint_name = f"language_model.model.layers.3.self_attn.index_{parameter_name}.weight"
+        backbone = MagicMock()
+        backbone.base_model_prefix = ""
+
+        assert find_checkpoint_key(onnx_name, {checkpoint_name: "model.safetensors"}, backbone) == checkpoint_name
+
+    def test_resolver_combines_vlm_alias_with_active_transform(self):
+        checkpoint_name = "language_model.model.layers.0.block_sparse_moe.router.weight"
+        backbone = MagicMock()
+        backbone.base_model_prefix = ""
+
+        assert (
+            find_checkpoint_key(
+                "model.model.language_model.layers.0.mlp.gate.weight",
+                {checkpoint_name: "model.safetensors"},
+                backbone,
+                MoEExpertStackingCheckpointTransform,
+            )
+            == checkpoint_name
+        )
+
+    def test_resolver_combines_vlm_router_bias_alias_with_active_transform(self):
+        checkpoint_name = "language_model.model.layers.3.block_sparse_moe.e_score_correction_bias"
+        backbone = MagicMock()
+        backbone.base_model_prefix = ""
+
+        assert (
+            find_checkpoint_key(
+                "language_model.layers.3.mlp.gate.e_score_correction_bias",
+                {checkpoint_name: "model.safetensors"},
+                backbone,
+                MoEExpertStackingCheckpointTransform,
+            )
+            == checkpoint_name
+        )
 
     def test_resolver_prefers_exact_router_gate_name(self):
         checkpoint_index = {
@@ -1093,7 +1187,6 @@ class TestWeightFreeCheckpointTransforms:
         assert [v.name for v in graph.inputs] == ["model.embed_tokens.weight"]
         assert spec.inputs[0].name == "model.embed_tokens.weight"
         assert spec.inputs[0].location.key == "model.embed_tokens.weight"
-        assert spec.external_data_root == str(tmp_path)
 
 
 def _fake_export(

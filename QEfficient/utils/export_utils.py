@@ -7,6 +7,7 @@
 
 import copy
 import inspect
+import os
 import re
 import warnings
 from collections import Counter
@@ -63,7 +64,9 @@ def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
     """Reorder example_inputs (and optional dynamic_shapes) to match model.forward signature.
 
     torch.export requires inputs and dynamic_shapes to follow the forward parameter order
-    so that each shape constraint binds to the correct input tensor.
+    so that each shape constraint binds to the correct input tensor. Non-input
+    dynamic_shapes entries are dropped because torch.export only accepts entries
+    matching real forward inputs.
     """
     sig_keys = list(inspect.signature(model.forward).parameters.keys())
     sig_key_set = set(sig_keys)
@@ -75,7 +78,7 @@ def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
             ordered_shapes[k] = dynamic_shapes[k]
     reordered_inputs = {**ordered_inputs, **{k: v for k, v in example_inputs.items() if k not in sig_key_set}}
     if dynamic_shapes is not None:
-        reordered_shapes = {**ordered_shapes, **{k: v for k, v in dynamic_shapes.items() if k not in sig_key_set}}
+        reordered_shapes = {k: dynamic_shapes.get(k, {}) for k in reordered_inputs}
         return reordered_inputs, reordered_shapes
     return reordered_inputs, None
 
@@ -90,7 +93,9 @@ def build_dynamo_export_kwargs(export_kwargs):
     from QEfficient.utils import constants
 
     kwargs = dict(export_kwargs)
-    kwargs.setdefault("report", False)
+    # The markdown report stringifies the full ExportedProgram (every FX node). On large
+    # unrolled prefill graphs that is minutes of pure overhead, so it is opt-in.
+    kwargs.setdefault("report", os.environ.get("QEFF_ONNX_EXPORT_REPORT", "0") == "1")
     kwargs.setdefault("optimize", False)
     kwargs["dynamo"] = True
     kwargs["opset_version"] = constants.ONNX_DYNAMO_EXPORT_OPSET
@@ -137,25 +142,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
 
     def resolve_dim(dim_name: str):
         if dim_name not in dim_registry:
-            if dim_name == "batch_size":
-                dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
-            elif dim_name == "full_batch_size":
-                # CB pool capacity; different min prevents torch.export collapsing it with batch_size.
-                dim_registry[dim_name] = Dim("full_batch_size", min=batch_min + 1, max=DYNAMO_DIM_MAX_BATCH_SIZE)
-            elif "seq_len" in dim_name:
-                dim_registry[dim_name] = Dim("seq_len", min=2, max=max_seq_len)
-            elif "comp_ctx_lengths" in dim_name:
-                dim_registry[dim_name] = Dim("comp_ctx_lengths", min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS, max=max_seq_len)
-            elif "ctx_len" in dim_name:
-                dim_registry[dim_name] = Dim("ctx_len", min=2, max=max_seq_len)
-            elif "sliding_window" in dim_name:
-                dim_registry[dim_name] = Dim(
-                    "sliding_window",
-                    min=2,
-                    max=getattr(model_config, "sliding_window", max_seq_len),
-                )
-            else:
-                dim_registry[dim_name] = Dim.DYNAMIC
+            dim_registry[dim_name] = Dim(dim_name)
         return dim_registry[dim_name]
 
     dynamic_shapes: Dict[str, Any] = {}
@@ -163,8 +150,14 @@ def convert_dynamic_axes_to_dynamic_shapes(
     past_values: Dict[int, Any] = {}
     compressed_kv_layers: Dict[int, Any] = {}
     k_pe_layers: Dict[int, Any] = {}
+    index_key_layers: Dict[int, Any] = {}
 
     for input_name, axes_map in dynamic_axes.items():
+        # ONNX dynamic_axes may include outputs so retained-state pairs share
+        # identical symbolic dimensions. torch.export dynamic_shapes accepts
+        # inputs only, so do not interpret retained outputs as cache inputs.
+        if input_name.endswith(("_RetainedState", "_InternalRetainedState")):
+            continue
         resolved = {axis_idx: resolve_dim(dim_name) for axis_idx, dim_name in axes_map.items()}
         if input_name.startswith("past_key."):
             past_keys[int(input_name.split(".")[1])] = resolved
@@ -174,6 +167,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
             compressed_kv_layers[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("k_pe."):
             k_pe_layers[int(input_name.split(".")[1])] = resolved
+        elif input_name.startswith("index_key."):
+            index_key_layers[int(input_name.split(".")[1])] = resolved
         else:
             dynamic_shapes[input_name] = resolved
 
@@ -188,6 +183,9 @@ def convert_dynamic_axes_to_dynamic_shapes(
         dynamic_shapes["compressed_kvs"] = [
             (compressed_kv_layers.get(i, {}), k_pe_layers.get(i, {})) for i in range(max_layer + 1)
         ]
+
+    if index_key_layers:
+        dynamic_shapes["index_keys"] = [index_key_layers[layer_idx] for layer_idx in sorted(index_key_layers)]
 
     return dynamic_shapes
 
@@ -425,10 +423,14 @@ def export_wrapper(func):
                 if use_onnx_subfunctions and dynamo
                 else nullcontext()
             )
+            # This is an inference export. Without no_grad, the first layer's
+            # input has requires_grad=False while later layer inputs have
+            # requires_grad=True. PyTorch's region comparison treats their
+            # otherwise identical bodies as different subgraphs.
+            grad_context = torch.no_grad() if use_onnx_subfunctions and dynamo else nullcontext()
             try:
-                with export_context:
-                    with dynamo_patch:
-                        onnx_path = func(self, *args, **kwargs)
+                with export_context, dynamo_patch, grad_context:
+                    onnx_path = func(self, *args, **kwargs)
             except Exception as export_exc:
                 QEFFLogger.log_api_failure("export", self.__class__.__name__, export_exc)
                 if use_onnx_subfunctions and dynamo:
@@ -538,7 +540,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
-        copy_of_hash_params["onnx_subfunction_version"] = 3
+        copy_of_hash_params["onnx_subfunction_version"] = 4
     # Generate hash from relevant parameters
     export_hash, filtered_hash_params = create_export_hash(
         model_params=copy_of_hash_params,
@@ -584,7 +586,7 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
     orig_hash_subfunction_version = qeff_model.hash_params.get("onnx_subfunction_version")
     qeff_model._use_onnx_subfunctions = True
     qeff_model.hash_params["use_onnx_subfunctions"] = True
-    qeff_model.hash_params["onnx_subfunction_version"] = 3
+    qeff_model.hash_params["onnx_subfunction_version"] = 4
     # TorchScript patches are irrelevant on the dynamo path.
     if not dynamo:
         apply_torch_patches()
@@ -593,20 +595,29 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
     # TorchScript renames _RetainedState → _InternalRetainedState; dynamo keeps _RetainedState for PreserveNestedCacheRetainedStateTransform.
     if not dynamo:
         if "output_names" in kwargs:
-            kwargs["output_names"] = [
-                re.sub("_RetainedState", "_InternalRetainedState", name)
-                if name.endswith("_RetainedState")
-                and (
-                    "key" in name
-                    or "value" in name
-                    or "compressed_kv" in name
-                    or "k_pe" in name
-                    or "conv" in name
-                    or "recurrent" in name
+            output_name_map = {}
+            rewritten_output_names = []
+            for name in kwargs["output_names"]:
+                rewritten_name = (
+                    re.sub("_RetainedState", "_InternalRetainedState", name)
+                    if name.endswith("_RetainedState")
+                    and (
+                        "key" in name
+                        or "value" in name
+                        or "compressed_kv" in name
+                        or "k_pe" in name
+                        or "conv" in name
+                        or "recurrent" in name
+                    )
+                    else name
                 )
-                else name
-                for name in kwargs["output_names"]
-            ]
+                output_name_map[name] = rewritten_name
+                rewritten_output_names.append(rewritten_name)
+            kwargs["output_names"] = rewritten_output_names
+            if "dynamic_axes" in kwargs:
+                kwargs["dynamic_axes"] = {
+                    output_name_map.get(name, name): axes for name, axes in kwargs["dynamic_axes"].items()
+                }
         else:
             warnings.warn(
                 "ONNX subfunctions are enabled, but no retained-state output names were found to rewrite. "

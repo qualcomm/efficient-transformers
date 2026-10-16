@@ -22,28 +22,6 @@ from QEfficient.utils.logging_utils import QEFFLogger
 logger = QEFFLogger.get_logger("INFRA")
 
 
-def huggingface_hub_cache_dir() -> Path:
-    """Return the Hugging Face Hub cache root used by ``snapshot_download``."""
-    if hf_hub_cache := os.environ.get("HF_HUB_CACHE"):
-        return Path(hf_hub_cache).expanduser()
-    if hf_home := os.environ.get("HF_HOME"):
-        return Path(hf_home).expanduser() / "hub"
-    if xdg_cache_home := os.environ.get("XDG_CACHE_HOME"):
-        return Path(xdg_cache_home).expanduser() / "huggingface" / "hub"
-    return Path.home() / ".cache" / "huggingface" / "hub"
-
-
-def _all_checkpoint_files_under(root: Path, checkpoint_files: Sequence[str]) -> bool:
-    """Return True when every checkpoint file is contained under ``root``."""
-    root = root.expanduser()
-    for checkpoint_file in checkpoint_files:
-        try:
-            Path(checkpoint_file).expanduser().relative_to(root)
-        except ValueError:
-            return False
-    return True
-
-
 def load_checkpoint_weights(checkpoint_path: str, keys: set[str]) -> dict[str, torch.Tensor]:
     """Read selected tensors from safetensors; pickle-backed PyTorch checkpoints are unsupported for security."""
     path = Path(checkpoint_path)
@@ -235,10 +213,6 @@ def checkpoint_root(model_id_or_path: str, checkpoint_files: Sequence[str]) -> P
     """
     if not checkpoint_files:
         return None
-
-    hf_cache_root = huggingface_hub_cache_dir()
-    if _all_checkpoint_files_under(hf_cache_root, checkpoint_files):
-        return hf_cache_root
 
     candidate = Path(model_id_or_path).expanduser()
     if candidate.exists():

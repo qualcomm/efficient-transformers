@@ -175,6 +175,88 @@ class DtypeConversionCheckpointTransform(BaseCheckpointTransform):
 
 
 # ---------------------------------------------------------------------------
+# MiniMax-M3 dense gate/up fusion
+# ---------------------------------------------------------------------------
+
+
+class MiniMaxM3DenseGateUpCheckpointTransform(BaseCheckpointTransform):
+    """Fuse serialized MiniMax-M3 dense gate/up weights for the live model layout."""
+
+    TRANSFORM_ID = "minimax_m3_dense_gate_up_fusion_v1"
+    _GATE_RE = re.compile(r"^(.+\.layers\.\d+\.(?:mlp|block_sparse_moe\.shared_experts))\.gate_proj\.weight$")
+
+    @classmethod
+    def is_applicable(cls, weight_map: Dict[str, str], **kwargs) -> bool:
+        config = kwargs.get("config")
+        model_types = {
+            getattr(config, "model_type", None),
+            getattr(getattr(config, "text_config", None), "model_type", None),
+        }
+        return bool({"minimax_m3_vl", "minimax_m3_vl_text"} & model_types) and any(
+            cls._GATE_RE.match(key) for key in weight_map
+        )
+
+    @classmethod
+    def plan_tasks(cls, context: CheckpointPlanningContext) -> None:
+        for gate_key, gate_shard in sorted(context.weight_map.items()):
+            match = cls._GATE_RE.match(gate_key)
+            if match is None:
+                continue
+
+            prefix = match.group(1)
+            up_key = f"{prefix}.up_proj.weight"
+            if up_key not in context.weight_map:
+                raise ValueError(f"MiniMax-M3 dense MLP is missing paired weight: {up_key}")
+
+            input_keys = (gate_key, up_key)
+            input_refs = _task_refs(input_keys)
+            output_key = f"{prefix}.gate_up_proj.weight"
+            output_ref = TensorRef(output_key, "fused")
+            layer_match = re.search(r"\.layers\.(\d+)\.", prefix)
+            layer_index = int(layer_match.group(1)) if layer_match else -1
+            component = "shared" if prefix.endswith("block_sparse_moe.shared_experts") else "dense"
+            output_file = f"minimax-gate-up-{component}-layer-{layer_index:05d}.safetensors"
+
+            def runner(get_tensor, target_dtype, input_refs=input_refs, output_ref=output_ref):
+                del target_dtype
+                gate = get_tensor(input_refs[0])
+                up = get_tensor(input_refs[1])
+                if gate.shape != up.shape:
+                    raise ValueError(
+                        f"MiniMax-M3 gate/up weight shapes must match, got {tuple(gate.shape)} and {tuple(up.shape)}."
+                    )
+                return {output_ref: torch.cat((gate, up), dim=0).contiguous()}
+
+            task_plan = CheckpointTaskPlan(
+                task_id=f"{cls.TRANSFORM_ID}:{prefix}",
+                input_refs=input_refs,
+                source_files=tuple(sorted({gate_shard, context.weight_map[up_key]})),
+                output_file=output_file,
+                estimated_peak_bytes=_estimate_task_bytes(
+                    context.source_dir,
+                    context.weight_map,
+                    input_keys,
+                    context.target_dtype,
+                ),
+                params=TaskParams(
+                    cls.TRANSFORM_ID,
+                    _task_values(output_key=output_key, output_file=output_file),
+                ),
+            )
+            task_plan.append_stage(
+                CheckpointStage(
+                    stage_id="fuse_gate_up",
+                    input_refs=input_refs,
+                    output_refs=(output_ref,),
+                    params=TaskParams(cls.TRANSFORM_ID, _task_values(output_key=output_key)),
+                    runner=runner,
+                    labels=("gate_up_fusion",),
+                )
+            )
+            context.add_task_plan(task_plan)
+
+
+# ---------------------------------------------------------------------------
 # Internal stacker helper for MoE layers
 # ---------------------------------------------------------------------------
 
@@ -250,8 +332,9 @@ class MoEExpertStackingCheckpointTransform(BaseCheckpointTransform):
         *.moe_weights.down [E, I, H]   (down weights, transposed)
 
     matching the derived parameter layout that OptimizedMoETransform creates.
-    Expert-parallel packing and dtype conversion are independent later stages
-    attached by the shared planning context.
+    Dtype conversion is an independent later stage attached by the shared
+    planning context. Expert-parallel prefill reads these canonical tensors
+    directly and selects each pipeline slot's experts in the graph.
     """
 
     TRANSFORM_ID = "moe_expert_stacking_v1"
@@ -312,8 +395,9 @@ class GptOssMxfp4ExpertDequantSplitCheckpointTransform(BaseCheckpointTransform):
         *.moe_weights.down_bias [E, H]       (dtype-converted)
 
     matching the derived parameter layout that OptimizedMoETransform creates.
-    Expert-parallel packing and dtype conversion are independent later stages
-    attached by the shared planning context.
+    Dtype conversion is an independent later stage attached by the shared
+    planning context. Expert-parallel prefill reads these canonical tensors
+    directly and selects each pipeline slot's experts in the graph.
     """
 
     TRANSFORM_ID = "gptoss_mxfp4_dequant_v1"
@@ -413,20 +497,6 @@ class FusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
 # ---------------------------------------------------------------------------
 
 
-class ExpertParallelPackingCheckpointTransform(BaseCheckpointTransform):
-    """Append expert-parallel packing to canonical MoE tensor groups."""
-
-    TRANSFORM_ID = "expert_parallel_pack_v1"
-
-    @classmethod
-    def is_applicable(cls, weight_map: Dict[str, str], **kwargs) -> bool:
-        return kwargs.get("hash_params", {}).get("moe_prefill_flavour") == "expert_parallel"
-
-    @classmethod
-    def plan_tasks(cls, context: CheckpointPlanningContext) -> None:
-        _plan_expert_parallel_stages(cls, context)
-
-
 def _estimate_task_bytes(
     src: Optional[Path],
     weight_map: Dict[str, str],
@@ -464,10 +534,8 @@ def _estimate_gptoss_task_bytes(
     weight_map: Dict[str, str],
     keys,
     target_dtype: torch.dtype,
-    *,
-    packed: bool,
 ) -> int:
-    """Estimate MXFP4 inputs, dequantized temporaries, final outputs, and packing."""
+    """Estimate MXFP4 inputs, dequantized temporaries, and final outputs."""
     if src is None or not keys:
         return 1
 
@@ -488,28 +556,8 @@ def _estimate_gptoss_task_bytes(
             elif key.endswith("_bias"):
                 final_output_bytes += elements * target_element_size
 
-    output_copies = 3 if packed else 2
+    output_copies = 2
     return max(1, source_bytes + final_output_bytes * output_copies)
-
-
-def _expert_parallel_params(hash_params: Dict) -> Optional[Tuple[int, int]]:
-    if hash_params.get("moe_prefill_flavour") != "expert_parallel":
-        return None
-
-    pipeline_stages = hash_params.get("moe_prefill_num_pipeline_stages")
-    parallelized_experts = hash_params.get("moe_prefill_num_parallelized_experts")
-    if pipeline_stages is None or parallelized_experts is None:
-        raise ValueError(
-            "expert_parallel flavour requires moe_prefill_num_pipeline_stages "
-            "and moe_prefill_num_parallelized_experts in hash_params."
-        )
-
-    pipeline_stages = int(pipeline_stages)
-    parallelized_experts = int(parallelized_experts)
-    if pipeline_stages <= 0 or parallelized_experts <= 0:
-        raise ValueError("expert_parallel pipeline stages and parallelized experts must be positive.")
-
-    return pipeline_stages, parallelized_experts
 
 
 def _task_refs(keys, stage="raw") -> tuple[TensorRef, ...]:
@@ -663,64 +711,6 @@ def _plan_dtype_stages(cls, context: CheckpointPlanningContext) -> None:
         context.add_task_plan(task_plan)
 
 
-def _plan_expert_parallel_stages(cls, context: CheckpointPlanningContext) -> None:
-    pack_params = _expert_parallel_params(context.hash_params)
-    if pack_params is None:
-        return
-
-    from QEfficient.transformers.moe.weights import _pack_expert_parallel_tensor
-
-    for task_plan in context.task_plans:
-        if task_plan.params.transform_id not in {
-            MoEExpertStackingCheckpointTransform.TRANSFORM_ID,
-            GptOssMxfp4ExpertDequantSplitCheckpointTransform.TRANSFORM_ID,
-            FusedExpertSplitCheckpointTransform.TRANSFORM_ID,
-        }:
-            continue
-
-        num_experts = task_plan.params.as_dict().get("num_experts")
-        if num_experts is not None and num_experts != pack_params[0] * pack_params[1]:
-            raise ValueError(
-                f"Checkpoint task {task_plan.task_id} has {num_experts} experts, but expert_parallel layout "
-                f"requires P * E/P = {pack_params[0] * pack_params[1]}."
-            )
-
-        input_refs = task_plan.current_refs
-        output_refs = tuple(TensorRef(ref.key, "packed") for ref in input_refs)
-
-        def runner(get_tensor, target_dtype, input_refs=input_refs, output_refs=output_refs):
-            outputs = {}
-            for input_ref, output_ref in zip(input_refs, output_refs):
-                tensor = get_tensor(input_ref)
-                outputs[output_ref] = (
-                    _pack_expert_parallel_tensor(
-                        tensor,
-                        num_pipeline_stages=pack_params[0],
-                        num_parallelized_experts=pack_params[1],
-                    ).data
-                    if tensor.is_floating_point()
-                    else tensor
-                )
-            return outputs
-
-        task_plan.append_stage(
-            CheckpointStage(
-                stage_id="expert_parallel_pack",
-                input_refs=input_refs,
-                output_refs=output_refs,
-                params=TaskParams(
-                    cls.TRANSFORM_ID,
-                    _task_values(
-                        parallelized_experts=pack_params[1],
-                        pipeline_stages=pack_params[0],
-                    ),
-                ),
-                runner=runner,
-                labels=("expert_parallel_pack",),
-            )
-        )
-
-
 def _expert_entries_for_plan(cls, weight_map):
     entries: Dict[int, Dict[Tuple[int, str], Tuple[str, str]]] = {}
     prefixes: Dict[int, str] = {}
@@ -752,8 +742,6 @@ def _expert_entries_for_plan(cls, weight_map):
 def _plan_expert_stages(cls, context: CheckpointPlanningContext) -> None:
     entries_by_layer, prefixes = _expert_entries_for_plan(cls, context.weight_map)
     declared_num_experts = _declared_num_experts(context.config)
-    packed = _expert_parallel_params(context.hash_params) is not None
-
     for layer_index in sorted(entries_by_layer):
         layer_entries = entries_by_layer[layer_index]
         expert_indices = {expert for expert, _ in layer_entries}
@@ -797,7 +785,6 @@ def _plan_expert_stages(cls, context: CheckpointPlanningContext) -> None:
                 context.weight_map,
                 input_keys,
                 context.target_dtype,
-                output_copies=2 if packed else 1,
             ),
             params=TaskParams(
                 cls.TRANSFORM_ID,
@@ -848,8 +835,6 @@ def _gptoss_locations_for_plan(cls, weight_map):
 
 def _plan_gptoss_stages(cls, context: CheckpointPlanningContext) -> None:
     locations_by_layer, biases, prefixes = _gptoss_locations_for_plan(cls, context.weight_map)
-    packed = _expert_parallel_params(context.hash_params) is not None
-
     for layer_index in sorted(locations_by_layer):
         locations = locations_by_layer[layer_index]
         input_keys = [
@@ -919,7 +904,6 @@ def _plan_gptoss_stages(cls, context: CheckpointPlanningContext) -> None:
                 context.weight_map,
                 input_keys,
                 context.target_dtype,
-                packed=packed,
             ),
             params=TaskParams(
                 cls.TRANSFORM_ID,
@@ -953,7 +937,6 @@ def _plan_fused_stages(cls, context: CheckpointPlanningContext) -> None:
         if match:
             keys_by_prefix.setdefault(match.group(1), []).append(canonical_key)
 
-    packed = _expert_parallel_params(context.hash_params) is not None
     for group_index, prefix in enumerate(sorted(keys_by_prefix)):
         canonical_keys = tuple(sorted(keys_by_prefix[prefix]))
         required_keys = {f"{prefix}.gate_up_proj", f"{prefix}.down_proj"}
@@ -1033,7 +1016,6 @@ def _plan_fused_stages(cls, context: CheckpointPlanningContext) -> None:
                 context.weight_map,
                 raw_keys,
                 context.target_dtype,
-                output_copies=2 if packed else 1,
             ),
             params=TaskParams(
                 cls.TRANSFORM_ID,

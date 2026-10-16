@@ -63,6 +63,7 @@ def export_via_legacy(
             dynamic_axes=dynamic_axes,
             dynamo=False,
             opset_version=constants.ONNX_LEGACY_EXPORT_OPSET,
+            verbose=True,
             **export_kwargs,
         )
     return ExportResult(onnx_path=onnx_path)

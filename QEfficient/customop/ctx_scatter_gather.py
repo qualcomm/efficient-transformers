@@ -333,7 +333,7 @@ class CtxGatherFuncBlockedKV(torch.autograd.Function):
 # compile time) so batch and KV-head are pre-flattened onto one axis that
 # matches a B*Hkv physical core/device layout 1:1.
 # ─────────────────────────────────────────────────────────────────────────────
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
+@qeff_custom_op("com.qualcomm.cloud", 1)
 def CtxChunkScatterBatch(
     data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates: onnxscript.FLOAT
 ) -> onnxscript.FLOAT:
@@ -412,7 +412,7 @@ class CtxChunkScatterBatchFunc(torch.autograd.Function):
         return g.onnxscript_op(CtxChunkScatterBatch, data, position_ids, updates).setTypeAs(data)
 
 
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
+@qeff_custom_op("com.qualcomm.cloud", 1)
 def CtxGatherBlockedKVBatch(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxscript.FLOAT:
     # data [1, BH, T, D], ctx_indices [1, BH, T_block]  (BH = B*NKVH, static at compile time)
     # batch_dims=2: checks data.shape[0]==indices.shape[0] (1==1) and
@@ -444,7 +444,7 @@ class CtxGatherFuncBlockedKVBatch(torch.autograd.Function):
         return g.onnxscript_op(CtxGatherBlockedKVBatch, data, ctx_indices).setTypeAs(data)
 
 
-@onnxscript.script(onnxscript.values.Opset("com.qualcomm.cloud", 1))
+@qeff_custom_op("com.qualcomm.cloud", 1)
 def CtxGatherPagedAttention(
     data: onnxscript.FLOAT, block_indices: onnxscript.INT32, ctx_indices: onnxscript.INT32
 ) -> onnxscript.FLOAT:
@@ -487,3 +487,385 @@ class CtxGatherFuncPagedAttention(torch.autograd.Function):
         g: torch.Graph, data: torch.Value, block_indices: torch.Value, ctx_indices: torch.Value
     ) -> torch.Value:
         return g.onnxscript_op(CtxGatherPagedAttention, data, block_indices, ctx_indices).setTypeAs(data)
+
+
+# ---------------------------------------------------------------------------
+# MiniMax-M3 indexer scatter
+# Identical semantics to CtxScatter but casts position_ids to INT64 before
+# building ScatterND indices so that all three index tensors (batch_idx,
+# head_idx, ctx_idx) share the same INT64 element type.  Without this cast
+# ctx_idx stays INT32 while batch_idx/head_idx are INT64 (derived from
+# Shape → Gather), producing a mixed-type Concat that triggers the QAIC
+# compiler assertion "sameSameShapeExceptDim: Different types".
+# ---------------------------------------------------------------------------
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def M3CtxScatter(data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates: onnxscript.FLOAT) -> onnxscript.FLOAT:
+    batch_size = ops.Gather(ops.Shape(data), [0])
+    num_heads = ops.Gather(ops.Shape(data), [1])
+    seq_len = ops.Gather(ops.Shape(position_ids), [1])
+    zero = ops.Constant(value_ints=[0])
+    one = ops.Constant(value_ints=[1])
+    exp_shape = ops.Concat(batch_size, num_heads, seq_len, one, axis=0)
+    batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2, 3]), exp_shape)
+    head_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_heads, one), [0, 2, 3]), exp_shape)
+    ctx_idx = ops.Expand(ops.Unsqueeze(ops.Cast(position_ids, to=onnxscript.INT64.dtype), [1, 3]), exp_shape)
+    indices = ops.Concat(batch_idx, head_idx, ctx_idx, axis=3)
+    return ops.ScatterND(data, indices, updates)
+
+
+class M3CtxScatterFunc(torch.autograd.Function):
+    """Scatter idx_k into the MiniMax-M3 index-key cache at position_ids."""
+
+    @staticmethod
+    def forward(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+        # Keep eager/export tracing semantics aligned with the MiniMax M3
+        # reference implementation.  In particular, the cache must be cloned
+        # before the indexed update and position_ids must be expanded across
+        # the cache-head dimension.  The latter is important for prefill,
+        # where updates have shape [B, H, Q, D].
+        batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
+        head_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+        out = data.clone()
+        out[batch_idx, head_idx, position_ids.long().unsqueeze(1)] = updates
+        return out
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, position_ids: torch.Value, updates: torch.Value) -> torch.Value:
+        return g.onnxscript_op(M3CtxScatter, data, position_ids, updates).setTypeAs(data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DP-layout ops for MiniMax M3 MSA indexer and attention (com.qti.aisw.onnx).
+# These mirror the benchmark's DP-path custom ops and use the qti.aisw namespace
+# so the QAIC compiler can pattern-match them to efficient on-chip implementations.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _symbolic_sizes(value: "torch.Value"):
+    try:
+        sizes = value.type().sizes()
+    except Exception:
+        return None
+    return tuple(sizes) if sizes is not None else None
+
+
+def _set_gather_output_type(output: "torch.Value", data: "torch.Value", indices: "torch.Value") -> "torch.Value":
+    data_sizes = _symbolic_sizes(data)
+    index_sizes = _symbolic_sizes(indices)
+    if data_sizes is None or len(data_sizes) != 4:
+        return output
+    gathered_len = index_sizes[2] if index_sizes is not None and len(index_sizes) == 3 else None
+    try:
+        output.setType(data.type().with_sizes((data_sizes[0], data_sizes[1], gathered_len, data_sizes[3])))
+    except Exception:
+        pass
+    return output
+
+
+def _set_paged_gather_output_type(
+    output: "torch.Value", data: "torch.Value", block_ids: "torch.Value"
+) -> "torch.Value":
+    data_sizes = _symbolic_sizes(data)
+    id_sizes = _symbolic_sizes(block_ids)
+    if data_sizes is None or len(data_sizes) != 4 or id_sizes is None or len(id_sizes) != 2:
+        return output
+    num_pages = id_sizes[0]
+    page_size = data_sizes[2]
+    token_len = num_pages * page_size if isinstance(num_pages, int) and isinstance(page_size, int) else None
+    try:
+        output.setType(data.type().with_sizes((1, data_sizes[1], token_len, data_sizes[3])))
+    except Exception:
+        pass
+    return output
+
+
+def _set_block_gather_output_type(
+    output: "torch.Value", data: "torch.Value", block_ids: "torch.Value"
+) -> "torch.Value":
+    data_sizes = _symbolic_sizes(data)
+    id_sizes = _symbolic_sizes(block_ids)
+    if data_sizes is None or len(data_sizes) != 5 or id_sizes is None or len(id_sizes) != 3:
+        return output
+    try:
+        output.setType(
+            data.type().with_sizes((data_sizes[0], data_sizes[1], id_sizes[2], data_sizes[3], data_sizes[4]))
+        )
+    except Exception:
+        pass
+    return output
+
+
+# @qeff_custom_op("com.qti.aisw.onnx", 1)
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxPagedScatterDP(
+    data: onnxscript.FLOAT,
+    block_id: onnxscript.INT32,
+    addr: onnxscript.INT32,
+    updates: onnxscript.FLOAT,
+) -> onnxscript.FLOAT:
+    update_shape = ops.Shape(updates)
+    batch_size = ops.Gather(update_shape, [0])
+    num_rows = ops.Gather(update_shape, [1])
+    seq_len = ops.Gather(update_shape, [2])
+    zero = ops.Constant(value_ints=[0])
+    one = ops.Constant(value_ints=[1])
+    exp_shape = ops.Concat(batch_size, num_rows, seq_len, one, axis=0)
+    row_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_rows, one), [0, 2, 3]), exp_shape)
+    indices = ops.Concat(
+        ops.Unsqueeze(ops.Cast(block_id, to=7), [-1]),
+        ops.Cast(row_idx, to=7),
+        ops.Unsqueeze(ops.Cast(addr, to=7), [-1]),
+        axis=3,
+    )
+    return ops.ScatterND(data, indices, updates)
+
+
+class CtxPagedScatterFuncDP(torch.autograd.Function):
+    """Paged scatter for GP-layout KV caches (block_id, addr addressing).
+
+    data:    [physical_blocks, rows, slot_size, D]
+    block_id: [B_local, rows, seq_len] – logical block (= batch-local index for non-paged)
+    addr:    [B_local, rows, seq_len] – position within the block
+    updates: [B_local, rows, seq_len, D]
+    """
+
+    @staticmethod
+    def forward(data: torch.Tensor, block_id: torch.Tensor, addr: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+        batch, rows, seq_len, _ = updates.shape
+        row_idx = torch.arange(rows, device=data.device).view(1, rows, 1).expand(batch, rows, seq_len)
+        out = data.clone()
+        valid = block_id != torch.iinfo(torch.int32).max
+        out[block_id[valid].long(), row_idx[valid], addr[valid].long()] = updates[valid]
+        return out
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(
+        g: torch.Graph, data: torch.Value, block_id: torch.Value, addr: torch.Value, updates: torch.Value
+    ) -> torch.Value:
+        return g.onnxscript_op(CtxPagedScatterDP, data, block_id, addr, updates).setTypeAs(data)
+
+
+# @qeff_custom_op("com.qti.aisw.onnx", 1)
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxPagedScatterPage(
+    data: onnxscript.FLOAT, block_id: onnxscript.INT32, updates: onnxscript.FLOAT
+) -> onnxscript.FLOAT:
+    """Scatter complete pages into a physical page pool.
+
+    ``data`` is ``[physical_pages, heads, page_size, dim]``;
+    ``block_id`` is ``[pages, heads]`` and ``updates`` is
+    ``[pages, heads, page_size, dim]``.
+    """
+    update_shape = ops.Shape(updates)
+    num_pages = ops.Gather(update_shape, [0])
+    num_heads = ops.Gather(update_shape, [1])
+    zero = ops.Constant(value_ints=[0])
+    one = ops.Constant(value_ints=[1])
+    head_idx = ops.Expand(
+        ops.Unsqueeze(ops.Range(zero, num_heads, one), [0]),
+        ops.Concat(num_pages, num_heads, axis=0),
+    )
+    indices = ops.Concat(
+        ops.Unsqueeze(ops.Cast(block_id, to=7), [-1]),
+        ops.Unsqueeze(ops.Cast(head_idx, to=7), [-1]),
+        axis=2,
+    )
+    return ops.ScatterND(data, indices, updates)
+
+
+class CtxPagedScatterFuncPage(torch.autograd.Function):
+    """Whole-page scatter matching the MSA microbenchmark ABI."""
+
+    @staticmethod
+    def forward(data: torch.Tensor, block_id: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+        out = data.clone()
+        valid = block_id != torch.iinfo(torch.int32).max
+        page_idx = block_id.long()
+        heads = torch.arange(data.shape[1], device=data.device).view(1, -1).expand_as(block_id)
+        out[page_idx[valid], heads[valid]] = updates[valid]
+        return out
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, block_id: torch.Value, updates: torch.Value) -> torch.Value:
+        return g.onnxscript_op(CtxPagedScatterPage, data, block_id, updates).setTypeAs(data)
+
+
+# @qeff_custom_op("com.qti.aisw.onnx", 1)
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxGatherBlockedKVDP(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxscript.FLOAT:
+    return ops.GatherND(data, ops.Unsqueeze(ctx_indices, [-1]), batch_dims=2)
+
+
+class CtxGatherFuncBlockedKVDP(torch.autograd.Function):
+    """Blocked KV gather for GP-layout caches with per-row (DP-aware) index validity.
+
+    data:        [B_local, rows, ctx_len, D]
+    ctx_indices: [B_local, rows, block_len]  – INT32; INT32_MAX → invalid (reads index 0)
+    Returns:     [B_local, rows, block_len, D]
+    """
+
+    @staticmethod
+    def forward(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+        batch_indices = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
+        row_indices = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+        ctx_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+        return data[batch_indices, row_indices, ctx_indices.long()]
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, ctx_indices: torch.Value) -> torch.Value:
+        output = g.onnxscript_op(CtxGatherBlockedKVDP, data, ctx_indices)
+        return _set_gather_output_type(output, data, ctx_indices)
+
+
+# @qeff_custom_op("com.qti.aisw.onnx", 1)
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxGatherPagedKVDP(data: onnxscript.FLOAT, block_ids: onnxscript.INT32) -> onnxscript.FLOAT:
+    # data: [physical_blocks, rows, page_size, D]
+    # block_ids: [num_pages, rows]
+    data_shape = ops.Shape(data)
+    ids_shape = ops.Shape(block_ids)
+    num_rows = ops.Gather(data_shape, [1])
+    page_size = ops.Gather(data_shape, [2])
+    head_dim = ops.Gather(data_shape, [3])
+    num_pages = ops.Gather(ids_shape, [0])
+    zero = ops.Constant(value_ints=[0])
+    one = ops.Constant(value_ints=[1])
+    row_idx = ops.Expand(
+        ops.Unsqueeze(ops.Range(zero, num_rows, one), [0]),
+        ops.Concat(num_pages, num_rows, axis=0),
+    )
+    indices = ops.Concat(
+        ops.Unsqueeze(ops.Cast(block_ids, to=7), [-1]),
+        ops.Unsqueeze(ops.Cast(row_idx, to=7), [-1]),
+        axis=2,
+    )
+    pages = ops.GatherND(data, indices, batch_dims=0)
+    pages = ops.Transpose(pages, perm=[1, 0, 2, 3])
+    return ops.Reshape(
+        pages,
+        ops.Concat(one, num_rows, ops.Mul(num_pages, page_size), head_dim, axis=0),
+    )
+
+
+class CtxGatherFuncPagedKVDP(torch.autograd.Function):
+    """Paged gather that assembles contiguous KV from a physical page pool.
+
+    data:      [physical_blocks, rows, page_size, D]
+    block_ids: [num_pages, rows]  – physical block IDs; INT32_MAX → reads page 0
+    Returns:   [1, rows, num_pages * page_size, D]
+    """
+
+    @staticmethod
+    def forward(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids)
+        num_pages, rows = block_ids.shape
+        _, data_rows, page_size, head_dim = data.shape
+        if rows != data_rows:
+            raise ValueError("Paged GQA gather block-id rows must match pool rows.")
+        row_idx = torch.arange(rows, device=data.device).view(1, rows)
+        pages = data[block_ids.long(), row_idx]
+        return pages.permute(1, 0, 2, 3).reshape(1, rows, num_pages * page_size, head_dim)
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, block_ids: torch.Value) -> torch.Value:
+        output = g.onnxscript_op(CtxGatherPagedKVDP, data, block_ids)
+        return _set_paged_gather_output_type(output, data, block_ids)
+
+
+# @qeff_custom_op("com.qti.aisw.onnx", 1)
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxGatherPagedKVHeads(data: onnxscript.FLOAT, block_ids: onnxscript.INT32) -> onnxscript.FLOAT:
+    """Gather pages for head-major IDs: ``[pages, heads] -> [1, heads, tokens, D]``."""
+    data_shape = ops.Shape(data)
+    ids_shape = ops.Shape(block_ids)
+    num_heads = ops.Gather(ids_shape, [1])
+    page_size = ops.Gather(data_shape, [2])
+    head_dim = ops.Gather(data_shape, [3])
+    num_pages = ops.Gather(ids_shape, [0])
+    zero = ops.Constant(value_ints=[0])
+    one = ops.Constant(value_ints=[1])
+    head_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, num_heads, one), [0]), ids_shape)
+    indices = ops.Concat(
+        ops.Unsqueeze(ops.Cast(block_ids, to=7), [-1]),
+        ops.Unsqueeze(ops.Cast(head_idx, to=7), [-1]),
+        axis=2,
+    )
+    pages = ops.GatherND(data, indices, batch_dims=0)
+    pages = ops.Transpose(pages, perm=[1, 0, 2, 3])
+    return ops.Reshape(pages, ops.Concat(one, num_heads, ops.Mul(num_pages, page_size), head_dim, axis=0))
+
+
+class CtxGatherFuncPagedKVHeads(torch.autograd.Function):
+    """Head-aware whole-page gather matching the MSA microbenchmark."""
+
+    @staticmethod
+    def forward(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids)
+        num_pages, heads = block_ids.shape
+        if heads != data.shape[1]:
+            raise ValueError("Paged head gather IDs must match the cache head dimension.")
+        head_idx = torch.arange(heads, device=data.device).view(1, heads)
+        pages = data[block_ids.long(), head_idx]
+        return pages.permute(1, 0, 2, 3).reshape(1, heads, num_pages * data.shape[2], data.shape[3])
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, block_ids: torch.Value) -> torch.Value:
+        output = g.onnxscript_op(CtxGatherPagedKVHeads, data, block_ids)
+        return _set_paged_gather_output_type(output, data, block_ids)
+
+
+# @qeff_custom_op("com.qti.aisw.onnx", 1)
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxGatherBlockRangeKVDP(data: onnxscript.FLOAT, block_ids: onnxscript.INT32) -> onnxscript.FLOAT:
+    # data: [B_local, rows, cache_blocks, block_size, D]
+    # ids:  [B_local, rows, selected_blocks]
+    return ops.GatherND(data, ops.Unsqueeze(block_ids, [-1]), batch_dims=2)
+
+
+class CtxGatherFuncBlockRangeKVDP(torch.autograd.Function):
+    """Block-range gather for 5-D GP caches (cache laid out as blocks).
+
+    data:      [B_local, rows, cache_blocks, block_size, D]
+    block_ids: [B_local, rows, selected_blocks]  – INT32_MAX → reads block 0
+    Returns:   [B_local, rows, selected_blocks, block_size, D]
+    """
+
+    @staticmethod
+    def forward(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        batch_indices = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
+        row_indices = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+        block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, 0, block_ids)
+        return data[batch_indices, row_indices, block_ids.long()]
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(g: torch.Graph, data: torch.Value, block_ids: torch.Value) -> torch.Value:
+        output = g.onnxscript_op(CtxGatherBlockRangeKVDP, data, block_ids)
+        return _set_block_gather_output_type(output, data, block_ids)

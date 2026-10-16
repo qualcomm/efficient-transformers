@@ -18,14 +18,13 @@ from pathlib import Path
 from typing import Any, List, Optional
 from unittest.mock import patch
 
-import numpy as np
 import onnx
 import pytest
 import torch
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, helper
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
-from QEfficient.base.modeling_qeff import _weight_free_external_data_root, generate_mdp_compiler_dump
+from QEfficient.base.modeling_qeff import generate_mdp_compiler_dump
 from QEfficient.compile.mdp_generator import (
     _get_layer_num_from_inputs,
     _layer_partition_bounds,
@@ -37,6 +36,25 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 VOCAB_SIZE = 500
 CTX_LEN = 32
 SEQ_LEN = 8
+
+
+@pytest.mark.cpu_only
+def test_align_retained_state_output_shapes_copies_full_input_contract():
+    input_shape = ["main_kv_batch_size", 4, "main_kv_ctx_len", 8]
+    generated_output_shape = ["generated_batch", 4, "generated_ctx", "generated_dim"]
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["past_key.1"], ["past_key.1_InternalRetainedState"])],
+        "retained-state-shape-alignment",
+        [helper.make_tensor_value_info("past_key.1", TensorProto.FLOAT, input_shape)],
+        [helper.make_tensor_value_info("past_key.1_InternalRetainedState", TensorProto.FLOAT, generated_output_shape)],
+    )
+    model = helper.make_model(graph)
+
+    _align_retained_state_output_shapes(model)
+
+    input_dims = model.graph.input[0].type.tensor_type.shape.dim
+    output_dims = model.graph.output[0].type.tensor_type.shape.dim
+    assert [dim.SerializeToString() for dim in output_dims] == [dim.SerializeToString() for dim in input_dims]
 
 
 def make_tiny_gpt2():
@@ -364,6 +382,31 @@ class TestQEFFBaseModelTransformBlocking:
 
         assert captured_kwargs["num_devices"] == expected_moe_num_devices
 
+    def test_transform_uses_decode_seq_len_when_prefill_seq_len_is_missing(self, monkeypatch):
+        from QEfficient.base import modeling_qeff
+
+        model, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model)
+        captured_kwargs = {}
+
+        def fake_moe_apply(model, **kwargs):
+            captured_kwargs.update(kwargs)
+            return model, False
+
+        monkeypatch.setattr(modeling_qeff.OptimizedMoETransform, "apply", staticmethod(fake_moe_apply))
+
+        qeff.transform(
+            ctx_len=32,
+            seq_len=1,
+            bs=1,
+            num_devices=8,
+            qaic_config={"moe_config": {"flavour": "expert_parallel", "expert_parallel_chunk_size": 8}},
+            aic_num_cores=16,
+            prefill_only=False,
+        )
+
+        assert captured_kwargs["prefill_seq_len"] == 1
+
     def test_transform_rejects_invalid_mdp_num_partitions_for_moe_transform(self):
         model, _ = make_tiny_gpt2()
         qeff = QEFFAutoModelForCausalLM(model)
@@ -553,11 +596,7 @@ def _bounds_to_layer_counts(bounds: List[int], total_layers: int) -> List[int]:
     return [pts[i + 1] - pts[i] for i in range(len(pts) - 1)]
 
 
-def _build_synthetic_gpt2_onnx(
-    num_layers: int,
-    out_path: Path,
-    external_data_file: Optional[str] = None,
-) -> None:
+def _build_synthetic_gpt2_onnx(num_layers: int, out_path: Path) -> None:
     """Write a minimal ONNX graph whose nodes carry 'h.N' transformer-layer names.
 
     The graph has topology: embed_tokens -> h.0/* -> h.1/* -> ... -> lm_head.
@@ -566,14 +605,7 @@ def _build_synthetic_gpt2_onnx(
     ONNX strategy end-to-end without loading a real model.
     """
     nodes: List[Any] = []
-    initializers: List[Any] = []
-    if external_data_file is None:
-        nodes.append(helper.make_node("Identity", inputs=["input_ids"], outputs=["embed_out"], name="embed_tokens"))
-    else:
-        initializers.append(numpy_helper.from_array(np.zeros((1, 8), dtype=np.float32), name="embed_bias"))
-        nodes.append(
-            helper.make_node("Add", inputs=["input_ids", "embed_bias"], outputs=["embed_out"], name="embed_tokens")
-        )
+    nodes.append(helper.make_node("Identity", inputs=["input_ids"], outputs=["embed_out"], name="embed_tokens"))
     prev_out = "embed_out"
     for layer_idx in range(num_layers):
         attn_out = f"attn_out_{layer_idx}"
@@ -588,21 +620,9 @@ def _build_synthetic_gpt2_onnx(
         "synthetic_gpt2_graph",
         [helper.make_tensor_value_info("input_ids", TensorProto.FLOAT, [1, 8])],
         [helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 8, 500])],
-        initializer=initializers,
     )
     onnx_model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
-    if external_data_file is None:
-        onnx.save(onnx_model, str(out_path))
-        return
-
-    onnx.save_model(
-        onnx_model,
-        str(out_path),
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location=external_data_file,
-        size_threshold=0,
-    )
+    onnx.save(onnx_model, str(out_path))
 
 
 def _fake_subprocess_run(command: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
@@ -757,33 +777,6 @@ class TestMdpCompileIntegration:
             )
 
         return compile_dir, onnx_path, qeff
-
-    def _write_weight_free_sidecar(self, tmp_path: Path, onnx_path: Path, monkeypatch) -> Path:
-        """Create a minimal weight_spec.json and checkpoint root for weight-free compile tests."""
-        hf_cache = tmp_path / "hf_cache"
-        checkpoint_path = hf_cache / "models--org--model" / "snapshots" / "prepared" / "model.safetensors"
-        checkpoint_path.parent.mkdir(parents=True)
-        checkpoint_path.write_bytes(b"FAKE_SAFE_TENSORS")
-        monkeypatch.setenv("HF_HUB_CACHE", str(hf_cache))
-
-        weight_spec_path = onnx_path.with_name("weight_spec.json")
-        weight_spec_path.write_text(
-            json.dumps(
-                {
-                    "files": [
-                        {
-                            "format": "safetensors",
-                            "path": "models--org--model/snapshots/prepared/model.safetensors",
-                        }
-                    ],
-                    "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
-                    "model_id": str(checkpoint_path.parent),
-                    "model_name": "GPT2LMHeadModel",
-                    "version": 5,
-                }
-            )
-        )
-        return hf_cache
 
     def test_mdp_disagg_json_is_created(self, compile_workspace):
         """mdp_disagg_4d_2p.json is written to compile_dir when mdp_num_partitions=2."""
@@ -1040,91 +1033,6 @@ class TestMdpCompileIntegration:
             f"Expected mdp_strategy='onnx' in qconfig compiler_config, got {compiler_cfg.get('mdp_strategy')}"
         )
 
-    def test_weight_free_mdp_compile_sets_external_data_root(self, compile_workspace, monkeypatch):
-        """Weight-free MDP compilation passes external checkpoint root to qaic-compile."""
-        tmp_path, onnx_path, compile_dir = compile_workspace
-        external_data_root = self._write_weight_free_sidecar(tmp_path, onnx_path, monkeypatch)
-        model_hf, _ = make_tiny_gpt2()
-        qeff = QEFFAutoModelForCausalLM(model_hf, weight_free=True)
-
-        with patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_fake_subprocess_run) as run_mock:
-            qeff._compile(
-                onnx_path=str(onnx_path),
-                compile_dir=str(compile_dir),
-                mdp_ts_num_devices=4,
-                mdp_num_partitions=2,
-            )
-
-        run_mock.assert_called_once()
-        command = run_mock.call_args.args[0]
-        command_str = " ".join(str(arg) for arg in command)
-        assert run_mock.call_args.kwargs["env"]["AIC_EXTERNAL_DATA_ROOT"] == str(external_data_root)
-        assert "-mdp-load-partition-config=" in command_str
-        assert "mdp_disagg_4d_2p.json" in command_str
-        assert "-aic-binary-dir=" in command_str
-
-    def test_weight_free_intersection_compile_uses_external_data_root_for_both_compiler_runs(
-        self, compile_workspace, monkeypatch
-    ):
-        """Weight-free intersection MDP passes checkpoint root to dump and final compile calls."""
-        tmp_path, onnx_path, compile_dir = compile_workspace
-        external_data_root = self._write_weight_free_sidecar(tmp_path, onnx_path, monkeypatch)
-        model_hf, _ = make_tiny_gpt2()
-        qeff = QEFFAutoModelForCausalLM(model_hf, weight_free=True)
-
-        with patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_fake_subprocess_run) as run_mock:
-            qeff._compile(
-                onnx_path=str(onnx_path),
-                compile_dir=str(compile_dir),
-                mdp_ts_num_devices=4,
-                mdp_num_partitions=2,
-                mdp_strategy="intersection",
-                specializations=[{"batch_size": 1, "seq_len": 8, "ctx_len": 32}],
-                custom_io={"input_ids": "float16"},
-            )
-
-        assert run_mock.call_count == 2
-        for call in run_mock.call_args_list:
-            assert call.kwargs["env"]["AIC_EXTERNAL_DATA_ROOT"] == str(external_data_root)
-
-        dump_command = run_mock.call_args_list[0].args[0]
-        final_command = run_mock.call_args_list[1].args[0]
-        dump_command_str = " ".join(str(arg) for arg in dump_command)
-        final_command_str = " ".join(str(arg) for arg in final_command)
-        assert "-mdp-dump-partition-config=" in dump_command_str
-        assert "-mdp-load-partition-config=" not in dump_command_str
-        assert "-aic-binary-dir=" not in dump_command_str
-        assert "-mdp-load-partition-config=" in final_command_str
-        assert "mdp_disagg_4d_2p.json" in final_command_str
-        assert "-aic-binary-dir=" in final_command_str
-
-    def test_weight_free_mdp_artifacts_copy_spec_and_replay_mdp_config(self, compile_workspace, monkeypatch):
-        """Weight-free MDP artifact bundles include sidecar metadata and replayable MDP config."""
-        tmp_path, onnx_path, compile_dir = compile_workspace
-        external_data_root = self._write_weight_free_sidecar(tmp_path, onnx_path, monkeypatch)
-        model_hf, _ = make_tiny_gpt2()
-        qeff = QEFFAutoModelForCausalLM(model_hf, weight_free=True)
-
-        with patch("QEfficient.base.modeling_qeff.subprocess.run") as compiler_run:
-            artifacts_dir = qeff._compile(
-                onnx_path=str(onnx_path),
-                compile_dir=str(compile_dir),
-                mdp_ts_num_devices=4,
-                mdp_num_partitions=2,
-                specializations=[{"batch_size": 1, "seq_len": 8, "ctx_len": 32}],
-                custom_io={"input_ids": "int64"},
-                artifacts=True,
-            )
-
-        compiler_run.assert_not_called()
-        replay_command = (artifacts_dir / "qaic-compile.sh").read_text()
-        assert (artifacts_dir / "weight_spec.json").is_file()
-        assert (artifacts_dir / "mdp_disagg_4d_2p.json").is_file()
-        assert f"export AIC_EXTERNAL_DATA_ROOT={external_data_root}" in replay_command
-        assert "-mdp-load-partition-config=mdp_disagg_4d_2p.json" in replay_command
-        assert "-m=model.onnx" in replay_command
-        assert not (artifacts_dir / "models--org--model").exists()
-
     def test_compile_artifacts_writes_replay_without_invoking_compiler(self, tmp_path):
         onnx_path = tmp_path / "model.onnx"
         npi_path = tmp_path / "node_precision_info.yaml"
@@ -1132,7 +1040,7 @@ class TestMdpCompileIntegration:
         compile_dir = None
 
         try:
-            _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path, external_data_file="model.onnx.data")
+            _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path)
             npi_path.write_text("FP32NodeInstanceNames: []\n")
             model_hf, _ = make_tiny_gpt2()
             qeff = QEFFAutoModelForCausalLM(model_hf)
@@ -1156,14 +1064,11 @@ class TestMdpCompileIntegration:
             subprocess.run(["bash", "-n", replay_script], check=True)
             assert (compile_dir / "specializations.json").is_file()
             assert (compile_dir / "custom_io.yaml").is_file()
-            assert (compile_dir / onnx_path.name).read_bytes() == onnx_path.read_bytes()
-            assert (compile_dir / "model.onnx.data").read_bytes() == (tmp_path / "model.onnx.data").read_bytes()
             assert (compile_dir / "hashed_compile_params.json").is_file()
             assert (compile_dir / npi_path.name).read_text() == npi_path.read_text()
             replay_command = replay_script.read_text()
             assert 'cd -- "$(dirname -- "$0")"' in replay_command
             assert "-aic-binary-dir=qpc" in replay_command
-            assert f"-m={onnx_path.name}" in replay_command
             assert f"-node-precision-info={npi_path.name}" in replay_command
             assert "-artifacts" not in replay_command
             assert str(tmp_path) not in replay_command
@@ -1174,174 +1079,6 @@ class TestMdpCompileIntegration:
             shutil.rmtree(compile_root, ignore_errors=True)
             onnx_path.unlink(missing_ok=True)
             npi_path.unlink(missing_ok=True)
-
-    def test_compile_artifacts_sets_weight_free_external_data_root(self, tmp_path, monkeypatch):
-        onnx_path = tmp_path / "model.onnx"
-        hf_cache = tmp_path / "hf_cache"
-        checkpoint_path = hf_cache / "models--org--model" / "snapshots" / "prepared" / "model.safetensors"
-        compile_root = tmp_path / "compile"
-        compile_dir = None
-
-        try:
-            monkeypatch.setenv("HF_HUB_CACHE", str(hf_cache))
-            _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path)
-            checkpoint_path.parent.mkdir(parents=True)
-            checkpoint_path.write_bytes(b"FAKE_SAFE_TENSORS")
-            weight_spec_path = tmp_path / "weight_spec.json"
-            weight_spec_path.write_text(
-                json.dumps(
-                    {
-                        "files": [
-                            {
-                                "format": "safetensors",
-                                "path": "models--org--model/snapshots/prepared/model.safetensors",
-                            }
-                        ],
-                        "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
-                        "model_id": str(checkpoint_path.parent),
-                        "model_name": "GPT2LMHeadModel",
-                        "version": 5,
-                    }
-                )
-            )
-            model_hf, _ = make_tiny_gpt2()
-            qeff = QEFFAutoModelForCausalLM(model_hf, weight_free=True)
-            qeff.weight_spec_path = str(weight_spec_path)
-
-            with patch("QEfficient.base.modeling_qeff.subprocess.run") as compiler_run:
-                compile_dir = qeff._compile(
-                    onnx_path=str(onnx_path),
-                    compile_dir=str(compile_root),
-                    specializations=[{"batch_size": 1, "seq_len": 8, "ctx_len": 32}],
-                    custom_io={"input_ids": "int64"},
-                    artifacts=True,
-                )
-
-            compiler_run.assert_not_called()
-            assert (compile_dir / onnx_path.name).read_bytes() == onnx_path.read_bytes()
-            assert (compile_dir / weight_spec_path.name).read_text() == weight_spec_path.read_text()
-            assert not (compile_dir / "models--org--model").exists()
-            replay_command = (compile_dir / "qaic-compile.sh").read_text()
-            assert f"-m={onnx_path.name}" in replay_command
-            assert f"export AIC_EXTERNAL_DATA_ROOT={hf_cache}" in replay_command
-            assert str(checkpoint_path) not in replay_command
-        finally:
-            if compile_dir is not None:
-                shutil.rmtree(compile_dir, ignore_errors=True)
-            shutil.rmtree(compile_root, ignore_errors=True)
-            onnx_path.unlink(missing_ok=True)
-
-    def test_cached_main_weight_free_spec_uses_containing_external_data_root(self, tmp_path, monkeypatch):
-        hf_cache = tmp_path / "hub"
-        snapshots = hf_cache / "models--org--m" / "snapshots"
-        prepared = snapshots / "deadbeef-qeff-prepared-float32"
-        checkpoint_path = prepared / "model.safetensors"
-        checkpoint_path.parent.mkdir(parents=True)
-        checkpoint_path.write_bytes(b"FAKE_SAFE_TENSORS")
-        monkeypatch.setenv("HF_HUB_CACHE", str(hf_cache))
-
-        weight_spec_path = tmp_path / "weight_spec.json"
-        weight_spec_path.write_text(
-            json.dumps(
-                {
-                    "files": [
-                        {
-                            "format": "safetensors",
-                            "path": "deadbeef-qeff-prepared-float32/model.safetensors",
-                        }
-                    ],
-                    "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
-                    "model_id": str(prepared),
-                    "model_name": "GPT2LMHeadModel",
-                    "version": 5,
-                }
-            )
-        )
-
-        external_data_root = _weight_free_external_data_root(weight_spec_path)
-
-        assert external_data_root == snapshots
-        assert (external_data_root / "deadbeef-qeff-prepared-float32/model.safetensors").is_file()
-
-    def test_weight_free_spec_external_data_root_overrides_heuristics(self, tmp_path):
-        recorded_root = tmp_path / "recorded_root"
-        recorded_root.mkdir()
-        prepared = tmp_path / "prepared"
-        prepared.mkdir()
-        weight_spec_path = tmp_path / "weight_spec.json"
-        weight_spec_path.write_text(
-            json.dumps(
-                {
-                    "external_data_root": str(recorded_root),
-                    "files": [
-                        {
-                            "format": "safetensors",
-                            "path": "prepared/model.safetensors",
-                        }
-                    ],
-                    "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
-                    "model_id": str(prepared),
-                    "model_name": "GPT2LMHeadModel",
-                    "version": 5,
-                }
-            )
-        )
-
-        assert _weight_free_external_data_root(weight_spec_path) == recorded_root
-
-    def test_compile_artifacts_preserves_user_weight_free_external_data_root(self, tmp_path, monkeypatch):
-        onnx_path = tmp_path / "model.onnx"
-        hf_cache = tmp_path / "hf_cache"
-        custom_external_data_root = tmp_path / "custom_external_data"
-        checkpoint_path = hf_cache / "models--org--model" / "snapshots" / "prepared" / "model.safetensors"
-        compile_root = tmp_path / "compile"
-        compile_dir = None
-
-        try:
-            monkeypatch.setenv("HF_HUB_CACHE", str(hf_cache))
-            monkeypatch.setenv("AIC_EXTERNAL_DATA_ROOT", str(custom_external_data_root))
-            _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path)
-            checkpoint_path.parent.mkdir(parents=True)
-            checkpoint_path.write_bytes(b"FAKE_SAFE_TENSORS")
-            weight_spec_path = tmp_path / "weight_spec.json"
-            weight_spec_path.write_text(
-                json.dumps(
-                    {
-                        "files": [
-                            {
-                                "format": "safetensors",
-                                "path": "models--org--model/snapshots/prepared/model.safetensors",
-                            }
-                        ],
-                        "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
-                        "model_id": str(checkpoint_path.parent),
-                        "model_name": "GPT2LMHeadModel",
-                        "version": 5,
-                    }
-                )
-            )
-            model_hf, _ = make_tiny_gpt2()
-            qeff = QEFFAutoModelForCausalLM(model_hf, weight_free=True)
-            qeff.weight_spec_path = str(weight_spec_path)
-
-            with patch("QEfficient.base.modeling_qeff.subprocess.run") as compiler_run:
-                compile_dir = qeff._compile(
-                    onnx_path=str(onnx_path),
-                    compile_dir=str(compile_root),
-                    specializations=[{"batch_size": 1, "seq_len": 8, "ctx_len": 32}],
-                    custom_io={"input_ids": "int64"},
-                    artifacts=True,
-                )
-
-            compiler_run.assert_not_called()
-            replay_command = (compile_dir / "qaic-compile.sh").read_text()
-            assert f"export AIC_EXTERNAL_DATA_ROOT={custom_external_data_root}" in replay_command
-            assert f"export AIC_EXTERNAL_DATA_ROOT={hf_cache}" not in replay_command
-        finally:
-            if compile_dir is not None:
-                shutil.rmtree(compile_dir, ignore_errors=True)
-            shutil.rmtree(compile_root, ignore_errors=True)
-            onnx_path.unlink(missing_ok=True)
 
     def test_user_mdp_compiler_dump_path_is_deprecated(self, compile_workspace):
         """User-provided compiler dumps are deprecated and ignored in favor of auto-generation."""

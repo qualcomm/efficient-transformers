@@ -24,6 +24,7 @@ from QEfficient.transformers.cache_utils import (
     QEffDynamicCache,
     QEffDynamicLayer,
     QEffEncoderDecoderCache,
+    QEffMiniMaxSparseCache,
 )
 
 # ---------------------------------------------------------------------------
@@ -225,6 +226,53 @@ class TestQEffDynamicLayerCorrectness:
         assert value_block.shape == (1, batch * heads, 4, head_dim)
         assert torch.equal(key_block, expected_keys)
         assert torch.equal(value_block, expected_values)
+
+
+# ---------------------------------------------------------------------------
+# Tests: QEffMiniMaxSparseCache
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.cache
+class TestQEffMiniMaxSparseCacheCorrectness:
+    def test_row_folded_cp_write_preserves_layout_and_updates_owner_row(self):
+        dp, cp, hkv, local_ctx_len, head_dim = 2, 4, 2, 4, 2
+        batch_local = 1
+        batch = dp * batch_local
+        rows = dp * hkv * cp
+        cache = QEffMiniMaxSparseCache(
+            (
+                (
+                    torch.zeros(rows, local_ctx_len, head_dim),
+                    torch.zeros(rows, local_ctx_len, head_dim),
+                ),
+            )
+        )
+        position_ids = torch.tensor([[2], [10]], dtype=torch.int64)
+        key_states = torch.arange(batch * hkv * head_dim, dtype=torch.float32).reshape(batch, hkv, 1, head_dim)
+        value_states = key_states + 100.0
+
+        cache.write_only_sparse(
+            key_states,
+            value_states,
+            0,
+            {"position_ids": position_ids, "dp": dp, "cp": cp, "hkv": hkv},
+        )
+
+        expected_keys = torch.zeros_like(cache.layers[0].keys)
+        expected_values = torch.zeros_like(cache.layers[0].values)
+        for dp_lane in range(dp):
+            owner_cp = int(position_ids[dp_lane, 0]) // local_ctx_len
+            local_pos = int(position_ids[dp_lane, 0]) % local_ctx_len
+            for head in range(hkv):
+                owner_row = dp_lane * hkv * cp + head * cp + owner_cp
+                expected_keys[owner_row, local_pos] = key_states[dp_lane, head, 0]
+                expected_values[owner_row, local_pos] = value_states[dp_lane, head, 0]
+
+        assert cache.layers[0].keys.shape == (rows, local_ctx_len, head_dim)
+        assert cache.layers[0].values.shape == (rows, local_ctx_len, head_dim)
+        assert torch.equal(cache.layers[0].keys, expected_keys)
+        assert torch.equal(cache.layers[0].values, expected_values)
 
 
 # ---------------------------------------------------------------------------

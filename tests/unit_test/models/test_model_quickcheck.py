@@ -38,6 +38,7 @@ import onnx
 import onnxruntime as ort
 import pytest
 import torch
+import yaml
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -51,7 +52,13 @@ from transformers import (
     LlamaConfig,
     Qwen2Config,
 )
+from transformers.cache_utils import DynamicCache
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
+from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+    MiniMaxM3VLAttention,
+    MiniMaxM3VLIndexer,
+    MiniMaxM3VLSparseMoeBlock,
+)
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
@@ -67,6 +74,27 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeVisionConfig,
 )
 
+from examples.text_generation.minimax_m3_paged_dp_decode_only_configurable_pages import (
+    _build_qaic_config,
+    build_block_table,
+)
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
+from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.transformers.cache_utils import QEffMiniMaxSparseCache
+from QEfficient.transformers.models.minimax_m3_vl import (
+    MiniMaxM3SparseForConditionalGeneration,
+    MiniMaxM3VLConfig,
+    MiniMaxM3VLForCausalLM,
+    MiniMaxM3VLTextConfig,
+    MiniMaxM3VLVisionConfig,
+)
+from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+    QEffMiniMaxM3VLAttention,
+    QEffMiniMaxM3VLIndexer,
+    QEffMiniMaxM3VLRotaryEmbedding,
+    QEffMiniMaxM3VLSparseMoeBlock,
+    _generate_minimax_npi_file,
+)
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
@@ -194,6 +222,138 @@ TINY_MOE_PREFILL_SUBFUNCTION_CONFIGS = {
 
 MODEL_KWARGS = {"attn_implementation": "eager"}
 PREFIX_CACHING_MODEL_ID = "hf-internal-testing/tiny-random-GPT2LMHeadModel"
+
+
+def _tiny_minimax_m3_text_config(dtype=torch.float32, microbench=False) -> MiniMaxM3VLTextConfig:
+    config = MiniMaxM3VLTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=16,
+        dense_intermediate_size=64,
+        shared_intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=32,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        routed_scaling_factor=1.0,
+        layer_types=["full_attention", "minimax_m3_sparse"],
+        mlp_layer_types=["dense", "sparse"],
+        index_n_heads=2,
+        index_head_dim=8,
+        index_block_size=4,
+        index_topk_blocks=2,
+        index_local_blocks=1,
+    )
+    if microbench:
+        config.num_hidden_layers = 1
+        config.layer_types = ["minimax_m3_sparse"]
+        config.mlp_layer_types = ["dense"]
+        config.head_dim = 32
+        config.max_position_embeddings = 8
+        config.index_head_dim = 16
+        config.index_block_size = 8
+        config.index_topk_blocks = 1
+        config.rope_parameters = {
+            "rope_type": "default",
+            "rope_theta": 5_000_000.0,
+            "partial_rotary_factor": 0.5,
+        }
+    config.torch_dtype = dtype
+    return config
+
+
+def _tiny_minimax_m3_vlm_config(microbench=False) -> MiniMaxM3VLConfig:
+    text_config = _tiny_minimax_m3_text_config(microbench=microbench)
+    vision_config = MiniMaxM3VLVisionConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        image_size=28,
+        patch_size=14,
+        temporal_patch_size=1,
+        spatial_merge_size=1,
+        num_channels=3,
+    )
+    return MiniMaxM3VLConfig(
+        text_config=text_config,
+        vision_config=vision_config,
+        image_token_index=4,
+        projector_hidden_size=text_config.hidden_size,
+    )
+
+
+def _tiny_minimax_m3_paged_dp_cp_config():
+    args = SimpleNamespace(
+        num_kv_blocks=1,
+        attn_dp=1,
+        attn_cp=1,
+        indexer_num_blocks=None,
+        msa_num_kv_blocks=None,
+        skip_kv=False,
+        non_dynamic_cache=False,
+        msa_indexer_dp=1,
+        msa_indexer_cp=2,
+        msa_attn_dp=2,
+        msa_attn_cp=2,
+        indexer_n_head=1,
+        num_cores=1,
+        gqa_num_pages=1,
+        msa_indexer_num_logical_pages=2,
+        msa_attn_num_logical_pages=2,
+        gqa_physical_pages=8,
+        msa_indexer_physical_pages=8,
+        msa_attn_physical_pages=8,
+        expert_parallel_chunk_size=4,
+        cores_per_expert=1,
+        tree_reduce=True,
+    )
+    qaic_config = _build_qaic_config(args, 8, 4, 4)
+    # Expert parallelism is a separate compile concern; keep this parity
+    # fixture focused on the DP/CP/paged-attention runtime layout.
+    qaic_config.pop("moe_config")
+    qaic_config.pop("indexer_num_blocks")
+    qaic_config.pop("msa_num_kv_blocks")
+    qaic_config.pop("skip_kv")
+    qaic_config.pop("non_dynamic_cache")
+    return qaic_config
+
+
+def _tiny_minimax_m3_paged_decode_inputs(qeff_model):
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        ctx_len=8,
+        past_seq_len=8,
+        prefill_seq_len=1,
+        batch_size=2,
+    )["lang"]
+    inputs["input_ids"] = torch.tensor([[3], [5]], dtype=torch.int64)
+    inputs["position_ids"] = torch.tensor([[7], [7]], dtype=torch.int64)
+    table_generator = torch.Generator(device="cpu").manual_seed(11)
+    inputs["gqa_block_table"] = build_block_table(1, 1, 2, 1, table_generator, 8)
+    inputs["msa_indexer_block_table"] = build_block_table(1, 2, 2, 2, table_generator, 8)
+    inputs["msa_attn_block_table"] = build_block_table(2, 2, 2, 2, table_generator, 8)
+    return inputs
+
+
+def _flatten_minimax_paged_ort_inputs(session, inputs):
+    ort_inputs = {}
+    input_names = {item.name for item in session.get_inputs()}
+    for name in input_names:
+        if name in inputs and torch.is_tensor(inputs[name]):
+            ort_inputs[name] = inputs[name].detach().numpy()
+        elif name.startswith(("past_key.", "past_value.")):
+            layer_idx = int(name.split(".")[1])
+            cache_idx = 0 if name.startswith("past_key.") else 1
+            ort_inputs[name] = inputs["past_key_values"][layer_idx][cache_idx].detach().numpy()
+        elif name.startswith("index_key."):
+            ort_inputs[name] = inputs["index_keys"][0].detach().numpy()
+        else:
+            raise AssertionError(f"Unhandled MiniMax ORT input: {name}")
+    return ort_inputs
 
 
 def _per_test_thread_budget() -> int:
@@ -1107,36 +1267,1853 @@ def test_causal_lm_cpu_runtime_parity_with_api_runner(model_type, model_id, tmp_
 
 
 @pytest.mark.llm_model
-def test_vlm_text_side_runtime_parity_and_full_export(tmp_path):
-    tokenizer = AutoTokenizer.from_pretrained(VLM_TEXT_RUNTIME_MODEL_ID, trust_remote_code=True)
-    config = AutoConfig.from_pretrained(VLM_TEXT_RUNTIME_MODEL_ID, trust_remote_code=True)
-    text_config = config.text_config
+def test_minimax_m3_npi_generation_tracks_exported_graph(tmp_path):
+    nodes = [
+        onnx.helper.make_node("Add", ["x", "x"], ["/language_model/layers.0/Add_output_0"]),
+        onnx.helper.make_node(
+            "CustomRMSNorm", ["x"], ["/language_model/layers.0/input_layernorm/CustomRMSNorm_output_0"]
+        ),
+        onnx.helper.make_node("Identity", ["x"], ["/language_model/layers.0/ignored_output"]),
+        onnx.helper.make_node("CustomRMSNorm", ["x"], ["/language_model/norm/CustomRMSNorm_output_0"]),
+    ]
+    graph = onnx.helper.make_graph(
+        nodes,
+        "minimax",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])],
+        [
+            onnx.helper.make_tensor_value_info(
+                "/language_model/norm/CustomRMSNorm_output_0", onnx.TensorProto.FLOAT, [1]
+            )
+        ],
+    )
+    onnx_path = tmp_path / "minimax.onnx"
+    onnx.save(onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 17)]), onnx_path)
 
-    text_model = AutoModelForCausalLM.from_config(text_config, trust_remote_code=True, **MODEL_KWARGS)
-    text_model.eval()
+    npi_path = Path(_generate_minimax_npi_file(onnx_path))
+    npi = yaml.safe_load(npi_path.read_text())
+    assert npi["FP32NodeInstanceNames"] == [
+        "/language_model/layers.0/Add_output_0",
+        "/language_model/layers.0/input_layernorm/CustomRMSNorm_output_0",
+        "/language_model/norm/CustomRMSNorm_output_0",
+    ]
 
-    api_runner = ApiRunner(
-        batch_size=1,
-        tokenizer=tokenizer,
-        config=text_model.config,
-        prompt=["hello world"],
-        prompt_len=4,
-        ctx_len=8,
-        full_batch_size=None,
+
+@pytest.mark.llm_model
+def test_minimax_m3_npi_generation_expands_decoder_functions(tmp_path):
+    decoder_function = onnx.helper.make_function(
+        "test.minimax",
+        "Decoder",
+        ["hidden_states"],
+        ["hidden_states.2"],
+        [
+            onnx.helper.make_node("CustomRMSNorm", ["hidden_states", "w0"], ["norm0"], name="CustomRMSNorm_0"),
+            onnx.helper.make_node("CustomRMSNorm", ["norm0", "w1"], ["norm1"], name="CustomRMSNorm_1"),
+            onnx.helper.make_node("CustomRMSNorm", ["norm1", "w2"], ["norm2"], name="CustomRMSNorm_2"),
+            onnx.helper.make_node("Add", ["hidden_states", "attn"], ["hidden_states.1"], name="Add_0"),
+            onnx.helper.make_node("CustomRMSNorm", ["hidden_states.1", "w3"], ["norm3"], name="CustomRMSNorm_3"),
+            onnx.helper.make_node("Add", ["hidden_states.1", "mlp"], ["hidden_states.2"], name="Add_1"),
+        ],
+        opset_imports=[onnx.helper.make_opsetid("", 17)],
+    )
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node(
+                "Decoder",
+                ["x"],
+                ["/language_model/layers.0/Decoder_output"],
+                name="/language_model/layers.0/Decoder",
+                domain="test.minimax",
+            )
+        ],
+        "minimax",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])],
+        [onnx.helper.make_tensor_value_info("/language_model/layers.0/Decoder_output", onnx.TensorProto.FLOAT, [1])],
+    )
+    onnx_path = tmp_path / "minimax.onnx"
+    onnx.save(
+        onnx.helper.make_model(
+            graph,
+            opset_imports=[onnx.helper.make_opsetid("", 17)],
+            functions=[decoder_function],
+        ),
+        onnx_path,
     )
 
-    hf_tokens = api_runner.run_hf_model_on_pytorch(text_model)
-    qeff_text_model = QEFFAutoModelForCausalLM(text_model)
-    kv_tokens = api_runner.run_kv_model_on_pytorch(qeff_text_model.model)
-    onnx_path = _exported_onnx_path(qeff_text_model.export(tmp_path / "vlm-text"))
-    ort_tokens = api_runner.run_kv_model_on_ort(str(onnx_path))
+    npi_path = Path(_generate_minimax_npi_file(onnx_path))
+    npi = yaml.safe_load(npi_path.read_text())
+    assert npi["FP32NodeInstanceNames"] == [
+        "/language_model/layers.0/CustomRMSNorm_0_output_0",
+        "/language_model/layers.0/CustomRMSNorm_1_output_0",
+        "/language_model/layers.0/CustomRMSNorm_2_output_0",
+        "/language_model/layers.0/Add_0_output_0",
+        "/language_model/layers.0/CustomRMSNorm_3_output_0",
+        "/language_model/layers.0/Add_1_output_0",
+    ]
 
-    assert np.array_equal(hf_tokens, kv_tokens.squeeze(0))
-    assert np.array_equal(kv_tokens, ort_tokens)
 
-    vlm_model = QEFFAutoModelForImageTextToText.from_pretrained(VLM_TEXT_RUNTIME_MODEL_ID, trust_remote_code=True)
-    vlm_onnx_path = _exported_onnx_path(vlm_model.export(tmp_path / "vlm-full"))
-    assert vlm_onnx_path.name.endswith(".onnx")
+@pytest.mark.llm_model
+def test_minimax_m3_text_config_derived_pt_and_onnx_runtime_parity(tmp_path):
+    torch.manual_seed(7)
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    text_config = vlm_config.text_config
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    model_hf_orig = deepcopy(model_hf)
+
+    input_ids = torch.tensor([[3]], dtype=torch.int64)
+    position_ids = torch.tensor([[4]], dtype=torch.int64)
+    hidden_size = text_config.hidden_size
+    cache_seq_len = 4
+    # Use the same zero-initialized KV cache for the HF reference and QEff paths.
+    runtime_cache_len = 8
+    past_key_values = tuple(
+        (
+            torch.zeros((1, text_config.num_key_value_heads, runtime_cache_len, text_config.head_dim)),
+            torch.zeros((1, text_config.num_key_value_heads, runtime_cache_len, text_config.head_dim)),
+        )
+        for _ in range(text_config.num_hidden_layers)
+    )
+    hf_past_key_values = DynamicCache(config=text_config)
+    for layer_idx, (key, value) in enumerate(past_key_values):
+        hf_past_key_values.update(key[:, :, :cache_seq_len], value[:, :, :cache_seq_len], layer_idx)
+    for layer_idx, layer_type in enumerate(text_config.layer_types):
+        if layer_type == "minimax_m3_sparse":
+            hf_past_key_values.layers[layer_idx].update_index(
+                torch.zeros((1, 1, cache_seq_len, text_config.index_head_dim))
+            )
+
+    with torch.no_grad():
+        inputs_embeds_hf = model_hf_orig.model.language_model.embed_tokens(input_ids)
+        hf_out = model_hf_orig.model.language_model(
+            inputs_embeds=inputs_embeds_hf,
+            position_ids=position_ids,
+            past_key_values=hf_past_key_values,
+            use_cache=False,
+        )
+        hf_logits = model_hf_orig.lm_head(hf_out.last_hidden_state[:, -1:, :]).float()
+
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+
+    dummy_vision_embeds = torch.zeros((1, 1, hidden_size), dtype=torch.float32)
+    dummy_image_idx = torch.zeros((1, 1), dtype=torch.int64)
+
+    index_keys = [
+        torch.zeros((1, 1, runtime_cache_len, text_config.index_head_dim))
+        for lt in text_config.layer_types
+        if lt == "minimax_m3_sparse"
+    ]
+
+    with torch.no_grad():
+        qeff_out = qeff_model.lang_model.model(
+            input_ids=input_ids,
+            vision_embeds=dummy_vision_embeds,
+            position_ids=position_ids,
+            image_idx=dummy_image_idx,
+            past_key_values=past_key_values,
+            index_keys=index_keys,
+        )
+    qeff_logits = qeff_out[0]
+
+    assert torch.allclose(hf_logits, qeff_logits, atol=1e-5, rtol=1e-5)
+
+    with torch.no_grad():
+        qeff_cached_out = qeff_model.lang_model.model(
+            input_ids=input_ids,
+            vision_embeds=dummy_vision_embeds,
+            position_ids=position_ids,
+            image_idx=dummy_image_idx,
+            past_key_values=past_key_values,
+            index_keys=index_keys,
+        )
+    qeff_cached_logits = qeff_cached_out[0]
+
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(tmp_path / "minimax-m3-vlm", skip_vision=True, prefill_seq_len=1, ctx_len=runtime_cache_len)
+    )
+    session = _ort_session(onnx_path)
+    ort_inputs = {}
+    for input_meta in session.get_inputs():
+        shape = [1 if not isinstance(dim, int) else dim for dim in input_meta.shape]
+        if input_meta.name == "input_ids":
+            ort_inputs[input_meta.name] = input_ids.numpy()
+        elif input_meta.name == "position_ids":
+            ort_inputs[input_meta.name] = position_ids.numpy()
+        elif input_meta.name == "vision_embeds":
+            ort_inputs[input_meta.name] = dummy_vision_embeds.numpy()
+        elif input_meta.name == "image_idx":
+            ort_inputs[input_meta.name] = dummy_image_idx.numpy()
+        elif input_meta.name.startswith(("past_key.", "past_value.")):
+            ort_inputs[input_meta.name] = np.zeros(
+                (1, text_config.num_key_value_heads, runtime_cache_len, text_config.head_dim), dtype=np.float32
+            )
+        elif input_meta.name.startswith("index_key."):
+            ort_inputs[input_meta.name] = np.zeros(
+                (1, 1, runtime_cache_len, text_config.index_head_dim), dtype=np.float32
+            )
+        else:
+            dtype = np.int64 if input_meta.type == "tensor(int64)" else np.float32
+            ort_inputs[input_meta.name] = np.zeros(shape, dtype=dtype)
+
+    ort_logits = session.run(None, ort_inputs)[0]
+    assert ort_logits.shape == (1, 1, text_config.vocab_size)
+    assert np.allclose(ort_logits, qeff_cached_logits.detach().numpy(), atol=1e-4, rtol=1e-4)
+
+    onnx_model = onnx.load(onnx_path, load_external_data=False)
+    output_names = {output.name for output in onnx_model.graph.output}
+    assert any(name.startswith("past_key.") and name.endswith("_RetainedState") for name in output_names)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_dummy_inputs_use_scaled_prefill_export_length():
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+    qaic_config = {
+        "blocking_mode": "kv_headpar",
+        "num_kv_blocks": 1,
+        "msa_indexer_dp": 1,
+        "msa_indexer_cp": 1,
+        "msa_attn_dp": 1,
+        "msa_attn_cp": 1,
+        "indexer_n_head": 1,
+        "indexer_q_size": 8,
+        "indexer_q_chunk": 32,
+        "indexer_prefill_parallel": True,
+        "msa_q_chunk": 32,
+        "num_cores_per_device": 4,
+    }
+
+    qeff_model.transform(
+        ctx_len=128,
+        seq_len=128,
+        bs=1,
+        num_devices=1,
+        num_cores=4,
+        qaic_config=qaic_config,
+        prefill_only=True,
+        prefill_seq_len=128,
+    )
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        ctx_len=128,
+        past_seq_len=128,
+        prefill_seq_len=128,
+        batch_size=1,
+    )["lang"]
+    blocking_config = next(
+        module.attn_blocking_config
+        for module in qeff_model.model.language_model.modules()
+        if getattr(module, "attn_blocking_config", None) is not None
+    )
+
+    assert inputs["input_ids"].shape[1] == 16
+    assert inputs["position_ids"].shape[1] == 16
+    assert blocking_config.prefill_export_seq_len == 16
+    assert blocking_config.prefill_compile_seq_len == 128
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_index_query_projection_uses_configured_loop_count():
+    config = _tiny_minimax_m3_text_config()
+    indexer = QEffMiniMaxM3VLIndexer(config, layer_idx=1).eval()
+    blocking_config = SimpleNamespace(indexer_q_proj_num_chunks=8)
+    hidden_states = torch.randn(1, 64, config.hidden_size)
+    call_count = 0
+    original_forward = indexer.q_proj.forward
+
+    def counted_forward(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_forward(*args, **kwargs)
+
+    indexer.q_proj.forward = counted_forward
+    projected = indexer._project_index_q_prefill(hidden_states, blocking_config)
+
+    assert call_count == 8
+    assert projected.shape[:2] == hidden_states.shape[:2]
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_reduced_export_runs_at_full_prefill_length(tmp_path):
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    vlm_config.text_config.max_position_embeddings = 128
+    text_config = vlm_config.text_config
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+    qaic_config = {
+        "blocking_mode": "kv_headpar",
+        "num_kv_blocks": 1,
+        "msa_indexer_dp": 1,
+        "msa_indexer_cp": 1,
+        "msa_attn_dp": 1,
+        "msa_attn_cp": 1,
+        "indexer_n_head": 1,
+        "indexer_q_size": 8,
+        "indexer_q_chunk": 32,
+        "indexer_prefill_parallel": True,
+        "msa_q_chunk": 32,
+        "num_cores_per_device": 4,
+    }
+    qeff_model.transform(
+        ctx_len=128,
+        seq_len=128,
+        bs=1,
+        num_devices=1,
+        num_cores=4,
+        qaic_config=qaic_config,
+        prefill_only=True,
+        prefill_seq_len=128,
+    )
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(
+            tmp_path / "minimax-m3-reduced-prefill",
+            skip_vision=True,
+            prefill_only=True,
+            enable_chunking=True,
+            prefill_seq_len=128,
+            ctx_len=128,
+            qaic_config=qaic_config,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    session = _ort_session(onnx_path)
+    ort_inputs = {}
+    for input_meta in session.get_inputs():
+        if input_meta.name == "input_ids":
+            ort_inputs[input_meta.name] = np.zeros((1, 128), dtype=np.int64)
+        elif input_meta.name == "position_ids":
+            ort_inputs[input_meta.name] = np.arange(128, dtype=np.int64).reshape(1, 128)
+        elif input_meta.name == "vision_embeds":
+            ort_inputs[input_meta.name] = np.zeros((1, 128, text_config.hidden_size), dtype=np.float32)
+        elif input_meta.name == "image_idx":
+            ort_inputs[input_meta.name] = np.zeros((1, 1), dtype=np.int64)
+        elif input_meta.name.startswith(("past_key.", "past_value.")):
+            ort_inputs[input_meta.name] = np.zeros(
+                (1, text_config.num_key_value_heads, 128, text_config.head_dim), dtype=np.float32
+            )
+        elif input_meta.name.startswith("index_key."):
+            ort_inputs[input_meta.name] = np.zeros((1, 1, 128, text_config.index_head_dim), dtype=np.float32)
+        else:
+            raise AssertionError(f"Unhandled MiniMax dynamic-prefill ORT input: {input_meta.name}")
+
+    outputs = session.run(None, ort_inputs)
+    assert outputs[0].shape == (1, 1, text_config.vocab_size)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_cp2_decode_cache_shapes_and_retained_dynamic_axes(tmp_path):
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qaic_config = {
+        "blocking_mode": "kv_headpar",
+        "msa_indexer_dp": 1,
+        "msa_indexer_cp": 2,
+        "msa_attn_dp": 1,
+        "msa_attn_cp": 2,
+        "indexer_n_head": 1,
+        "num_kv_blocks": 1,
+        "num_cores_per_device": 1,
+    }
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    # The public export/compile path synchronizes this configuration before
+    # constructing dummy inputs and dynamic axes; mirror that path directly.
+    qeff_model.model.qaic_config = qaic_config
+    qeff_model.lang_model.model.qaic_config = qaic_config
+
+    lang_inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        ctx_len=8,
+        past_seq_len=8,
+        prefill_seq_len=1,
+        batch_size=1,
+    )["lang"]
+    dense_key, _ = lang_inputs["past_key_values"][0]
+    sparse_key, sparse_value = lang_inputs["past_key_values"][1]
+    (index_key,) = lang_inputs["index_keys"]
+
+    assert tuple(dense_key.shape) == (1, 2, 8, 8)
+    assert tuple(sparse_key.shape) == (1, 4, 4, 8)
+    assert tuple(sparse_value.shape) == (1, 4, 4, 8)
+    assert tuple(index_key.shape) == (1, 2, 4, 8)
+
+    dynamic_axes = qeff_model.model.get_onnx_dynamic_axes(kv_offload=True)["lang"]
+    expected_main_axes = {0: "main_kv_batch_size", 1: "main_kv_rows", 2: "main_kv_ctx_len"}
+    expected_index_axes = {0: "indexer_kv_batch_size", 1: "indexer_kv_rows", 2: "indexer_kv_ctx_len"}
+    for name in ("past_key.1", "past_value.1"):
+        assert dynamic_axes[name] == expected_main_axes
+        assert dynamic_axes[f"{name}_RetainedState"] == expected_main_axes
+    assert dynamic_axes["index_key.1"] == expected_index_axes
+    assert dynamic_axes["index_key.1_RetainedState"] == expected_index_axes
+
+    specs, _ = qeff_model.model.get_specializations(
+        batch_size=1,
+        prefill_seq_len=1,
+        ctx_len=8,
+        kv_offload=True,
+    )
+    decode_spec = specs["lang"][-1]
+    assert decode_spec["main_kv_batch_size"] == 1
+    assert decode_spec["main_kv_rows"] == 4
+    assert decode_spec["main_kv_ctx_len"] == 4
+    assert decode_spec["indexer_kv_batch_size"] == 1
+    assert decode_spec["indexer_kv_rows"] == 2
+    assert decode_spec["indexer_kv_ctx_len"] == 4
+
+    qeff_model.transform(
+        ctx_len=8,
+        seq_len=1,
+        bs=1,
+        num_devices=1,
+        num_cores=1,
+        qaic_config=qaic_config,
+        prefill_seq_len=1,
+    )
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(
+            tmp_path / "minimax-m3-cp2-decode",
+            skip_vision=True,
+            prefill_seq_len=1,
+            ctx_len=8,
+            qaic_config=qaic_config,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    graph = onnx.load(onnx_path, load_external_data=False).graph
+    inputs_by_name = {value.name: value for value in graph.input}
+    outputs_by_name = {value.name: value for value in graph.output}
+
+    def shape_signature(value):
+        return [dim.dim_param or dim.dim_value for dim in value.type.tensor_type.shape.dim]
+
+    for input_name in ("past_key.1", "past_value.1", "index_key.1"):
+        output_name = next(
+            name
+            for name in (
+                f"{input_name}_RetainedState",
+                f"{input_name}_InternalRetainedState",
+            )
+            if name in outputs_by_name
+        )
+        assert shape_signature(outputs_by_name[output_name]) == shape_signature(inputs_by_name[input_name])
+
+    assert shape_signature(inputs_by_name["past_key.1"]) == [
+        "main_kv_batch_size",
+        "main_kv_rows",
+        "main_kv_ctx_len",
+        8,
+    ]
+    assert shape_signature(inputs_by_name["past_value.1"]) == [
+        "main_kv_batch_size",
+        "main_kv_rows",
+        "main_kv_ctx_len",
+        8,
+    ]
+    assert shape_signature(inputs_by_name["index_key.1"]) == [
+        "indexer_kv_batch_size",
+        "indexer_kv_rows",
+        "indexer_kv_ctx_len",
+        8,
+    ]
+
+
+@pytest.mark.cpu_only
+def test_minimax_m3_cp_indexer_rejects_rank_three_cache():
+    config = _tiny_minimax_m3_text_config()
+    indexer = QEffMiniMaxM3VLIndexer(config, layer_idx=1).eval()
+    cache = QEffMiniMaxSparseCache()
+    cache.index_keys[1] = torch.zeros(2, 4, config.index_head_dim)
+    blocking_config = AttentionBlockingConfig(
+        mode=BlockingMode.KV_HEADPAR,
+        ctx_len=8,
+        num_kv_blocks=1,
+        num_cores_per_device=1,
+        msa_indexer_dp=1,
+        msa_indexer_cp=2,
+        indexer_n_head=1,
+    )
+
+    with pytest.raises(ValueError, match="MSA index key cache must be rank 4"):
+        indexer._select_blocks_dp(
+            torch.zeros(1, 1, config.hidden_size),
+            torch.tensor([[7]]),
+            cache,
+            layer_idx=1,
+            cos=torch.ones(1, 1, config.index_head_dim),
+            sin=torch.zeros(1, 1, config.index_head_dim),
+            blocking_config=blocking_config,
+        )
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(("vision_batch_size", "expected_vision_batch_size"), [(None, 4), (2, 2)])
+def test_minimax_m3_get_specializations_consumes_vision_batch_size(vision_batch_size, expected_vision_batch_size):
+    model_hf = MiniMaxM3SparseForConditionalGeneration(_tiny_minimax_m3_vlm_config()).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+
+    specs, compiler_options = qeff_model.model.get_specializations(
+        batch_size=4,
+        vision_batch_size=vision_batch_size,
+        prefill_seq_len=1,
+        ctx_len=8,
+        kv_offload=True,
+    )
+
+    assert all(spec["vision_batch_size"] == expected_vision_batch_size for spec in specs["lang"])
+    assert "vision_batch_size" not in compiler_options
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_paged_indexer_cp16_attention_cp4_decode():
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    text_config = vlm_config.text_config
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qaic_config = {
+        "blocking_mode": "kv_headpar",
+        "msa_indexer_dp": 1,
+        "msa_indexer_cp": 16,
+        "msa_attn_dp": 1,
+        "msa_attn_cp": 4,
+        "indexer_n_head": 1,
+        "num_kv_blocks": 1,
+        "num_cores_per_device": 1,
+        "paged_kv": True,
+        "gqa_page_block_size": 16,
+        "msa_indexer_page_block_size": 4,
+        "msa_attn_page_block_size": 4,
+    }
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    qeff_model.model.qaic_config = qaic_config
+    qeff_model.lang_model.model.qaic_config = qaic_config
+
+    lang_inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        ctx_len=128,
+        past_seq_len=128,
+        prefill_seq_len=1,
+        batch_size=1,
+    )["lang"]
+    dense_key, dense_value = lang_inputs["past_key_values"][0]
+    sparse_key, sparse_value = lang_inputs["past_key_values"][1]
+    (index_key,) = lang_inputs["index_keys"]
+    assert tuple(dense_key.shape) == (8, 2, 16, 8)
+    assert tuple(dense_value.shape) == tuple(dense_key.shape)
+    assert tuple(sparse_key.shape) == (8, 8, 4, 8)
+    assert tuple(sparse_value.shape) == tuple(sparse_key.shape)
+    assert tuple(index_key.shape) == (2, 16, 4, 8)
+    specs, _ = qeff_model.model.get_specializations(
+        batch_size=1,
+        prefill_seq_len=1,
+        ctx_len=128,
+        kv_offload=True,
+        qaic_config=qaic_config,
+    )
+    assert all(spec["gqa_page_size"] == 16 for spec in specs["lang"])
+    assert all(spec["indexer_page_size"] == 4 for spec in specs["lang"])
+    assert all(spec["attn_page_size"] == 4 for spec in specs["lang"])
+    dynamic_axes = qeff_model.model.get_onnx_dynamic_axes(kv_offload=True)["lang"]
+    assert dynamic_axes["past_key.0"][2] == "gqa_page_size"
+    assert dynamic_axes["past_key.1"][2] == "attn_page_size"
+    assert dynamic_axes["index_key.1"][2] == "indexer_page_size"
+
+    attention = QEffMiniMaxM3VLAttention(text_config, layer_idx=1).eval()
+    query = torch.zeros(1, text_config.num_attention_heads, 1, text_config.head_dim)
+    key_cache = torch.zeros_like(sparse_key)
+    value_cache = torch.zeros_like(sparse_value)
+    value_cache[0, 0:2, :, :] = 1.0
+    value_cache[3, 6:8, :, :] = 4.0
+    block_indices = torch.tensor([[[0, 15], [0, 15]]], dtype=torch.int64)
+    block_valid = torch.ones_like(block_indices, dtype=torch.bool)
+    indexer_block_table = torch.arange(2, dtype=torch.int32).view(1, 1, 2)
+    attention_block_table = torch.arange(8, dtype=torch.int32).view(1, 1, 8)
+    blocking_config = SimpleNamespace(
+        msa_indexer_dp=1,
+        msa_indexer_cp=16,
+        indexer_n_head=1,
+        msa_attn_dp=1,
+        msa_attn_cp=4,
+        ctx_len=128,
+        num_kv_blocks=1,
+        num_cores_per_device=1,
+        msa_indexer_page_block_size=4,
+        msa_attn_page_block_size=4,
+    )
+
+    indexer = QEffMiniMaxM3VLIndexer(text_config, layer_idx=1).eval()
+    with torch.no_grad():
+        indexer.q_proj.weight.zero_()
+        indexer.k_proj.weight.zero_()
+        indexer.q_proj.weight[0, 0] = 1.0
+        indexer.q_proj.weight[text_config.index_head_dim + 1, 0] = 1.0
+        indexer.k_proj.weight[2, 0] = 1.0
+
+    # Populate two different past blocks so each index query head has a
+    # distinct winner. This catches accidental reshapes across CP/core/head
+    # axes; shape-only checks cannot detect that class of error.
+    index_key.zero_()
+    indexer_page_size = qaic_config["msa_indexer_page_block_size"]
+    indexer_cp = qaic_config["msa_indexer_cp"]
+    for position in range(128):
+        logical_page = position // indexer_page_size
+        page_group = logical_page // indexer_cp
+        cp_way = logical_page % indexer_cp
+        page_address = position % indexer_page_size
+        block_idx = position // text_config.index_block_size
+        if block_idx == 3:
+            index_key[page_group, cp_way, page_address, 0] = 10.0
+        if block_idx == 7:
+            index_key[page_group, cp_way, page_address, 1] = 20.0
+    index_cache = SimpleNamespace(index_keys={1: index_key})
+    hidden_states = torch.zeros(1, 1, text_config.hidden_size)
+    hidden_states[..., 0] = 1.0
+    index_cos = torch.ones(1, 1, text_config.index_head_dim)
+    index_sin = torch.zeros_like(index_cos)
+    selected_blocks, selected_valid = indexer._select_blocks_paged(
+        hidden_states,
+        torch.tensor([[127]], dtype=torch.int64),
+        index_cache,
+        1,
+        index_cos,
+        index_sin,
+        indexer_block_table,
+        blocking_config,
+    )
+    assert tuple(selected_blocks.shape) == (1, text_config.index_n_heads, text_config.index_topk_blocks)
+    assert tuple(selected_valid.shape) == tuple(selected_blocks.shape)
+    assert torch.equal(selected_blocks[0, 0], torch.tensor([3, 31], dtype=torch.int32))
+    assert torch.equal(selected_blocks[0, 1], torch.tensor([7, 31], dtype=torch.int32))
+    assert selected_valid.all()
+    assert index_cache.index_keys[1][1, 15, 3, 2] != 0
+
+    attention_blocking_config = SimpleNamespace(
+        msa_attn_dp=1,
+        msa_attn_cp=4,
+        ctx_len=64,
+        num_kv_blocks=1,
+        num_cores_per_device=1,
+        msa_attn_page_block_size=4,
+    )
+    output = attention._paged_attention(
+        query,
+        block_indices,
+        block_valid,
+        key_cache,
+        value_cache,
+        torch.tensor([[63]], dtype=torch.int64),
+        attention_block_table,
+        attention_blocking_config,
+    )
+    assert tuple(output.shape) == tuple(query.shape)
+    assert torch.allclose(output, torch.full_like(output, 2.5), atol=1e-6, rtol=0)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_paged_gqa_cache_and_block_table_are_exported(tmp_path):
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qaic_config = {
+        "blocking_mode": "kv_minimax_dedicated",
+        "num_kv_blocks": 1,
+        "num_cores_per_device": 1,
+        "paged_kv": True,
+        "page_block_size": vlm_config.text_config.index_block_size,
+        "gqa_physical_pages": 5,
+        "msa_attn_physical_pages": 6,
+        "msa_indexer_physical_pages": 7,
+    }
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    qeff_model.model.qaic_config = qaic_config
+
+    lang_inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        ctx_len=8,
+        past_seq_len=8,
+        prefill_seq_len=1,
+        batch_size=1,
+    )["lang"]
+
+    dense_key, dense_value = lang_inputs["past_key_values"][0]
+    sparse_key, sparse_value = lang_inputs["past_key_values"][1]
+    (index_key,) = lang_inputs["index_keys"]
+    assert tuple(dense_key.shape) == (5, 2, 4, 8)
+    assert tuple(dense_value.shape) == tuple(dense_key.shape)
+    assert tuple(sparse_key.shape) == (6, 2, 4, 8)
+    assert tuple(sparse_value.shape) == tuple(sparse_key.shape)
+    assert tuple(index_key.shape) == (7, 1, 4, 8)
+    assert tuple(lang_inputs["gqa_block_table"].shape) == (1, 1, 2)
+    specs, _ = qeff_model.model.get_specializations(
+        batch_size=1,
+        prefill_seq_len=1,
+        ctx_len=8,
+        kv_offload=True,
+        qaic_config=qaic_config,
+    )
+    assert all(spec["gqa_page_groups"] == 2 for spec in specs["lang"])
+    assert all(spec["gqa_physical_pages"] == 5 for spec in specs["lang"])
+    assert all(spec["attn_physical_pages"] == 6 for spec in specs["lang"])
+    assert all(spec["indexer_physical_pages"] == 7 for spec in specs["lang"])
+    dynamic_axes = qeff_model.model.get_onnx_dynamic_axes(kv_offload=True)["lang"]
+    assert dynamic_axes["gqa_block_table"] == {1: "gqa_batch_local", 2: "gqa_page_groups"}
+    assert dynamic_axes["past_key.0"] == {0: "gqa_physical_pages", 2: "page_size"}
+    assert dynamic_axes["past_key.1"] == {0: "attn_physical_pages", 2: "page_size"}
+    assert dynamic_axes["index_key.1"] == {0: "indexer_physical_pages", 2: "page_size"}
+
+    qeff_model.transform(
+        ctx_len=8,
+        seq_len=1,
+        bs=1,
+        num_devices=1,
+        num_cores=1,
+        qaic_config=qaic_config,
+        prefill_seq_len=1,
+    )
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(
+            tmp_path / "minimax-m3-paged-gqa",
+            skip_vision=True,
+            prefill_seq_len=1,
+            ctx_len=8,
+            qaic_config=qaic_config,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    graph = onnx.load(onnx_path, load_external_data=False).graph
+    inputs_by_name = {value.name: value for value in graph.input}
+    assert "gqa_block_table" in inputs_by_name
+
+
+@pytest.mark.llm_model
+@pytest.mark.accuracy
+def test_minimax_m3_paged_dp_cp_qeff_pytorch_vs_ort(tmp_path):
+    torch.manual_seed(7)
+    qaic_config = _tiny_minimax_m3_paged_dp_cp_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(_tiny_minimax_m3_vlm_config()).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    qeff_model.model.qaic_config = qaic_config
+    qeff_model.lang_model.model.qaic_config = qaic_config
+
+    qeff_model.transform(
+        ctx_len=8,
+        seq_len=1,
+        bs=2,
+        num_devices=1,
+        num_cores=1,
+        qaic_config=qaic_config,
+        prefill_seq_len=1,
+    )
+    inputs = _tiny_minimax_m3_paged_decode_inputs(qeff_model)
+    pytorch_inputs = deepcopy(inputs)
+    with torch.no_grad():
+        qeff_logits = qeff_model.lang_model.model(**pytorch_inputs)[0].detach().float().numpy()
+
+    with _suppress_native_output():
+        onnx_path = _exported_onnx_path(
+            qeff_model.export(
+                tmp_path / "minimax-m3-paged-dp-cp-ort",
+                skip_vision=True,
+                prefill_seq_len=1,
+                ctx_len=8,
+                qaic_config=qaic_config,
+                use_onnx_subfunctions=True,
+                offload_pt_weights=False,
+            )
+        )
+    session = _ort_session(onnx_path)
+    ort_logits = session.run(None, _flatten_minimax_paged_ort_inputs(session, inputs))[0]
+
+    np.testing.assert_allclose(ort_logits, qeff_logits, atol=1e-4, rtol=1e-4)
+    assert qaic_config["paged_kv"] is True
+    assert qaic_config["attn_dp"] == 1
+    assert qaic_config["msa_indexer_cp"] == 2
+    assert qaic_config["msa_attn_dp"] == 2
+    assert qaic_config["gqa_page_block_size"] == 8
+    assert qaic_config["msa_indexer_page_block_size"] == 4
+    assert qaic_config["msa_attn_page_block_size"] == 4
+
+
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+@pytest.mark.accuracy
+def test_minimax_m3_paged_dp_cp_qeff_pytorch_vs_aic(tmp_path):
+    torch.manual_seed(7)
+    qaic_config = _tiny_minimax_m3_paged_dp_cp_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(_tiny_minimax_m3_vlm_config()).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+
+    qeff_model.transform(
+        ctx_len=8,
+        seq_len=1,
+        bs=2,
+        num_devices=1,
+        num_cores=1,
+        qaic_config=qaic_config,
+        prefill_seq_len=1,
+    )
+    inputs = _tiny_minimax_m3_paged_decode_inputs(qeff_model)
+    with torch.no_grad():
+        qeff_logits = qeff_model.lang_model.model(**inputs)[0].detach().float().numpy()
+
+    qpc_path = qeff_model.compile(
+        compile_dir=tmp_path / "minimax-m3-paged-dp-cp-aic",
+        prefill_seq_len=1,
+        ctx_len=8,
+        batch_size=2,
+        num_cores=1,
+        num_devices=1,
+        skip_vision=True,
+        node_precision_info=True,
+        use_onnx_subfunctions=False,
+        mxint8_kv_cache=True,
+        mxfp6_matmul=True,
+        retain_full_kv=True,
+        split_model_io=True,
+        user_tiled=True,
+        qaic_config=qaic_config,
+        offload_pt_weights=False,
+    )["lang_decode_qpc_path"]
+    session = QAICInferenceSession(qpc_path)
+    try:
+
+        def binding_value(input_name, source=None):
+            binding = session.bindings[session.binding_index_map[input_name]]
+            shape = tuple(binding.dims)
+            dtype = session.aic_to_np_dtype_mapping[binding.type]
+            if source is None:
+                return np.zeros(shape, dtype=dtype)
+            source = np.asarray(source, dtype=dtype)
+            assert source.size == np.prod(shape), (
+                f"AIC binding shape mismatch for {input_name}: source {source.shape}, expected {shape}"
+            )
+            return source.reshape(shape)
+
+        source_inputs = _flatten_minimax_paged_ort_inputs(session, inputs)
+        aic_inputs = {name: binding_value(name, source_inputs.get(name)) for name in session.input_names}
+        aic_outputs = session.run(aic_inputs)
+    finally:
+        session.deactivate()
+
+    np.testing.assert_allclose(aic_outputs["logits"], qeff_logits, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(
+    "physical_page_name",
+    ["gqa_physical_pages", "msa_attn_physical_pages", "msa_indexer_physical_pages"],
+)
+def test_minimax_m3_rejects_undersized_physical_page_pools(physical_page_name):
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qaic_config = {
+        "blocking_mode": "kv_minimax_dedicated",
+        "num_kv_blocks": 1,
+        "num_cores_per_device": 1,
+        "paged_kv": True,
+        "page_block_size": vlm_config.text_config.index_block_size,
+        physical_page_name: 1,
+    }
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    qeff_model.model.qaic_config = qaic_config
+
+    with pytest.raises(ValueError, match="physical_pages"):
+        qeff_model.model.get_dummy_inputs(
+            kv_offload=True,
+            ctx_len=8,
+            past_seq_len=8,
+            prefill_seq_len=1,
+            batch_size=1,
+        )
+
+
+@pytest.mark.cpu_only
+def test_minimax_sparse_cache_cp_write_keeps_rank_four(monkeypatch):
+    dp, cp, hkv = 2, 3, 2
+    batch_local, local_ctx_len, head_dim = 1, 3, 1
+    rows = dp * cp * hkv
+    key_cache = torch.zeros(batch_local, rows, local_ctx_len, head_dim)
+    value_cache = torch.zeros_like(key_cache)
+    cache = QEffMiniMaxSparseCache.from_legacy_cache(((key_cache, value_cache),))
+    original_paged_scatter = cache.paged_scatter
+    observed_shapes = []
+
+    def paged_scatter(data, block_id, addr, updates):
+        observed_shapes.append(tuple(data.shape))
+        return original_paged_scatter(data, block_id, addr, updates)
+
+    monkeypatch.setattr(cache, "paged_scatter", paged_scatter)
+    key_states = torch.tensor([[[[1.0]], [[2.0]]], [[[3.0]], [[4.0]]]])
+    value_states = key_states + 10.0
+    position_ids = torch.tensor([[4], [7]])
+    cache.write_only_sparse(
+        key_states,
+        value_states,
+        layer_idx=0,
+        cache_kwargs={"position_ids": position_ids, "dp": dp, "hkv": hkv, "cp": cp},
+    )
+
+    expected_keys = torch.zeros_like(key_cache)
+    expected_values = torch.zeros_like(value_cache)
+    for dp_lane in range(dp):
+        cp_lane = int(position_ids[dp_lane, 0]) % cp
+        local_position = int(position_ids[dp_lane, 0]) // cp
+        for kv_head in range(hkv):
+            row = dp_lane * cp * hkv + cp_lane * hkv + kv_head
+            expected_keys[0, row, local_position] = key_states[dp_lane, kv_head, 0]
+            expected_values[0, row, local_position] = value_states[dp_lane, kv_head, 0]
+
+    assert observed_shapes == [tuple(key_cache.shape), tuple(value_cache.shape)]
+    assert tuple(cache.layers[0].keys.shape) == tuple(key_cache.shape)
+    assert tuple(cache.layers[0].values.shape) == tuple(value_cache.shape)
+    assert torch.equal(cache.layers[0].keys, expected_keys)
+    assert torch.equal(cache.layers[0].values, expected_values)
+
+
+@pytest.mark.cpu_only
+def test_minimax_sparse_cache_cp_write_rejects_rank_three():
+    key_cache = torch.zeros(2, 3, 1)
+    value_cache = torch.zeros_like(key_cache)
+    cache = QEffMiniMaxSparseCache.from_legacy_cache(((key_cache, value_cache),))
+
+    with pytest.raises(ValueError, match="CP sparse cache shape"):
+        cache.write_only_sparse(
+            torch.tensor([[[[7.0]]]]),
+            torch.tensor([[[[11.0]]]]),
+            layer_idx=0,
+            cache_kwargs={"position_ids": torch.tensor([[4]]), "dp": 1, "hkv": 1, "cp": 2},
+        )
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("use_block_indices", [True, False])
+def test_minimax_m3_retained_cp_attention_uses_cp_before_kv_heads(use_block_indices):
+    config = _tiny_minimax_m3_text_config()
+    attention = QEffMiniMaxM3VLAttention(config, layer_idx=1).eval()
+    dp, cp, hkv = 1, 2, config.num_key_value_heads
+    batch_local, local_ctx_len, head_dim = 2, 4, config.head_dim
+    rows = dp * cp * hkv
+
+    query = torch.zeros(dp * batch_local, config.num_attention_heads, 1, head_dim)
+    key_cache = torch.zeros(batch_local, rows, local_ctx_len, head_dim)
+    value_cache = torch.full_like(key_cache, 100.0)
+    value_cache[0, :2] = 1.0  # DP=0, CP=0
+    value_cache[0, 2:4] = 7.0  # DP=0, CP=1
+    value_cache[1, :2] = 3.0
+    value_cache[1, 2:4] = 9.0
+
+    if use_block_indices:
+        token_indices = torch.tensor([[[0], [1]], [[0], [1]]], dtype=torch.int64)
+        token_valid = torch.ones_like(token_indices, dtype=torch.bool)
+    else:
+        token_indices = torch.tensor(
+            [[[[0, 1]], [[4, 5]]], [[[0, 1]], [[4, 5]]]],
+            dtype=torch.int64,
+        )
+        token_valid = torch.ones_like(token_indices, dtype=torch.bool)
+
+    output, _, _ = attention._baseline_attention_gp(
+        query,
+        token_indices,
+        token_valid,
+        key_cache,
+        value_cache,
+        dp=dp,
+        blocking_config=SimpleNamespace(msa_attn_cp=cp, ctx_len=cp * local_ctx_len, num_cores_per_device=1),
+        position_ids=torch.full((batch_local, 1), cp * local_ctx_len - 1, dtype=torch.int64),
+    )
+
+    expected = torch.tensor([[4.0, 4.0, 4.0, 4.0], [6.0, 6.0, 6.0, 6.0]])
+    expected = expected.view(batch_local, config.num_attention_heads, 1, 1)
+    expected = expected.expand_as(output)
+    assert torch.allclose(output, expected, atol=1e-6, rtol=0)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_dedicated_contiguous_gqa_cache_has_dynamic_dp_cp_axes():
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qaic_config = {
+        "blocking_mode": "kv_minimax_dedicated",
+        "num_kv_blocks": 2,
+        "num_cores_per_device": 1,
+        "attn_dp": 2,
+        "attn_cp": 2,
+    }
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    qeff_model.model.qaic_config = qaic_config
+
+    lang_inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        ctx_len=8,
+        past_seq_len=8,
+        prefill_seq_len=1,
+        batch_size=2,
+    )["lang"]
+    key, value = lang_inputs["past_key_values"][0]
+    assert tuple(key.shape) == (1, 8, 4, 8)
+    assert tuple(value.shape) == tuple(key.shape)
+
+    specs, _ = qeff_model.model.get_specializations(
+        batch_size=2,
+        prefill_seq_len=1,
+        ctx_len=8,
+        kv_offload=True,
+    )
+    assert all(spec["gqa_batch_local"] == 1 for spec in specs["lang"])
+    assert all(spec["gqa_ctx_len"] == 4 for spec in specs["lang"])
+    dynamic_axes = qeff_model.model.get_onnx_dynamic_axes(kv_offload=True)["lang"]
+    assert dynamic_axes["past_key.0"] == {0: "gqa_batch_local", 2: "gqa_ctx_len"}
+    assert dynamic_axes["past_key.0_RetainedState"] == dynamic_axes["past_key.0"]
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_dedicated_gqa_rejects_continuous_batching():
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qaic_config = {"blocking_mode": "kv_minimax_dedicated", "num_kv_blocks": 1}
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    qeff_model.model.qaic_config = qaic_config
+
+    with pytest.raises(NotImplementedError, match="does not support continuous batching"):
+        qeff_model.model.get_specializations(
+            batch_size=1,
+            prefill_seq_len=1,
+            ctx_len=8,
+            kv_offload=True,
+            continuous_batching=True,
+            kv_cache_batch_size=2,
+        )
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_minimax_m3_dense_attention_uses_dedicated_paged_gqa(query_len):
+    config = _tiny_minimax_m3_text_config()
+    paged_attention = QEffMiniMaxM3VLAttention(config, layer_idx=0).eval()
+    reference_attention = deepcopy(paged_attention)
+    is_prefill = query_len > 1
+    paged_attention.attn_blocking_config = AttentionBlockingConfig(
+        mode=BlockingMode.KV_MINIMAX_DEDICATED,
+        num_kv_blocks=2 if is_prefill else 1,
+        num_q_blocks=2 if is_prefill else 1,
+        n_rep_chunk=1,
+        head_block_size=1,
+        ctx_len=8,
+        paged_attention=True,
+        paged_gqa=True,
+        gqa_page_block_size=4,
+        num_cores_per_device=2 if is_prefill else 1,
+    )
+
+    hidden_states = torch.randn(1, query_len, config.hidden_size)
+    position_ids = torch.arange(query_len, dtype=torch.int64).view(1, -1)
+    cos = torch.ones(1, query_len, config.head_dim)
+    sin = torch.zeros_like(cos)
+    attention_mask = torch.arange(8).view(1, 1, 1, -1) > position_ids.view(1, 1, -1, 1)
+    paged_cache = QEffMiniMaxSparseCache.from_legacy_cache(
+        (
+            (
+                torch.zeros(2, config.num_key_value_heads, 4, config.head_dim),
+                torch.zeros(2, config.num_key_value_heads, 4, config.head_dim),
+            ),
+        )
+    )
+    reference_cache = QEffMiniMaxSparseCache.from_legacy_cache(
+        (
+            (
+                torch.zeros(1, config.num_key_value_heads, 8, config.head_dim),
+                torch.zeros(1, config.num_key_value_heads, 8, config.head_dim),
+            ),
+        )
+    )
+
+    with torch.no_grad():
+        paged_output, _ = paged_attention(
+            hidden_states,
+            (cos, sin),
+            attention_mask=attention_mask,
+            past_key_values=paged_cache,
+            position_ids=position_ids,
+            gqa_block_table=torch.arange(2, dtype=torch.int32).view(1, 1, 2),
+        )
+        reference_output, _ = reference_attention(
+            hidden_states,
+            (cos, sin),
+            attention_mask=attention_mask,
+            past_key_values=reference_cache,
+            position_ids=position_ids,
+        )
+
+    assert torch.allclose(paged_output, reference_output, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_dedicated_contiguous_prefill_matches_dense_attention():
+    torch.manual_seed(3)
+    config = _tiny_minimax_m3_text_config()
+    attention = QEffMiniMaxM3VLAttention(config, layer_idx=0).eval()
+    batch, query_len, ctx_len = 1, 4, 8
+    query = torch.randn(batch, config.num_attention_heads, query_len, config.head_dim)
+    key_cache = torch.zeros(batch, config.num_key_value_heads, ctx_len, config.head_dim)
+    value_cache = torch.zeros_like(key_cache)
+    key_cache[:, :, :query_len] = torch.randn(batch, config.num_key_value_heads, query_len, config.head_dim)
+    value_cache[:, :, :query_len] = torch.randn_like(key_cache[:, :, :query_len])
+    position_ids = torch.arange(query_len).view(1, -1)
+    blocking_config = AttentionBlockingConfig(
+        mode=BlockingMode.KV_MINIMAX_DEDICATED,
+        num_kv_blocks=2,
+        num_q_blocks=2,
+        n_rep_chunk=1,
+        head_block_size=1,
+        ctx_len=ctx_len,
+        num_cores_per_device=config.num_key_value_heads,
+    )
+
+    output = attention._gqa_dedicated_prefill(query, key_cache, value_cache, position_ids, blocking_config)
+    repeated_k = key_cache[:, :, :query_len].repeat_interleave(attention.num_key_value_groups, dim=1)
+    repeated_v = value_cache[:, :, :query_len].repeat_interleave(attention.num_key_value_groups, dim=1)
+    scores = torch.matmul(query, repeated_k.transpose(-1, -2)) * attention.scaling
+    causal = torch.arange(query_len).view(1, 1, 1, -1) > position_ids[:, None, :, None]
+    expected = torch.matmul(torch.softmax(scores.masked_fill(causal, -3.0e4), dim=-1), repeated_v)
+
+    assert torch.allclose(output, expected, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_dedicated_contiguous_dp_cp_decode_matches_dense_attention():
+    torch.manual_seed(4)
+    config = _tiny_minimax_m3_text_config()
+    attention = QEffMiniMaxM3VLAttention(config, layer_idx=0).eval()
+    batch, dp, cp, ctx_len = 2, 2, 2, 8
+    hkv, head_dim = config.num_key_value_heads, config.head_dim
+    full_key = torch.randn(batch, hkv, ctx_len, head_dim)
+    full_value = torch.randn_like(full_key)
+    key_cache = torch.zeros(batch // dp, dp * cp * hkv, ctx_len // cp, head_dim)
+    value_cache = torch.zeros_like(key_cache)
+    for dp_idx in range(dp):
+        for way in range(cp):
+            for head_idx in range(hkv):
+                row = dp_idx * cp * hkv + way * hkv + head_idx
+                key_cache[0, row] = full_key[dp_idx, head_idx, way::cp]
+                value_cache[0, row] = full_value[dp_idx, head_idx, way::cp]
+    query = torch.randn(batch, config.num_attention_heads, 1, head_dim)
+    position_ids = torch.full((batch, 1), ctx_len - 1, dtype=torch.int64)
+    blocking_config = AttentionBlockingConfig(
+        mode=BlockingMode.KV_MINIMAX_DEDICATED,
+        num_kv_blocks=2,
+        ctx_len=ctx_len,
+        attn_dp=dp,
+        attn_cp=cp,
+        num_cores_per_device=1,
+        skip_kv=True,
+    )
+
+    output = attention._gqa_dedicated_decode(query, key_cache, value_cache, position_ids, blocking_config)
+    repeated_k = full_key.repeat_interleave(attention.num_key_value_groups, dim=1)
+    repeated_v = full_value.repeat_interleave(attention.num_key_value_groups, dim=1)
+    scores = torch.matmul(query, repeated_k.transpose(-1, -2)) * attention.scaling
+    expected = torch.matmul(torch.softmax(scores, dim=-1), repeated_v)
+
+    assert torch.allclose(output, expected, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.llm_model
+@pytest.mark.accuracy
+def test_minimax_m3_contiguous_dp_cp_decode_hf_qeff_pytorch_parity():
+    torch.manual_seed(5)
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    text_config = vlm_config.text_config
+    text_config.index_topk_blocks = 1
+    text_config.index_local_blocks = 1
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    model_hf_orig = deepcopy(model_hf)
+
+    batch, dp, cp, ctx_len = 2, 2, 2, 16
+    past_seq_len = ctx_len - 1
+    qaic_config = {
+        "blocking_mode": "kv_minimax_dedicated",
+        "num_kv_blocks": 2,
+        "attn_dp": dp,
+        "attn_cp": cp,
+        "msa_indexer_dp": dp,
+        "msa_indexer_cp": cp,
+        "msa_attn_dp": dp,
+        "msa_attn_cp": cp,
+        "indexer_n_head": 1,
+        "num_cores_per_device": 1,
+    }
+
+    def pack_dp_cp_cache(cache: torch.Tensor) -> torch.Tensor:
+        cache_batch, num_heads, cache_len, head_dim = cache.shape
+        assert cache_batch == batch
+        assert cache_len == ctx_len
+        batch_local = cache_batch // dp
+        packed = torch.empty(batch_local, dp * cp * num_heads, cache_len // cp, head_dim, dtype=cache.dtype)
+        for local_batch_idx in range(batch_local):
+            for dp_lane in range(dp):
+                source_batch_idx = dp_lane * batch_local + local_batch_idx
+                for cp_lane in range(cp):
+                    row_start = (dp_lane * cp + cp_lane) * num_heads
+                    row_end = row_start + num_heads
+                    packed[local_batch_idx, row_start:row_end] = cache[source_batch_idx, :, cp_lane::cp]
+        return packed
+
+    logical_caches = []
+    logical_index_keys = {}
+    hf_cache = DynamicCache(config=text_config)
+    for layer_idx, layer_type in enumerate(text_config.layer_types):
+        key = torch.randn(batch, text_config.num_key_value_heads, past_seq_len, text_config.head_dim)
+        value = torch.randn_like(key)
+        logical_caches.append((key, value))
+        hf_cache.update(key, value, layer_idx)
+        if layer_type == "minimax_m3_sparse":
+            index_key = torch.randn(batch, 1, past_seq_len, text_config.index_head_dim)
+            logical_index_keys[layer_idx] = index_key
+            hf_cache.layers[layer_idx].update_index(index_key)
+
+    input_ids = torch.tensor([[3], [5]], dtype=torch.int64)
+    position_ids = torch.full((batch, 1), past_seq_len, dtype=torch.int64)
+    with torch.no_grad():
+        hf_outputs = model_hf_orig.model.language_model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=hf_cache,
+            use_cache=True,
+        )
+        hf_logits = model_hf_orig.lm_head(hf_outputs.last_hidden_state[:, -1:, :]).float()
+
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True, qaic_config=qaic_config)
+    qeff_model.transform(
+        ctx_len=ctx_len,
+        seq_len=1,
+        bs=batch,
+        num_devices=1,
+        num_cores=1,
+        qaic_config=qaic_config,
+        prefill_seq_len=1,
+    )
+    qeff_inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        ctx_len=ctx_len,
+        past_seq_len=ctx_len,
+        prefill_seq_len=1,
+        batch_size=batch,
+    )["lang"]
+    qeff_inputs["input_ids"] = input_ids
+    qeff_inputs["position_ids"] = position_ids
+    qeff_inputs["past_key_values"] = tuple(
+        (
+            pack_dp_cp_cache(torch.nn.functional.pad(key, (0, 0, 0, 1))),
+            pack_dp_cp_cache(torch.nn.functional.pad(value, (0, 0, 0, 1))),
+        )
+        for key, value in logical_caches
+    )
+    qeff_inputs["index_keys"] = [
+        pack_dp_cp_cache(torch.nn.functional.pad(logical_index_keys[layer_idx], (0, 0, 0, 1)))
+        for layer_idx, layer_type in enumerate(text_config.layer_types)
+        if layer_type == "minimax_m3_sparse"
+    ]
+
+    with torch.no_grad():
+        qeff_logits = qeff_model.lang_model.model(**qeff_inputs)[0].float()
+
+    assert torch.isfinite(hf_logits).all()
+    assert torch.isfinite(qeff_logits).all()
+    torch.testing.assert_close(qeff_logits, hf_logits, atol=1e-5, rtol=1e-5)
+    assert torch.equal(qeff_logits.argmax(dim=-1), hf_logits.argmax(dim=-1))
+
+
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+def test_minimax_m3_decode_qeff_pytorch_vs_aic(tmp_path):
+    torch.manual_seed(7)
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    text_config = vlm_config.text_config
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+
+    input_ids = torch.tensor([[3]], dtype=torch.int64)
+    position_ids = torch.tensor([[4]], dtype=torch.int64)
+    runtime_cache_len = 8
+    past_key_values = tuple(
+        (
+            torch.zeros((1, text_config.num_key_value_heads, runtime_cache_len, text_config.head_dim)),
+            torch.zeros((1, text_config.num_key_value_heads, runtime_cache_len, text_config.head_dim)),
+        )
+        for _ in range(text_config.num_hidden_layers)
+    )
+    index_keys = [
+        torch.zeros((1, 1, runtime_cache_len, text_config.index_head_dim))
+        for layer_type in text_config.layer_types
+        if layer_type == "minimax_m3_sparse"
+    ]
+    dummy_vision_embeds = torch.zeros((1, 1, text_config.hidden_size), dtype=torch.float32)
+    dummy_image_idx = torch.zeros((1, 1), dtype=torch.int64)
+
+    with torch.no_grad():
+        qeff_outputs = qeff_model.lang_model.model(
+            input_ids=input_ids,
+            vision_embeds=dummy_vision_embeds,
+            position_ids=position_ids,
+            image_idx=dummy_image_idx,
+            past_key_values=past_key_values,
+            index_keys=index_keys,
+        )
+    qeff_logits = qeff_outputs[0].detach().cpu().numpy()
+
+    qpc_paths = qeff_model.compile(
+        compile_dir=tmp_path / "minimax-m3-aic",
+        prefill_seq_len=1,
+        ctx_len=runtime_cache_len,
+        batch_size=1,
+        num_cores=1,
+        num_devices=1,
+        skip_vision=True,
+        node_precision_info=True,
+        qaic_config={},
+        offload_pt_weights=False,
+    )
+    session = QAICInferenceSession(qpc_paths["lang_decode_qpc_path"])
+    try:
+
+        def binding_shape_dtype(input_name):
+            binding = session.bindings[session.binding_index_map[input_name]]
+            shape = tuple(binding.dims)
+            assert all(dim >= 0 for dim in shape), f"Dynamic AIC binding shape for {input_name}: {shape}"
+            return shape, session.aic_to_np_dtype_mapping[binding.type]
+
+        def binding_zeros(input_name):
+            shape, dtype = binding_shape_dtype(input_name)
+            return np.zeros(shape, dtype=dtype)
+
+        def binding_copy(input_name, source):
+            shape, dtype = binding_shape_dtype(input_name)
+            source = np.asarray(source, dtype=dtype)
+            assert source.size == np.prod(shape), (
+                f"AIC binding shape mismatch for {input_name}: source {source.shape}, expected {shape}"
+            )
+            return source.reshape(shape)
+
+        aic_inputs = {}
+        for input_name in session.input_names:
+            if input_name == "input_ids":
+                aic_inputs[input_name] = binding_copy(input_name, input_ids.numpy())
+            elif input_name == "position_ids":
+                aic_inputs[input_name] = binding_copy(input_name, position_ids.numpy())
+            elif input_name == "vision_embeds":
+                aic_inputs[input_name] = binding_zeros(input_name)
+            elif input_name == "image_idx":
+                aic_inputs[input_name] = binding_copy(input_name, dummy_image_idx.numpy())
+            elif input_name.startswith(("past_key.", "past_value.")):
+                aic_inputs[input_name] = binding_zeros(input_name)
+            elif input_name.startswith("index_key."):
+                aic_inputs[input_name] = binding_zeros(input_name)
+            else:
+                raise AssertionError(f"Unhandled Minimax AIC input: {input_name}")
+        aic_outputs = session.run(aic_inputs)
+    finally:
+        session.deactivate()
+
+    np.testing.assert_allclose(aic_outputs["logits"], qeff_logits, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):
+    """Check MiniMax expert-parallel prefill logits against the original HF model."""
+    torch.manual_seed(7)
+    vlm_config = _tiny_minimax_m3_vlm_config()
+    text_config = vlm_config.text_config
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    model_hf_orig = deepcopy(model_hf)
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+
+    prefill_len, cache_len = 4, 8
+    input_ids = torch.tensor([[3, 5, 7, 9]], dtype=torch.int64)
+    position_ids = torch.arange(prefill_len, dtype=torch.int64).view(1, -1)
+    with torch.no_grad():
+        hf_prefill = model_hf_orig.model.language_model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            use_cache=True,
+        )
+        hf_logits = model_hf_orig.lm_head(hf_prefill.last_hidden_state[:, -1:, :]).float().cpu().numpy()
+
+    qaic_config = {
+        "blocking_mode": "kv_headpar",
+        "num_kv_blocks": 2,
+        "msa_indexer_dp": 1,
+        "msa_indexer_cp": 1,
+        "msa_attn_dp": 1,
+        "indexer_n_head": 1,
+        "num_cores_per_device": 2,
+        "msa_q_chunk": 4,
+        "moe_config": {
+            "flavour": "expert_parallel",
+            "expert_parallel_chunk_size": prefill_len,
+        },
+    }
+    qpc_path = qeff_model.compile(
+        compile_dir=tmp_path / "minimax-m3-expert-parallel-prefill-aic",
+        prefill_seq_len=prefill_len,
+        ctx_len=cache_len,
+        batch_size=1,
+        num_cores=4,
+        num_devices=1,
+        skip_vision=True,
+        node_precision_info=True,
+        prefill_only=True,
+        enable_chunking=True,
+        qaic_config=qaic_config,
+        offload_pt_weights=False,
+    )["lang_prefill_qpc_path"]
+    assert qeff_model.lang_model.hash_params["moe_prefill_flavour"] == "expert_parallel"
+
+    session = QAICInferenceSession(qpc_path)
+    try:
+
+        def binding_value(input_name, source=None):
+            binding = session.bindings[session.binding_index_map[input_name]]
+            shape = tuple(binding.dims)
+            dtype = session.aic_to_np_dtype_mapping[binding.type]
+            if source is None:
+                return np.zeros(shape, dtype=dtype)
+            source = np.asarray(source, dtype=dtype)
+            assert source.size == np.prod(shape), (
+                f"AIC binding shape mismatch for {input_name}: source {source.shape}, expected {shape}"
+            )
+            return source.reshape(shape)
+
+        aic_inputs = {}
+        for input_name in session.input_names:
+            if input_name == "input_ids":
+                aic_inputs[input_name] = binding_value(input_name, input_ids.numpy())
+            elif input_name == "position_ids":
+                aic_inputs[input_name] = binding_value(input_name, position_ids.numpy())
+            elif input_name == "image_idx":
+                aic_inputs[input_name] = binding_value(input_name, np.zeros((1, 1), dtype=np.int64))
+            elif input_name == "vision_embeds" or input_name.startswith(("past_key.", "past_value.", "index_key.")):
+                aic_inputs[input_name] = binding_value(input_name)
+            else:
+                raise AssertionError(f"Unhandled MiniMax AIC input: {input_name}")
+        aic_outputs = session.run(aic_inputs)
+    finally:
+        session.deactivate()
+
+    np.testing.assert_allclose(aic_outputs["logits"], hf_logits, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_text_hf_qeff_pytorch_parity():
+    torch.manual_seed(7)
+    config = _tiny_minimax_m3_text_config()
+    model_hf = MiniMaxM3VLForCausalLM(config).eval()
+    # Preserve the original HF model before transforms mutate it in-place.
+    model_hf_orig = deepcopy(model_hf)
+
+    input_ids = torch.arange(4, dtype=torch.int64).view(1, 4) % config.vocab_size
+    position_ids = torch.arange(4, dtype=torch.int64).view(1, 4)
+    seq_len = input_ids.shape[1]
+
+    with torch.no_grad():
+        hf_logits_no_cache = model_hf(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            use_cache=False,
+        ).logits[:, -1:]
+
+    qeff_model = QEFFAutoModelForCausalLM(model_hf)
+
+    with torch.no_grad():
+        qeff_logits_no_cache = qeff_model.model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            use_cache=False,
+        ).logits
+
+    assert torch.allclose(hf_logits_no_cache, qeff_logits_no_cache, atol=1e-5, rtol=1e-5), (
+        f"HF vs QEff logit mismatch on no-cache prefill: "
+        f"max_diff={(hf_logits_no_cache - qeff_logits_no_cache).abs().max().item():.6f}"
+    )
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_indexer_select_blocks_parity():
+    """
+    Check that QEffMiniMaxM3VLIndexer._select_blocks selects the same key-blocks as
+    MiniMaxM3VLIndexer.forward for a single-token decode step with a pre-filled index-key cache.
+
+    index_n_heads=1 makes HF's per-query head-amax and QEff's per-head topk equivalent.
+    The two outputs differ in representation (HF: block indices; QEff: token indices + validity mask),
+    so we convert QEff token indices to block indices before comparing.
+    """
+    torch.manual_seed(42)
+
+    # Use index_n_heads=1 so HF's amax(dim=heads) and QEff's per-head topk are identical.
+    text_cfg = MiniMaxM3VLTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=16,
+        dense_intermediate_size=64,
+        shared_intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=32,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        routed_scaling_factor=1.0,
+        layer_types=["full_attention", "minimax_m3_sparse"],
+        mlp_layer_types=["dense", "sparse"],
+        index_n_heads=1,
+        index_head_dim=8,
+        index_block_size=4,
+        index_topk_blocks=2,
+        index_local_blocks=1,
+    )
+    text_cfg.torch_dtype = torch.float32
+
+    layer_idx = 1  # the sparse layer
+    batch = 1
+    prefill_len = 8  # pre-filled positions 0..7
+    ctx_len = prefill_len + 1  # includes decode token at position 8
+
+    hf_indexer = MiniMaxM3VLIndexer(text_cfg, layer_idx=layer_idx).eval()
+    qeff_indexer = QEffMiniMaxM3VLIndexer(text_cfg, layer_idx=layer_idx).eval()
+    qeff_indexer.load_state_dict(hf_indexer.state_dict())
+
+    hidden_states = torch.randn(batch, 1, text_cfg.hidden_size)
+    position_ids = torch.tensor([[prefill_len]])  # decode at position 8
+
+    # cos/sin for the single decode query position: [B, 1, index_head_dim]
+    cos = torch.rand(batch, 1, text_cfg.index_head_dim)
+    sin = torch.rand(batch, 1, text_cfg.index_head_dim)
+
+    # Already-rotated index-key cache for positions 0..7: [B, 1, prefill_len, D]
+    pre_fill_index_keys = torch.randn(batch, 1, prefill_len, text_cfg.index_head_dim)
+
+    # HF mock cache: layers[layer_idx].update_index(new_k) appends new_k to past keys.
+    class _HFIndexLayer:
+        def __init__(self, past_k: torch.Tensor) -> None:
+            self._past = past_k
+
+        def update_index(self, new_k: torch.Tensor) -> torch.Tensor:
+            return torch.cat([self._past, new_k], dim=2)
+
+    class _HFCache:
+        def __init__(self) -> None:
+            self.layers = {layer_idx: _HFIndexLayer(pre_fill_index_keys)}
+
+    hf_cache = _HFCache()
+
+    # QEff cache: _select_blocks reads ctx_len from layers[layer_idx].keys.shape[2] and
+    # scatter-writes the new key via update_index_key_cache into a pre-allocated buffer.
+    qeff_cache = QEffMiniMaxSparseCache()
+    qeff_cache.layers = [None] * (layer_idx + 1)
+    qeff_cache.layers[layer_idx] = SimpleNamespace(
+        keys=torch.zeros(batch, text_cfg.num_key_value_heads, ctx_len, text_cfg.head_dim)
+    )
+    # Pre-allocated buffer: positions 0..7 filled, position 8 zeroed (filled in-flight).
+    qeff_cache.index_keys[layer_idx] = torch.cat(
+        [pre_fill_index_keys, torch.zeros(batch, 1, 1, text_cfg.index_head_dim)], dim=2
+    )
+
+    with torch.no_grad():
+        hf_block_indices = hf_indexer.forward(
+            hidden_states,
+            position_embeddings=(cos, sin),
+            past_key_values=hf_cache,
+            position_ids=position_ids,
+        )  # [B=1, S_q=1, topk_blocks]
+
+        qeff_safe_indices, qeff_token_valid = qeff_indexer._select_blocks(
+            hidden_states,
+            position_ids,
+            qeff_cache,
+            layer_idx=layer_idx,
+            cos=cos,
+            sin=sin,
+        )  # [B=1, H=1, topk*block_size] each
+
+    block_size = text_cfg.index_block_size
+
+    # HF returns block indices [B=1, S_q=1, topk]; -1 pads unused slots.
+    hf_selected = hf_block_indices[0, 0]
+    hf_valid_blocks = hf_selected[hf_selected >= 0].sort().values
+
+    # QEff returns token indices + validity mask; convert to block indices.
+    qeff_tok_idx = qeff_safe_indices[0, 0]
+    qeff_tok_mask = qeff_token_valid[0, 0]
+    qeff_valid_blocks = (qeff_tok_idx[qeff_tok_mask] // block_size).unique().sort().values
+
+    assert torch.equal(hf_valid_blocks, qeff_valid_blocks), (
+        f"Block selection mismatch: HF={hf_valid_blocks.tolist()}, QEff={qeff_valid_blocks.tolist()}"
+    )
+
+
+def check_attention_module_parity(
+    text_cfg: MiniMaxM3VLTextConfig,
+    layer_idx: int,
+    prefill_len: int = 7,
+    batch: int = 1,
+    atol: float = 1e-4,
+    seed: int = 42,
+) -> tuple:
+    """
+    Verify that QEffMiniMaxM3VLAttention and MiniMaxM3VLAttention produce the same
+    attention output on a single-token decode step with a pre-filled KV cache.
+
+    A QEffMiniMaxSparseCache is built via from_legacy_cache with pre-allocated
+    ctx_len = prefill_len + 1 buffers (positions 0..prefill_len-1 filled, position
+    prefill_len zeroed as the decode slot).  QEff's write_only / update then
+    scatter-writes the decode token into that slot.  A lightweight HF mock cache
+    appends the same decode token so both modules attend over the same ctx_len KV.
+
+    For sparse layers ctx_len is kept within index_topk_blocks * index_block_size so
+    that every key block falls within the topk budget, making HF's indexer block mask
+    equivalent to a plain causal mask and the outputs identical.
+
+    Args:
+        text_cfg:    MiniMaxM3VLTextConfig instance.
+        layer_idx:   Index of the attention layer to test.
+        prefill_len: Number of pre-existing tokens in the cache (decode position).
+        batch:       Batch size.
+        atol:        Absolute tolerance; returns True when max_diff < atol.
+        seed:        RNG seed.
+
+    Returns:
+        (passed: bool, max_diff: float)
+    """
+    torch.manual_seed(seed)
+
+    is_sparse = text_cfg.layer_types[layer_idx] == "minimax_m3_sparse"
+    if is_sparse:
+        max_ctx = text_cfg.index_topk_blocks * text_cfg.index_block_size
+        prefill_len = min(prefill_len, max_ctx - 1)  # leave one slot for decode
+
+    ctx_len = prefill_len + 1  # buffer size; position prefill_len is the decode slot
+
+    nkv = text_cfg.num_key_value_heads
+    hd = text_cfg.head_dim
+    idx_d = text_cfg.index_head_dim
+
+    # Pre-filled KV: random for positions 0..prefill_len-1, zero for the decode slot.
+    pre_k = torch.cat([torch.randn(batch, nkv, prefill_len, hd), torch.zeros(batch, nkv, 1, hd)], dim=2)
+    pre_v = torch.cat([torch.randn(batch, nkv, prefill_len, hd), torch.zeros(batch, nkv, 1, hd)], dim=2)
+    # Pre-filled index keys for the sparse indexer (same zeroed-slot convention).
+    pre_idx_k = torch.cat([torch.randn(batch, 1, prefill_len, idx_d), torch.zeros(batch, 1, 1, idx_d)], dim=2)
+
+    # ── QEff cache ─────────────────────────────────────────────────────────────
+    # Build a per-layer tuple list so from_legacy_cache initialises layers[0..layer_idx].
+    # Dummy 2-tuples cover layers below the target; the target layer gets a 3-tuple
+    # carrying the index-key buffer so QEffMiniMaxSparseCache.index_keys is set.
+    dummy = (
+        torch.zeros(batch, nkv, ctx_len, hd),
+        torch.zeros(batch, nkv, ctx_len, hd),
+    )
+    layer_tuples = [dummy] * layer_idx + [(pre_k, pre_v, pre_idx_k)]
+    qeff_cache = QEffMiniMaxSparseCache.from_legacy_cache(layer_tuples)
+
+    # ── HF mock cache ──────────────────────────────────────────────────────────
+    # MiniMaxM3VLAttention.forward calls cache.update(k, v, layer_idx) for standard
+    # attention and cache.layers[layer_idx].update_index(new_idx_k) for the indexer.
+    pre_k_hf = pre_k[:, :, :prefill_len, :]  # HF holds only the filled positions
+    pre_v_hf = pre_v[:, :, :prefill_len, :]
+    pre_idx_k_hf = pre_idx_k[:, :, :prefill_len, :]
+
+    class _HFIndexLayer:
+        def __init__(self, past_idx_k: torch.Tensor) -> None:
+            self._past = past_idx_k
+
+        def update_index(self, new_idx_k: torch.Tensor) -> torch.Tensor:
+            return torch.cat([self._past, new_idx_k], dim=2)
+
+    class _HFCache:
+        def __init__(self) -> None:
+            self._k = pre_k_hf
+            self._v = pre_v_hf
+            self.layers = {layer_idx: _HFIndexLayer(pre_idx_k_hf)}
+
+        def update(self, key_states: torch.Tensor, value_states: torch.Tensor, _layer_idx: int):
+            k = torch.cat([self._k, key_states], dim=2)
+            v = torch.cat([self._v, value_states], dim=2)
+            self._k, self._v = k, v
+            return k, v
+
+    hf_cache = _HFCache()
+
+    # ── Shared module setup ────────────────────────────────────────────────────
+    hf_attn = MiniMaxM3VLAttention(text_cfg, layer_idx=layer_idx).eval()
+    qeff_attn = QEffMiniMaxM3VLAttention(text_cfg, layer_idx=layer_idx).eval()
+    qeff_attn.load_state_dict(hf_attn.state_dict())
+    # Mirror the production ModuleMappingTransform: swap the indexer class so that
+    # QEffMiniMaxM3VLAttention.forward can call self.indexer._select_blocks().
+    if qeff_attn.indexer is not None:
+        qeff_attn.indexer.__class__ = QEffMiniMaxM3VLIndexer
+
+    # Decode inputs: single token at position prefill_len.
+    hidden_states = torch.randn(batch, 1, text_cfg.hidden_size)
+    position_ids = torch.tensor([[prefill_len]], dtype=torch.long)
+
+    rot_emb = QEffMiniMaxM3VLRotaryEmbedding(text_cfg).eval()
+    with torch.no_grad():
+        cos, sin = rot_emb(hidden_states, position_ids)
+
+    with torch.no_grad():
+        hf_out, _ = hf_attn(
+            hidden_states,
+            position_embeddings=(cos, sin),
+            attention_mask=None,
+            past_key_values=hf_cache,
+            position_ids=position_ids,
+        )
+        qeff_out, _ = qeff_attn(
+            hidden_states,
+            position_embeddings=(cos, sin),
+            attention_mask=None,
+            past_key_values=qeff_cache,
+            position_ids=position_ids,
+        )
+
+    max_diff = (hf_out - qeff_out).abs().max().item()
+    return max_diff < atol, max_diff
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize("layer_idx", [0, 1], ids=["dense", "sparse"])
+def test_minimax_m3_attention_module_parity(layer_idx):
+    """
+    Verify that QEffMiniMaxM3VLAttention.forward and MiniMaxM3VLAttention.forward
+    produce identical outputs (within 1e-4) on a decode step with a pre-filled
+    QEffMiniMaxSparseCache, for both the dense (layer 0) and sparse (layer 1) types.
+    """
+    text_cfg = _tiny_minimax_m3_text_config()
+    passed, max_diff = check_attention_module_parity(text_cfg, layer_idx=layer_idx)
+    assert passed, (
+        f"Attention parity failed for layer_idx={layer_idx} "
+        f"(layer_type={text_cfg.layer_types[layer_idx]}): max_diff={max_diff:.6f}"
+    )
+
+
+def check_moe_module_parity(
+    text_cfg: MiniMaxM3VLTextConfig,
+    batch: int = 1,
+    seq_len: int = 4,
+    atol: float = 1e-4,
+    seed: int = 42,
+) -> tuple:
+    """
+    Verify that QEffMiniMaxM3VLSparseMoeBlock.forward and MiniMaxM3VLSparseMoeBlock.forward
+    produce identical outputs on random hidden_states.
+
+    QEffMiniMaxM3VLSparseMoeBlock replaces the per-expert index_add_ loop with batched
+    matrix multiplies (BMM).  Both should produce the same weighted sum of expert outputs
+    plus the shared expert contribution.
+
+    Args:
+        text_cfg: MiniMaxM3VLTextConfig with sparse MoE settings.
+        batch:    Batch size.
+        seq_len:  Sequence length.
+        atol:     Absolute tolerance; returns True when max_diff < atol.
+        seed:     RNG seed.
+
+    Returns:
+        (passed: bool, max_diff: float)
+    """
+    torch.manual_seed(seed)
+
+    hf_moe = MiniMaxM3VLSparseMoeBlock(text_cfg).eval()
+    with torch.no_grad():
+        for parameter in hf_moe.parameters():
+            parameter.normal_(mean=0.0, std=0.02)
+    qeff_moe = MiniMaxM3VLSparseMoeBlock(text_cfg).eval()
+    qeff_moe.load_state_dict(hf_moe.state_dict())
+    qeff_moe.__class__ = QEffMiniMaxM3VLSparseMoeBlock
+    qeff_moe.__qeff_init__()
+    qeff_moe.transform_weights()
+
+    hidden_states = torch.randn(batch, seq_len, text_cfg.hidden_size)
+
+    with torch.no_grad():
+        hf_out = hf_moe(hidden_states.clone())
+        qeff_out = qeff_moe(hidden_states.clone())
+
+    max_diff = (hf_out - qeff_out).abs().max().item()
+    return max_diff < atol, max_diff
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(
+    ("batch", "seq_len"),
+    [(1, 1), (1, 4), (2, 6)],
+    ids=["decode", "context_4", "context_6_batch2"],
+)
+def test_minimax_m3_moe_module_parity(batch, seq_len):
+    """
+    Verify that QEffMiniMaxM3VLSparseMoeBlock.forward produces identical outputs to
+    MiniMaxM3VLSparseMoeBlock.forward (within 1e-5) across decode and context steps.
+
+    The QEff variant uses BMM-based expert computation instead of the HF per-expert
+    index_add_ loop; this test confirms mathematical equivalence.
+    """
+    text_cfg = _tiny_minimax_m3_text_config()
+    passed, max_diff = check_moe_module_parity(text_cfg, batch=batch, seq_len=seq_len)
+    assert passed, f"MoE parity failed for batch={batch}, seq_len={seq_len}: max_diff={max_diff:.6f}"
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_moe_expert_parallel_transform_and_parity():
+    from QEfficient.transformers.models.pytorch_transforms import OptimizedMoETransform
+    from QEfficient.transformers.moe import MoEFlavour
+
+    torch.manual_seed(42)
+    text_cfg = _tiny_minimax_m3_text_config()
+    hf_moe = MiniMaxM3VLSparseMoeBlock(text_cfg).eval()
+    with torch.no_grad():
+        for parameter in hf_moe.parameters():
+            parameter.normal_(mean=0.0, std=0.02)
+    qeff_moe = MiniMaxM3VLSparseMoeBlock(text_cfg).eval()
+    qeff_moe.load_state_dict(hf_moe.state_dict())
+
+    qeff_moe, transformed = OptimizedMoETransform.apply(
+        qeff_moe,
+        prefill_only=True,
+        num_devices=2,
+        num_cores=text_cfg.num_local_experts // 2,
+        qaic_config={
+            "moe_config": {
+                "flavour": "expert_parallel",
+                "expert_parallel_chunk_size": 4,
+                "tree_reduce": True,
+            }
+        },
+        prefill_seq_len=4,
+    )
+
+    assert transformed
+    assert isinstance(qeff_moe, QEffMiniMaxM3VLSparseMoeBlock)
+    assert qeff_moe._moe_flavour is MoEFlavour.EXPERT_PARALLEL
+    assert qeff_moe.moe_weights.gate.shape[:2] == (text_cfg.num_local_experts, 1)
+    assert qeff_moe.num_devices == 2
+    assert qeff_moe.tree_reduce is True
+
+    hidden_states = torch.randn(1, 4, text_cfg.hidden_size)
+    with torch.no_grad():
+        hf_out = hf_moe(hidden_states.clone())
+        qeff_out = qeff_moe(hidden_states.clone())
+
+    torch.testing.assert_close(qeff_out, hf_out, atol=1e-4, rtol=1e-4)
+
+    qeff_moe, _ = OptimizedMoETransform.apply(
+        qeff_moe,
+        prefill_only=False,
+        qaic_config={"moe_config": {"flavour": "decode_bmm"}},
+    )
+    assert qeff_moe._moe_flavour is MoEFlavour.DECODE_BMM
+    assert qeff_moe.moe_weights.gate.ndim == 3
+    with torch.no_grad():
+        decode_out = qeff_moe(hidden_states.clone())
+    torch.testing.assert_close(decode_out, hf_out, atol=1e-4, rtol=1e-4)
 
 
 @pytest.mark.llm_model
@@ -5331,3 +7308,246 @@ def test_runner_io_bundle_is_cpu_only_and_qaic_runner_compatible(tmp_path):
     assert entries[1]["dims"] == [1, 4]
     assert (io_dir / "data/input_ids.raw").stat().st_size == inputs.nbytes
     assert not (io_dir / "data/output.raw").exists()
+
+
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+def test_minimax_m3_prefill_decode_hf_pytorch_vs_aic(tmp_path):
+    """Check AIC parity against the original HF MiniMax prefill-to-decode handoff."""
+    torch.manual_seed(7)
+    config = _tiny_minimax_m3_vlm_config()
+    text_config = config.text_config
+    model_hf = MiniMaxM3SparseForConditionalGeneration(config).eval()
+    model_hf_orig = deepcopy(model_hf)
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+    prefill_len, cache_len = 4, 8
+    input_ids = torch.tensor([[3, 5, 7, 9]], dtype=torch.int64)
+    prefill_positions = torch.arange(prefill_len, dtype=torch.int64).view(1, -1)
+    decode_positions = torch.tensor([[prefill_len]], dtype=torch.int64)
+    vision = torch.zeros((1, 1, text_config.hidden_size))
+    image_idx = torch.zeros((1, 1), dtype=torch.int64)
+    with torch.no_grad():
+        hf_prefill = model_hf_orig.model.language_model(
+            input_ids=input_ids,
+            position_ids=prefill_positions,
+            use_cache=True,
+        )
+        pt_prefill_logits = model_hf_orig.lm_head(hf_prefill.last_hidden_state[:, -1:, :]).float()
+        next_ids = pt_prefill_logits.argmax(dim=-1)
+        hf_decode = model_hf_orig.model.language_model(
+            input_ids=next_ids,
+            position_ids=decode_positions,
+            past_key_values=hf_prefill.past_key_values,
+            use_cache=True,
+        )
+        pt_decode_logits = model_hf_orig.lm_head(hf_decode.last_hidden_state[:, -1:, :]).float()
+
+    def run_stage(qpc_path, stage_input_ids, stage_positions, retained=None):
+        session = QAICInferenceSession(qpc_path)
+        try:
+
+            def adapt(name, source=None):
+                binding = session.bindings[session.binding_index_map[name]]
+                shape = tuple(binding.dims)
+                dtype = session.aic_to_np_dtype_mapping[binding.type]
+                if source is None:
+                    return np.zeros(shape, dtype=dtype)
+                source = np.asarray(source, dtype=dtype)
+                assert source.size == np.prod(shape), (
+                    f"AIC binding shape mismatch for {name}: {source.shape}, expected {shape}"
+                )
+                return source.reshape(shape)
+
+            inputs = {}
+            for name in session.input_names:
+                if name == "input_ids":
+                    inputs[name] = adapt(name, stage_input_ids.numpy())
+                elif name == "position_ids":
+                    inputs[name] = adapt(name, stage_positions.numpy())
+                elif name == "vision_embeds":
+                    inputs[name] = adapt(name, vision.expand(1, stage_positions.shape[1], -1).numpy())
+                elif name == "image_idx":
+                    inputs[name] = adapt(name, image_idx.numpy())
+                elif name.startswith(("past_key.", "past_value.", "index_key.")):
+                    inputs[name] = adapt(name, retained.get(name) if retained else None)
+                else:
+                    raise AssertionError(f"Unhandled MiniMax AIC input: {name}")
+            return session.run(inputs)
+        finally:
+            session.deactivate()
+
+    def run_ort_stage(onnx_path, stage_input_ids, stage_positions, retained=None):
+        session = _ort_session(Path(onnx_path))
+        input_shapes = {meta.name: tuple(meta.shape) for meta in session.get_inputs()}
+        input_types = {
+            meta.name: np.int64 if meta.type == "tensor(int64)" else np.float32 for meta in session.get_inputs()
+        }
+
+        def adapt(name, source=None):
+            shape = input_shapes[name]
+            dtype = input_types[name]
+            if source is None:
+                assert all(isinstance(dim, int) for dim in shape), (
+                    f"ORT input {name} has unresolved shape {shape} without a source tensor"
+                )
+                return np.zeros(shape, dtype=dtype)
+            source = np.asarray(source, dtype=dtype)
+            for expected, actual in zip(shape, source.shape):
+                if isinstance(expected, int):
+                    assert expected == actual, (
+                        f"ORT binding shape mismatch for {name}: {source.shape}, expected {shape}"
+                    )
+            return source
+
+        inputs = {}
+        for name in input_shapes:
+            if name == "input_ids":
+                inputs[name] = adapt(name, stage_input_ids.numpy())
+            elif name == "position_ids":
+                inputs[name] = adapt(name, stage_positions.numpy())
+            elif name == "vision_embeds":
+                inputs[name] = adapt(name, vision.expand(1, stage_positions.shape[1], -1).numpy())
+            elif name == "image_idx":
+                inputs[name] = adapt(name, image_idx.numpy())
+            elif name.startswith(("past_key.", "past_value.")):
+                source = (
+                    retained.get(name)
+                    if retained
+                    else np.zeros((1, text_config.num_key_value_heads, cache_len, text_config.head_dim))
+                )
+                inputs[name] = adapt(name, source)
+            elif name.startswith("index_key."):
+                source = retained.get(name) if retained else np.zeros((1, 1, cache_len, text_config.index_head_dim))
+                inputs[name] = adapt(name, source)
+            else:
+                raise AssertionError(f"Unhandled MiniMax ORT input: {name}")
+        return dict(zip((output.name for output in session.get_outputs()), session.run(None, inputs)))
+
+    compile_args = dict(
+        ctx_len=cache_len,
+        batch_size=1,
+        num_cores=4,
+        num_devices=1,
+        skip_vision=True,
+        node_precision_info=True,
+        qaic_config={
+            "blocking_mode": "kv_headpar",
+            "num_kv_blocks": 2,
+            "msa_indexer_dp": 1,
+            "msa_indexer_cp": 1,
+            "msa_attn_dp": 1,
+            "indexer_n_head": 1,
+            "num_cores_per_device": 2,
+            "msa_q_chunk": 4,
+        },
+        offload_pt_weights=False,
+    )
+
+    prefill_qpc = qeff_model.compile(
+        compile_dir=tmp_path / "minimax-prefill-aic",
+        prefill_seq_len=prefill_len,
+        prefill_only=True,
+        enable_chunking=True,
+        **compile_args,
+    )["lang_prefill_qpc_path"]
+    prefill_onnx = Path(qeff_model.lang_model.onnx_path)
+    decode_qpc = qeff_model.compile(
+        compile_dir=tmp_path / "minimax-decode-aic", prefill_seq_len=1, prefill_only=False, **compile_args
+    )["lang_decode_qpc_path"]
+    decode_onnx = Path(qeff_model.lang_model.onnx_path)
+
+    ort_prefill = run_ort_stage(prefill_onnx, input_ids, prefill_positions)
+    np.testing.assert_allclose(ort_prefill["logits"], pt_prefill_logits.numpy(), atol=1e-4, rtol=1e-4)
+    ort_retained = {
+        name.removesuffix("_RetainedState"): output
+        for name, output in ort_prefill.items()
+        if name.endswith("_RetainedState")
+    }
+    ort_decode = run_ort_stage(decode_onnx, ort_prefill["logits"].argmax(axis=-1), decode_positions, ort_retained)
+    np.testing.assert_allclose(ort_decode["logits"], pt_decode_logits.numpy(), atol=1e-4, rtol=1e-4)
+
+    aic_prefill = run_stage(prefill_qpc, input_ids, prefill_positions)
+    np.testing.assert_allclose(aic_prefill["logits"], pt_prefill_logits.numpy(), atol=1e-2, rtol=1e-2)
+    retained = {
+        name.removesuffix("_RetainedState"): output
+        for name, output in aic_prefill.items()
+        if name.endswith("_RetainedState")
+    }
+    aic_decode = run_stage(decode_qpc, aic_prefill["logits"].argmax(axis=-1), decode_positions, retained)
+    np.testing.assert_allclose(aic_decode["logits"], pt_decode_logits.numpy(), atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.llm_model
+def test_minimax_m3_prefill_hf_qeff_pytorch_parity_with_explicit_cache():
+    """Compare HF and QEff PyTorch prefill with identical explicit cache tensors."""
+    torch.manual_seed(7)
+    vlm_config = _tiny_minimax_m3_vlm_config(microbench=True)
+    text_config = vlm_config.text_config
+    model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
+    model_hf_orig = deepcopy(model_hf)
+    qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)
+
+    prefill_len, cache_len = 8, 8
+    input_ids = torch.tensor([[3, 5, 7, 9, 11, 13, 15, 17]], dtype=torch.int64)
+    position_ids = torch.arange(prefill_len, dtype=torch.int64).view(1, -1)
+    vision_embeds = torch.zeros((1, prefill_len, text_config.hidden_size))
+    image_idx = torch.zeros((1, 1), dtype=torch.int64)
+    explicit_cache = tuple(
+        (
+            torch.zeros((1, text_config.num_key_value_heads, cache_len, text_config.head_dim)),
+            torch.zeros((1, text_config.num_key_value_heads, cache_len, text_config.head_dim)),
+        )
+        for _ in range(text_config.num_hidden_layers)
+    )
+    explicit_index_keys = [
+        torch.zeros((1, 1, cache_len, text_config.index_head_dim))
+        for layer_type in text_config.layer_types
+        if layer_type == "minimax_m3_sparse"
+    ]
+
+    qeff_model.transform(
+        ctx_len=cache_len,
+        seq_len=prefill_len,
+        bs=1,
+        num_devices=1,
+        num_cores=8,
+        prefill_only=True,
+        prefill_seq_len=prefill_len,
+        qaic_config={
+            "blocking_mode": "kv_headpar",
+            "num_kv_blocks": 1,
+            "msa_indexer_dp": 1,
+            "msa_indexer_cp": 1,
+            "msa_attn_dp": 1,
+            "indexer_n_head": 1,
+            "num_cores_per_device": 8,
+            "msa_q_chunk": 8,
+        },
+    )
+    hf_cache = DynamicCache(config=text_config)
+    # HF has no fixed-capacity cache input; an empty DynamicCache represents the
+    # same logical state as QEff's zero-filled capacity cache before prefill.
+
+    with torch.no_grad():
+        hf_outputs = model_hf_orig.model.language_model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=hf_cache,
+            use_cache=True,
+        )
+        hf_logits = model_hf_orig.lm_head(hf_outputs.last_hidden_state[:, -1:, :]).float()
+        qeff_outputs = qeff_model.lang_model.model(
+            input_ids=input_ids,
+            vision_embeds=vision_embeds,
+            position_ids=position_ids,
+            image_idx=image_idx,
+            past_key_values=explicit_cache,
+            index_keys=explicit_index_keys,
+        )
+
+    np.testing.assert_allclose(
+        qeff_outputs[0].detach().cpu().numpy(),
+        hf_logits.detach().cpu().numpy(),
+        atol=1e-5,
+        rtol=1e-5,
+    )
