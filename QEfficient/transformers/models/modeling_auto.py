@@ -1597,7 +1597,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         # Note: SamplerTransform should be applied after all other transforms
         # are done. The role of the sampler is to just add nodes at the output of the
         # previous transform function.
-        self.lang_model.model.qaic_config = qaic_config
+        self.model.qaic_config = qaic_config
         self.lang_model.model, _ = SamplerTransform.apply(self.lang_model.model, qaic_config, **kwargs)
 
     @classmethod
@@ -1754,8 +1754,12 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             "continuous_batching": self.continuous_batching,
             "comp_ctx_lengths": self.comp_ctx_lengths_decode,
         }
+        _blocking_cfg = self.lang_model.hash_params.get("blocking_kwargs", None)
+        if _blocking_cfg is not None:
+            # Dummy-input shapes for blocked/paged attention need the real ctx_len (e.g. to size
+            # the KV cache's block dimension), not the small ONNX_EXPORT_EXAMPLE_SEQ_LEN placeholder.
+            onnx_kwargs["ctx_len"] = _blocking_cfg.ctx_len
         if getattr(self.model.config, "model_type", None) in {"qwen3_vl_moe", "qwen3_5_moe", "qwen3_5"}:
-            _blocking_cfg = self.lang_model.hash_params.get("blocking_kwargs", None)
             batch_fold = (
                 not prefill_only and _blocking_cfg is not None and _blocking_cfg.mode == BlockingMode.KV_BATCH_FOLD
             )

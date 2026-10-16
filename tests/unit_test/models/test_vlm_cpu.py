@@ -150,6 +150,7 @@ class TestInternalVLMClassesStructure:
                 self.get_model_config = {"vocab_size": 97}
                 self.onnx_path = "lang.onnx"
                 self.exported_inputs = None
+                self.hash_params = {}
 
             def export(self, inputs, output_names, dynamic_axes, **kwargs):
                 self.exported_inputs = inputs
@@ -264,6 +265,75 @@ class TestQEffAutoModelForImageTextToTextDualQPCStructure:
         assert all(call["mdp_ts_num_devices"] == 4 for call in calls)
         assert all(call["mdp_num_partitions"] == 2 for call in calls)
         assert "`mdp_ts_num_devices` passed to compile() is ignored" in caplog.text
+
+
+class TestDualQPCPagedAttentionQaicConfigRegression:
+    """Regression tests for the qaic_config attribute-identity mismatch (DualQPC + VLM paged attention).
+
+    Bug: get_dummy_inputs()/get_specializations()/get_onnx_dynamic_axes() read qaic_config off a
+    different object (self.model) than __init__ wrote it to (self.lang_model.model), so a paged
+    blocking_mode/num_kv_blocks set at construction time could silently never be seen by the
+    dummy-input-shaping code, and the real ctx_len never reached get_dummy_inputs()'s KV-cache
+    sizing. These tests exercise the real methods directly (no QAIC hardware, no checkpoint
+    download) with small, reproducible configs.
+    """
+
+    @pytest.mark.parametrize(
+        "modeling_module, class_name",
+        [
+            (
+                "QEfficient.transformers.models.qwen2_5_vl.modeling_qwen2_5_vl",
+                "QEffQwen_2_5_vl_ForConditionalGeneration",
+            ),
+            ("QEfficient.transformers.models.qwen3_vl.modeling_qwen3_vl", "QEffQwen3VLForConditionalGeneration"),
+            (
+                "QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe",
+                "QEffQwen3VLMoeForConditionalGeneration",
+            ),
+        ],
+    )
+    def test_get_dummy_inputs_paged_branch_uses_real_ctx_len_and_self_qaic_config(self, modeling_module, class_name):
+        """get_dummy_inputs()'s paged branch must read qaic_config off self (not self.model) and
+        size the KV-cache block dimension from the real ctx_len passed in via kwargs, with
+        prefill_seq_len forced equal to kv_block_size (no partial-block decoupling)."""
+        import importlib
+
+        module = importlib.import_module(modeling_module)
+        cls = getattr(module, class_name)
+
+        text_config = SimpleNamespace(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_key_value_heads=2,
+            num_attention_heads=2,
+            head_dim=4,
+        )
+        vision_config = SimpleNamespace(out_hidden_size=8, deepstack_visual_indexes=[0])
+        model_config = SimpleNamespace(
+            text_config=text_config,
+            vision_config=vision_config,
+            torch_dtype=torch.float32,
+        )
+
+        instance = object.__new__(cls)
+        instance.model = SimpleNamespace(config=model_config)
+        instance.config = model_config
+        # Regression-critical: qaic_config must live on self, not self.model, after the fix.
+        instance.qaic_config = {"blocking_mode": "kv_paged", "num_kv_blocks": 2}
+
+        num_kv_blocks = 2
+        ctx_len = 32
+        expected_kv_block_size = -(-ctx_len // num_kv_blocks)  # 16
+
+        inputs = instance.get_dummy_inputs(kv_offload=True, prefill_seq_len=4, ctx_len=ctx_len)
+        lang_inputs = inputs["lang"]
+
+        assert lang_inputs["input_ids"].shape[-1] == expected_kv_block_size
+        assert lang_inputs["block_table"].shape == (1, num_kv_blocks)
+        assert lang_inputs["slot_id"].shape == (1,)
+        for kv_pair in lang_inputs["past_key_values"]:
+            for tensor in kv_pair:
+                assert tensor.shape[2] == expected_kv_block_size
 
 
 class TestQEffAutoModelForImageTextToTextSingleQPCCompile:

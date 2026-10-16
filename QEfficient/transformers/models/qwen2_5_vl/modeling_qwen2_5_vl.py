@@ -895,11 +895,12 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
         )
 
         lang_inputs["input_ids"] = torch.zeros((inputs_shapes["input_ids"]), dtype=torch.int64)
-        qaic_config = getattr(self.model, "qaic_config", None)
+        qaic_config = getattr(self, "qaic_config", None)
         blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
         if blocking_mode is not None and "paged" in blocking_mode:
             num_kv_blocks = qaic_config["num_kv_blocks"]
             batch, num_kv_heads, CL, dh = kv_cache_shape
+            CL = kwargs.get("ctx_len") or CL
             prefill_seq_len = kv_block_size = -(-CL // num_kv_blocks)
             total_num_kv_blocks = batch * num_kv_blocks
             kv_cache_shape = [total_num_kv_blocks, num_kv_heads, kv_block_size, dh]
@@ -1081,10 +1082,10 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
             if full_batch_size:
                 lang_prefill["full_batch_exec_size"] = full_batch_size
 
-            qaic_config = getattr(self.model, "qaic_config", None)
+            qaic_config = getattr(self, "qaic_config", None)
             blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
             if blocking_mode is not None and "paged" in blocking_mode:
-                num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
+                num_kv_blocks = self.qaic_config["num_kv_blocks"]
                 lang_prefill["num_kv_blocks"] = num_kv_blocks
                 lang_prefill["total_num_kv_blocks"] = kv_cache_batch_size * num_kv_blocks
                 lang_prefill["kv_block_size"] = -(-ctx_len // num_kv_blocks)
@@ -1102,10 +1103,10 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
             else:
                 lang_decode["batch_size"] = kv_cache_batch_size
 
-            qaic_config = getattr(self.model, "qaic_config", None)
+            qaic_config = getattr(self, "qaic_config", None)
             blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
             if blocking_mode is not None and "paged" in blocking_mode:
-                num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
+                num_kv_blocks = self.qaic_config["num_kv_blocks"]
                 lang_decode["num_kv_blocks"] = num_kv_blocks
                 lang_decode["total_num_kv_blocks"] = kv_cache_batch_size * num_kv_blocks
                 lang_decode["kv_block_size"] = -(-ctx_len // num_kv_blocks)
@@ -1145,7 +1146,7 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
             2: "ctx_len",
         }
 
-        qaic_config = getattr(self.model, "qaic_config", None)
+        qaic_config = getattr(self, "qaic_config", None)
         blocking_mode = qaic_config.get("blocking_mode") if qaic_config is not None else None
         if blocking_mode is not None and "paged" in blocking_mode:
             lang_dynamic_axes["block_table"] = {0: "batch_size"}
