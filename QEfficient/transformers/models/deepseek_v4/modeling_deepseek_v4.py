@@ -1203,6 +1203,52 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             return qeff_apply_rotary_pos_emb(states, cos, -sin if inverse else sin, unsqueeze_dim=2)
         return qeff_apply_rotary_pos_emb(states, cos, -sin if inverse else sin)
 
+    def _csa_prefill_select_indexer_slots(
+        self,
+        q_index: torch.Tensor,
+        index_weights: torch.Tensor,
+        position_ids: torch.Tensor,
+        indexer_kv_cache: torch.Tensor,
+        index_topk: int,
+        compression_rate: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select CSA compressed-cache slots from bounded indexer-KV score tiles."""
+        batch_size, chunk_length = position_ids.shape
+        capacity = indexer_kv_cache.shape[1]
+        tile_size = int(getattr(self.config, "qeff_csa_prefill_indexer_kv_block_size", 512))
+        topk_per_tile = int(getattr(self.config, "qeff_csa_prefill_indexer_topk_per_block", 4))
+        if tile_size < 1 or topk_per_tile < 1:
+            raise ValueError("CSA prefill indexer tile size and top-k per tile must be positive.")
+
+        num_tiles = (capacity + tile_size - 1) // tile_size
+        top_k = min(index_topk, capacity)
+        topk_per_tile = max(topk_per_tile, (top_k + num_tiles - 1) // num_tiles)
+        causal_threshold = torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype).unsqueeze(-1)
+
+        candidate_scores = []
+        candidate_indices = []
+        for tile_start in range(0, capacity, tile_size):
+            tile_end = min(tile_start + tile_size, capacity)
+            tile_cache = indexer_kv_cache[:, tile_start:tile_end]
+            tile_scores = torch.einsum("bshd,btd->bsht", q_index.float(), tile_cache.float()).relu()
+            tile_scores = (tile_scores * index_weights.unsqueeze(-1)).sum(dim=2)
+            tile_indices = torch.arange(tile_start, tile_end, device=indexer_kv_cache.device).view(1, 1, -1)
+            tile_scores = tile_scores.masked_fill(tile_indices >= causal_threshold, -3.0e4)
+            tile_topk = torch.topk(tile_scores, k=min(topk_per_tile, tile_end - tile_start), dim=-1)
+            candidate_scores.append(tile_topk.values)
+            candidate_indices.append(tile_start + tile_topk.indices)
+
+        candidate_scores = torch.cat(candidate_scores, dim=-1)
+        candidate_indices = torch.cat(candidate_indices, dim=-1)
+        candidate_count = candidate_scores.shape[-1]
+        if index_topk >= candidate_count:
+            selection = torch.arange(candidate_count, device=indexer_kv_cache.device).view(1, 1, -1)
+            selection = selection.expand(batch_size, chunk_length, -1)
+        else:
+            selection = torch.topk(candidate_scores, k=index_topk, dim=-1).indices
+        selected = torch.gather(candidate_indices, dim=-1, index=selection)
+        return selected, selected < causal_threshold
+
     def _csa_prefill_update(
         self,
         hidden_states: torch.Tensor,
@@ -1428,33 +1474,30 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 sin[:, start:end],
                 sequence_major=True,
             )
-            index_scores = torch.einsum("bshd,btd->bsht", q_index.float(), indexer_kv_cache.float()).relu()
             index_weights = (
                 indexer.scorer.weights_proj(hidden_chunk).float()
                 * indexer.scorer.softmax_scale
                 * indexer.scorer.weights_scaling
             )
-            index_scores = (index_scores * index_weights.unsqueeze(-1)).sum(dim=2)
-            causal_threshold = torch.div(position_chunk + 1, ratio, rounding_mode="floor").unsqueeze(-1)
-            compressed_indices = torch.arange(compressed_kv_cache.shape[1], device=hidden_states.device).view(1, 1, -1)
-            index_scores = index_scores.masked_fill(compressed_indices >= causal_threshold, -3.0e4)
-            top_k = min(indexer.index_topk, compressed_kv_cache.shape[1])
-            selected = (
-                compressed_indices.expand(batch_size, chunk_length, -1)
-                if indexer.index_topk >= compressed_kv_cache.shape[1]
-                else torch.topk(index_scores, k=top_k, dim=-1).indices
+            selected, selected_valid = self._csa_prefill_select_indexer_slots(
+                q_index,
+                index_weights,
+                position_chunk,
+                indexer_kv_cache,
+                indexer.index_topk,
+                ratio,
             )
-            selected_valid = selected < causal_threshold
 
-            local_states = torch.cat((carry_kv, kv_chunk), dim=1).unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            local_states = torch.cat((carry_kv, kv_chunk), dim=1)
             local_valid = torch.cat((carry_query_valid, in_chunk_valid), dim=-1)
-            local_scores = torch.matmul(query_chunk.float(), local_states.transpose(-1, -2).float()) * self.scaling
-            local_scores = local_scores.masked_fill(~local_valid.unsqueeze(1), -3.0e4)
+            local_scores = torch.einsum("bhsd,btd->bhst", query_chunk.float(), local_states.float()) * self.scaling
+            local_masked_logit = local_scores[:, :, :1, :1].sum() * 0.0 - 3.0e4
+            local_scores = torch.where(local_valid.unsqueeze(1), local_scores, local_masked_logit)
             sinks = self.sinks.view(1, self.num_heads, 1, 1).float()
             stable_max = torch.maximum(local_scores.max(dim=-1, keepdim=True).values, sinks)
             local_probs = torch.exp(local_scores - stable_max)
             local_probs = local_probs / (local_probs.sum(dim=-1, keepdim=True) + torch.exp(sinks - stable_max))
-            local_output = torch.matmul(local_probs.to(local_states.dtype), local_states)
+            local_output = torch.einsum("bhst,btd->bhsd", local_probs, local_states.float()).to(local_states.dtype)
             local_output = self._csa_prefill_rotate(
                 local_output.transpose(1, 2), cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
             ).transpose(1, 2)

@@ -20,7 +20,7 @@ from transformers import AutoConfig, AutoTokenizer
 DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
-PREFILL_PROMPT = "<replace with the prefill prompt>"
+PREFILL_PROMPT = "Hello, how are you?"
 GATE_PREFIX_OUTPUTS = (
     "mlp/gate/MatMul_output_0",
     "mlp/gate/score_fn/Softplus_output_0",
@@ -261,6 +261,24 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--attn-dp", type=int, default=None, help="Folded decode attention data-parallel rows.")
     parser.add_argument("--indexer-cp", type=int, default=1, help="CSA indexer compressed-cache context parallelism.")
     parser.add_argument(
+        "--csa-prefill-attn-gather-sub-qc",
+        type=int,
+        default=None,
+        help="CSA prefill compressed-attention query subchunk size.",
+    )
+    parser.add_argument(
+        "--csa-prefill-indexer-kv-block-size",
+        type=int,
+        default=None,
+        help="CSA prefill indexer score tile size.",
+    )
+    parser.add_argument(
+        "--csa-prefill-indexer-topk-per-block",
+        type=int,
+        default=None,
+        help="CSA prefill candidates retained from each indexer score tile.",
+    )
+    parser.add_argument(
         "--num-kv-blocks",
         type=int,
         default=1,
@@ -360,6 +378,15 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
     config.qeff_csa_num_kv_blocks = num_kv_blocks
     config.qeff_csa_indexer_attention_cores = attention_cores
     config.qeff_csa_folded_row_cache = True
+    csa_prefill_attn_gather_sub_qc = getattr(args, "csa_prefill_attn_gather_sub_qc", None)
+    if csa_prefill_attn_gather_sub_qc is not None:
+        config.qeff_csa_prefill_attn_gather_sub_qc = csa_prefill_attn_gather_sub_qc
+    csa_prefill_indexer_kv_block_size = getattr(args, "csa_prefill_indexer_kv_block_size", None)
+    if csa_prefill_indexer_kv_block_size is not None:
+        config.qeff_csa_prefill_indexer_kv_block_size = csa_prefill_indexer_kv_block_size
+    csa_prefill_indexer_topk_per_block = getattr(args, "csa_prefill_indexer_topk_per_block", None)
+    if csa_prefill_indexer_topk_per_block is not None:
+        config.qeff_csa_prefill_indexer_topk_per_block = csa_prefill_indexer_topk_per_block
     config.qeff_hca_attention_dp = attention_dp
     config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
     config.qeff_hca_attn_blocks = hca_attn_blocks
@@ -504,7 +531,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
     exec_info = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=[args.prefill_prompt] * batch_size,
-        device_id=args.device_group,
+        device_ids=args.device_group,
         generation_len=args.generation_len,
         automation=args.automation,
         stream=False,
