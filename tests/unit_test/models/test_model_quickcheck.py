@@ -5331,3 +5331,586 @@ def test_runner_io_bundle_is_cpu_only_and_qaic_runner_compatible(tmp_path):
     assert entries[1]["dims"] == [1, 4]
     assert (io_dir / "data/input_ids.raw").stat().st_size == inputs.nbytes
     assert not (io_dir / "data/output.raw").exists()
+
+
+@pytest.mark.cpu_only
+def test_path_valued_artifacts_resolves_runtime_input_dump(tmp_path):
+    from QEfficient.generation.input_dump import RuntimeInputDumpCapture, resolve_runtime_dump_inputs_path
+
+    dump_dir = tmp_path / "input-dumps"
+    legacy_dir = tmp_path / "legacy-dumps"
+
+    assert resolve_runtime_dump_inputs_path(True) is None
+    assert resolve_runtime_dump_inputs_path(False) is None
+
+    first_capture = resolve_runtime_dump_inputs_path(dump_dir)
+    second_capture = resolve_runtime_dump_inputs_path(str(dump_dir))
+    legacy_capture = resolve_runtime_dump_inputs_path(dump_dir, legacy_dir)
+
+    assert isinstance(first_capture, RuntimeInputDumpCapture)
+    assert isinstance(second_capture, RuntimeInputDumpCapture)
+    assert isinstance(legacy_capture, RuntimeInputDumpCapture)
+    assert first_capture.root.parent == dump_dir.resolve()
+    assert second_capture.root.parent == dump_dir.resolve()
+    assert legacy_capture.root.parent == legacy_dir.resolve()
+    assert first_capture.root != second_capture.root
+    assert first_capture.root.is_dir()
+    assert second_capture.root.is_dir()
+
+
+@pytest.mark.cpu_only
+def test_causal_generate_uses_path_valued_artifacts_for_runtime_input_dump(monkeypatch, tmp_path):
+    from QEfficient.generation.input_dump import RuntimeInputDumpCapture
+    from QEfficient.transformers.models import modeling_auto
+
+    model = object.__new__(QEFFAutoModelForCausalLM)
+    model.qpc_path = tmp_path / "model.qpc"
+    model.comp_ctx_lengths_prefill = None
+    model.comp_ctx_lengths_decode = None
+    model.is_tlm = False
+    dump_dir = tmp_path / "input-dumps"
+    exec_info = object()
+    captured_kwargs = {}
+
+    monkeypatch.setattr(
+        modeling_auto,
+        "write_causal_lm_runner_bundle",
+        MagicMock(side_effect=AssertionError("path-valued artifacts should execute runtime generation")),
+    )
+
+    def fake_cloud_ai_100_exec_kv(**kwargs):
+        captured_kwargs.update(kwargs)
+        return exec_info
+
+    monkeypatch.setattr(modeling_auto.QEfficient, "cloud_ai_100_exec_kv", fake_cloud_ai_100_exec_kv)
+
+    result = model.generate(tokenizer=object(), prompts=["Hello"], artifacts=dump_dir)
+
+    assert result is exec_info
+    dump_capture = captured_kwargs["dump_inputs_path"]
+    assert isinstance(dump_capture, RuntimeInputDumpCapture)
+    assert dump_capture.root.parent == dump_dir.resolve()
+    assert dump_capture.root.is_dir()
+
+
+@pytest.mark.cpu_only
+def test_causal_generate_keeps_bool_artifacts_runner_bundle(monkeypatch, tmp_path):
+    from QEfficient.transformers.models import modeling_auto
+
+    model = object.__new__(QEFFAutoModelForCausalLM)
+    runner_dir = tmp_path / "runner-inputs"
+    runner_bundle = MagicMock(return_value=runner_dir)
+
+    monkeypatch.setattr(modeling_auto, "write_causal_lm_runner_bundle", runner_bundle)
+    monkeypatch.setattr(
+        modeling_auto.QEfficient,
+        "cloud_ai_100_exec_kv",
+        MagicMock(side_effect=AssertionError("bool artifacts should not execute runtime generation")),
+    )
+
+    result = model.generate(tokenizer=object(), prompts=["Hello"], artifacts=True)
+
+    assert result == runner_dir
+    runner_bundle.assert_called_once()
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_writes_multi_invocation_runner_inputs(tmp_path):
+    from QEfficient.generation.input_dump import QAICInputDumper
+
+    bindings = [
+        SimpleNamespace(name="input_ids", type="int64", dims=[1, -1]),
+        SimpleNamespace(name="position_ids", type="int64", dims=[1, -1]),
+        SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+    ]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+    )
+    dumper = QAICInputDumper(
+        session=session,
+        qpc_path=tmp_path / "qpc",
+        root=tmp_path / "dumps",
+        component_name="text",
+    )
+
+    prefill_inputs = {
+        "input_ids": np.arange(4, dtype=np.int64).reshape(1, 4),
+        "position_ids": np.arange(4, dtype=np.int64).reshape(1, 4),
+    }
+    decode_inputs = {
+        "input_ids": np.array([[4]], dtype=np.int64),
+        "position_ids": np.array([[4]], dtype=np.int64),
+    }
+    dumper.record_invocation(
+        kind="prefill",
+        inputs=prefill_inputs,
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+    )
+    dumper.record_invocation(
+        kind="decode",
+        inputs=decode_inputs,
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+    )
+
+    descriptor = json.loads((dumper.session_dir / "aic_batch_io.json").read_text())
+    assert len(descriptor["IO-files"]) == 2
+    assert descriptor["IO-files"][0][0]["path"] == "data/00000/input_ids.raw"
+    assert descriptor["IO-files"][1][0]["dims"] == [1, 1]
+    assert (dumper.session_dir / "data/00000/input_ids.raw").stat().st_size == prefill_inputs["input_ids"].nbytes
+    assert (dumper.session_dir / "data/00001/input_ids.raw").stat().st_size == decode_inputs["input_ids"].nbytes
+    manifest = json.loads((dumper.session_dir / "manifest.json").read_text())
+    assert "qpc_path" not in manifest
+    assert [invocation["kind"] for invocation in manifest["invocations"]] == ["prefill", "decode"]
+    aggregate_manifest = json.loads((tmp_path / "dumps/manifest.json").read_text())
+    assert aggregate_manifest["capture_kind"] == "single_qpc_text"
+    assert aggregate_manifest["component_order"] == ["text"]
+    assert aggregate_manifest["required_component_counts"] == {"text": 1}
+    assert aggregate_manifest["all_required_components_captured"] is True
+    assert aggregate_manifest["replay_component"] == "text"
+    assert [component["component"] for component in aggregate_manifest["components"]] == ["text"]
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_persists_invocation_context_metadata(tmp_path):
+    from QEfficient.generation.input_dump import QAICInputDumper
+
+    bindings = [
+        SimpleNamespace(name="input_ids", type="int64", dims=[1, 1]),
+        SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+    ]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+        required_input_names=["input_ids"],
+    )
+    dumper = QAICInputDumper(session=session, qpc_path=tmp_path / "qpc", root=tmp_path / "dumps", component_name="text")
+
+    dumper.record_invocation(
+        kind="run",
+        inputs={"input_ids": np.array([[5]], dtype=np.int64)},
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+        metadata={
+            "invocation_context": {
+                "phase": "prefill",
+                "prefill_chunk": 0,
+                "logical_invocation": "prefill_chunk",
+            }
+        },
+    )
+
+    manifest = json.loads((dumper.session_dir / "manifest.json").read_text())
+    context = manifest["invocations"][0]["invocation_context"]
+    assert context["phase"] == "prefill"
+    assert context["prefill_chunk"] == 0
+    assert context["logical_invocation"] == "prefill_chunk"
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_writes_multicomponent_capture_contract(tmp_path):
+    from QEfficient.generation.input_dump import QAICInputDumper
+
+    bindings = [
+        SimpleNamespace(name="input_ids", type="int64", dims=[1, 1]),
+        SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+    ]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+        required_input_names=["input_ids"],
+    )
+    root = tmp_path / "dumps"
+    text_dumper = QAICInputDumper(session=session, qpc_path=tmp_path / "text_qpc", root=root, component_name="text")
+    vision_dumper = QAICInputDumper(
+        session=session,
+        qpc_path=tmp_path / "vision_qpc",
+        root=root,
+        component_name="vision",
+    )
+
+    text_dumper.record_invocation(
+        kind="decode",
+        inputs={"input_ids": np.array([[7]], dtype=np.int64)},
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+    )
+    vision_dumper.record_invocation(
+        kind="vision",
+        inputs={"input_ids": np.array([[3]], dtype=np.int64)},
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+    )
+
+    aggregate_manifest = json.loads((root / "manifest.json").read_text())
+    assert aggregate_manifest["capture_kind"] == "dual_qpc_multimodal"
+    assert aggregate_manifest["component_order"] == ["vision", "text"]
+    assert aggregate_manifest["dependencies"] == {"vision": [], "text": ["vision"]}
+    assert aggregate_manifest["required_component_counts"] == {"vision": 1, "text": 1}
+    assert aggregate_manifest["component_counts"] == {"text": 1, "vision": 1}
+    assert aggregate_manifest["all_required_components_captured"] is True
+    assert aggregate_manifest["replay_component"] == "text"
+    assert [component["component"] for component in aggregate_manifest["components"]] == ["vision", "text"]
+    assert [component["depends_on"] for component in aggregate_manifest["components"]] == [[], ["vision"]]
+    assert [component["replay"] for component in aggregate_manifest["components"]] == [False, True]
+    assert [component["invocation_count"] for component in aggregate_manifest["components"]] == [1, 1]
+
+
+@pytest.mark.cpu_only
+def test_runtime_dump_capture_roots_scope_logical_generations(tmp_path):
+    from QEfficient.generation.input_dump import QAICInputDumper, resolve_runtime_dump_inputs_path
+
+    bindings = [
+        SimpleNamespace(name="input_ids", type="int64", dims=[1, 1]),
+        SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+    ]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+        required_input_names=["input_ids"],
+    )
+    dump_parent = tmp_path / "input-dumps"
+
+    first_capture = resolve_runtime_dump_inputs_path(dump_parent)
+    first_text_dumper = QAICInputDumper.from_config(
+        session=session,
+        qpc_path=tmp_path / "text_qpc",
+        dump_inputs_path=first_capture,
+        component_name="text",
+    )
+    first_vision_dumper = QAICInputDumper.from_config(
+        session=session,
+        qpc_path=tmp_path / "vision_qpc",
+        dump_inputs_path=first_capture,
+        component_name="vision",
+    )
+    first_text_dumper.record_invocation(
+        kind="decode",
+        inputs={"input_ids": np.array([[7]], dtype=np.int64)},
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+    )
+    first_vision_dumper.record_invocation(
+        kind="vision",
+        inputs={"input_ids": np.array([[3]], dtype=np.int64)},
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+    )
+
+    second_capture = resolve_runtime_dump_inputs_path(dump_parent)
+    second_text_dumper = QAICInputDumper.from_config(
+        session=session,
+        qpc_path=tmp_path / "text_qpc",
+        dump_inputs_path=second_capture,
+        component_name="text",
+    )
+    second_text_dumper.record_invocation(
+        kind="decode",
+        inputs={"input_ids": np.array([[9]], dtype=np.int64)},
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+    )
+
+    first_manifest = json.loads((first_capture.root / "manifest.json").read_text())
+    second_manifest = json.loads((second_capture.root / "manifest.json").read_text())
+    assert first_capture.root != second_capture.root
+    assert first_manifest["component_counts"] == {"text": 1, "vision": 1}
+    assert first_manifest["all_required_components_captured"] is True
+    assert second_manifest["component_counts"] == {"text": 1}
+    assert second_manifest["all_required_components_captured"] is True
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_writes_single_qpc_vlm_capture_contract(tmp_path):
+    from QEfficient.generation.input_dump import QAICInputDumper
+
+    bindings = [SimpleNamespace(name="input_ids", type="int64", dims=[1, 1])]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={"input_ids": 0},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64)},
+        required_input_names=["input_ids"],
+    )
+    QAICInputDumper(
+        session=session,
+        qpc_path=tmp_path / "vision_text_qpc",
+        root=tmp_path / "dumps",
+        component_name="vision_text",
+    )
+
+    aggregate_manifest = json.loads((tmp_path / "dumps/manifest.json").read_text())
+    assert aggregate_manifest["capture_kind"] == "single_qpc_multimodal"
+    assert aggregate_manifest["component_order"] == ["vision_text"]
+    assert aggregate_manifest["required_component_counts"] == {"vision_text": 1}
+    assert aggregate_manifest["all_required_components_captured"] is True
+    assert aggregate_manifest["replay_component"] == "vision_text"
+    assert [component["component"] for component in aggregate_manifest["components"]] == ["vision_text"]
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_rejects_missing_unknown_and_duplicate_required_inputs(tmp_path):
+    from QEfficient.generation.input_dump import InputDumpValidationError, QAICInputDumper
+
+    bindings = [
+        SimpleNamespace(name="input_ids", type="int64", dims=[1, 1]),
+        SimpleNamespace(name="position_ids", type="int64", dims=[1, 1]),
+        SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+    ]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+        required_input_names=["input_ids", "position_ids"],
+    )
+    dumper = QAICInputDumper(session=session, qpc_path=tmp_path / "qpc", root=tmp_path / "dumps", component_name="text")
+
+    with pytest.raises(InputDumpValidationError, match="Missing required input bindings"):
+        dumper.record_invocation(
+            kind="prefill",
+            inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+            output_names=["logits"],
+        )
+
+    unknown_required_session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map=session.binding_index_map,
+        aic_to_np_dtype_mapping=session.aic_to_np_dtype_mapping,
+        required_input_names=["input_ids", "missing_input"],
+    )
+    unknown_required_dumper = QAICInputDumper(
+        session=unknown_required_session,
+        qpc_path=tmp_path / "qpc_unknown",
+        root=tmp_path / "unknown_dumps",
+        component_name="text",
+    )
+    with pytest.raises(InputDumpValidationError, match="Unknown required input binding"):
+        unknown_required_dumper.record_invocation(
+            kind="prefill",
+            inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+            output_names=["logits"],
+        )
+
+    duplicate_session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={**session.binding_index_map, "input_ids_alias": 0},
+        aic_to_np_dtype_mapping=session.aic_to_np_dtype_mapping,
+    )
+    duplicate_dumper = QAICInputDumper(
+        session=duplicate_session,
+        qpc_path=tmp_path / "qpc_duplicate",
+        root=tmp_path / "duplicate_dumps",
+        component_name="text",
+    )
+    with pytest.raises(InputDumpValidationError, match="Duplicate input binding"):
+        duplicate_dumper.record_invocation(
+            kind="prefill",
+            inputs={
+                "input_ids": np.array([[1]], dtype=np.int64),
+                "input_ids_alias": np.array([[2]], dtype=np.int64),
+            },
+            output_names=["logits"],
+        )
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_records_intentional_skipped_inputs(tmp_path):
+    from QEfficient.generation.input_dump import QAICInputDumper
+
+    bindings = [
+        SimpleNamespace(name="input_ids", type="int64", dims=[1, 1]),
+        SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+    ]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+        required_input_names=["input_ids"],
+    )
+    dumper = QAICInputDumper(session=session, qpc_path=tmp_path / "qpc", root=tmp_path / "dumps", component_name="text")
+
+    dumper.record_invocation(
+        kind="prefill",
+        inputs={
+            "input_ids": np.array([[1]], dtype=np.int64),
+            "optional_input": None,
+            "unknown_input": np.array([[2]], dtype=np.int64),
+        },
+        output_names=["logits"],
+    )
+
+    manifest = json.loads((dumper.session_dir / "manifest.json").read_text())
+    assert manifest["invocations"][0]["skipped_inputs"] == [
+        {"name": "optional_input", "reason": "value_is_none"},
+        {"name": "unknown_input", "reason": "unknown_binding"},
+    ]
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_rejects_dtype_shape_elem_and_byte_mismatches(tmp_path):
+    from QEfficient.generation.input_dump import InputDumpValidationError, QAICInputDumper
+
+    def make_dumper(root_name):
+        bindings = [
+            SimpleNamespace(name="input_ids", type="int64", dims=[1, 2]),
+            SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+        ]
+        session = SimpleNamespace(
+            bindings=bindings,
+            binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+            aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+            required_input_names=["input_ids"],
+        )
+        dumper = QAICInputDumper(
+            session=session,
+            qpc_path=tmp_path / f"{root_name}_qpc",
+            root=tmp_path / root_name,
+            component_name="text",
+        )
+        dumper.record_invocation(
+            kind="prefill",
+            inputs={"input_ids": np.array([[1, 2]], dtype=np.int64)},
+            output_names=["logits"],
+        )
+        return dumper
+
+    dtype_dumper = QAICInputDumper(
+        session=make_dumper("dtype_base").session,
+        qpc_path=tmp_path / "dtype_qpc",
+        root=tmp_path / "dtype_dumps",
+        component_name="text",
+    )
+    with pytest.raises(InputDumpValidationError, match="has dtype"):
+        dtype_dumper.record_invocation(
+            kind="prefill",
+            inputs={"input_ids": np.array([[1, 2]], dtype=np.int32)},
+            output_names=["logits"],
+        )
+
+    shape_record_dumper = QAICInputDumper(
+        session=make_dumper("shape_record_base").session,
+        qpc_path=tmp_path / "shape_record_qpc",
+        root=tmp_path / "shape_record_dumps",
+        component_name="text",
+    )
+    with pytest.raises(InputDumpValidationError, match="has shape"):
+        shape_record_dumper.record_invocation(
+            kind="prefill",
+            inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+            output_names=["logits"],
+        )
+
+    shape_dumper = make_dumper("shape_dumps")
+    descriptor_path = shape_dumper.session_dir / "aic_batch_io.json"
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor["IO-files"][0][0]["dims"] = [1, 1]
+    descriptor_path.write_text(json.dumps(descriptor))
+    with pytest.raises(InputDumpValidationError, match="has dims"):
+        shape_dumper.validate()
+
+    elem_dumper = make_dumper("elem_dumps")
+    descriptor_path = elem_dumper.session_dir / "aic_batch_io.json"
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor["IO-files"][0][0]["elem-size"] = 4
+    descriptor_path.write_text(json.dumps(descriptor))
+    with pytest.raises(InputDumpValidationError, match="element size"):
+        elem_dumper.validate()
+
+    byte_dumper = make_dumper("byte_dumps")
+    input_path = byte_dumper.session_dir / byte_dumper.invocations[0]["input_details"][0]["path"]
+    input_path.write_bytes(np.array([1], dtype=np.int64).tobytes())
+    with pytest.raises(InputDumpValidationError, match="bytes"):
+        byte_dumper.validate()
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_rejects_descriptor_file_coverage_mismatches(tmp_path):
+    from QEfficient.generation.input_dump import InputDumpValidationError, QAICInputDumper
+
+    def make_dumper(root_name):
+        bindings = [
+            SimpleNamespace(name="input_ids", type="int64", dims=[1, 1]),
+            SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+        ]
+        session = SimpleNamespace(
+            bindings=bindings,
+            binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+            aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+            required_input_names=["input_ids"],
+        )
+        dumper = QAICInputDumper(
+            session=session,
+            qpc_path=tmp_path / f"{root_name}_qpc",
+            root=tmp_path / root_name,
+            component_name="text",
+        )
+        dumper.record_invocation(
+            kind="prefill",
+            inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+            output_names=["logits"],
+        )
+        return dumper
+
+    missing_file_dumper = make_dumper("missing_file_dumps")
+    missing_input_path = (
+        missing_file_dumper.session_dir / missing_file_dumper.invocations[0]["input_details"][0]["path"]
+    )
+    missing_input_path.unlink()
+    with pytest.raises(InputDumpValidationError, match="references missing file"):
+        missing_file_dumper.validate()
+
+    unreferenced_file_dumper = make_dumper("unreferenced_file_dumps")
+    extra_input_path = unreferenced_file_dumper.session_dir / "data/00000/extra.raw"
+    extra_input_path.write_bytes(np.array([3], dtype=np.int64).tobytes())
+    with pytest.raises(InputDumpValidationError, match="not referenced"):
+        unreferenced_file_dumper.validate()
+
+
+@pytest.mark.cpu_only
+def test_qaic_input_dumper_records_kv_slice_handoff_inputs(tmp_path):
+    from QEfficient.generation.input_dump import QAICInputDumper
+
+    bindings = [
+        SimpleNamespace(name="input_ids", type="int64", dims=[1, 1]),
+        SimpleNamespace(name="past_key.0", type="float32", dims=[1, 2, 4, 8]),
+        SimpleNamespace(name="logits", type="float32", dims=[1, 1, 8]),
+    ]
+    session = SimpleNamespace(
+        bindings=bindings,
+        binding_index_map={binding.name: index for index, binding in enumerate(bindings)},
+        aic_to_np_dtype_mapping={"int64": np.dtype(np.int64), "float32": np.dtype(np.float32)},
+    )
+    dumper = QAICInputDumper(
+        session=session,
+        qpc_path=tmp_path / "decode_qpc",
+        root=tmp_path / "dumps",
+        component_name="decode",
+    )
+
+    kv_cache = np.ones((1, 2, 4, 8), dtype=np.float32)
+    dumper.record_slice_config(
+        index=0,
+        kv_cache_buffers=[kv_cache],
+        slicing_parameters=[("batch_index", 0), ("ctx_start", 0)],
+        buff_map=[("past_key.0", 1)],
+    )
+    dumper.record_invocation(
+        kind="np_run_decode",
+        inputs={"input_ids": np.array([[7]], dtype=np.int64)},
+        output_names=["logits"],
+        output_shapes={"logits": [1, 1, 8]},
+        exec_obj_index=0,
+    )
+
+    manifest = json.loads((dumper.session_dir / "manifest.json").read_text())
+    assert "qpc_path" not in manifest
+    slice_configs = manifest["invocations"][0]["slice_configs"]
+    assert slice_configs[0]["slicing_parameters"] == [["batch_index", 0], ["ctx_start", 0]]
+    assert slice_configs[0]["buffers"][0]["name"] == "past_key.0"
+    kv_path = dumper.session_dir / slice_configs[0]["buffers"][0]["path"]
+    assert kv_path.stat().st_size == kv_cache.nbytes

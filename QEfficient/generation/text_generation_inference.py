@@ -298,6 +298,7 @@ def cloud_ai_100_exec_kv(
     sampling_params: Optional[Dict[str, Any]] = None,
     profiling_type: str | None = None,
     profiling_output_dir: Path | str | None = None,
+    dump_inputs_path: Path | str | bool | None = None,
 ):
     """
     This method generates output until ``eos`` or ``generation_len`` by executing the compiled ``qpc`` on ``Cloud AI 100`` Hardware cards.
@@ -332,6 +333,8 @@ def cloud_ai_100_exec_kv(
         :profiling_type (str, default=None): One of "latency", "trace", "raw_device_stats", "stats". Enables
         runtime device profiling capture (via `QAICInferenceSession`'s profiling API) for this call.
         :profiling_output_dir (Union[Path, str], default=None): Directory to write the profiling report to.
+        :dump_inputs_path (Union[Path, str, bool], default=None): Dump every qaic-runner invocation under this
+        directory. If omitted, the QEFFICIENT_DUMP_INPUTS environment variable can be used instead.
 
     Returns:
         :CloudAI100ExecInfo: Object holding execution output and performance details.
@@ -370,6 +373,7 @@ def cloud_ai_100_exec_kv(
         sampling_params=sampling_params,
         profiling_type=profiling_type,
         profiling_output_dir=profiling_output_dir,
+        dump_inputs_path=dump_inputs_path,
     )
 
     for _ in range(0, int(iteration)):
@@ -422,6 +426,8 @@ class QEffTextGenerationBase:
         activate: bool = True,
         profiling_type: str | None = None,
         profiling_output_dir: Path | str | None = None,
+        dump_inputs_path: Path | str | bool | None = None,
+        dump_component_name: str | None = None,
     ) -> None:
         self._ctx_len = ctx_len
         self.comp_ctx_lengths_prefill = comp_ctx_lengths_prefill
@@ -440,6 +446,8 @@ class QEffTextGenerationBase:
             enable_debug_logs=enable_debug_logs,
             profiling_type=profiling_type,
             profiling_output_dir=profiling_output_dir,
+            dump_inputs_path=dump_inputs_path,
+            dump_component_name=dump_component_name or "text",
         )
 
         # Validate sampler inputs for On-Device Sampling
@@ -709,6 +717,23 @@ class QEffTextGenerationBase:
         self.generation_len[decode_batch] = generation_len
         return next_token_id
 
+    def _record_runtime_schedule_event(self, event: Dict[str, Any]) -> None:
+        input_dumper = getattr(self._session, "input_dumper", None)
+        if input_dumper is not None:
+            input_dumper.record_schedule_event(event)
+
+    def _session_run_with_context(self, inputs: Dict[str, np.ndarray], **context):
+        invocation_context = getattr(self._session, "invocation_context", None)
+        if invocation_context is None:
+            return self._session.run(inputs)
+        with invocation_context(**context):
+            return self._session.run(inputs)
+
+    @staticmethod
+    def _prompt_descriptor(prompt) -> Dict[str, Any]:
+        prompt_count = len(prompt) if isinstance(prompt, list) else 1
+        return {"prompt_count": prompt_count}
+
     def run_prefill_for_all_inputs(self, prompt_queue, generation_len):
         """
         Runs prefill for all inputs in the prompt queue and updates the decode input.
@@ -722,6 +747,16 @@ class QEffTextGenerationBase:
         """
         for decode_batch_id in range(self.full_batch_size):
             next_prompt = prompt_queue.popleft()
+            self._record_runtime_schedule_event(
+                {
+                    "type": "prompt_arrival",
+                    "phase": "initial_prefill",
+                    "logical_prompt_index": decode_batch_id,
+                    "slot": decode_batch_id,
+                    "queue_depth_after_pop": len(prompt_queue),
+                    **self._prompt_descriptor(next_prompt),
+                }
+            )
             block_table = self.block_table[decode_batch_id].reshape(1, -1) if self.num_kv_blocks else None
 
             # run prefill for num_chunks
@@ -732,7 +767,17 @@ class QEffTextGenerationBase:
                 block_table=block_table,
             )
 
-            _ = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
+            new_token_id = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
+            self._record_runtime_schedule_event(
+                {
+                    "type": "slot_assigned",
+                    "phase": "initial_prefill",
+                    "logical_prompt_index": decode_batch_id,
+                    "slot": decode_batch_id,
+                    "prefill_token": int(np.asarray(new_token_id).reshape(-1)[-1]),
+                    "generation_len": int(np.asarray(generation_len).reshape(-1)[-1]),
+                }
+            )
 
     def _set_output_buffers(self, batch_size: int = 1, sequence_length: int = 1):
         """
@@ -827,7 +872,16 @@ class QEffTextGenerationBase:
             if self.include_sampler:
                 chunk_inputs["last_accepted_output_tokens"] = chunk_inputs["input_ids"]
 
-            outputs = self._session.run(chunk_inputs)
+            outputs = self._session_run_with_context(
+                chunk_inputs,
+                phase="prefill",
+                prefill_chunk=i,
+                prefill_chunks=num_chunks,
+                slot=int(np.asarray(decode_batch_id).reshape(-1)[0]) if decode_batch_id is not None else None,
+                logical_invocation="prefill_chunk",
+                is_prefill=True,
+                is_decode=False,
+            )
 
         return (
             outputs,
@@ -885,19 +939,62 @@ class QEffTextGenerationBase:
             ccl_id, max_ccl_id = self.initialize_ccl(decode_inputs)
             decode_inputs["comp_ctx_lengths"] = self.list_of_comp_ctx_lengths_decode[ccl_id]
 
+        decode_step = 0
         while prompt_queue or current_decode_ongoing.any():
-            outputs = self._session.run(decode_inputs)
+            active_slots = [int(slot) for slot in np.where(current_decode_ongoing.reshape(-1))[0]]
+            self._record_runtime_schedule_event(
+                {
+                    "type": "decode_invocation",
+                    "decode_step": decode_step,
+                    "active_slots": active_slots,
+                    "queue_depth_before": len(prompt_queue),
+                    "slot_to_logical_prompt": {int(slot): int(prompt_id) for slot, prompt_id in batch_id_map.items()},
+                    "decode_input_ids": np.asarray(decode_inputs["input_ids"]).reshape(self.full_batch_size, -1)[:, -1],
+                    "decode_position_ids": np.asarray(decode_inputs["position_ids"]).reshape(self.full_batch_size, -1)[
+                        :, -1
+                    ],
+                }
+            )
+            outputs = self._session_run_with_context(
+                decode_inputs,
+                phase="decode",
+                decode_step=decode_step,
+                active_slots=active_slots,
+                queue_depth_before=len(prompt_queue),
+                logical_invocation="continuous_batching_decode",
+                is_prefill=False,
+                is_decode=True,
+            )
 
             # Prepare inputs for next iteration
             next_token_id = self._fetch_next_token_id(outputs)
 
             for decode_batch_id in range(self.full_batch_size):
-                if (
-                    next_token_id[decode_batch_id, -1] == self.tokenizer.eos_token_id
-                    or generated_id_current_index[decode_batch_id] >= self.generation_len[decode_batch_id]
-                ):
+                slot_token_id = int(next_token_id[decode_batch_id, -1])
+                generation_index = int(np.asarray(generated_id_current_index[decode_batch_id]).reshape(-1)[0])
+                reached_eos = slot_token_id == self.tokenizer.eos_token_id
+                reached_generation_len = bool(
+                    np.asarray(
+                        generated_id_current_index[decode_batch_id] >= self.generation_len[decode_batch_id]
+                    ).reshape(-1)[0]
+                )
+                if reached_eos or reached_generation_len:
+                    self._record_runtime_schedule_event(
+                        {
+                            "type": "slot_completed",
+                            "decode_step": decode_step,
+                            "slot": decode_batch_id,
+                            "logical_prompt_index": int(batch_id_map[decode_batch_id]),
+                            "token": slot_token_id,
+                            "generation_index": generation_index,
+                            "reason": "eos" if reached_eos else "generation_len",
+                            "terminal_decode": not prompt_queue,
+                        }
+                    )
                     if prompt_queue:
                         start = perf_counter()
+                        replacement_prompt_index = max(batch_id_map.values()) + 1
+                        queue_depth_before_pop = len(prompt_queue)
                         # run prefill for next prompt input.
                         outputs, position_ids, generation_len = self.run_prefill(
                             prompt_queue.popleft(),
@@ -907,9 +1004,22 @@ class QEffTextGenerationBase:
 
                         new_token_id = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
 
-                        batch_id_map[decode_batch_id] = max(batch_id_map.values()) + 1
+                        batch_id_map[decode_batch_id] = replacement_prompt_index
                         self.generated_ids[batch_id_map[decode_batch_id], 0] = new_token_id.squeeze()
                         generated_id_current_index[decode_batch_id] = 1
+                        self._record_runtime_schedule_event(
+                            {
+                                "type": "replacement_prefill",
+                                "decode_step": decode_step,
+                                "slot": decode_batch_id,
+                                "logical_prompt_index": int(batch_id_map[decode_batch_id]),
+                                "queue_depth_before_pop": queue_depth_before_pop,
+                                "queue_depth_after_pop": len(prompt_queue),
+                                "prefill_token": int(np.asarray(new_token_id).reshape(-1)[-1]),
+                                "generation_len": int(np.asarray(generation_len).reshape(-1)[-1]),
+                                "trigger": "eos" if reached_eos else "generation_len",
+                            }
+                        )
 
                         self._set_output_buffers(
                             batch_size=self.full_batch_size,
@@ -938,6 +1048,15 @@ class QEffTextGenerationBase:
 
                     else:
                         current_decode_ongoing[decode_batch_id] = False
+                        self._record_runtime_schedule_event(
+                            {
+                                "type": "slot_released",
+                                "decode_step": decode_step,
+                                "slot": decode_batch_id,
+                                "logical_prompt_index": int(batch_id_map[decode_batch_id]),
+                                "reason": "eos" if reached_eos else "generation_len",
+                            }
+                        )
                 else:
                     # If the generated sequence is valid and within generation len prepare for next decode
                     decode_inputs["input_ids"][decode_batch_id, -1] = next_token_id[decode_batch_id, -1]
@@ -961,6 +1080,19 @@ class QEffTextGenerationBase:
                             decode_inputs["comp_ctx_lengths"] = self.list_of_comp_ctx_lengths_decode[ccl_id]
 
                     generated_id_current_index[decode_batch_id] += 1
+                    self._record_runtime_schedule_event(
+                        {
+                            "type": "slot_advanced",
+                            "decode_step": decode_step,
+                            "slot": decode_batch_id,
+                            "logical_prompt_index": int(batch_id_map[decode_batch_id]),
+                            "token": slot_token_id,
+                            "generation_index": generation_index,
+                            "next_position_id": int(decode_inputs["position_ids"][decode_batch_id][..., -1]),
+                        }
+                    )
+
+            decode_step += 1
 
         return decode_pause_time
 
@@ -1000,7 +1132,14 @@ class QEffTextGenerationBase:
 
             if streamer:
                 streamer.put(decode_inputs["input_ids"][0])
-            outputs = self._session.run(decode_inputs)
+            outputs = self._session_run_with_context(
+                decode_inputs,
+                phase="decode",
+                decode_step=num_token,
+                logical_invocation="decode",
+                is_prefill=False,
+                is_decode=True,
+            )
 
             # Prepare inputs for next iteration
             decode_inputs["input_ids"] = self._fetch_next_token_id(outputs)
@@ -1066,6 +1205,7 @@ class TextGeneration:
         sampling_params: Optional[Dict[str, Any]] = None,
         profiling_type: str | None = None,
         profiling_output_dir: Path | str | None = None,
+        dump_inputs_path: Path | str | bool | None = None,
     ) -> None:
         self._qaic_model = QEffTextGenerationBase(
             tokenizer=tokenizer,
@@ -1084,6 +1224,8 @@ class TextGeneration:
             sampling_params=sampling_params,
             profiling_type=profiling_type,
             profiling_output_dir=profiling_output_dir,
+            dump_inputs_path=dump_inputs_path,
+            dump_component_name="text",
         )
         self._full_batch_size = self._qaic_model.full_batch_size
         self._num_kv_blocks = self._qaic_model.num_kv_blocks

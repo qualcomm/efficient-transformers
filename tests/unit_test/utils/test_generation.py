@@ -637,6 +637,31 @@ class TestRunPrefill:
         obj.run_prefill(prompt=["Hello world"], generation_len=None)
         assert mock_session.run.called
 
+    def test_run_prefill_records_invocation_context(self):
+        obj, _, mock_session = _make_base_instance()
+        contexts = []
+
+        class InvocationContext:
+            def __init__(self, **metadata):
+                self.metadata = metadata
+
+            def __enter__(self):
+                contexts.append(self.metadata)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_session.invocation_context.side_effect = lambda **metadata: InvocationContext(**metadata)
+        obj.initialize_decode_inputs(1, 1, CTX_LEN)
+
+        obj.run_prefill(prompt=["Hello world"], generation_len=None)
+
+        assert contexts[0]["phase"] == "prefill"
+        assert contexts[0]["prefill_chunk"] == 0
+        assert contexts[0]["logical_invocation"] == "prefill_chunk"
+        assert contexts[0]["is_prefill"] is True
+        assert contexts[0]["is_decode"] is False
+
     def test_run_prefill_generation_len_bounded_by_ctx_len(self):
         obj, _, _ = _make_base_instance(ctx_len=CTX_LEN)
         obj.initialize_decode_inputs(1, 1, CTX_LEN)
@@ -707,6 +732,30 @@ class TestRunDecode:
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
         obj.run_decode(decode_inputs, gen_len, automation=True)
         assert mock_session.run.called
+
+    def test_run_decode_records_invocation_context(self):
+        obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
+        contexts = []
+
+        class InvocationContext:
+            def __init__(self, **metadata):
+                self.metadata = metadata
+
+            def __enter__(self):
+                contexts.append(self.metadata)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_session.invocation_context.side_effect = lambda **metadata: InvocationContext(**metadata)
+
+        obj.run_decode(decode_inputs, gen_len, automation=True)
+
+        assert contexts[0]["phase"] == "decode"
+        assert contexts[0]["decode_step"] == 1
+        assert contexts[0]["logical_invocation"] == "decode"
+        assert contexts[0]["is_prefill"] is False
+        assert contexts[0]["is_decode"] is True
 
     def test_run_decode_updates_generated_ids(self):
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
@@ -948,6 +997,54 @@ class TestContinuousBatching:
         prompt_queue = deque(["Hello", "World"])
         obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
         assert len(prompt_queue) == 0
+
+    def test_continuous_batching_records_terminal_decode_schedule(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11], [12]], dtype=np.int64)
+        obj.decode_pos_ids[:] = np.array([[1], [1]], dtype=np.int64)
+        obj.generation_len[:] = 1
+        obj.generated_ids[:, 0] = obj.decode_input_ids[:, 0]
+        obj.batch_index = np.arange(2).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(), generation_len=1)
+
+        event_types = [event["type"] for event in schedule_events]
+        assert event_types == [
+            "decode_invocation",
+            "slot_completed",
+            "slot_released",
+            "slot_completed",
+            "slot_released",
+        ]
+        assert schedule_events[0]["active_slots"] == [0, 1]
+        assert schedule_events[1]["reason"] == "generation_len"
+        assert schedule_events[1]["terminal_decode"] is True
+        assert schedule_events[3]["terminal_decode"] is True
+
+    def test_continuous_batching_records_replacement_prefill_schedule(self):
+        obj, tok, mock_session = self._make_cb_instance(full_batch_size=1)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 1, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11]], dtype=np.int64)
+        obj.decode_pos_ids[:] = np.array([[1]], dtype=np.int64)
+        obj.generation_len[:] = 1
+        obj.generated_ids[0, 0] = 11
+        obj.batch_index = np.arange(1).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(["replacement"]), generation_len=1)
+
+        event_types = [event["type"] for event in schedule_events]
+        assert "replacement_prefill" in event_types
+        replacement_event = next(event for event in schedule_events if event["type"] == "replacement_prefill")
+        assert replacement_event["slot"] == 0
+        assert replacement_event["logical_prompt_index"] == 1
+        assert replacement_event["trigger"] == "generation_len"
+        assert replacement_event["queue_depth_before_pop"] == 1
+        assert replacement_event["queue_depth_after_pop"] == 0
 
 
 # ---------------------------------------------------------------------------
