@@ -4,7 +4,7 @@ jobs:
   debug-artifacts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check for debugger artifacts
         run: |
           set -euo pipefail
@@ -30,7 +30,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: pip3 install ruff==0.15.22
       - run: ruff check
     env:
@@ -38,7 +38,7 @@ jobs:
   format:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: pip3 install ruff==0.15.22
       - run: ruff format --check
     env:
