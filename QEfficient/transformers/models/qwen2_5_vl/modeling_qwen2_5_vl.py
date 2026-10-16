@@ -231,7 +231,7 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
         pos_ids = x_expanded.reshape(-1, pos_ids.size(1))
 
         max_grid_size = max(grid_thw.shape)
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        rotary_pos_emb_full = self.rotary_pos_emb(torch.arange(max_grid_size, device=grid_thw.device))
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 

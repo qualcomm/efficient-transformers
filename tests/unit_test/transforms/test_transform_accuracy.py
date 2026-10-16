@@ -1421,9 +1421,9 @@ class TestSplitOptimizedMoETransform:
         from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeMoE, Glm4MoeTopkRouter
         from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts, GptOssMLP
         from transformers.models.granitemoe.modeling_granitemoe import (
+            GraniteMoeExperts,
             GraniteMoeMoE,
-            GraniteMoeParallelExperts,
-            GraniteMoeTopKGating,
+            GraniteMoeTopKRouter,
         )
         from transformers.models.llama4.modeling_llama4 import Llama4Router, Llama4TextExperts, Llama4TextMoe
         from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
@@ -1462,8 +1462,8 @@ class TestSplitOptimizedMoETransform:
             GptOssMLP,
             GptOssExperts,
             GraniteMoeMoE,
-            GraniteMoeParallelExperts,
-            GraniteMoeTopKGating,
+            GraniteMoeExperts,
+            GraniteMoeTopKRouter,
             MixtralSparseMoeBlock,
         }
 

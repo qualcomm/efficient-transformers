@@ -33,6 +33,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeVisionAttention,
     Qwen3_5MoeVisionModel,
     apply_rotary_pos_emb_vision,
+    create_recurrent_attention_mask,
     repeat_kv,
     rotate_half,
 )
@@ -1187,12 +1188,12 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
 
 class QEffQwen3_5MoeDecoderLayer(Qwen3_5MoeDecoderLayer):
     def __qeff_init__(self):
-        if not hasattr(self, "layer_type") and hasattr(self, "block_type"):
-            self.layer_type = self.block_type
-        if self.layer_type == "linear_attention":
+        layer_type = getattr(self, "layer_type", getattr(self, "block_type", None))
+        self.layer_type = layer_type
+        if layer_type == "linear_attention":
             self.linear_attn.__class__ = QEffQwen3_5MoeGatedDeltaNet
             self.linear_attn.__qeff_init__()
-        elif self.layer_type == "full_attention":
+        elif layer_type == "full_attention":
             self.self_attn.__class__ = QEffQwen3_5MoeAttention
             self.self_attn.__qeff_init__()
 
@@ -1447,16 +1448,7 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
                 ]
             else:
                 layer = self.model.layers[layer_idx].linear_attn
-                if layer.conv_dim % layer.num_k_heads != 0:
-                    raise ValueError(
-                        f"conv_dim ({layer.conv_dim}) must be divisible by num_k_heads ({layer.num_k_heads})"
-                    )
-                conv_shape = (
-                    batch_size,
-                    layer.num_k_heads,
-                    layer.conv_dim // layer.num_k_heads,
-                    layer.conv_kernel_size,
-                )
+                conv_shape = (batch_size, layer.conv_dim, layer.conv_kernel_size)
                 recurrent_shape = (batch_size, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
                 layer_names = [f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}"]
                 layer_tensors = [
@@ -1598,7 +1590,7 @@ class QEffQwen3_5MoeVisionModel(Qwen3_5MoeVisionModel):
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         merge_size = self.spatial_merge_size
         max_hw = max(grid_thw.shape)
-        freq_table = self.rotary_pos_emb(max_hw)
+        freq_table = self.rotary_pos_emb(torch.arange(max_hw, device=grid_thw.device))
         device = freq_table.device
         _bs, num_frames, height, width = grid_thw.shape
         grid_thw = (torch.tensor(grid_thw.shape, dtype=torch.int64)).unsqueeze(0)
@@ -2369,16 +2361,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
                     lang_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=kv_dtype))
             else:
                 layer = self.model.language_model.layers[i].linear_attn
-                if layer.conv_dim % layer.num_k_heads != 0:
-                    raise ValueError(
-                        f"conv_dim ({layer.conv_dim}) must be divisible by num_k_heads ({layer.num_k_heads})"
-                    )
-                conv_shape = (
-                    linear_batch_size,
-                    layer.num_k_heads,
-                    layer.conv_dim // layer.num_k_heads,
-                    layer.conv_kernel_size,
-                )
+                conv_shape = (linear_batch_size, layer.conv_dim, layer.conv_kernel_size)
                 recurrent_shape = (linear_batch_size, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
                 lang_inputs["past_key_values"][i].append(torch.zeros(conv_shape, dtype=kv_dtype))
                 lang_inputs["past_key_values"][i].append(torch.zeros(recurrent_shape, dtype=kv_dtype))

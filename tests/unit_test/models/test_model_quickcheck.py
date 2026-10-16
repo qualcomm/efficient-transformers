@@ -2065,7 +2065,9 @@ def test_proxy_toggle_onnx_transform_policy_for_sequence_classification():
     except Exception as exc:
         _skip_on_model_fetch_error(exc, model_id)
 
-    _assert_proxy_only_onnx_transform_policy(qeff_default, enable_proxy=False)
+    _assert_proxy_only_onnx_transform_policy(
+        qeff_default, enable_proxy=False, always_on_transforms={"FP16ClipTransform"}
+    )
     _assert_proxy_only_onnx_transform_policy(qeff_proxy, enable_proxy=True)
 
 

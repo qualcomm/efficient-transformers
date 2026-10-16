@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
@@ -617,6 +618,48 @@ def _find_transform_by_id(
     return _ID_MAP.get(transform_id)
 
 
+class _CheckpointPreparationLock:
+    """Small cross-process lock for shared checkpoint preparation directories."""
+
+    def __init__(self, out: Path):
+        self.path = out.with_name(out.name + ".lock")
+        self._lock_dir = out.with_name(out.name + ".lockdir")
+        self._handle = None
+        self._using_lock_dir = False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+
+            self._handle = self.path.open("w")
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            while True:
+                try:
+                    self._lock_dir.mkdir()
+                    self._using_lock_dir = True
+                    break
+                except FileExistsError:
+                    time.sleep(0.1)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            import fcntl
+
+            if self._handle is not None:
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        except ImportError:
+            if self._using_lock_dir:
+                try:
+                    self._lock_dir.rmdir()
+                except OSError:
+                    pass
+        if self._handle is not None:
+            self._handle.close()
+
+
 class BaseCheckpointTransform:
     """Base class for transforms that contribute stages to a checkpoint plan."""
 
@@ -733,6 +776,18 @@ class CheckpointTransformPipeline:
     ) -> Path:
         """Prepare checkpoint at src into out and return the usable directory."""
         src, out = Path(src), Path(out)
+
+        with _CheckpointPreparationLock(out):
+            return self._apply_locked(src, out, target_dtype=target_dtype, **kwargs)
+
+    def _apply_locked(
+        self,
+        src: Path,
+        out: Path,
+        target_dtype: torch.dtype = torch.float32,
+        **kwargs,
+    ) -> Path:
+        """Apply checkpoint preparation while holding the output lock."""
 
         if list(src.glob("*.bin")) and not list(src.glob("*.safetensors")):
             raise ValueError(

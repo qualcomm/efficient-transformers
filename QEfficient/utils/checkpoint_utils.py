@@ -149,6 +149,25 @@ def read_weight_map(src: Path) -> dict[str, str]:
     )
 
 
+def checkpoint_files_complete(src: Path) -> bool:
+    """Return True when all indexed checkpoint shards are present and readable."""
+    try:
+        weight_map = read_weight_map(src)
+    except Exception:
+        return False
+
+    for shard_name in set(weight_map.values()):
+        shard_path = src / shard_name
+        if not shard_path.is_file() or not os.access(shard_path, os.R_OK):
+            return False
+        try:
+            with safe_open(str(shard_path), framework="pt"):
+                pass
+        except Exception:
+            return False
+    return True
+
+
 @cache
 def resolve_checkpoint_dir(model_id_or_path: str) -> Path:
     """Resolve a local or remote model reference to a checkpoint directory.
@@ -278,6 +297,10 @@ def atomic_save(tensors: dict[str, torch.Tensor], dst: Path) -> None:
     tmp = dst.with_suffix(dst.suffix + ".tmp")
     save_file({k: v.contiguous() for k, v in tensors.items()}, str(tmp))
     tmp.replace(dst)
+    try:
+        dst.chmod(dst.stat().st_mode | 0o660)
+    except OSError:
+        pass
 
 
 def write_index(out: Path, weight_map: dict[str, str]) -> None:
@@ -325,8 +348,14 @@ def convert_bin_to_safetensors(src: Path, out: Path) -> None:
 
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    if bool(list(out.glob("*.safetensors"))) or (out / "model.safetensors.index.json").exists():
+    if checkpoint_files_complete(out):
         return
+
+    if out.exists():
+        if out.is_dir():
+            shutil.rmtree(out)
+        else:
+            out.unlink()
 
     out.mkdir(parents=True, exist_ok=True)
     copy_checkpoint_aux_files(src, out)
@@ -341,4 +370,6 @@ def convert_bin_to_safetensors(src: Path, out: Path) -> None:
     model.save_pretrained(str(out), safe_serialization=True)
     del model
     gc.collect()
+    if not checkpoint_files_complete(out):
+        raise FileNotFoundError(f"Failed to create a complete safetensors checkpoint in {out}")
     logger.info(f"Conversion complete — safetensors files written to {out}")

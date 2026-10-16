@@ -53,6 +53,15 @@ def _load_gemma4_classes():
 # ---------------------------------------------------------------------------
 
 
+def _config_hasattr(config, name):
+    try:
+        return hasattr(config, name)
+    except Exception as exc:
+        if exc.__class__.__name__ != "AmbiguousGlobalPerLayerAttributeError":
+            raise
+        return name in getattr(config, "__dict__", {})
+
+
 def make_tiny_gemma4():
     """
     Minimal Gemma4 vision+text config with both sliding and full attention text layers.
@@ -69,90 +78,90 @@ def make_tiny_gemma4():
     text_cfg.vocab_size = VOCAB_SIZE
     text_cfg.max_position_embeddings = CTX_LEN
 
-    if hasattr(text_cfg, "head_dim"):
+    if _config_hasattr(text_cfg, "head_dim"):
         text_cfg.head_dim = 32
-    if hasattr(text_cfg, "global_head_dim"):
+    if _config_hasattr(text_cfg, "global_head_dim"):
         text_cfg.global_head_dim = 32
-    if hasattr(text_cfg, "num_global_key_value_heads"):
+    if _config_hasattr(text_cfg, "num_global_key_value_heads"):
         text_cfg.num_global_key_value_heads = 2
-    if hasattr(text_cfg, "attention_k_eq_v"):
+    if _config_hasattr(text_cfg, "attention_k_eq_v"):
         text_cfg.attention_k_eq_v = False
 
-    if hasattr(text_cfg, "sliding_window"):
+    if _config_hasattr(text_cfg, "sliding_window"):
         text_cfg.sliding_window = 8
-    if hasattr(text_cfg, "layer_types"):
+    if _config_hasattr(text_cfg, "layer_types"):
         text_cfg.layer_types = ["sliding_attention", "full_attention"]
-    if hasattr(text_cfg, "_sliding_window_pattern"):
+    if _config_hasattr(text_cfg, "_sliding_window_pattern"):
         text_cfg._sliding_window_pattern = 2
-    if hasattr(text_cfg, "sliding_window_pattern"):
+    if _config_hasattr(text_cfg, "sliding_window_pattern"):
         text_cfg.sliding_window_pattern = 2
 
-    if hasattr(text_cfg, "final_logit_softcapping"):
+    if _config_hasattr(text_cfg, "final_logit_softcapping"):
         text_cfg.final_logit_softcapping = None
-    if hasattr(text_cfg, "attn_logit_softcapping"):
+    if _config_hasattr(text_cfg, "attn_logit_softcapping"):
         text_cfg.attn_logit_softcapping = None
-    if hasattr(text_cfg, "rope_scaling") and text_cfg.rope_scaling is None:
+    if _config_hasattr(text_cfg, "rope_scaling") and text_cfg.rope_scaling is None:
         text_cfg.rope_scaling = {"rope_type": "default"}
 
-    if hasattr(text_cfg, "num_experts"):
+    if _config_hasattr(text_cfg, "num_experts"):
         text_cfg.num_experts = 4
-    if hasattr(text_cfg, "num_local_experts"):
+    if _config_hasattr(text_cfg, "num_local_experts"):
         text_cfg.num_local_experts = 4
-    if hasattr(text_cfg, "num_experts_per_tok"):
+    if _config_hasattr(text_cfg, "num_experts_per_tok"):
         text_cfg.num_experts_per_tok = 2
-    if hasattr(text_cfg, "top_k_experts"):
+    if _config_hasattr(text_cfg, "top_k_experts"):
         text_cfg.top_k_experts = 2
-    if hasattr(text_cfg, "moe_intermediate_size"):
+    if _config_hasattr(text_cfg, "moe_intermediate_size"):
         text_cfg.moe_intermediate_size = 64
-    if hasattr(text_cfg, "dtype"):
+    if _config_hasattr(text_cfg, "dtype"):
         text_cfg.dtype = torch.float32
 
     vision_cfg = Gemma4VisionConfig()
-    if hasattr(vision_cfg, "hidden_size"):
+    if _config_hasattr(vision_cfg, "hidden_size"):
         vision_cfg.hidden_size = 64
-    if hasattr(vision_cfg, "intermediate_size"):
+    if _config_hasattr(vision_cfg, "intermediate_size"):
         vision_cfg.intermediate_size = 128
-    if hasattr(vision_cfg, "num_hidden_layers"):
+    if _config_hasattr(vision_cfg, "num_hidden_layers"):
         vision_cfg.num_hidden_layers = 2
-    if hasattr(vision_cfg, "num_attention_heads"):
+    if _config_hasattr(vision_cfg, "num_attention_heads"):
         vision_cfg.num_attention_heads = 2
-    if hasattr(vision_cfg, "num_key_value_heads"):
+    if _config_hasattr(vision_cfg, "num_key_value_heads"):
         vision_cfg.num_key_value_heads = 2
-    if hasattr(vision_cfg, "head_dim"):
+    if _config_hasattr(vision_cfg, "head_dim"):
         vision_cfg.head_dim = 32
-    if hasattr(vision_cfg, "default_output_length"):
+    if _config_hasattr(vision_cfg, "default_output_length"):
         vision_cfg.default_output_length = 16
-    if hasattr(vision_cfg, "pooling_kernel_size"):
+    if _config_hasattr(vision_cfg, "pooling_kernel_size"):
         vision_cfg.pooling_kernel_size = 2
-    if hasattr(vision_cfg, "patch_size"):
+    if _config_hasattr(vision_cfg, "patch_size"):
         vision_cfg.patch_size = 2
-    if hasattr(vision_cfg, "dtype"):
+    if _config_hasattr(vision_cfg, "dtype"):
         vision_cfg.dtype = torch.float32
 
     try:
         mm_cfg = Gemma4Config(text_config=text_cfg, vision_config=vision_cfg)
     except TypeError:
         mm_cfg = Gemma4Config()
-        if hasattr(mm_cfg, "text_config"):
+        if _config_hasattr(mm_cfg, "text_config"):
             mm_cfg.text_config = text_cfg
-        if hasattr(mm_cfg, "vision_config"):
+        if _config_hasattr(mm_cfg, "vision_config"):
             mm_cfg.vision_config = vision_cfg
 
-    if hasattr(mm_cfg, "vocab_size"):
+    if _config_hasattr(mm_cfg, "vocab_size"):
         mm_cfg.vocab_size = VOCAB_SIZE
-    if hasattr(mm_cfg, "image_token_id"):
+    if _config_hasattr(mm_cfg, "image_token_id"):
         mm_cfg.image_token_id = VOCAB_SIZE + 5
-    if hasattr(mm_cfg, "mm_tokens_per_image"):
+    if _config_hasattr(mm_cfg, "mm_tokens_per_image"):
         mm_cfg.mm_tokens_per_image = 16
     if getattr(mm_cfg, "text_config", None) is None:
         mm_cfg.text_config = text_cfg
     if getattr(mm_cfg, "vision_config", None) is None:
         mm_cfg.vision_config = vision_cfg
-    if hasattr(mm_cfg, "dtype"):
+    if _config_hasattr(mm_cfg, "dtype"):
         mm_cfg.dtype = torch.float32
-    if hasattr(mm_cfg.text_config, "dtype"):
+    if _config_hasattr(mm_cfg.text_config, "dtype"):
         mm_cfg.text_config.dtype = torch.float32
-    if hasattr(mm_cfg.vision_config, "dtype"):
+    if _config_hasattr(mm_cfg.vision_config, "dtype"):
         mm_cfg.vision_config.dtype = torch.float32
 
     return Gemma4ForConditionalGeneration(mm_cfg).eval(), text_cfg
@@ -243,11 +252,19 @@ def _kv_heads_for_layer(config, layer_idx):
 
 
 def _head_dim_for_layer(config, layer_idx):
+    layer_config = None
+    per_layer_config = getattr(config, "per_layer_config", None)
+    if per_layer_config is not None and layer_idx < len(per_layer_config):
+        layer_config = per_layer_config[layer_idx]
+
+    if layer_config is not None and _config_hasattr(layer_config, "head_dim"):
+        return int(layer_config.head_dim)
+
     layer_t = _layer_type(config, layer_idx)
     global_dim = getattr(config, "global_head_dim", None)
     if layer_t != "sliding_attention" and global_dim is not None:
         return int(global_dim)
-    return int(getattr(config, "head_dim", config.hidden_size // config.num_attention_heads))
+    return int(config.__dict__.get("head_dim", config.hidden_size // config.num_attention_heads))
 
 
 def _ctx_len_for_layer(config, layer_idx, ctx_len):
@@ -381,8 +398,8 @@ class TestQEffGemma4Architecture:
         text_model = qeff.lang_model.model.language_model
 
         for layer_type in ("full_attention", "sliding_attention"):
-            expected_head_dim = cfg.global_head_dim if layer_type == "full_attention" else cfg.head_dim
             for embedding_index, embedding_name in enumerate(("cos", "sin")):
+                expected_head_dim = expected_embeddings[layer_type][embedding_index].shape[-1]
                 cached_embedding = getattr(text_model, f"{layer_type}_{embedding_name}_cached")
                 assert cached_embedding.shape == (text_model.rotary_emb.original_max_seq_len, expected_head_dim)
                 torch.testing.assert_close(

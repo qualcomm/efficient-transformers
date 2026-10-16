@@ -616,22 +616,11 @@ class QEffGemma3ForCausalLMModel(Gemma3ForCausalLM):
         dtype = dtype or getattr(config, "torch_dtype", torch.float32)
         n_heads = config.num_key_value_heads
         d_head = config.head_dim
-        layer_switch = (
-            config._sliding_window_pattern if hasattr(config, "_sliding_window_pattern") else 2
-        )  # 2 is for BC
-        is_sliding = torch.tensor(
-            [bool((i + 1) % layer_switch) for i in range(config.num_hidden_layers)], dtype=torch.bool
-        )
         global_cache_shape = [batch_size, n_heads, seq_len, d_head]
-        if hasattr(config, "sliding_window"):
-            sliding_cache_shape = [batch_size, n_heads, min(config.sliding_window, seq_len), d_head]
         past_key_values = []
-        cache_shape = global_cache_shape
         for i in range(config.num_hidden_layers):
-            if hasattr(config, "sliding_window"):
-                cache_shape = global_cache_shape if not is_sliding[i] else sliding_cache_shape
-            new_layer_key_cache = torch.zeros(cache_shape, dtype=dtype)
-            new_layer_value_cache = torch.zeros(cache_shape, dtype=dtype)
+            new_layer_key_cache = torch.zeros(global_cache_shape, dtype=dtype)
+            new_layer_value_cache = torch.zeros(global_cache_shape, dtype=dtype)
             pkv = (new_layer_key_cache, new_layer_value_cache)
             past_key_values.append(pkv)
         return past_key_values
@@ -826,6 +815,7 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
             else:
                 vision_size = 256
 
+        runtime_sliding_window = ctx_len
         vision = [
             {
                 "vision_batch_size": vision_batch_size,
@@ -843,7 +833,7 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
                     "seq_len": prefill_seq_len,
                     "ctx_len": ctx_len,
                     "comp_ctx_lengths": comp_ctx_lengths_prefill[i],
-                    "sliding_window": self.language_model.config.sliding_window,
+                    "sliding_window": runtime_sliding_window,
                     "img_size": img_size,
                     "vision_size": vision_size,
                     "vision_batch_size": vision_batch_size,
@@ -862,7 +852,7 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
                     "seq_len": "1",
                     "ctx_len": ctx_len,
                     "comp_ctx_lengths": comp_ctx_lengths_decode[i],
-                    "sliding_window": self.language_model.config.sliding_window,
+                    "sliding_window": runtime_sliding_window,
                     "img_size": img_size,
                     "vision_size": vision_size,
                     "vision_batch_size": vision_batch_size,
@@ -878,7 +868,7 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
                 "batch_size": 1 if continuous_batching else batch_size,
                 "seq_len": prefill_seq_len,
                 "ctx_len": ctx_len,
-                "sliding_window": self.language_model.config.sliding_window,
+                "sliding_window": runtime_sliding_window,
                 "img_size": img_size,
                 "vision_size": vision_size,
                 "vision_batch_size": vision_batch_size,
@@ -894,7 +884,7 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
                 "batch_size": full_batch_size if continuous_batching else batch_size,
                 "seq_len": "1",
                 "ctx_len": ctx_len,
-                "sliding_window": self.language_model.config.sliding_window,
+                "sliding_window": runtime_sliding_window,
                 "img_size": img_size,
                 "vision_size": vision_size,
                 "vision_batch_size": vision_batch_size,
@@ -977,22 +967,11 @@ class QEffGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
         dtype = dtype or getattr(config, "torch_dtype", torch.float32)
         n_heads = config.num_key_value_heads
         d_head = config.head_dim
-        layer_switch = (
-            config._sliding_window_pattern if hasattr(config, "_sliding_window_pattern") else 2
-        )  # 2 is for BC
-        is_sliding = torch.tensor(
-            [bool((i + 1) % layer_switch) for i in range(config.num_hidden_layers)], dtype=torch.bool
-        )
         global_cache_shape = [batch_size, n_heads, seq_len, d_head]
-        if hasattr(config, "sliding_window"):
-            sliding_cache_shape = [batch_size, n_heads, min(config.sliding_window, seq_len), d_head]
         past_key_values = []
-        cache_shape = global_cache_shape
         for i in range(config.num_hidden_layers):
-            if hasattr(config, "sliding_window"):
-                cache_shape = global_cache_shape if not is_sliding[i] else sliding_cache_shape
-            new_layer_key_cache = torch.zeros(cache_shape, dtype=dtype)
-            new_layer_value_cache = torch.zeros(cache_shape, dtype=dtype)
+            new_layer_key_cache = torch.zeros(global_cache_shape, dtype=dtype)
+            new_layer_value_cache = torch.zeros(global_cache_shape, dtype=dtype)
             pkv = (new_layer_key_cache, new_layer_value_cache)
             past_key_values.append(pkv)
         return past_key_values

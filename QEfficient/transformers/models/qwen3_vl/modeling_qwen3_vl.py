@@ -148,7 +148,7 @@ class QEffQwen3VLVisionModel(Qwen3VLVisionModel):
         merge_size = self.spatial_merge_size
 
         max_hw = max(grid_thw.shape)
-        freq_table = self.rotary_pos_emb(max_hw)  # (max_hw, dim // 2)
+        freq_table = self.rotary_pos_emb(torch.arange(max_hw, device=grid_thw.device))  # (max_hw, dim // 2)
         device = freq_table.device
         _bs, num_frames, height, width = grid_thw.shape
         grid_thw = (torch.tensor(grid_thw.shape, dtype=torch.int64)).unsqueeze(0)

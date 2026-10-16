@@ -15,9 +15,9 @@ import torch
 from QEfficient.customop import (
     ctx_gather_3d_generalized,
     ctx_scatter_3d_generalized,
-    ctx_scatter_3d_int,
 )
 from QEfficient.customop.quantization_ops import CastToUInt4Func, DequantizeLinearFunc
+from QEfficient.transformers.moe.flavours import build_matched_idx_from_cumsum
 
 
 @dataclass(frozen=True)
@@ -57,18 +57,6 @@ class QuantizedMoEWeights:
     @property
     def hidden_size(self) -> int:
         return self.gate_qweight.shape[-1] * 2
-
-
-def _build_matched_idx_from_cumsum(token_to_expert: torch.Tensor) -> torch.Tensor:
-    """Build packed-to-original token indices for cumsum expert dispatch."""
-    batch_size, seq_len = token_to_expert.shape
-    int32_max = torch.iinfo(torch.int32).max
-    invalid_index = torch.tensor(int32_max, dtype=torch.int32, device=token_to_expert.device)
-    token_indices = torch.arange(seq_len, dtype=torch.int32, device=token_to_expert.device).expand(batch_size, -1)
-    packed_indices = torch.cumsum(token_to_expert.to(torch.int32), dim=1) - 1
-    scatter_indices = torch.where(token_to_expert, packed_indices, invalid_index)
-    matched_indices = torch.full_like(token_indices, int32_max)
-    return ctx_scatter_3d_int(matched_indices.unsqueeze(-1), scatter_indices, token_indices.unsqueeze(-1)).squeeze(-1)
 
 
 def _dequantize_projection(qweight: torch.Tensor, scales: torch.Tensor, qzeros: torch.Tensor, group_size: int):
@@ -147,7 +135,7 @@ def _cumsum_scatter_gather_update_quantized_expert(
 
     packed_chunk_size = seq_len // num_packed_chunks
 
-    matched_idx = _build_matched_idx_from_cumsum(token_to_expert)
+    matched_idx = build_matched_idx_from_cumsum(token_to_expert)
     valid_rows = token_to_expert.to(torch.int32).sum(dim=-1, keepdim=True)
     row_range = torch.arange(packed_chunk_size, dtype=torch.int32, device=x.device).unsqueeze(0)
     x_expanded = x.unsqueeze(0).expand(batch_size, -1, -1)
@@ -163,18 +151,9 @@ def _cumsum_scatter_gather_update_quantized_expert(
 
         x_chunk = ctx_gather_3d_generalized(x_expanded, chunk_matched_idx)
 
-        gate_proj_unpacked = CastToUInt4Func.apply(gate_qweight)
-        gate_zeros_unpacked = CastToUInt4Func.apply(gate_qzeros)
-        gate_proj_dq = DequantizeLinearFunc.apply(gate_proj_unpacked, gate_scales, gate_zeros_unpacked, group_size)
-
-        up_proj_unpacked = CastToUInt4Func.apply(up_qweight)
-        up_zeros_unpacked = CastToUInt4Func.apply(up_qzeros)
-        up_proj_dq = DequantizeLinearFunc.apply(up_proj_unpacked, up_scales, up_zeros_unpacked, group_size)
-
-        down_proj_unpacked = CastToUInt4Func.apply(down_qweight)
-        down_zeros_unpacked = CastToUInt4Func.apply(down_qzeros)
-
-        down_proj_dq = DequantizeLinearFunc.apply(down_proj_unpacked, down_scales, down_zeros_unpacked, group_size)
+        gate_proj_dq = _dequantize_projection(gate_qweight, gate_scales, gate_qzeros, group_size)
+        up_proj_dq = _dequantize_projection(up_qweight, up_scales, up_qzeros, group_size)
+        down_proj_dq = _dequantize_projection(down_qweight, down_scales, down_qzeros, group_size)
 
         gate_out = torch.bmm(x_chunk, gate_proj_dq.transpose(1, 2).to(x_chunk.dtype))
         up_out = torch.bmm(x_chunk, up_proj_dq.transpose(1, 2).to(x_chunk.dtype))

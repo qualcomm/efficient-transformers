@@ -29,6 +29,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5VisionAttention,
     Qwen3_5VisionModel,
     apply_rotary_pos_emb_vision,
+    create_recurrent_attention_mask,
     repeat_kv,
     rotate_half,
 )
@@ -1167,10 +1168,12 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
 class QEffQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
     def __qeff_init__(self):
-        if self.layer_type == "linear_attention":
+        layer_type = getattr(self, "layer_type", getattr(self, "block_type", None))
+        self.layer_type = layer_type
+        if layer_type == "linear_attention":
             self.linear_attn.__class__ = QEffQwen3_5GatedDeltaNet
             self.linear_attn.__qeff_init__()
-        elif self.layer_type == "full_attention":
+        elif layer_type == "full_attention":
             self.self_attn.__class__ = QEffQwen3_5Attention
             self.self_attn.__qeff_init__()
 
@@ -1303,7 +1306,12 @@ class QEffQwen3_5TextModel(Qwen3_5TextModel):
         causal_mask = _create_causal_mask(
             position_ids=text_position_ids, target_length=target_length, sliding_window=None
         )
-        linear_attn_mask = self._update_linear_attn_mask(attention_mask, past_key_values)
+        linear_attn_mask = create_recurrent_attention_mask(
+            config=self.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+        )
 
         hidden_states = inputs_embeds
 
@@ -1567,7 +1575,7 @@ class QEffQwen3_5VisionModel(Qwen3_5VisionModel):
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         merge_size = self.spatial_merge_size
         max_hw = max(grid_thw.shape)
-        freq_table = self.rotary_pos_emb(max_hw)
+        freq_table = self.rotary_pos_emb(torch.arange(max_hw, device=grid_thw.device))
         device = freq_table.device
         _bs, num_frames, height, width = grid_thw.shape
         grid_thw = (torch.tensor(grid_thw.shape, dtype=torch.int64)).unsqueeze(0)
