@@ -45,7 +45,9 @@ from QEfficient.diffusers.pipelines.pipeline_utils import (
 )
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.utils import constants
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger, log_pipeline_api
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 class QEffWanPipeline:
@@ -200,6 +202,7 @@ class QEffWanPipeline:
         return self._guidance_scale > 1.0 and (self._guidance_scale_2 is None or self._guidance_scale_2 > 1.0)
 
     @classmethod
+    @log_pipeline_api("from_pretrained", "Diffusion model loading completed.", "load_complete")
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
@@ -266,6 +269,7 @@ class QEffWanPipeline:
             **kwargs,
         )
 
+    @log_pipeline_api("export", "ONNX export completed.", "export_complete")
     def export(
         self,
         export_dir: Optional[str] = None,
@@ -333,6 +337,7 @@ class QEffWanPipeline:
         config_name = "wan_config.json" if self.use_unified else "wan_non_unified_config.json"
         return os.path.join(os.path.dirname(os.path.dirname(__file__)), f"configs/{config_name}")
 
+    @log_pipeline_api("compile", "Compilation completed.", "compile_complete")
     def compile(
         self,
         compile_config: Optional[str] = None,
@@ -762,6 +767,13 @@ class QEffWanPipeline:
 
         return latents, transformer_perf
 
+    @log_pipeline_api(
+        "generate",
+        "Generation completed.",
+        "generation_complete",
+        start_run=True,
+        finish_run=True,
+    )
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,

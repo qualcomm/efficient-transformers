@@ -29,7 +29,9 @@ from QEfficient.transformers.quantizers.quantizer_utils import (
     dequantize_gptq,
     unpack_weights_and_zeros,
 )
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 class AwqToMatmulNbitsTransform(ModuleMutatorTransform):

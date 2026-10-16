@@ -6,7 +6,6 @@
 # -----------------------------------------------------------------------------
 
 import argparse
-import logging
 import time
 
 import numpy as np
@@ -18,8 +17,9 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.logging_utils import QEFFLogger
 
-logger = logging.getLogger(__name__)
+logger = QEFFLogger.get_logger("INFRA")
 
 
 # 1. Data Loading
@@ -362,13 +362,6 @@ def main():
     )
     parser.add_argument("--log_file", default="perplexity_results.log", help="Log file name")
     args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(args.log_file), logging.StreamHandler()],
-    )
-    logger = logging.getLogger(__name__)
 
     start_time = time.time()
 

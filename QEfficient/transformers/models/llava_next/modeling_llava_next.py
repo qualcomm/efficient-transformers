@@ -18,8 +18,9 @@ from transformers.models.llava_next.modeling_llava_next import (
 
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 
+logger = QEFFLogger.get_logger("MODEL")
 BS = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
 FBS = constants.ONNX_EXPORT_EXAMPLE_FBS
 

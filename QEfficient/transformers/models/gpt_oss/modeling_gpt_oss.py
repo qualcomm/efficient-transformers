@@ -49,7 +49,9 @@ from QEfficient.transformers.moe import (
     gptoss_clamped_glu_mlp,
 )
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 def override_gptoss_prefill_chunking(
@@ -844,6 +846,11 @@ class QEffGptOssAttention(GptOssAttention):
                 batch_index=batch_index,
                 position_ids=position_ids,
                 sliding_window=self.sliding_window,
+                sliding_window_len=(
+                    past_key_values.get_sliding_window_len(self.layer_idx)
+                    if self.sliding_window is not None and past_key_values is not None
+                    else None
+                ),
             )
             attn_output, attn_weights = eager_attention_forward(
                 self,

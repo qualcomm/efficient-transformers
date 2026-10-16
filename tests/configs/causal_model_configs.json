@@ -497,7 +497,8 @@
       "model_type": "gpt2",
       "is_moe": false,
       "supports_blocking": false,
-      "num_hidden_layers": 1
+      "num_hidden_layers": 1,
+      "known_bf16_compile_issue": "GPT2 bf16 compilation fails because qaic-compile does not support ONNX type Complex128"
     },
     {
       "id": "llama_text",
@@ -559,7 +560,8 @@
       "model_type": "phi",
       "is_moe": false,
       "supports_blocking": false,
-      "num_hidden_layers": 1
+      "num_hidden_layers": 1,
+      "known_bf16_compile_issue": "Phi bf16 compilation fails because qaic-compile glow error"
     },
     {
       "id": "phi3_text",
@@ -696,7 +698,8 @@
       "model_type": "mistral",
       "is_moe": false,
       "supports_blocking": false,
-      "num_hidden_layers": 1
+      "num_hidden_layers": 1,
+      "known_bf16_compile_issue": "Mistral bf16 compilation fails because qaic-compile glow error"
     },
     {
       "id": "mixtral_moe_text",
@@ -753,7 +756,8 @@
       "model_type": "falcon",
       "is_moe": false,
       "supports_blocking": false,
-      "num_hidden_layers": 1
+      "num_hidden_layers": 1,
+      "known_bf16_compile_issue": "Falcon bf16 compilation fails because qaic-compile does not support ONNX type Complex128"
     },
     {
       "id": "mpt_text",
@@ -769,7 +773,8 @@
       "model_type": "starcoder2",
       "is_moe": false,
       "supports_blocking": true,
-      "num_hidden_layers": 1
+      "num_hidden_layers": 1,
+      "known_bf16_compile_issue": "Starcoder2 bf16 compilation fails because qaic-compile glow error"
     },
     {
       "id": "gpt_bigcode_text",
@@ -777,7 +782,8 @@
       "model_type": "gpt_bigcode",
       "is_moe": false,
       "supports_blocking": false,
-      "num_hidden_layers": 1
+      "num_hidden_layers": 1,
+      "known_bf16_compile_issue": "GPT-BigCode bf16 compilation fails because qaic-compile glow error"
     },
     {
       "id": "gpt_oss_moe_text",

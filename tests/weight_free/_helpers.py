@@ -16,14 +16,13 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Dict, Tuple
 
 import numpy as np
 import onnx
 import onnxruntime
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
@@ -31,35 +30,55 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 # ---------------------------------------------------------------------------
 # Worker-level model cache
 # ---------------------------------------------------------------------------
-_HF_MODEL_CACHE: Dict[str, Tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
+_HF_MODEL_CACHE: dict[str, tuple[AutoModelForCausalLM, AutoTokenizer]] = {}
 
 # ---------------------------------------------------------------------------
 # Model registry — same tiny-random models as tests/dynamo/
 # ---------------------------------------------------------------------------
 
 WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
-    "codegen": "hf-internal-testing/tiny-random-CodeGenForCausalLM",
-    "falcon": "hf-internal-testing/tiny-random-FalconForCausalLM",
+    "codegen": "hf-tiny-v2/tiny-random-CodeGenForCausalLM",
+    "falcon": "hf-tiny-v2/tiny-random-FalconForCausalLM",
     "gemma": "Xenova/tiny-random-GemmaForCausalLM",
-    "gemma2": "hf-internal-testing/tiny-random-Gemma2ForCausalLM",
+    "gemma2": "hf-tiny-v2/tiny-random-Gemma2ForCausalLM",
     "glm4_moe": "tiny-random/glm-4-moe",
-    "gpt2": "hf-internal-testing/tiny-random-GPT2LMHeadModel",
-    "gpt_bigcode": "hf-internal-testing/tiny-random-GPTBigCodeForCausalLM",
+    "gpt2": "hf-tiny-v2/tiny-random-GPT2LMHeadModel",
+    "gpt_bigcode": "hf-tiny-v2/tiny-random-GPTBigCodeForCausalLM",
     "gpt_oss": "tiny-random/gpt-oss-mxfp4",
-    "gptj": "hf-internal-testing/tiny-random-GPTJForCausalLM",
-    "granite": "hf-internal-testing/tiny-random-GraniteForCausalLM",
-    "granitemoe": "hf-internal-testing/tiny-random-GraniteMoeForCausalLM",
-    "llama": "hf-internal-testing/tiny-random-LlamaForCausalLM",
-    "mistral": "hf-internal-testing/tiny-random-MistralForCausalLM",
-    "mixtral": "hf-internal-testing/tiny-random-MixtralForCausalLM",
-    "mpt": "hf-internal-testing/tiny-random-MptForCausalLM",
-    "olmo2": "hf-internal-testing/tiny-random-Olmo2ForCausalLM",
-    "phi": "hf-internal-testing/tiny-random-PhiForCausalLM",
+    "gptj": "yujiepan/gptj-tiny-random",
+    "granite": "hf-tiny-v2/tiny-random-GraniteForCausalLM",
+    "granitemoe": "hf-tiny-v2/tiny-random-GraniteMoeForCausalLM",
+    "llama": "hf-tiny-v2/tiny-random-LlamaForCausalLM",
+    "mistral": "yujiepan/mistral-tiny-random",
+    "mixtral": "optimum-intel-internal-testing/tiny-mixtral",
+    "mpt": "hf-tiny-v2/tiny-random-MptForCausalLM",
+    "olmo2": "hf-tiny-v2/tiny-random-Olmo2ForCausalLM",
+    "phi": "hf-tiny-v2/tiny-random-PhiForCausalLM",
     "qwen2": "yujiepan/qwen2-tiny-random",
     "qwen3": "tiny-random/qwen3",
     "qwen3_moe": "tiny-random/qwen3-moe",
-    "starcoder2": "hf-internal-testing/tiny-random-Starcoder2ForCausalLM",
+    "starcoder2": "hf-tiny-v2/tiny-random-Starcoder2ForCausalLM",
 }
+
+WEIGHT_FREE_EMBEDDING_MODELS = {
+    "bge_reranker": ("BAAI/bge-reranker-v2-m3", "mean"),
+    "bge_small": ("BAAI/bge-small-en-v1.5", "mean"),
+    "granite_embedding_30m": ("ibm-granite/granite-embedding-30m-english", "mean"),
+    "granite_multilingual_107m": ("ibm-granite/granite-embedding-107m-multilingual", "mean"),
+    "jina": ("jinaai/jina-embeddings-v2-base-code", "mean"),
+    "mpnet": ("sentence-transformers/multi-qa-mpnet-base-cos-v1", "mean"),
+    "nomic": ("nomic-ai/nomic-embed-text-v1.5", "mean"),
+}
+
+_WEIGHT_FREE_EMBEDDING_XFAILS = {"jina", "nomic"}
+
+
+def _embedding_test_param(model_type, model_id, pooling):
+    marks = [pytest.mark.xdist_group(name=f"qaic-runtime-{model_type}")]
+    if model_type in _WEIGHT_FREE_EMBEDDING_XFAILS:
+        marks.append(pytest.mark.xfail(reason="Weight-free is not enabled for this embedding model yet", strict=False))
+    return pytest.param(model_type, model_id, pooling, marks=marks, id=model_type)
+
 
 WEIGHT_FREE_QAIC_MODEL_PARAMS = [
     pytest.param(
@@ -69,6 +88,11 @@ WEIGHT_FREE_QAIC_MODEL_PARAMS = [
         id=model_type,
     )
     for model_type, model_id in sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.items())
+]
+
+WEIGHT_FREE_EMBEDDING_MODEL_PARAMS = [
+    _embedding_test_param(model_type, model_id, pooling)
+    for model_type, (model_id, pooling) in sorted(WEIGHT_FREE_EMBEDDING_MODELS.items())
 ]
 
 # ---------------------------------------------------------------------------
@@ -102,6 +126,21 @@ def load_hf_model(model_id: str) -> AutoModelForCausalLM:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if not hasattr(tokenizer, "pad_token") or tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        _HF_MODEL_CACHE[model_id] = (model, tokenizer)
+    model, _ = _HF_MODEL_CACHE[model_id]
+    return copy.deepcopy(model)
+
+
+def load_hf_embedding_model(model_id: str) -> AutoModel:
+    """Load a real encoder model for HF reference inference."""
+    if model_id not in _HF_MODEL_CACHE:
+        model = AutoModel.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            **MODEL_KWARGS,
+        )
+        model.eval()
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         _HF_MODEL_CACHE[model_id] = (model, tokenizer)
     model, _ = _HF_MODEL_CACHE[model_id]
     return copy.deepcopy(model)

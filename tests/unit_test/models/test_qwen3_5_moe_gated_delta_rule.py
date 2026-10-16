@@ -29,6 +29,8 @@ def _run_chunk_rule(solver: str, chunk_size: int = 8):
     # Method only depends on these attrs/helpers; full HF model init is not required for this unit test.
     layer = object.__new__(QEffQwen3_5MoeGatedDeltaNet)
     layer.chunk_gated_delta_solver = solver
+    layer.torch_dtype = torch.float32
+    layer.head_k_dim = k_head_dim
 
     query = torch.randn(batch_size, seq_len, num_heads, k_head_dim, dtype=torch.float32, device=device)
     key = torch.randn(batch_size, seq_len, num_heads, k_head_dim, dtype=torch.float32, device=device)

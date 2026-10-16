@@ -16,7 +16,10 @@ from transformers.utils import is_compressed_tensors_available
 from transformers.utils.quantization_config import CompressedTensorsConfig, QuantizationConfigMixin, QuantizationMethod
 
 from QEfficient.transformers.quantizers.quantizer_utils import blockwise_dequantize, get_keys_to_not_convert
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
+
 
 FP8_DTYPE = torch.float8_e4m3fn
 

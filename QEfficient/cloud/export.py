@@ -13,7 +13,10 @@ from QEfficient.base.common import QEFFCommonLoader
 from QEfficient.cloud import warn_deprecated_cloud_api
 from QEfficient.utils import check_and_assign_cache_dir
 from QEfficient.utils.custom_yaml import generate_custom_io
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
+
 
 # Specifically for Docker images.
 ROOT_DIR = os.path.dirname(os.path.abspath(""))

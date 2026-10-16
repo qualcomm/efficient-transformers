@@ -8,7 +8,9 @@
 from typing import List, Tuple
 
 from QEfficient.utils import constants
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 # Better performance when context length is multiple of 1024 → map CL to the next multiple of 1024

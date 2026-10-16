@@ -323,7 +323,9 @@ class QEffGemma4CustomRMSNormAIC(nn.Module):
             weight = getattr(self, "_qeff_unit_weight", None)
             if weight is None:
                 weight = hidden_states.new_ones(hidden_states.shape[-1])
-        return CustomRMSNormFunc.apply(hidden_states, weight, self.eps)
+        # Cast weight to match hidden_states dtype so the AIC compiler sees
+        # matching Input/Scale dtypes in the CustomRMSNorm op (e.g. bfloat16).
+        return CustomRMSNormFunc.apply(hidden_states, weight.to(hidden_states.dtype), self.eps)
 
 
 class QEffGemma4TextMoeBlock(QEffMoEBlockMixin, nn.Module):
@@ -476,6 +478,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
+        target_dtype = hidden_states.dtype
         cache_kwargs = {"position_ids": position_ids, "batch_index": batch_index}
         token_key_states = None
         token_value_states = None
@@ -506,8 +509,8 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
 
         if self.is_kv_shared_layer and past_key_values is not None:
             key_states, value_states = past_key_values.shared_layers[self.kv_shared_layer_index]
-            key_states = key_states.to(query_states.device)
-            value_states = value_states.to(query_states.device)
+            key_states = key_states.to(query_states.device, dtype=target_dtype)
+            value_states = value_states.to(query_states.device, dtype=target_dtype)
             if hasattr(past_key_values, "shared_layers_token"):
                 token_states = past_key_values.shared_layers_token.get(self.kv_shared_layer_index)
                 if token_states is not None:
@@ -519,9 +522,13 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
             key_states = self.k_norm(key_states)
             key_states = qeff_apply_rotary_pos_emb(key_states, cos, sin)
             key_states = key_states.transpose(1, 2)
+            if key_states.dtype != target_dtype:
+                key_states = key_states.to(target_dtype)
 
             value_states = self.v_norm(value_states)
             value_states = value_states.transpose(1, 2)
+            if value_states.dtype != target_dtype:
+                value_states = value_states.to(target_dtype)
             token_key_states, token_value_states = key_states, value_states
 
         if use_blocking:
@@ -718,6 +725,10 @@ class QEffGemma4TextModel(Gemma4TextModel):
 
         if input_ids is not None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        target_dtype = self.embed_tokens.weight.dtype
+        if inputs_embeds is not None and inputs_embeds.dtype != target_dtype:
+            inputs_embeds = inputs_embeds.to(target_dtype)
 
         if self.hidden_size_per_layer_input:
             if per_layer_inputs is None:
@@ -1088,8 +1099,8 @@ class QEffGemma4ForCausalLM(Gemma4ForCausalLM):
             cache_shape = [batch_size, n_heads, layer_seq_len, d_head]
             past_key_values.append(
                 (
-                    torch.zeros(cache_shape, dtype=torch.float32),
-                    torch.zeros(cache_shape, dtype=torch.float32),
+                    torch.zeros(cache_shape, dtype=config.dtype),
+                    torch.zeros(cache_shape, dtype=config.dtype),
                 )
             )
         return past_key_values
@@ -1174,6 +1185,9 @@ class QEffGemma4DecoderWrapper(nn.Module):
         llm_input_ids = input_ids.clone()
         llm_input_ids[special_image_mask] = self.config.text_config.pad_token_id
         inputs_embeds = self.model.get_input_embeddings()(llm_input_ids)
+        target_dtype = self.language_model.embed_tokens.weight.dtype
+        if inputs_embeds.dtype != target_dtype:
+            inputs_embeds = inputs_embeds.to(target_dtype)
 
         next_image_idx = image_idx
         if input_ids.shape[1] != 1 and special_image_mask.any() and vision_embeds is None:
@@ -1192,6 +1206,8 @@ class QEffGemma4DecoderWrapper(nn.Module):
             indices0 = torch.arange(special_image_mask.shape[0], device=special_image_mask.device).view(-1, 1)
             safe_indices1 = torch.where(indices1 < 0, torch.zeros_like(indices1), indices1)
             gathered_vision_embeds = vision_embeds[indices0, safe_indices1]
+            if gathered_vision_embeds.dtype != target_dtype:
+                gathered_vision_embeds = gathered_vision_embeds.to(target_dtype)
             inputs_embeds = torch.where(special_image_mask.unsqueeze(-1), gathered_vision_embeds, inputs_embeds)
             next_image_idx = (indices1.max() + 1).reshape(1, 1)
 
@@ -1486,8 +1502,8 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
             cache_shape = [batch_size, n_heads, layer_seq_len, d_head]
             past_key_values.append(
                 (
-                    torch.zeros(cache_shape, dtype=torch.float32),
-                    torch.zeros(cache_shape, dtype=torch.float32),
+                    torch.zeros(cache_shape, dtype=config.dtype),
+                    torch.zeros(cache_shape, dtype=config.dtype),
                 )
             )
         return past_key_values
@@ -1529,12 +1545,14 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         mm_token_type_ids[:, image_start:image_end] = 1
 
         vision_inputs = {
-            "pixel_values": torch.zeros((bs, max_patches, patch_dim), dtype=torch.float32),
+            "pixel_values": torch.zeros((bs, max_patches, patch_dim), dtype=self.config.dtype),
             "image_position_ids": image_position_ids,
         }
         lang_inputs = {
             "input_ids": input_ids,
-            "vision_embeds": torch.zeros((bs, mm_tokens_per_image, self.model.language_model.config.hidden_size)),
+            "vision_embeds": torch.zeros(
+                (bs, mm_tokens_per_image, self.model.language_model.config.hidden_size), dtype=self.config.dtype
+            ),
             "position_ids": torch.arange(seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1),
             "image_idx": torch.zeros((1, 1), dtype=torch.int64),
             "mm_token_type_ids": mm_token_type_ids,

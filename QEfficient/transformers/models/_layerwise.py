@@ -32,7 +32,9 @@ import torch
 import transformers
 
 import QEfficient
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
 
 # Architectures whose modeling files declare _start/_end class attributes the
 # layer-wise driver pokes. Keep this list narrow on purpose - adding a new

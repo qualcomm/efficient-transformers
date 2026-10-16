@@ -39,7 +39,9 @@ from QEfficient.diffusers.pipelines.pipeline_utils import (
     set_execute_params,
 )
 from QEfficient.generation.cloud_infer import QAICInferenceSession
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger, log_pipeline_api
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 class QEffFluxPipeline:
@@ -145,6 +147,7 @@ class QEffFluxPipeline:
         )
 
     @classmethod
+    @log_pipeline_api("from_pretrained", "Diffusion model loading completed.", "load_complete")
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
@@ -205,6 +208,7 @@ class QEffFluxPipeline:
             **kwargs,
         )
 
+    @log_pipeline_api("export", "ONNX export completed.", "export_complete")
     def export(self, export_dir: Optional[str] = None, use_onnx_subfunctions: bool = False) -> str:
         """
         Export all pipeline modules to ONNX format for deployment preparation.
@@ -276,6 +280,7 @@ class QEffFluxPipeline:
         """
         return os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs/flux_config.json")
 
+    @log_pipeline_api("compile", "Compilation completed.", "compile_complete")
     def compile(
         self,
         compile_config: Optional[str] = None,
@@ -573,6 +578,13 @@ class QEffFluxPipeline:
 
         return prompt_embeds, pooled_prompt_embeds, text_ids, [text_encoder_perf, text_encoder_2_perf]
 
+    @log_pipeline_api(
+        "generate",
+        "Generation completed.",
+        "generation_complete",
+        start_run=True,
+        finish_run=True,
+    )
     def __call__(
         self,
         height: int = 512,

@@ -120,7 +120,8 @@ def _run_per_pr_causal_text_case(
         pytest.xfail(model_config["known_runtime_parity_issue"])
 
     config = _per_pr_dummy_config(model_config)
-    num_cores = model_config.get("num_cores", num_cores)
+    aic_hw_version = "ai200" if torch_dtype == torch.bfloat16 else "ai100"
+    num_cores = 4 if aic_hw_version == "ai200" else model_config.get("num_cores", num_cores)
     compile_options = {**model_config.get("compile_options", {}), **(compile_options or {})}
     check_causal_lm_pytorch_vs_kv_vs_ort_vs_ai100(
         model_name=model_config["model_name"],
@@ -139,6 +140,7 @@ def _run_per_pr_causal_text_case(
         comp_ctx_lengths_decode=comp_ctx_lengths_decode,
         kv_cache_batch_size=kv_cache_batch_size,
         num_cores=num_cores,
+        aic_hw_version=aic_hw_version,
         compile_options=compile_options,
         num_speculative_tokens=num_speculative_tokens,
         tokenizer_name=model_config.get("tokenizer_id"),

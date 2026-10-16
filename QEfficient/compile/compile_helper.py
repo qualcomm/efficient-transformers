@@ -15,7 +15,9 @@ from typing import List, Optional, Tuple
 from QEfficient.compile.qnn_compiler import compile as qnn_compile
 from QEfficient.utils import constants
 from QEfficient.utils._utils import load_json, load_yaml, to_named_specializations
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 def create_and_dump_specializations(

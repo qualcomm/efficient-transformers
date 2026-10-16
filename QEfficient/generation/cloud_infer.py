@@ -186,6 +186,7 @@ class QAICInferenceSession:
                 dev_id_non_mq = device_ids[0]
             elif len(device_ids) > 1:
                 prog_properties.devMapping = ":".join(map(str, device_ids))
+        self.is_active = False
         self.program = qaicrt.Program(self.context, dev_id_non_mq, qpc, prog_properties)
         if self.program.load() != qaicrt.QStatus.QS_SUCCESS:
             raise RuntimeError("Failed to load program")
@@ -203,10 +204,8 @@ class QAICInferenceSession:
                 fileNamePrefix=profiling_file_prefix,
                 outputDirectory=str(output_dir),
             )
-        self.is_active = False
         if activate:
             self.activate()
-            self.is_active = True
         if self._kv_dma is None:
             # Create input qbuffers and buf_dims (single-execObj `run()` path)
             self.qbuffers = [qaicrt.QBuffer(bytes(binding.size)) for binding in self.bindings]
@@ -275,19 +274,40 @@ class QAICInferenceSession:
     def activate(self):
         """Activate qpc"""
         if not self.is_active:
-            self.program.activate()
-            if self._kv_dma is not None:
-                self.execObj = [qaicrt.ExecObj(self.context, self.program) for _ in range(self._queue_len)]
-            else:
-                self.execObj = qaicrt.ExecObj(self.context, self.program)
-            self.is_active = True
+            try:
+                self.program.activate()
+                self.is_active = True
+                if self._kv_dma is not None:
+                    self.execObj = [qaicrt.ExecObj(self.context, self.program) for _ in range(self._queue_len)]
+                else:
+                    self.execObj = qaicrt.ExecObj(self.context, self.program)
+            except Exception:
+                try:
+                    self._deactivate(force=True)
+                except Exception as cleanup_error:
+                    warn(f"Failed to deactivate QAIC program after activation error: {cleanup_error}", RuntimeWarning)
+                raise
+
+    def _deactivate(self, force: bool = False):
+        """Deactivate qpc"""
+        if force or getattr(self, "is_active", False):
+            if hasattr(self, "execObj"):
+                del self.execObj
+            try:
+                self.program.deactivate()
+            finally:
+                self.is_active = False
 
     def deactivate(self):
         """Deactivate qpc"""
-        if self.is_active:
-            del self.execObj
-            self.program.deactivate()
-            self.is_active = False
+        self._deactivate()
+
+    def __del__(self):
+        """Best-effort release of device resources when the session is discarded."""
+        try:
+            self.deactivate()
+        except Exception:
+            pass
 
     def start_profiling(self):
         """Start capturing a profiling report for this session's program(s)."""

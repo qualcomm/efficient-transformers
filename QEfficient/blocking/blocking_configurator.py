@@ -431,18 +431,20 @@ def build_transformer_blocking_config_for_transform(
 
 def build_gated_delta_config_for_transform(
     seq_len: Optional[int] = None, qaic_config: Optional[dict] = None
-) -> Optional[Dict[str, int]]:
+) -> Optional[Dict[str, Any]]:
     del seq_len
     if not qaic_config:
         return None
 
+    gated_delta_config = {}
     chunk_size = qaic_config.get("gdn_chunk_size")
 
-    if chunk_size is None:
-        return None
+    if chunk_size is not None:
+        chunk_size = int(chunk_size)
+        if chunk_size > 0:
+            gated_delta_config["chunk_size"] = chunk_size
 
-    chunk_size = int(chunk_size)
-    if chunk_size <= 0:
-        return None
+    if qaic_config.get("gdn_full_state_update") is True:
+        gated_delta_config["full_state_update"] = True
 
-    return {"chunk_size": chunk_size}
+    return gated_delta_config or None

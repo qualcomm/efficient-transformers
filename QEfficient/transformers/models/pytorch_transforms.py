@@ -216,6 +216,7 @@ try:
 except ImportError:
     from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRMSNorm as Qwen2_5RMSNorm
 from transformers.models.bert.modeling_bert import BertModel
+from transformers.models.nomic_bert.modeling_nomic_bert import NomicBertEmbeddings
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3Attention,
     Qwen3DecoderLayer,
@@ -288,7 +289,7 @@ from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3VLMoeVisionAttention,
     Qwen3VLMoeVisionModel,
 )
-from transformers.models.roberta.modeling_roberta import RobertaModel
+from transformers.models.roberta.modeling_roberta import RobertaEmbeddings, RobertaModel
 from transformers.models.starcoder2.modeling_starcoder2 import (
     Starcoder2Attention,
     Starcoder2DecoderLayer,
@@ -313,7 +314,7 @@ from transformers.models.whisper.modeling_whisper import (
     WhisperModel,
     WhisperPositionalEmbedding,
 )
-from transformers.models.xlm_roberta.modeling_xlm_roberta import XLMRobertaModel
+from transformers.models.xlm_roberta.modeling_xlm_roberta import XLMRobertaEmbeddings, XLMRobertaModel
 
 from QEfficient.base.pytorch_transforms import (
     ExternalModuleMapperTransform,
@@ -325,7 +326,10 @@ from QEfficient.customop import CustomRMSNormAIC, GemmaCustomRMSNormAIC
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP, PooledModel, validate_user_pooling_function
 from QEfficient.transformers.models.bert.modeling_bert import (
     QEffBertModel,
+    QEffNomicBertEmbeddings,
+    QEffRobertaEmbeddings,
     QEffRobertaModel,
+    QEffXLMRobertaEmbeddings,
     QEffXLMRobertaModel,
 )
 from QEfficient.transformers.models.codegen.modeling_codegen import (
@@ -679,7 +683,7 @@ from QEfficient.utils.constants import (
     MOE_PREFILL_PACKED_CHUNK_SIZE,
     ONNX_EXPORT_EXAMPLE_SEQ_LEN,
 )
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 from QEfficient.utils.repeat_kv_utils import (
     duplicate_kv_projection_weights,
     get_attention_module,
@@ -688,6 +692,7 @@ from QEfficient.utils.repeat_kv_utils import (
     is_mla_model,
 )
 
+logger = QEFFLogger.get_logger("MODEL")
 SPD_TARGET = "target"
 
 
@@ -723,6 +728,11 @@ class CustomOpsTransform(ModuleMappingTransform):
         BertModel: QEffBertModel,
         RobertaModel: QEffRobertaModel,
         XLMRobertaModel: QEffXLMRobertaModel,
+        # *Embeddings: fix a FakeTensor/meta-device mismatch in the buffered
+        # token_type_ids gather (see QEff*Embeddings docstrings in modeling_bert.py).
+        RobertaEmbeddings: QEffRobertaEmbeddings,
+        XLMRobertaEmbeddings: QEffXLMRobertaEmbeddings,
+        NomicBertEmbeddings: QEffNomicBertEmbeddings,
         Qwen3_5RMSNorm: GemmaCustomRMSNormAIC,
         Qwen3_5MoeRMSNorm: GemmaCustomRMSNormAIC,
         Qwen3_5RMSNormGated: QEffQwen3_5GatedDeltaNetCustomRMSNormAIC,
@@ -1551,13 +1561,18 @@ class BlockingAttentionTransform:
 class GatedDeltaConfigTransform:
     @classmethod
     def apply(cls, model: nn.Module, gated_delta_config: dict | None = None) -> tuple[nn.Module, bool]:
+        gated_delta_config = gated_delta_config or {}
+        full_state_update = bool(gated_delta_config.get("full_state_update", False))
         target_modules = [module for module in model.modules() if hasattr(module, "torch_chunk_gated_delta_rule_qeff")]
+        full_state_targets = [module for module in target_modules if hasattr(module, "gdn_full_state_update")]
+        if full_state_update and not full_state_targets:
+            raise ValueError("qaic_config['gdn_full_state_update'] is not supported for this model")
         if not target_modules:
             return model, False
 
         if not gated_delta_config:
-            # Avoid compile-to-compile state leakage when the same model object is reused
-            # across prefill/decode compiles and only one of them passes qaic_config.
+            # Preserve the legacy chunk-size reset and independently clear the
+            # model-specific full-state mode between prefill/decode compiles.
             transformed = False
             for module in target_modules:
                 if getattr(module, "gdn_chunk_size", 64) != 64:
@@ -1565,13 +1580,14 @@ class GatedDeltaConfigTransform:
                     if hasattr(module, "__qeff_init__"):
                         module.__qeff_init__()
                     transformed = True
+            for module in full_state_targets:
+                if bool(module.gdn_full_state_update):
+                    module.gdn_full_state_update = False
+                    transformed = True
             return model, transformed
 
         chunk_size = gated_delta_config.get("chunk_size")
         chunk_size = int(chunk_size) if chunk_size is not None else None
-
-        if chunk_size is None:
-            return model, False
 
         transformed = False
         for module in target_modules:
@@ -1580,6 +1596,10 @@ class GatedDeltaConfigTransform:
                 if hasattr(module, "__qeff_init__"):
                     module.__qeff_init__()
                 transformed = True
+        for module in full_state_targets:
+            if full_state_update or bool(module.gdn_full_state_update) != full_state_update:
+                transformed = True
+            module.gdn_full_state_update = full_state_update
 
         return model, transformed
 

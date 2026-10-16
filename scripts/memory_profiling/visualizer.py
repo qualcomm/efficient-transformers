@@ -22,7 +22,9 @@ import numpy as np
 if TYPE_CHECKING:
     from .profiler import QEffMemoryProfiler
 
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 class QEffMemoryVisualizer:

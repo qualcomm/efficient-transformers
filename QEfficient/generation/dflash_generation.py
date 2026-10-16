@@ -25,7 +25,10 @@ from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.qwen3_vl.modeling_qwen3_vl import (
     QEffQwen3VLForConditionalGeneration,
 )
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
+
 
 # ===== GEMMA IMAGE/TEXT PROMPT (multimodal TLM) =====
 # Mirrors examples/image_text_to_text/models/gemma_vision/gemma4/gemma4_example.py: the

@@ -1436,6 +1436,48 @@ def test_runner_metadata_reuses_loaded_onnx_across_runner_helpers(tmp_path, monk
 
 
 @pytest.mark.cpu_only
+def test_runner_metadata_excludes_weight_free_constant_inputs(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation import runner_io
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
+    weight = helper.make_tensor_value_info("transformer.wte.weight", TensorProto.FLOAT, [4, 4])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 4])
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "weight_free_runner", [input_ids, weight], [logits])), onnx_path)
+    (tmp_path / "weight_spec.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "format": "safetensors",
+                        "path": "models--org--model/snapshots/prepared/model.safetensors",
+                    }
+                ],
+                "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
+                "model_id": "org/model",
+                "model_name": "GPT2LMHeadModel",
+                "version": 5,
+            }
+        )
+    )
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.required_host_input_names == {"input_ids"}
+    io_dir = runner_io.write_runner_io_bundle(
+        runner_metadata=runner_metadata,
+        specialization={"batch_size": 1, "seq_len": 1},
+        host_inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+    )
+    entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    assert [entry["map-to"] for entry in entries] == ["input_ids", "logits"]
+
+
+@pytest.mark.cpu_only
 def test_graph_input_filter_selects_model_specific_vision_metadata(tmp_path):
     import onnx
     from onnx import TensorProto, helper

@@ -17,6 +17,18 @@ from QEfficient.exporter.weight_free.weight_spec import ExternalDataFile, Weight
 from QEfficient.utils.checkpoint_utils import checkpoint_root, resolve_checkpoint_dir
 
 
+def _root_containing_spec_files(model_dir: Path, files: Sequence[ExternalDataFile]) -> Optional[Path]:
+    """Find the ancestor root that makes weight-spec relative paths resolve."""
+    relative_paths = [Path(external_file.path) for external_file in files if not Path(external_file.path).is_absolute()]
+    if not relative_paths:
+        return None
+
+    for root in (model_dir, *model_dir.parents):
+        if all((root / relative_path).exists() for relative_path in relative_paths):
+            return root
+    return None
+
+
 def _load_checkpoint_tensor(checkpoint_file: str, key: str) -> np.ndarray:
     """Load one tensor from a safetensors checkpoint as a NumPy array."""
     with safe_open(checkpoint_file, framework="pt") as handle:
@@ -32,16 +44,25 @@ def _default_weights_roots(weight_spec_path: Path, spec) -> List[Path]:
     ext_root = os.environ.get("AIC_EXTERNAL_DATA_ROOT")
     if ext_root:
         roots.append(Path(ext_root).expanduser())
-    roots.append(weight_spec_path.parent)
+    if spec.external_data_root:
+        roots.append(Path(spec.external_data_root).expanduser())
 
     candidate = Path(spec.model_id).expanduser()
     if candidate.exists():
+        root = _root_containing_spec_files(candidate, spec.files)
+        if root is not None:
+            roots.append(root)
+        roots.append(candidate)
         roots.append(candidate.parent)
     else:
         checkpoint_dir = resolve_checkpoint_dir(spec.model_id)
         root = checkpoint_root(spec.model_id, [str(path) for path in checkpoint_dir.glob("*.safetensors")])
         if root is not None:
             roots.append(root)
+        roots.append(checkpoint_dir)
+        roots.append(checkpoint_dir.parent)
+
+    roots.append(weight_spec_path.parent)
 
     deduped_roots: List[Path] = []
     seen = set()

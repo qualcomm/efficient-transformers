@@ -338,6 +338,35 @@ def test_generic_blocked_attention_infers_prefill_only_from_mode(monkeypatch):
 
 
 @pytest.mark.transforms
+def test_kv_batch_fold_allows_uninitialized_cache_layers(monkeypatch):
+    class Cache:
+        layers = []
+
+        def write_only_batch(self, key, value, layer_idx, cache_kwargs):
+            pass
+
+    def batch_strategy(**kwargs):
+        return kwargs["query"], None
+
+    monkeypatch.setitem(attention_blocking._STRATEGIES, BlockingMode.KV_BATCH_FOLD, batch_strategy)
+    query = torch.ones(1, 1, 1, 1)
+
+    output, weights = attention_blocking.generic_blocked_attention_interface(
+        module=type("Attention", (), {"layer_idx": 0})(),
+        query=query,
+        key=query,
+        value=query,
+        position_ids=torch.zeros(1, 1, dtype=torch.long),
+        layer_idx=0,
+        past_key_value=Cache(),
+        blocking_config=AttentionBlockingConfig(mode=BlockingMode.KV_BATCH_FOLD, num_kv_blocks=1),
+    )
+
+    assert torch.equal(output, query)
+    assert weights is None
+
+
+@pytest.mark.transforms
 def test_kv_batch_fold_preserves_optional_gdn_num_head_blocks():
     from QEfficient.blocking.blocking_configurator import build_transformer_blocking_config_for_transform
 

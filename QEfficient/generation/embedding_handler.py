@@ -23,7 +23,9 @@ from transformers import AutoImageProcessor, AutoTokenizer
 
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.utils import constants
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 class VisionHandler:

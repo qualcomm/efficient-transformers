@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from onnx import TensorProto, helper
 from transformers import LlamaConfig, LlamaForCausalLM
@@ -237,13 +238,15 @@ class TestPreserveNestedCacheRetainedStateTransform:
         changed = PreserveNestedCacheRetainedStateTransform.apply(model)
         assert not changed, "Transform should be a no-op when there are no dangling _RetainedState outputs"
 
-    def test_noop_when_scatter_count_not_two(self):
+    def test_rejects_missing_cache_writer_without_partial_rewire(self):
         # Build model where function has only 1 scatter node
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=1, scatter_count_per_fn=1)
-        PreserveNestedCacheRetainedStateTransform.apply(model)
-        # The key invariant: no crash; the function with only 1 scatter is skipped
+        with pytest.raises(ValueError, match="Could not uniquely resolve"):
+            PreserveNestedCacheRetainedStateTransform.apply(model)
+        # The key invariant: the function call is not partially rewired.
         fn = model.functions[0]
         assert len(fn.output) == 1, f"Function with 1 scatter should not have outputs added, got {list(fn.output)}"
+        assert not model.graph.node[0].output
 
 
 # ---------------------------------------------------------------------------

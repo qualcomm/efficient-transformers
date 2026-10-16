@@ -11,7 +11,9 @@ import torch
 
 from QEfficient.utils import constants
 from QEfficient.utils.constants import Constants
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 def validate_sampler_inputs(

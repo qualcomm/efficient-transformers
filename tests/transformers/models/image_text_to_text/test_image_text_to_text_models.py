@@ -227,14 +227,17 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             torch_dtype=torch_dtype,
             ignore_mismatched_sizes=True,
         )
+    aic_hw_version = "ai200" if torch_dtype == torch.bfloat16 else "ai100"
     compile_kwargs = {
         "num_devices": num_devices,
+        "num_cores": 4 if aic_hw_version == "ai200" else 16,
+        "aic_hw_version": aic_hw_version,
         "prefill_seq_len": prompt_len,
         "ctx_len": ctx_len,
         "mxfp6": False,
         "qaic_config": qaic_config,
         "use_onnx_subfunctions": use_onnx_subfunctions,
-        "split-model-io": True,
+        "split-model-io": False if aic_hw_version == "ai200" else True,
     }
 
     # Left as None when CCL is auto-generated: compile() derives both lists from ctx_len.

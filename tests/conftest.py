@@ -27,8 +27,24 @@ from QEfficient.utils.device_utils import (  # noqa: E402
     get_qaic_mdp_device_groups,
     parse_qaic_device_groups,
 )
-from QEfficient.utils.logging_utils import logger  # noqa: E402
+from QEfficient.utils.logging_utils import QEFFLogger  # noqa: E402
 from tests.two_phase import is_compile_warm_phase, is_two_phase_session  # noqa: E402
+
+
+class _NoOpLogger:
+    def __getattr__(self, _name):
+        return lambda *args, **kwargs: None
+
+
+logger = _NoOpLogger()
+
+
+@pytest.fixture(autouse=True)
+def finalize_qeff_run_after_test():
+    """Close the model timing run at the end of each pytest test."""
+    yield
+    QEFFLogger.finish_run()
+
 
 _QUICKCHECK_FILE = "tests/unit_test/models/test_model_quickcheck.py"
 _QUICKCHECK_SUMMARY = {}
@@ -333,6 +349,16 @@ def pytest_sessionstart(session):
 
 def pytest_configure(config):
     """Register custom markers for test categorization."""
+    global logger
+    # When using multiple workers, pytest creates one controller process and
+    # one process for each worker. Suppress logging in the controller and keep
+    # real QEfficient log files only for worker processes.
+    config_option = getattr(config, "option", None)
+    if getattr(config_option, "numprocesses", None) and getattr(config, "workerinput", None) is None:
+        logger = _NoOpLogger()
+    else:
+        logger = QEFFLogger.get_logger("INFRA")
+
     explicit_device_groups = os.environ.get("QEFF_QAIC_DEVICE_GROUPS")
     if _xdist_worker and (explicit_device_groups or os.environ.get("QEFF_ISOLATE_QAIC_WORKERS") == "1"):
         try:

@@ -17,7 +17,31 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 from QEfficient.utils._utils import hf_download
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
+
+
+def huggingface_hub_cache_dir() -> Path:
+    """Return the Hugging Face Hub cache root used by ``snapshot_download``."""
+    if hf_hub_cache := os.environ.get("HF_HUB_CACHE"):
+        return Path(hf_hub_cache).expanduser()
+    if hf_home := os.environ.get("HF_HOME"):
+        return Path(hf_home).expanduser() / "hub"
+    if xdg_cache_home := os.environ.get("XDG_CACHE_HOME"):
+        return Path(xdg_cache_home).expanduser() / "huggingface" / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _all_checkpoint_files_under(root: Path, checkpoint_files: Sequence[str]) -> bool:
+    """Return True when every checkpoint file is contained under ``root``."""
+    root = root.expanduser()
+    for checkpoint_file in checkpoint_files:
+        try:
+            Path(checkpoint_file).expanduser().relative_to(root)
+        except ValueError:
+            return False
+    return True
 
 
 def load_checkpoint_weights(checkpoint_path: str, keys: set[str]) -> dict[str, torch.Tensor]:
@@ -106,21 +130,23 @@ def requires_dtype_conversion(src: Path, weight_map: dict[str, str], target_dtyp
 
 def read_weight_map(src: Path) -> dict[str, str]:
     """Return {tensor_key: shard_filename} from model.safetensors.index.json,
-    or by scanning all *.safetensors for single-file checkpoints."""
+    or from model.safetensors directly for single-file checkpoints."""
     index_path = src / "model.safetensors.index.json"
     if index_path.exists():
         return json.loads(index_path.read_text())["weight_map"]
-    # TODO(wf): This is un-necessary and we should error out when index map is missing.
     shard_files = sorted(src.glob("*.safetensors"))
-    if not shard_files:
-        raise FileNotFoundError(f"No safetensors files found in {src}")
-    weight_map: dict[str, str] = {}
-    for sf in shard_files:
-        with safe_open(str(sf), framework="pt") as f:
-            keys = f.keys()
-            for k in keys:
-                weight_map[k] = sf.name
-    return weight_map
+    if len(shard_files) == 1:
+        with safe_open(str(shard_files[0]), framework="pt") as f:
+            return {k: shard_files[0].name for k in f.keys()}
+    if len(shard_files) == 0:
+        raise FileNotFoundError(
+            f"No safetensors files found in {src}. Weight-free export requires a safetensors checkpoint."
+        )
+    raise FileNotFoundError(
+        f"{len(shard_files)} safetensors shards found in {src} but no "
+        "model.safetensors.index.json. The checkpoint is malformed — "
+        "re-download or regenerate the index file."
+    )
 
 
 @cache
@@ -209,6 +235,10 @@ def checkpoint_root(model_id_or_path: str, checkpoint_files: Sequence[str]) -> P
     """
     if not checkpoint_files:
         return None
+
+    hf_cache_root = huggingface_hub_cache_dir()
+    if _all_checkpoint_files_under(hf_cache_root, checkpoint_files):
+        return hf_cache_root
 
     candidate = Path(model_id_or_path).expanduser()
     if candidate.exists():

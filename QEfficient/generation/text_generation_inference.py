@@ -22,8 +22,10 @@ from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_
 from QEfficient.generation.generation_helpers import build_prefill_inputs, prepare_tokenizer, slice_prefill_inputs
 from QEfficient.utils import padding_check_and_fix
 from QEfficient.utils.constants import Constants
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 from QEfficient.utils.sampler_utils import validate_sampler_inputs
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 @dataclass

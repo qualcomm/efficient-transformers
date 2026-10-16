@@ -16,7 +16,9 @@ import PIL.Image
 from tqdm import tqdm
 
 from QEfficient.utils._utils import load_json
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 def calculate_compressed_latent_dimension(height: int, width: int, vae_scale_factor: int) -> int:

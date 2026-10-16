@@ -303,14 +303,54 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         }
     )
 
-    @staticmethod
-    def _scatter_sort_key(n) -> int:
-        output_name = n.output[0] if n.output else ""
-        if "key" in output_name:
-            return 0
-        if "value" in output_name:
-            return 1
-        return 2
+    @classmethod
+    def _resolve_kv_scatter_outputs(cls, fn, node, layer_idx: str) -> dict[str, str] | None:
+        """Resolve nested KV scatter outputs from the function-call data flow.
+
+        ONNX function-call inputs bind positionally. Each cache scatter consumes
+        the cache buffer as its first input, so the matching scatter is identified
+        from that buffer's function argument rather than output names or node order.
+        """
+        function_cache_inputs: dict[str, str] = {}
+        for input_index, input_name in enumerate(node.input):
+            match = cls._KV_INPUT_RE.match(input_name)
+            if match is None:
+                continue
+            kind, input_layer_idx = match.groups()
+            if input_layer_idx != layer_idx:
+                continue
+            if input_index >= len(fn.input):
+                raise ValueError(
+                    f"Nested function '{fn.name}' has no input at position {input_index} for "
+                    f"call-node cache input '{input_name}'."
+                )
+            function_cache_inputs[kind] = fn.input[input_index]
+
+        if set(function_cache_inputs) != {"key", "value"}:
+            return None
+
+        scatter_outputs = {}
+        for kind, function_input in function_cache_inputs.items():
+            writers = [
+                fn_node
+                for fn_node in fn.node
+                if fn_node.op_type in cls._SCATTER_OP_TYPES
+                and fn_node.input
+                and fn_node.input[0] == function_input
+                and fn_node.output
+            ]
+            if len(writers) != 1:
+                writer_names = [
+                    f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
+                ]
+                raise ValueError(
+                    f"Could not uniquely resolve the nested past_{kind}.{layer_idx} cache writer in function "
+                    f"'{fn.name}': expected one CtxScatter* with data input '{function_input}', "
+                    f"found {len(writers)} ({writer_names})."
+                )
+            scatter_outputs[kind] = writers[0].output[0]
+
+        return scatter_outputs
 
     @classmethod
     def apply(cls, model: ModelProto) -> bool:
@@ -330,27 +370,6 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             fn = fn_by_name.get(node.op_type)
             if fn is None:
                 continue
-
-            # Collect scatter nodes that write back the KV cache.
-            # Sort by first-input name so the key scatter reliably precedes the
-            # value scatter: dynamo names function-body args generically (arg7_1
-            # etc.), so we sort by the scatter output name instead — dynamo
-            # preserves "key"/"value" in output tensor names even when input
-            # argument names are opaque.
-            scatter_nodes = [
-                fn_node for fn_node in fn.node if fn_node.op_type in cls._SCATTER_OP_TYPES and fn_node.output
-            ]
-            if len(scatter_nodes) != 2:
-                logger.debug(
-                    "PreserveNestedCacheRetainedStateTransform: function '%s' has %d scatter node(s), expected 2 — skipping.",
-                    node.op_type,
-                    len(scatter_nodes),
-                )
-                continue
-
-            scatter_nodes.sort(key=cls._scatter_sort_key)
-            # Only the first two scatter outputs map to key / value respectively.
-            scatter_outputs = [n.output[0] for n in scatter_nodes[:2]]
 
             # Identify layer index from KV inputs on this call node.
             layer_idx = None
@@ -379,10 +398,21 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             if not any(name in dangling_retained_outputs for name in desired_outputs):
                 continue
 
+            if not all(name in dangling_retained_outputs for name in desired_outputs):
+                raise ValueError(
+                    f"Nested function '{fn.name}' has partially dangling KV retained-state outputs for layer "
+                    f"{layer_idx}: expected both {desired_outputs}."
+                )
+
+            scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx)
+            if scatter_outputs is None:
+                continue
+
             # Expose scatter outputs in the function's output list, rename KV
-            # inputs and append retained-state output names to the call node —
-            # all in one pass over the two key/value pairs.
-            for kind, scatter_output, desired_output in zip(("key", "value"), scatter_outputs, desired_outputs):
+            # inputs and append retained-state output names to the call node.
+            # Both writers are resolved before this block, so graph rewiring is atomic.
+            for kind, desired_output in zip(("key", "value"), desired_outputs):
+                scatter_output = scatter_outputs[kind]
                 if scatter_output not in fn.output:
                     fn.output.append(scatter_output)
                     changed = True

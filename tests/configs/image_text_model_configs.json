@@ -106,6 +106,7 @@
     },
     {
       "model_name": "tiny-random/gemma-3",
+      "known_dummy_runtime_parity_issue": "The QAIC backend returns all-zero token IDs for the dummy Gemma3 VLM QPC, while HF PyTorch, QEff PyTorch, and ONNXRuntime agree.",
       "model_type": "gemma3",
       "supports_blocking": false,
       "batch_size": 1,
@@ -265,7 +266,6 @@
     },
     {
       "model_name": "Qwen/Qwen3-VL-2B-Instruct",
-      "known_bf16_compile_issue": "Qwen3-VL vision export retains an unsupported data type during the BF16-to-FP16 fallback on AI100, causing qaic-compile to fail with 'Data type not supported'.",
       "model_type": "qwen3_vl",
       "batch_size": 1,
       "prompt_len": 128,
@@ -720,7 +720,6 @@
     },
     {
       "model_name": "tiny-random/gemma-4-dense",
-      "known_bf16_compile_issue": "Gemma4 RMSNorm promotes hidden states to float32 during BF16-to-FP16 export, causing a dtype mismatch with FP16 linear weights.",
       "model_type": "gemma4",
       "supports_blocking": false,
       "batch_size": 1,
@@ -762,7 +761,6 @@
     },
     {
       "model_name": "tiny-random/gemma-4-moe",
-      "known_bf16_compile_issue": "Gemma4 RMSNorm promotes hidden states to float32 during BF16-to-FP16 export, causing a dtype mismatch with FP16 linear weights.",
       "model_type": "gemma4",
       "supports_blocking": false,
       "batch_size": 1,

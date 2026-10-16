@@ -48,6 +48,16 @@ def main():
         default="32,64",
         help="Sequence length(s) - single int (e.g., '32') or comma-separated list (e.g., '32,64')",
     )
+    parser.add_argument(
+        "--weight-free",
+        action="store_true",
+        help="Build the model on meta tensors and load weights at compile time",
+    )
+    parser.add_argument(
+        "--use-onnx-subfunctions",
+        action="store_true",
+        help="Use subfunctions while exporting",
+    )
     args = parser.parse_args()
 
     # Parse seq_len argument
@@ -67,15 +77,20 @@ def main():
     # You can specify the pooling strategy either as a string (e.g., "max") or by passing a custom pooling function.
     # If no pooling is specified, the model will return its default output (typically token embeddings).
     if args.pooling == "max":
-        qeff_model = AutoModel.from_pretrained(args.model_name, pooling=max_pooling)
+        qeff_model = AutoModel.from_pretrained(args.model_name, pooling=max_pooling, weight_free=args.weight_free)
     elif args.pooling == "mean":
-        qeff_model = AutoModel.from_pretrained(args.model_name, pooling="mean")
+        qeff_model = AutoModel.from_pretrained(args.model_name, pooling="mean", weight_free=args.weight_free)
     else:
-        qeff_model = AutoModel.from_pretrained(args.model_name)
+        qeff_model = AutoModel.from_pretrained(args.model_name, weight_free=args.weight_free)
 
     # Compile the model
     # seq_len can be a list of seq_len or single int
-    qeff_model.compile(num_cores=args.num_cores, seq_len=seq_len)
+    qeff_model.compile(
+        num_cores=args.num_cores,
+        seq_len=seq_len,
+        dynamo=args.weight_free,
+        use_onnx_subfunctions=args.use_onnx_subfunctions,
+    )
 
     # Tokenize sentences
     encoded_input = tokenizer(args.sentences, return_tensors="pt")

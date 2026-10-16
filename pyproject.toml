@@ -47,6 +47,7 @@ dependencies = [
     "tiktoken==0.12.0",
     "compressed-tensors==0.15.0",
     "torch==2.7.0; platform_machine=='aarch64'",
+    "tabulate==0.9.0",
     # Specifying torch cpu package URL per python version, update the list once pytorch releases whl for python>3.11
     "torch@https://download.pytorch.org/whl/cpu/torch-2.7.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl ; python_version=='3.10' and platform_machine=='x86_64'",
     "torch@https://download.pytorch.org/whl/cpu/torch-2.7.0%2Bcpu-cp311-cp311-manylinux_2_28_x86_64.whl ; python_version=='3.11' and platform_machine=='x86_64'",

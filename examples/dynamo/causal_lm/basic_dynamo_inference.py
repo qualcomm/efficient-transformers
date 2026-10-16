@@ -24,7 +24,7 @@ def main():
         description="Dynamo-based export and inference for Causal LM models on Cloud AI 100.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--model-name", type=str, default="tiny-random/gpt-oss-mxfp4", help="HuggingFace model ID")
+    parser.add_argument("--model-name", type=str, default="openai/gpt-oss-20b", help="HuggingFace model ID")
     parser.add_argument("--num-hidden-layers", type=int, default=-1, help="Override number of hidden layers")
     parser.add_argument("--prompt", type=str, default="My name is", help="Input prompt for generation")
     parser.add_argument("--prefill-seq-len", type=int, default=32, help="Prefill sequence length")
@@ -64,7 +64,8 @@ def main():
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
         aic_hw_version=args.aic_hw_version,
-        num_devices=(1 if args.device_group is None else len(args.device_group)),
+        mxfp6_matmul=True,
+        num_devices=(4 if args.device_group is None else len(args.device_group)),
         dynamo=True,
         use_onnx_subfunctions=True,
     )

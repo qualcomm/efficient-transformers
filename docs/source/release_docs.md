@@ -85,6 +85,8 @@ Welcome to the official release of **Efficient Transformer Library v1.22.0**! Th
   - New `enable_proxy=True` flag to export a proxy model (disables Embedding Layer and LM Head)
   - Supported across text, embedding, vision, and audio models
   - Proxy-gated ONNX transforms: `FP16ClipTransform` and `SplitTensorsTransform` now only applied when `enable_proxy=True`
+  - Usage: pass `enable_proxy=True` to `from_pretrained()` and compile normally; for CausalLM CLI flows, use `examples/text_generation/basic_inference.py --enable-proxy --compile-only`
+  - Optional `num_hidden_layers` can be passed with `enable_proxy=True` to force a specific reduced proxy depth
 
 - **On-Device Sampling for Qwen3**
   - Extended on-device sampling support to `Qwen3ForCausalLM`

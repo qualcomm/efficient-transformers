@@ -6,7 +6,6 @@
 # ----------------------------------------------------------------------------
 
 import hashlib
-import logging
 import warnings
 from typing import List, Optional, Union
 
@@ -32,8 +31,9 @@ from QEfficient.transformers.models.pytorch_transforms import CustomOpsTransform
 from QEfficient.utils import constants
 from QEfficient.utils._utils import get_padding_shape_from_config
 from QEfficient.utils.hash_utils import to_hashable
+from QEfficient.utils.logging_utils import QEFFLogger
 
-logger = logging.getLogger(__name__)
+logger = QEFFLogger.get_logger("FT")
 
 
 class QEffAutoPeftModelForCausalLM(QEFFBaseModel):

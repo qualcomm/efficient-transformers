@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import tempfile
+from collections import Counter
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from copy import deepcopy
 from io import StringIO
@@ -50,6 +51,7 @@ from transformers import (
     LlamaConfig,
     Qwen2Config,
 )
+from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
@@ -272,8 +274,12 @@ def _ort_session(onnx_path: Path) -> ort.InferenceSession:
     for name, value in added_initializers.items():
         options.add_initializer(name, value)
     if graph_was_patched:
-        return ort.InferenceSession(onnx_model.SerializeToString(), sess_options=options)
-    return ort.InferenceSession(str(onnx_path), sess_options=options)
+        session = ort.InferenceSession(onnx_model.SerializeToString(), sess_options=options)
+    else:
+        session = ort.InferenceSession(str(onnx_path), sess_options=options)
+    # SessionOptions does not own the OrtValue buffers registered above.
+    session._qeff_added_initializers = added_initializers
+    return session
 
 
 def _ort_session_zeroing_int32_max_constants(onnx_path: Path):
@@ -380,6 +386,12 @@ def _function_op_types(onnx_model, function_names: Set[str]) -> Set[str]:
         if function_proto.name in function_names
         for node in function_proto.node
     }
+
+
+def _function_call_counts(onnx_model, function_names: Set[str]) -> Counter:
+    nodes = list(onnx_model.graph.node)
+    nodes.extend(node for function_proto in onnx_model.functions for node in function_proto.node)
+    return Counter(node.op_type for node in nodes if node.op_type in function_names)
 
 
 def _assert_has_retained_state_outputs(onnx_path: Path) -> None:
@@ -1559,6 +1571,210 @@ def test_causal_subfunction_and_proxy_export_smoke_gpt2(tmp_path):
     assert any("QEffGPT2Block" in func.name for func in onnx_model.functions)
 
 
+@pytest.mark.llm_model
+def test_gpt_oss_proxy_repeats_each_decoder_subfunction(tmp_path):
+    model_id = CAUSAL_RUNTIME_MODEL_IDS["gpt_oss"]
+    try:
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            enable_proxy=True,
+            torch_dtype=torch.float32,
+        )
+    except Exception as exc:
+        _skip_on_model_fetch_error(exc, model_id)
+
+    assert qeff_model.model.config.num_hidden_layers == 4
+    assert Counter(qeff_model.model.config.layer_types) == Counter({"sliding_attention": 2, "full_attention": 2})
+
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(tmp_path / "gpt-oss-proxy-subfunctions", use_onnx_subfunctions=True)
+    )
+    onnx_model = onnx.load(onnx_path, load_external_data=False)
+    function_names = _decoder_block_subfunction_names(onnx_model, qeff_model)
+    call_counts = _function_call_counts(onnx_model, function_names)
+
+    assert len(function_names) == 2
+    assert call_counts.keys() == function_names
+    assert sorted(call_counts.values()) == [2, 2]
+
+
+def test_proxy_subfunction_validation_rejects_single_call_function(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyModel:
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [helper.make_node("DummyLayer", ["x"], ["y"])],
+        "proxy_subfunction_single_call",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(graph, functions=[function], opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "single_call.onnx"
+    onnx.save(model, onnx_path)
+
+    with pytest.raises(RuntimeError, match="must be invoked more than once"):
+        _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_accepts_repeated_function_calls(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyModel:
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid"]),
+            helper.make_node("DummyLayer", ["mid"], ["y"]),
+        ],
+        "proxy_subfunction_repeated_call",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(graph, functions=[function], opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "repeated_call.onnx"
+    onnx.save(model, onnx_path)
+
+    _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_ignores_single_use_vision_functions(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyDecoderLayer:
+        pass
+
+    class DummyVisionBlock:
+        pass
+
+    class DummyLanguageDecoder:
+        def get_submodules_for_export(self):
+            return {DummyDecoderLayer}
+
+    class DummyVlmModel:
+        def get_submodules_for_export(self):
+            return {DummyDecoderLayer, DummyVisionBlock}
+
+        def get_qeff_language_decoder(self):
+            return DummyLanguageDecoder()
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyVlmModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyVisionBlock", ["x"], ["vision"]),
+            helper.make_node("DummyDecoderLayer", ["vision"], ["mid"]),
+            helper.make_node("DummyDecoderLayer", ["mid"], ["y"]),
+        ],
+        "proxy_subfunction_mixed_vlm",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    functions = [
+        helper.make_function(
+            "",
+            "DummyVisionBlock",
+            ["x"],
+            ["y"],
+            [helper.make_node("Identity", ["x"], ["y"])],
+            [helper.make_operatorsetid("", 17)],
+        ),
+        helper.make_function(
+            "",
+            "DummyDecoderLayer",
+            ["x"],
+            ["y"],
+            [helper.make_node("Identity", ["x"], ["y"])],
+            [helper.make_operatorsetid("", 17)],
+        ),
+    ]
+    model = helper.make_model(graph, functions=functions, opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "mixed_vlm.onnx"
+    onnx.save(model, onnx_path)
+
+    _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_skips_vision_encoder_exports(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyVisionBlock:
+        pass
+
+    class DummyVisionModel:
+        def get_submodules_for_export(self):
+            return {DummyVisionBlock}
+
+    class QEffVisionEncoderForTextImageToTextModel:
+        _enable_proxy = True
+        model = DummyVisionModel()
+
+    graph = helper.make_graph(
+        [helper.make_node("DummyVisionBlock", ["x"], ["y"])],
+        "proxy_subfunction_vision_only",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "",
+        "DummyVisionBlock",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(graph, functions=[function], opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "vision_only.onnx"
+    onnx.save(model, onnx_path)
+
+    _validate_proxy_subfunction_calls(QEffVisionEncoderForTextImageToTextModel(), onnx_path)
+
+
 def test_subfunction_export_restores_onnx_transforms_on_failure():
     from QEfficient.base.onnx_transforms import CustomOpTransform, RenameFunctionOutputsTransform
     from QEfficient.transformers.cache_utils import InvalidIndexProvider
@@ -1644,6 +1860,183 @@ def test_proxy_toggle_onnx_transform_policy_for_causal_lm():
 
     _assert_proxy_only_onnx_transform_policy(qeff_default, enable_proxy=False)
     _assert_proxy_only_onnx_transform_policy(qeff_proxy, enable_proxy=True)
+
+
+def test_proxy_layer_config_preserves_repeated_layer_types():
+    from transformers import LlamaForCausalLM
+
+    from QEfficient.proxy.modeling_utils import apply_proxy_layer_config, prepare_proxy_config
+
+    llama_config = LlamaConfig(num_hidden_layers=16)
+    assert apply_proxy_layer_config(llama_config) == 2
+    assert llama_config.num_hidden_layers == 2
+
+    gpt_oss_config = GptOssConfig(num_hidden_layers=16)
+    assert apply_proxy_layer_config(gpt_oss_config) == 4
+    assert gpt_oss_config.layer_types == [
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+    ]
+
+    qwen_moe_config = Qwen3MoeConfig(num_hidden_layers=16)
+    assert apply_proxy_layer_config(qwen_moe_config) == 2
+
+    mixed_qwen_moe_config = Qwen3MoeConfig(num_hidden_layers=16, decoder_sparse_step=2)
+    assert apply_proxy_layer_config(mixed_qwen_moe_config) == 4
+
+    qwen3_5_moe_config = Qwen3_5MoeTextConfig(num_hidden_layers=16)
+    qwen3_5_moe_config.num_hidden_layers = 2
+    assert apply_proxy_layer_config(qwen3_5_moe_config) == 8
+    assert qwen3_5_moe_config.layer_types == ["linear_attention"] * 3 + ["full_attention"] + [
+        "linear_attention"
+    ] * 3 + ["full_attention"]
+
+    kwargs = {"config": GptOssConfig(num_hidden_layers=16), "num_hidden_layers": 2}
+    prepare_proxy_config("unused-local-config", kwargs)
+    assert kwargs["config"].num_hidden_layers == 2
+    assert "num_hidden_layers" not in kwargs
+
+    llama_kwargs = {
+        "config": LlamaConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            num_attention_heads=2,
+            num_hidden_layers=8,
+            num_key_value_heads=2,
+            vocab_size=32,
+        ),
+        "num_hidden_layers": 3,
+    }
+    prepare_proxy_config("unused-local-config", llama_kwargs)
+    qeff_model = QEFFAutoModelForCausalLM(
+        LlamaForCausalLM(llama_kwargs["config"]).eval(),
+        enable_proxy=True,
+    )
+    assert "num_hidden_layers" not in llama_kwargs
+    assert qeff_model.hash_params["proxy_num_hidden_layers"] == 3
+
+
+@pytest.mark.llm_model
+@pytest.mark.mdp
+def test_proxy_compile_artifacts_generate_disagg_mdp_config_for_tiny_model(tmp_path):
+    from transformers import LlamaForCausalLM
+
+    from QEfficient.proxy.modeling_utils import prepare_proxy_config
+
+    model_kwargs = {
+        "config": LlamaConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_key_value_heads=2,
+            vocab_size=32,
+            max_position_embeddings=32,
+            torch_dtype=torch.float32,
+        )
+    }
+    prepare_proxy_config("unused-local-config", model_kwargs)
+    qeff_model = QEFFAutoModelForCausalLM(
+        LlamaForCausalLM(model_kwargs["config"]).eval(),
+        enable_proxy=True,
+        torch_dtype=torch.float32,
+    )
+
+    artifacts_dir = Path(
+        qeff_model.compile(
+            compile_dir=str(tmp_path / "proxy-mdp"),
+            prefill_seq_len=4,
+            ctx_len=8,
+            batch_size=1,
+            num_devices=2,
+            mdp_num_partitions=2,
+            artifacts=True,
+            offload_pt_weights=False,
+        )
+    )
+
+    assert qeff_model.num_layers == 2
+    assert qeff_model.hash_params["proxy_num_hidden_layers"] == 2
+    assert qeff_model.qpc_path is None
+    assert qeff_model.compile_artifacts_path == artifacts_dir
+
+    mdp_path = artifacts_dir / "mdp_disagg_2d_2p.json"
+    assert mdp_path.is_file()
+    mdp_data = json.loads(mdp_path.read_text())
+    assert len(mdp_data["partitions"]) == 2
+    assert [device["deviceId"] for device in mdp_data["partitions"][0]["devices"]] == [0]
+    assert [device["deviceId"] for device in mdp_data["partitions"][1]["devices"]] == [1]
+
+    replay_script = artifacts_dir / "qaic-compile.sh"
+    assert replay_script.is_file()
+    replay_command = replay_script.read_text()
+    assert "-mdp-load-partition-config=mdp_disagg_2d_2p.json" in replay_command
+    assert "-aic-binary-dir=qpc" in replay_command
+
+
+def test_proxy_layer_config_only_reduces_vlm_language_layers():
+    from QEfficient.proxy.modeling_utils import apply_proxy_layer_config
+
+    # Proxy layer reduction is language-only; vision layers must remain untouched.
+    config = Qwen3VLMoeConfig(
+        text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+        vision_config=Qwen3VLMoeVisionConfig(depth=8),
+    )
+
+    assert apply_proxy_layer_config(config) == 2
+    assert config.text_config.num_hidden_layers == 2
+
+    explicit_config = Qwen3VLMoeConfig(
+        text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+        vision_config=Qwen3VLMoeVisionConfig(depth=16),
+    )
+    assert apply_proxy_layer_config(explicit_config, num_hidden_layers=3) == 3
+    assert explicit_config.text_config.num_hidden_layers == 3
+    assert explicit_config.vision_config.depth == 16
+    assert config.vision_config.depth == 8
+
+
+def test_proxy_module_transform_leaves_vision_embedding_unchanged():
+    from QEfficient.proxy import QeffProxyEmbedding, QeffProxyLinear
+    from QEfficient.proxy.pytorch_transform import QeffProxyModuleTransform
+
+    class DummyVlm(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_decoder = nn.Module()
+            self.language_decoder.token_embedding = nn.Embedding(32, 8)
+            self.language_decoder.lm_head = nn.Linear(8, 32, bias=False)
+            self.vision_embedding = nn.Embedding(16, 8)
+
+        def get_qeff_language_decoder(self):
+            return self.language_decoder
+
+        def get_input_embeddings(self):
+            return self.language_decoder.token_embedding
+
+        def get_output_embeddings(self):
+            return self.language_decoder.lm_head
+
+    model = DummyVlm()
+    model, transformed = QeffProxyModuleTransform.apply(model)
+
+    assert transformed
+    assert isinstance(model.language_decoder.token_embedding, QeffProxyEmbedding)
+    assert isinstance(model.language_decoder.lm_head, QeffProxyLinear)
+    assert type(model.vision_embedding) is nn.Embedding
+
+    causal_model = nn.Module()
+    causal_model.token_embedding = nn.Embedding(32, 8)
+    causal_model.position_embedding = nn.Embedding(16, 8)
+    causal_model.lm_head = nn.Linear(8, 32, bias=False)
+    causal_model, transformed = QeffProxyModuleTransform.apply(causal_model)
+
+    assert transformed
+    assert isinstance(causal_model.token_embedding, QeffProxyEmbedding)
+    assert isinstance(causal_model.position_embedding, QeffProxyEmbedding)
+    assert isinstance(causal_model.lm_head, QeffProxyLinear)
 
 
 @pytest.mark.llm_model
@@ -2254,6 +2647,75 @@ class _BlockedPrefillCache:
         return self.value[:, :, start_index:end_index, :]
 
 
+@pytest.mark.parametrize("n_rep_chunk", [None, 1, 2])
+def test_blocked_prefill_qkv_accepts_n_rep_chunk(n_rep_chunk):
+    from QEfficient.blocking.blocked_attention_forwards import blocked_qkv_attention_forward_prefill_headpar_offline
+
+    batch_size, sequence_length, head_dim, ctx_len = 1, 2, 4, 4
+    num_query_heads, num_kv_groups = 4, 2
+    module = SimpleNamespace(num_key_value_groups=num_kv_groups)
+    query = torch.ones(batch_size, num_query_heads, sequence_length, head_dim)
+    cache = _BlockedPrefillCache(batch_size, num_query_heads // num_kv_groups, ctx_len, head_dim)
+
+    output, attention_weights = blocked_qkv_attention_forward_prefill_headpar_offline(
+        module=module,
+        query=query,
+        key=None,
+        value=None,
+        attention_mask=None,
+        scaling=1.0,
+        num_q_blocks=1,
+        num_kv_blocks=1,
+        cache_kwargs={"position_ids": torch.zeros(batch_size, sequence_length, dtype=torch.long)},
+        layer_idx=0,
+        past_key_value=cache,
+        ctx_len=ctx_len,
+        configured_split=1,
+        n_rep_chunk=n_rep_chunk,
+    )
+
+    assert output.shape == (batch_size, sequence_length, num_query_heads, head_dim)
+    assert attention_weights is None
+
+
+def test_blocked_prefill_qkv_chunks_queries_by_seq_len(monkeypatch):
+    from QEfficient.blocking import blocked_attention_forwards as blocked
+
+    chunk_lengths = []
+    original_create_causal_mask = blocked._create_causal_mask
+
+    def tracked_create_causal_mask(*args, **kwargs):
+        chunk_lengths.append(kwargs["position_ids"].shape[-1])
+        return original_create_causal_mask(*args, **kwargs)
+
+    monkeypatch.setattr(blocked, "_create_causal_mask", tracked_create_causal_mask)
+
+    batch_size, sequence_length, head_dim, ctx_len = 1, 2, 4, 8
+    num_query_heads, num_kv_groups = 4, 2
+    module = SimpleNamespace(num_key_value_groups=num_kv_groups)
+    query = torch.ones(batch_size, num_query_heads, sequence_length, head_dim)
+    cache = _BlockedPrefillCache(batch_size, num_query_heads // num_kv_groups, ctx_len, head_dim)
+
+    blocked.blocked_qkv_attention_forward_prefill_headpar_offline(
+        module=module,
+        query=query,
+        key=None,
+        value=None,
+        attention_mask=None,
+        scaling=1.0,
+        num_q_blocks=2,
+        num_kv_blocks=1,
+        cache_kwargs={"position_ids": torch.zeros(batch_size, sequence_length, dtype=torch.long)},
+        layer_idx=0,
+        past_key_value=cache,
+        ctx_len=ctx_len,
+        configured_split=1,
+        n_rep_chunk=None,
+    )
+
+    assert chunk_lengths == [1, 1]
+
+
 @pytest.mark.parametrize(
     "num_query_heads, num_kv_groups, num_cores",
     [
@@ -2464,6 +2926,37 @@ def test_qwen3_5_moe_get_specializations_supports_multi_resolution():
     assert all(spec["vision_batch_size"] == 1 for spec in lang_specs)
 
 
+def test_qwen3_5_moe_get_specializations_accepts_qeff_logger_adapter():
+    """Ensure constrained vision-size logging works with a LoggerAdapter."""
+    from types import SimpleNamespace
+
+    from QEfficient.transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        QEffQwen3_5MoeForConditionalGeneration,
+    )
+
+    model = QEffQwen3_5MoeForConditionalGeneration.__new__(QEffQwen3_5MoeForConditionalGeneration)
+    model.config = SimpleNamespace(
+        vision_config=SimpleNamespace(patch_size=16, temporal_patch_size=1),
+        text_config=SimpleNamespace(num_hidden_layers=1, layer_types=[]),
+    )
+
+    assert isinstance(modeling_qwen3_5_moe.logger, logging.LoggerAdapter)
+    specs, _ = model.get_specializations(
+        batch_size=1,
+        prefill_seq_len=512,
+        ctx_len=14336,
+        height=[354],
+        width=[536],
+        num_frames=[1],
+        vision_size=1,
+        kv_offload=True,
+    )
+
+    assert len(specs["vision"]) == 1
+    assert specs["lang"][0]["vision_size"] == 1
+
+
 def test_qwen3_5_moe_get_specializations_decouples_vision_batch_size():
     from types import SimpleNamespace
 
@@ -2493,6 +2986,193 @@ def test_qwen3_5_moe_get_specializations_decouples_vision_batch_size():
     axes = model.get_onnx_dynamic_axes(kv_offload=True)
     assert axes["vision"]["image_grid_thw"][0] == "vision_batch_size"
     assert axes["lang"]["vision_embeds"][0] == "vision_batch_size"
+
+
+@pytest.mark.llm_model
+def test_qwen3_5_moe_full_state_update_matches_singleton_routed_state():
+    config = _tiny_qwen3_5_moe_config()
+    config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
+    torch.manual_seed(0)
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    routed_model = QEFFAutoModelForImageTextToText(
+        deepcopy(hf_model),
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    full_state_model = QEFFAutoModelForImageTextToText(
+        deepcopy(hf_model),
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    inputs = full_state_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        gdn_full_state_update=True,
+        batch_size=1,
+        prefill_seq_len=4,
+    )["lang"]
+    inputs["input_ids"].fill_(1)
+    assert inputs["batch_index"].tolist() == [[0]]
+
+    routed_model.transform(ctx_len=8, seq_len=4, bs=1, prefill_only=True, prefill_seq_len=4)
+    full_state_model.transform(
+        ctx_len=8,
+        seq_len=4,
+        bs=1,
+        prefill_only=True,
+        prefill_seq_len=4,
+        qaic_config={"gdn_full_state_update": True},
+    )
+    assert full_state_model.lang_model.hash_params["gated_delta_kwargs"] == {"full_state_update": True}
+
+    routed_gdn_modules = [
+        module for module in routed_model.lang_model.model.modules() if hasattr(module, "gdn_full_state_update")
+    ]
+    full_state_gdn_modules = [
+        module for module in full_state_model.lang_model.model.modules() if hasattr(module, "gdn_full_state_update")
+    ]
+    assert routed_gdn_modules and all(module.gdn_full_state_update is False for module in routed_gdn_modules)
+    assert full_state_gdn_modules and all(module.gdn_full_state_update is True for module in full_state_gdn_modules)
+
+    with torch.no_grad():
+        routed_outputs = routed_model.lang_model.model(**deepcopy(inputs))
+        full_state_outputs = full_state_model.lang_model.model(**deepcopy(inputs))
+
+    torch.testing.assert_close(full_state_outputs[0], routed_outputs[0])
+    routed_states = routed_outputs[3]
+    full_states = full_state_outputs[3]
+    assert len(routed_states) == len(full_states) == config.text_config.num_hidden_layers
+    for layer_idx, ((routed_conv, routed_recurrent), (full_conv, full_recurrent)) in enumerate(
+        zip(routed_states, full_states)
+    ):
+        torch.testing.assert_close(
+            full_conv,
+            routed_conv,
+            msg=lambda msg, layer_idx=layer_idx: f"conv_state.{layer_idx}: {msg}",
+        )
+        torch.testing.assert_close(
+            full_recurrent,
+            routed_recurrent,
+            msg=lambda msg, layer_idx=layer_idx: f"recurrent_state.{layer_idx}: {msg}",
+        )
+
+    full_state_model.transform(ctx_len=8, seq_len=1, bs=1, prefill_only=False, prefill_seq_len=1)
+    assert all(module.gdn_full_state_update is False for module in full_state_gdn_modules)
+    assert "gated_delta_kwargs" not in full_state_model.lang_model.hash_params
+
+
+@pytest.mark.llm_model
+def test_qwen3_5_moe_singleton_prefill_export_has_no_state_scatter(tmp_path):
+    config = _tiny_qwen3_5_moe_config()
+    config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(
+        hf_model,
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    qeff_model.transform(
+        ctx_len=8,
+        seq_len=4,
+        bs=1,
+        qaic_config={"gdn_full_state_update": True},
+        prefill_only=True,
+        prefill_seq_len=4,
+    )
+
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        gdn_full_state_update=True,
+        batch_size=1,
+        prefill_seq_len=4,
+    )["lang"]
+    inputs["input_ids"].fill_(1)
+    assert all(state.shape[0] == 1 for layer_state in inputs["past_key_values"] for state in layer_state)
+
+    export_result = qeff_model.export(
+        export_dir=tmp_path / "qwen3-5-moe-prefill-no-state-scatter",
+        skip_vision=True,
+        prefill_only=True,
+        prefill_seq_len=4,
+        use_onnx_subfunctions=True,
+        offload_pt_weights=False,
+        qaic_config={"gdn_full_state_update": True},
+    )
+    onnx_model = onnx.load(_exported_onnx_path(export_result), load_external_data=False)
+    nodes = list(onnx_model.graph.node)
+    nodes.extend(node for function_proto in onnx_model.functions for node in function_proto.node)
+    state_indexing_ops = {"CtxGatherCB", "CtxGatherCB3D", "CtxScatterCB", "CtxScatterCB3D"}
+
+    assert not ({node.op_type for node in nodes} & state_indexing_ops)
+    for function_proto in onnx_model.functions:
+        retained_outputs = [name for name in function_proto.output if "state." in name]
+        if not retained_outputs:
+            continue
+        producer_by_output = {output: node for node in function_proto.node for output in node.output}
+        for retained_output in retained_outputs:
+            pending = [retained_output]
+            visited = set()
+            while pending:
+                value = pending.pop()
+                producer = producer_by_output.get(value)
+                if producer is None or id(producer) in visited:
+                    continue
+                visited.add(id(producer))
+                assert "Scatter" not in producer.op_type
+                pending.extend(producer.input)
+
+    with torch.no_grad():
+        pytorch_outputs = qeff_model.lang_model.model(**deepcopy(inputs))
+    session = _ort_session(_exported_onnx_path(export_result))
+    session_input_names = [item.name for item in session.get_inputs()]
+    session_output_names = [item.name for item in session.get_outputs()]
+    ort_inputs = _flatten_qwen_ort_inputs(inputs, session_input_names, qeff_model.lang_model.model)
+    ort_outputs = dict(zip(session_output_names, session.run(session_output_names, ort_inputs)))
+
+    assert np.allclose(pytorch_outputs[0].detach().numpy(), ort_outputs["logits"], atol=2e-3, rtol=1e-4)
+    for layer_idx, (conv_state, recurrent_state) in enumerate(pytorch_outputs[3]):
+        assert np.allclose(
+            conv_state.detach().numpy(),
+            ort_outputs[f"conv_state.{layer_idx}_RetainedState"],
+            atol=2e-3,
+            rtol=1e-4,
+        )
+        assert np.allclose(
+            recurrent_state.detach().numpy(),
+            ort_outputs[f"recurrent_state.{layer_idx}_RetainedState"],
+            atol=2e-3,
+            rtol=1e-4,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "prefill_only", "batch_size", "full_batch_size"),
+    [
+        ("qwen3_5", True, 1, 1),
+        ("qwen3_5_moe", False, 1, 1),
+        ("qwen3_5_moe", True, 2, 1),
+        ("qwen3_5_moe", True, 1, 4),
+    ],
+)
+def test_gdn_full_state_update_rejects_unsafe_compile_modes(
+    model_type,
+    prefill_only,
+    batch_size,
+    full_batch_size,
+):
+    from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
+
+    model = _QEffAutoModelForImageTextToTextDualQPC.__new__(_QEffAutoModelForImageTextToTextDualQPC)
+    model.model = _tiny_qwen_qeff_model(model_type).model
+
+    with pytest.raises(ValueError, match="gdn_full_state_update"):
+        model.compile(
+            prefill_only=prefill_only,
+            batch_size=batch_size,
+            full_batch_size=full_batch_size,
+            qaic_config={"gdn_full_state_update": True},
+        )
 
 
 def test_vlm_compile_forwards_gdn_chunk_size_in_qaic_config_to_export_path():

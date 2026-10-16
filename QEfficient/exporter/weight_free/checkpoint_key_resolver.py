@@ -5,6 +5,7 @@
 #
 # ----------------------------------------------------------------------------
 
+import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -38,6 +39,8 @@ _COMPUTED_INITIALIZER_NAMES = {
     "original_inv_freq",
     "embed_positions",
     "embed_scale",
+    "position_ids",
+    "token_type_ids",
 }
 
 
@@ -75,9 +78,18 @@ def _moe_weight_aliases(name: str) -> List[str]:
     return aliases
 
 
+def _router_gate_aliases(name: str) -> List[str]:
+    """Return the legacy router/gate spelling for sparse-MoE router weights."""
+    if name.endswith(".mlp.gate.weight"):
+        return [name[: -len(".mlp.gate.weight")] + ".mlp.router.weight"]
+    if name.endswith(".mlp.router.weight"):
+        return [name[: -len(".mlp.router.weight")] + ".mlp.gate.weight"]
+    return []
+
+
 def _find_checkpoint_key(candidates: List[str], checkpoint_index: Dict[str, str], onnx_name: str) -> Optional[str]:
     """Return the unique matching checkpoint key, or fail on ambiguous matches."""
-    seen = set()
+    seen: set = set()
     matches = []
     for candidate in candidates:
         if candidate in seen:
@@ -108,14 +120,17 @@ def find_checkpoint_key(
     onnx_name: str,
     checkpoint_index: Dict[str, str],
     backbone: nn.Module,
+    active_transform=None,
 ) -> Optional[str]:
     """Resolve an ONNX initializer name to its safetensors checkpoint key.
 
-    Most weights match directly. The fallback rules cover wrapper prefixes,
-    task-head/base-model checkpoint differences, and known HF/QEff MoE naming
-    differences without putting those details in the export orchestration path.
-    TODO(wf): Make this explicit model/layout mapping we should always know what key to expect in what case.
+    Resolution order:
+    1. Universal HF prefix rules (base_model., base_model_prefix).
+    2. Legacy sparse-MoE router/gate spelling fallback.
+    3. Transform-specific explicit mapping via resolve_onnx_key().
+    4. Legacy MoE weight aliases fallback for old checkpoints.
     """
+    # 1. Universal HF prefix rules
     candidates = [onnx_name]
     stripped = onnx_name.removeprefix("base_model.")
     candidates.append(stripped)
@@ -127,16 +142,29 @@ def find_checkpoint_key(
     if prefix and stripped.startswith(f"{prefix}."):
         candidates.append(stripped[len(f"{prefix}.") :])
 
-    if ".mlp." in stripped:
-        candidates.append(stripped.replace(".mlp.", ".block_sparse_moe."))
+    key = _find_checkpoint_key(candidates, checkpoint_index, onnx_name)
+    if key is not None:
+        return key
 
-    if stripped.endswith(".mlp.gate.weight"):
-        candidates.append(stripped[: -len(".gate.weight")] + ".router.weight")
+    # 2. Keep the historic sparse-MoE router/gate compatibility after exact lookup.
+    router_gate_candidates = [alias for candidate in candidates for alias in _router_gate_aliases(candidate)]
+    key = _find_checkpoint_key(router_gate_candidates, checkpoint_index, onnx_name)
+    if key is not None:
+        return key
 
-    if stripped.endswith(".mlp.router.weight"):
-        candidates.append(stripped[: -len(".router.weight")] + ".gate.weight")
+    # 3. Transform-specific explicit mapping
+    if active_transform is not None and hasattr(active_transform, "resolve_onnx_key"):
+        for candidate in [onnx_name, *_router_gate_aliases(onnx_name)]:
+            key = active_transform.resolve_onnx_key(candidate, checkpoint_index)
+            if key is not None:
+                return key
 
-    return _find_checkpoint_key(candidates, checkpoint_index, onnx_name)
+    # 4. Legacy MoE weight aliases (kept for old prepared checkpoints)
+    return _find_checkpoint_key(
+        [alias for c in candidates for alias in _moe_weight_aliases(c)],
+        checkpoint_index,
+        onnx_name,
+    )
 
 
 def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name: str, qeff_model) -> WeightSpec:
@@ -159,8 +187,8 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
         Specification mapping promoted ONNX inputs to checkpoint tensor locations.
     """
     model_ir = onnx_program.model
-    parameter_names = {name for name, _ in qeff_model.model.named_parameters()}
-    buffer_names = {name for name, _ in qeff_model.model.named_buffers()}
+    parameter_names = {name for name, _ in qeff_model.model.named_parameters(remove_duplicate=False)}
+    buffer_names = {name for name, _ in qeff_model.model.named_buffers(remove_duplicate=False)}
     model_names = parameter_names | buffer_names
     tied_weight_map = {entry.alias: entry.canonical for entry in _collect_tied_weights(qeff_model.model)}
     # named_parameters()/named_buffers() dedup tied tensors by identity, so a tied alias
@@ -179,6 +207,32 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
         for checkpoint_file in checkpoint_files
     ]
     backbone = qeff_model.model.base_model if isinstance(qeff_model.model, PooledModel) else qeff_model.model
+
+    # Identify the active layout transform from the prepared checkpoint manifest.
+    # The manifest stores the active layout transform ID during centralized finalization.
+    # Reading from the manifest avoids re-running detection on the prepared checkpoint
+    # (which would fail — the prepared checkpoint has canonical output keys like
+    # moe_weights.gate, not the original per-expert keys that trigger detection).
+
+    from QEfficient.base.checkpoint_transforms import (  # noqa: PLC0415
+        CHECKPOINT_PREPARED_MANIFEST,
+        _find_transform_by_id,
+    )
+
+    active_transform = None
+    manifest_path = Path(model_ref) / CHECKPOINT_PREPARED_MANIFEST
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            transform_id = manifest.get("active_group", "none")
+            if transform_id and transform_id != "none":
+                active_transform = _find_transform_by_id(
+                    transform_id,
+                    getattr(qeff_model, "_checkpoint_transforms", []),
+                )
+        except (OSError, json.JSONDecodeError):
+            pass  # no manifest → active_transform stays None, fallback to legacy aliases
+
     promoted_inputs: List[WeightSpecInput] = []
 
     for name, init_value in list(model_ir.graph.initializers.items()):
@@ -186,7 +240,7 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             continue
 
         onnx_name = tied_weight_map.get(name, name)
-        checkpoint_key = find_checkpoint_key(onnx_name, checkpoint_index, backbone)
+        checkpoint_key = find_checkpoint_key(onnx_name, checkpoint_index, backbone, active_transform)
         if checkpoint_key is None:
             if _is_computed_initializer(onnx_name):
                 continue
@@ -215,6 +269,7 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
     return WeightSpec(
         model_name=model_name,
         model_id=model_ref,
+        external_data_root=str(root) if root is not None else None,
         files=relative_checkpoint_files,
         inputs=promoted_inputs,
     )

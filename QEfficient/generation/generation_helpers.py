@@ -17,7 +17,10 @@ import onnx
 import yaml
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from QEfficient.utils.logging_utils import logger
+from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 def prepare_tokenizer(tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]) -> None:
@@ -199,17 +202,28 @@ def _resolve_output_shape(
     return shape
 
 
-def _required_host_input_names(graph: onnx.GraphProto) -> set[str]:
+def _weight_free_input_names(onnx_path: Path) -> set[str]:
+    """Return the input names that refer to constants in a weight-free model."""
+    weight_spec_path = resolve_weight_spec_path(onnx_path)
+    if not weight_spec_path.is_file():
+        return set()
+    return {spec_input.name for spec_input in load_weight_spec(weight_spec_path).inputs}
+
+
+def _required_host_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[str]:
     retained_inputs = set()
     for output in graph.output:
         for suffix in ("_InternalRetainedState", "_RetainedState"):
             if output.name.endswith(suffix):
                 retained_inputs.add(output.name[: -len(suffix)])
     initializer_names = {initializer.name for initializer in graph.initializer}
+    weight_free_inputs = _weight_free_input_names(onnx_path)
     return {
         graph_input.name
         for graph_input in graph.input
-        if graph_input.name not in retained_inputs and graph_input.name not in initializer_names
+        if graph_input.name not in retained_inputs
+        and graph_input.name not in initializer_names
+        and graph_input.name not in weight_free_inputs
     }
 
 
@@ -243,7 +257,7 @@ class RunnerMetadata:
             model=model,
             graph=graph,
             input_names={graph_input.name for graph_input in graph.input},
-            required_host_input_names=_required_host_input_names(graph),
+            required_host_input_names=_required_host_input_names(graph, onnx_path),
             output_names={output.name for output in graph.output},
             custom_io_precisions=custom_io_precisions,
             custom_io_item_sizes=custom_io_item_sizes,

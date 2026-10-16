@@ -26,7 +26,9 @@ from QEfficient.customop import (
 )
 from QEfficient.transformers.moe.profiles import MoEProfile
 from QEfficient.transformers.moe.weights import MoEWeights, validate_expert_parallel_moe_weights
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 class MoEFlavour(str, Enum):
@@ -84,10 +86,10 @@ def build_matched_idx_from_cumsum(T2Ei: torch.Tensor) -> torch.Tensor:
     """Build packed->original token index from a per-token expert-match mask."""
     batch_size, seq_len = T2Ei.shape
     int32_max = torch.iinfo(torch.int32).max
-    int32_max_scalar = torch.tensor(int32_max, dtype=torch.int32, device=T2Ei.device)
     token_idx = torch.arange(seq_len, dtype=torch.int32, device=T2Ei.device).unsqueeze(0).expand(batch_size, -1)
-    valid_prefix = torch.cumsum(T2Ei.to(torch.int32), dim=1)
+    valid_prefix = torch.cumsum(T2Ei.to(torch.int32), dim=1, dtype=torch.int32)
     valid_dest = valid_prefix - 1
+    int32_max_scalar = torch.full_like(valid_dest, int32_max)
     scatter_pos = torch.where(T2Ei, valid_dest, int32_max_scalar)
     # NOTE: expand_as(...) instead of torch.full_like(...) is the compiler-preferred
     # workaround for ConstantOfShape(INT32_MAX); both produce identical traced Ctx ops.

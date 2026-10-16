@@ -8,7 +8,7 @@
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 WEIGHT_SPEC_VERSION = 5
 
@@ -61,11 +61,16 @@ class WeightSpec:
     files: List[ExternalDataFile] = field(default_factory=list)
     inputs: List[WeightSpecInput] = field(default_factory=list)
     version: int = WEIGHT_SPEC_VERSION
+    external_data_root: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a JSON-serializable representation of the weight spec."""
         data = asdict(self)
         data["model_id"] = str(data["model_id"])
+        if data["external_data_root"] is None:
+            del data["external_data_root"]
+        else:
+            data["external_data_root"] = str(data["external_data_root"])
         return data
 
 
@@ -134,6 +139,7 @@ def load_weight_spec(path: Path) -> WeightSpec:
             if entry.get("location") is not None  # backward compat: skip old buffer-only entries
         ],
         version=data.get("version", WEIGHT_SPEC_VERSION),
+        external_data_root=data.get("external_data_root"),
     )
 
 

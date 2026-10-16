@@ -37,7 +37,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "weight_free_export: CPU-only weight-free export smoke and parity tests")
 
 
-_XFAIL_MODELS = {"gpt_oss"}
+_XFAIL_MODELS = {}
 _XFAIL_REASON = (
     "gpt_oss: dynamo=True + use_onnx_subfunctions=True triggers SerdeError "
     "(ir_version=10, serialize_model_into); export must use use_onnx_subfunctions=False"

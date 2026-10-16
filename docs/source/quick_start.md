@@ -22,6 +22,19 @@ By default, the library exported models and Qaic Program Container (QPC) files, 
 
 ---
 
+## Logging
+
+QEfficient writes structured JSON logs to `~/.cache/qefficient_logs` by default. Configure the destination and verbosity with:
+
+```bash
+export QEFF_LOG_PATH=/tmp/qefficient-logs
+export QEFF_LOG_LEVEL=INFO
+```
+
+`QEFF_LOG_PATH` may name a directory or a `.log` file. Process IDs are added to the resulting filename so parallel workers do not share a log.
+
+---
+
 ## Command Line Interface Execution
 ```{NOTE}
 Use ``bash terminal``, else if using ``ZSH terminal`` then ``device_group``should be in single quotes e.g.  ``'--device_group [0]'``

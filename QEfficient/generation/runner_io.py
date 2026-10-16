@@ -41,7 +41,9 @@ from QEfficient.generation.generation_helpers import (
     slice_prefill_inputs,
 )
 from QEfficient.utils import get_padding_shape_from_config
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 __all__ = [
     "load_prefill_specialization",

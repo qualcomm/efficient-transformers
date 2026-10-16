@@ -17,8 +17,9 @@ from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoTokenizer, TextStreamer
 
 from QEfficient import QEFFAutoModelForCausalLM
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 
+logger = QEFFLogger.get_logger("MODEL")
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 

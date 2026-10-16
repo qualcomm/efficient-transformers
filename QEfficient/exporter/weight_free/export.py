@@ -5,6 +5,7 @@
 #
 # ----------------------------------------------------------------------------
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -18,8 +19,10 @@ from QEfficient.exporter.weight_free.checkpoint_key_resolver import promote_init
 from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path, save_weight_spec
 from QEfficient.utils import load_json
 from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 from QEfficient.utils.torch_patches import dynamo_invoke_subgraph_fallback_env, preserve_subfunction_source_lines
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 def _to_meta(value: Any) -> Any:
@@ -107,6 +110,38 @@ def _prune_unused_fake_initializers(onnx_program) -> None:
             del initializers[name]
 
 
+def _prepared_checkpoint_hash(
+    model_ref: str,
+    target_dtype: torch.dtype,
+    active_group_transform_id: str,
+    moe_prefill_flavour: str,
+    moe_prefill_num_pipeline_stages: int | None = None,
+    moe_prefill_num_parallelized_experts: int | None = None,
+    plan_payload: dict | None = None,
+) -> str:
+    """Return a 12-char content-addressable hash for the prepared checkpoint.
+
+    Encodes what was done to the weights so that different model flavours
+    (dense vs MoE, decode vs expert_parallel, different P/E values) always
+    hash to different prepared directories and never overwrite each other.
+
+    Two expert_parallel exports of the same model and dtype but with
+    different P or E/P values produce differently-packed tensors; including
+    num_pipeline_stages and num_parallelized_experts ensures they land in
+    separate prepared directories.
+    """
+    content = {
+        "model_ref": model_ref,
+        "target_dtype": str(target_dtype),
+        "active_group": active_group_transform_id,
+        "moe_flavour": moe_prefill_flavour,
+        "moe_num_pipeline_stages": str(moe_prefill_num_pipeline_stages),
+        "moe_num_parallelized_experts": str(moe_prefill_num_parallelized_experts),
+        "plan": plan_payload or {},
+    }
+    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:12]
+
+
 def _prepare_checkpoint_for_weight_free_export(
     qeff_model,
     model_ref: str,
@@ -132,20 +167,40 @@ def _prepare_checkpoint_for_weight_free_export(
     from QEfficient.utils.cache import QEFF_CHECKPOINT_HOME
 
     source_dir = resolve_checkpoint_dir(model_ref)
-    dtype_suffix = str(target_dtype).replace("torch.", "")
-    # TODO(wf): For different flavours of the model that expect different checkpoint weight layouts,
-    # we end up overriding old one. We need to add support of hashing/caching here.
-    prepared_name = source_dir.name + f"-qeff-prepared-{dtype_suffix}"
+    hash_params = qeff_model.hash_params
+
+    prep_pipeline = CheckpointTransformPipeline(transforms=qeff_model._checkpoint_transforms)
+    plan, active_group_id = prep_pipeline.build_plan(
+        source_dir,
+        target_dtype,
+        config=getattr(qeff_model.model, "config", None),
+        hash_params=hash_params,
+    )
+    moe_prefill_flavour = hash_params.get("moe_prefill_flavour", "none")
+
+    prepared_hash = _prepared_checkpoint_hash(
+        model_ref=model_ref,
+        target_dtype=target_dtype,
+        active_group_transform_id=active_group_id,
+        moe_prefill_flavour=moe_prefill_flavour,
+        moe_prefill_num_pipeline_stages=hash_params.get("moe_prefill_num_pipeline_stages"),
+        moe_prefill_num_parallelized_experts=hash_params.get("moe_prefill_num_parallelized_experts"),
+        plan_payload=plan.fingerprint_payload(),
+    )
+    prepared_name = source_dir.name + f"-qeff-prepared-{prepared_hash}"
     if QEFF_CHECKPOINT_HOME:
         prepared_out = QEFF_CHECKPOINT_HOME.expanduser() / prepared_name
     else:
         prepared_out = source_dir.parent / prepared_name
-    prep_pipeline = CheckpointTransformPipeline(transforms=qeff_model._checkpoint_transforms)
+
     return str(
         prep_pipeline.apply(
             src=source_dir,
             out=prepared_out,
             target_dtype=target_dtype,
+            config=getattr(qeff_model.model, "config", None),
+            hash_params=hash_params,
+            plan=plan,
         )
     )
 

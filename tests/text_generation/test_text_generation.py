@@ -5,6 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
+import gc
 import os
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -25,12 +26,18 @@ configs = [pytest.param("gpt2", 2, None, 32, id="gpt2_config")]
 @pytest.fixture
 def profiling_runtime(monkeypatch):
     """Provide a runtime whose profiling enum predates device KPI support."""
+    program = SimpleNamespace(
+        load=Mock(return_value=0),
+        activate=Mock(),
+        deactivate=Mock(return_value=0),
+        unload=Mock(return_value=0),
+    )
     runtime = SimpleNamespace(
         Context=Mock(),
         Queue=Mock(),
         Qpc=Mock(return_value=SimpleNamespace(getIoDescriptor=Mock(return_value=(0, b"")))),
         QAicProgramProperties=SimpleNamespace,
-        Program=Mock(return_value=SimpleNamespace(load=Mock(return_value=0), activate=Mock())),
+        Program=Mock(return_value=program),
         ExecObj=Mock(),
         BufferDimensionsVecRef=list,
         QStatus=SimpleNamespace(QS_SUCCESS=0),
@@ -65,6 +72,80 @@ def profiling_runtime(monkeypatch):
     monkeypatch.setattr(cloud_infer, "is_qaicrt_imported", True)
     monkeypatch.setattr(cloud_infer, "is_aicapi_imported", True, raising=False)
     return runtime
+
+
+def test_repeated_execobj_initialization_failures_release_program_resources(profiling_runtime, tmp_path):
+    """A failed ExecObj allocation must not retain an activated program."""
+    attempts = 32
+    profiling_runtime.ExecObj.side_effect = RuntimeError("QAIC_ERROR_NSP_ALLOC_FAILED")
+
+    for _ in range(attempts):
+        with pytest.raises(RuntimeError, match="QAIC_ERROR_NSP_ALLOC_FAILED"):
+            cloud_infer.QAICInferenceSession(tmp_path / "model.qpc")
+
+    program = profiling_runtime.Program.return_value
+    assert program.activate.call_count == attempts
+    assert program.deactivate.call_count == attempts
+    program.unload.assert_not_called()
+
+
+def test_deactivate_is_idempotent(profiling_runtime, tmp_path):
+    session = cloud_infer.QAICInferenceSession(tmp_path / "model.qpc")
+
+    session.deactivate()
+    session.deactivate()
+
+    program = profiling_runtime.Program.return_value
+    program.deactivate.assert_called_once_with()
+    assert not session.is_active
+
+
+def test_failed_activation_attempts_deactivation(profiling_runtime, tmp_path):
+    profiling_runtime.Program.return_value.activate.side_effect = RuntimeError("QAIC_ERROR_NSP_ALLOC_FAILED")
+
+    with pytest.raises(RuntimeError, match="QAIC_ERROR_NSP_ALLOC_FAILED"):
+        cloud_infer.QAICInferenceSession(tmp_path / "model.qpc")
+
+    profiling_runtime.Program.return_value.deactivate.assert_called_once_with()
+
+
+def test_repeated_discarded_sessions_do_not_exhaust_runtime_resources(profiling_runtime, tmp_path):
+    """Discarded sessions release a finite runtime resource pool."""
+    capacity = 4
+    attempts = 32
+    resources = SimpleNamespace(active=0, peak=0)
+
+    class ResourceLimitedProgram:
+        def __init__(self):
+            self.active = False
+            self.loaded = False
+
+        def load(self):
+            self.loaded = True
+            return profiling_runtime.QStatus.QS_SUCCESS
+
+        def activate(self):
+            if resources.active >= capacity:
+                raise RuntimeError("QAIC_ERROR_NSP_ALLOC_FAILED")
+            resources.active += 1
+            resources.peak = max(resources.peak, resources.active)
+            self.active = True
+
+        def deactivate(self):
+            if self.active:
+                resources.active -= 1
+                self.active = False
+            return profiling_runtime.QStatus.QS_SUCCESS
+
+    profiling_runtime.Program.side_effect = lambda *args, **kwargs: ResourceLimitedProgram()
+
+    for _ in range(attempts):
+        session = cloud_infer.QAICInferenceSession(tmp_path / "model.qpc")
+        del session
+        gc.collect()
+
+    assert resources.active == 0
+    assert resources.peak == 1
 
 
 @pytest.mark.parametrize("has_profiling_api", [True, False])

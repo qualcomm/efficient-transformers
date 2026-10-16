@@ -50,8 +50,9 @@ from utils import (
 )
 
 from QEfficient.generation.dflash_generation import run_spd_inference_single
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 
+logger = QEFFLogger.get_logger("INFRA")
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 sys.path.insert(0, REPO_ROOT)

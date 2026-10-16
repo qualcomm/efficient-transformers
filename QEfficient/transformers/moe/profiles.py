@@ -64,6 +64,12 @@ def gptoss_clamped_glu_mlp(
     alpha: float,
 ) -> torch.Tensor:
     """GPT-OSS clamped GLU with per-expert biases: ``(up + 1) * gate * sigmoid(gate * alpha)``."""
+    W_g = W_g.to(x.dtype)
+    W_u = W_u.to(x.dtype)
+    W_d = W_d.to(x.dtype)
+    b_g = b_g.to(x.dtype)
+    b_u = b_u.to(x.dtype)
+    b_d = b_d.to(x.dtype)
     gate = (x @ W_g) + b_g.unsqueeze(-2)
     up = (x @ W_u) + b_u.unsqueeze(-2)
     gate = gate.clamp(min=torch.finfo(torch.float16).min, max=limit)

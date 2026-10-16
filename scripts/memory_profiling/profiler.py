@@ -21,7 +21,9 @@ from typing import Dict, List, Optional, Tuple
 
 import psutil
 
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 @dataclass

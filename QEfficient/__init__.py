@@ -53,7 +53,10 @@ from QEfficient.generation.text_generation_inference import cloud_ai_100_exec_kv
 from QEfficient.peft import QEffAutoPeftModelForCausalLM
 from QEfficient.transformers.transform import transform
 from QEfficient.utils import custom_format_warning
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
+
 
 try:
     from QEfficient.diffusers.pipelines.flux.pipeline_flux import QEffFluxPipeline

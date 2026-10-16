@@ -15,7 +15,9 @@ from QEfficient.transformers.quantizers.quantizer_utils import (
     repack_zeros,
     replace_linear_layer_with_target_layer,
 )
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("MODEL")
 
 
 class QEffGPTQConfig(GPTQConfig):

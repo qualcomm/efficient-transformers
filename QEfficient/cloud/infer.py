@@ -19,7 +19,9 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 from QEfficient.base.common import QEFFCommonLoader
 from QEfficient.cloud import warn_deprecated_cloud_api
 from QEfficient.utils import check_and_assign_cache_dir, load_hf_processor, load_hf_tokenizer
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 
 # TODO: Remove after adding support for VLM's compile and execute

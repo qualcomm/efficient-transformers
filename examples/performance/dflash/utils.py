@@ -21,8 +21,9 @@ from QEfficient.generation.cloud_infer import (
     QAICInferenceSession,
     is_retained_state_name,
 )
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 
+logger = QEFFLogger.get_logger("INFRA")
 # ─────────────────────────────────────────────────────────────────────────────
 # model_name (TLM short)  →  (TLM HF repo, DLM HF repo)
 # DLM column is the canonical DFlash repo. TLM column is the standard HF repo

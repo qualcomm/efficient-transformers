@@ -7,7 +7,6 @@
 
 import gc
 import inspect
-import logging
 import os
 import shlex
 import shutil
@@ -43,6 +42,7 @@ from QEfficient.compile.mdp_generator import (
 )
 from QEfficient.compile.qnn_compiler import compile as qnn_compile
 from QEfficient.exporter.weight_free.export import embed_weight_spec_as_metadata, link_prepared_checkpoint_dir
+from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.pytorch_transforms import (
     BlockingAttentionTransform,
@@ -63,11 +63,18 @@ from QEfficient.utils import (
     require_value,
     to_named_specializations,
 )
+from QEfficient.utils.checkpoint_utils import checkpoint_root, huggingface_hub_cache_dir
 from QEfficient.utils.config_utils import calculate_num_replicate_kv_heads
 from QEfficient.utils.export_utils import export_from_compile, export_wrapper
+from QEfficient.utils.logging_utils import (
+    QEFFLogger,
+    log_api_arguments,
+    log_from_pretrained_call,
+    log_generate_call,
+)
 from QEfficient.utils.torch_patches import layerwise_safe_onnx_export_patches
 
-logger = logging.getLogger(__name__)
+logger = QEFFLogger.get_logger("INFRA")
 
 
 _LEGACY_MOE_PREFILL_PACKED_CHUNK_SIZE_ERROR = (
@@ -95,6 +102,143 @@ def _copy_existing_compiler_input(command: List[str], flag: str, compile_dir: Pa
         if input_path.resolve() != artifact_path.resolve():
             shutil.copy2(input_path, artifact_path)
         command[index] = f"{flag}={artifact_path}"
+
+
+def _copy_onnx_external_data_files(source_onnx_path: Path, artifact_onnx_path: Path) -> None:
+    """Copy ONNX-native external tensor data referenced by source_onnx_path.
+
+    This handles ONNX ``TensorProto.EXTERNAL`` files that must remain beside the
+    replay ONNX. It intentionally does not copy weight-free checkpoint files;
+    those are resolved through ``AIC_EXTERNAL_DATA_ROOT``.
+    """
+    model = onnx.load(source_onnx_path, load_external_data=False)
+    for tensor in onnx.external_data_helper._get_all_tensors(model):
+        if tensor.data_location != onnx.TensorProto.EXTERNAL:
+            continue
+        location = next((entry.value for entry in tensor.external_data if entry.key == "location"), None)
+        if not location:
+            continue
+        location_path = Path(location)
+        if location_path.is_absolute():
+            source_path = location_path
+            artifact_path = artifact_onnx_path.parent / location_path.name
+        else:
+            source_path = source_onnx_path.parent / location_path
+            artifact_path = artifact_onnx_path.parent / location_path
+        if not source_path.is_file():
+            raise FileNotFoundError(f"ONNX external data file not found at: {source_path}")
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        if source_path.resolve() != artifact_path.resolve():
+            shutil.copy2(source_path, artifact_path)
+
+
+def _weight_free_input_names(onnx_path: Path) -> set[str]:
+    """Return the input names that refer to constants in a weight-free model."""
+    weight_spec_path = resolve_weight_spec_path(onnx_path)
+    return _weight_free_spec_input_names(weight_spec_path)
+
+
+def _weight_free_spec_input_names(weight_spec_path: Path) -> set[str]:
+    """Return the input names recorded in a weight-free sidecar."""
+    if not weight_spec_path.is_file():
+        return set()
+    return {spec_input.name for spec_input in load_weight_spec(weight_spec_path).inputs}
+
+
+def _copy_weight_free_spec(weight_spec_path: Path, artifact_dir: Path) -> None:
+    """Copy only the weight-free sidecar metadata, not checkpoint weight files.
+
+    The compiler consumes the same extdata metadata embedded in the ONNX and
+    resolves its ``files`` entries from ``AIC_EXTERNAL_DATA_ROOT``. Copying the
+    sidecar keeps the bundle inspectable without creating stale duplicate weight
+    files that still point back to their original cache location.
+    """
+    if not weight_spec_path.is_file():
+        raise FileNotFoundError(f"Weight spec file not found at: {weight_spec_path}")
+
+    artifact_weight_spec_path = artifact_dir / weight_spec_path.name
+    if weight_spec_path.resolve() != artifact_weight_spec_path.resolve():
+        shutil.copy2(weight_spec_path, artifact_weight_spec_path)
+
+
+def _root_containing_weight_free_files(model_id_path: Path, external_files) -> Optional[Path]:
+    """Return the nearest ancestor that resolves all relative weight-spec files."""
+    relative_paths = [
+        Path(external_file.path) for external_file in external_files if not Path(external_file.path).is_absolute()
+    ]
+    if not relative_paths:
+        return None
+
+    for root in (model_id_path, *model_id_path.parents):
+        if all((root / relative_path).exists() for relative_path in relative_paths):
+            return root
+    return None
+
+
+def _weight_free_external_data_root(weight_spec_path: Optional[Union[str, Path]]) -> Optional[Path]:
+    """Return the root for weight-free external data files, if a weight spec exists."""
+    if weight_spec_path is None:
+        return None
+
+    weight_spec_path = Path(weight_spec_path)
+    if not weight_spec_path.is_file():
+        return None
+
+    spec = load_weight_spec(weight_spec_path)
+    if spec.external_data_root:
+        return Path(spec.external_data_root).expanduser()
+
+    model_id_path = Path(spec.model_id).expanduser()
+    if model_id_path.exists():
+        root = _root_containing_weight_free_files(model_id_path, spec.files)
+        if root is not None:
+            return root
+        return checkpoint_root(spec.model_id, [str(model_id_path / external_file.path) for external_file in spec.files])
+
+    return huggingface_hub_cache_dir()
+
+
+def _compiler_env_with_external_data_root(weight_spec_path: Optional[Union[str, Path]]) -> Optional[Dict[str, str]]:
+    """Return a compiler environment containing AIC_EXTERNAL_DATA_ROOT for weight-free models."""
+    compiler_env = os.environ.copy()
+    if compiler_env.get("AIC_EXTERNAL_DATA_ROOT"):
+        return compiler_env
+
+    external_data_root = _weight_free_external_data_root(weight_spec_path)
+    if external_data_root is None:
+        return None
+
+    compiler_env["AIC_EXTERNAL_DATA_ROOT"] = str(external_data_root)
+    return compiler_env
+
+
+def _copy_model_compiler_input(
+    command: List[str],
+    compile_dir: Path,
+    weight_spec_path: Optional[Union[str, Path]] = None,
+) -> None:
+    """Copy the ONNX compiler input and dependent files into compile_dir, updating command."""
+    for index, argument in enumerate(command):
+        option, separator, value = argument.partition("=")
+        if option != "-m" or not separator:
+            continue
+
+        source_onnx_path = Path(value)
+        if not source_onnx_path.is_file():
+            raise FileNotFoundError(f"ONNX file not found at: {source_onnx_path}")
+
+        artifact_onnx_path = compile_dir / source_onnx_path.name
+        if source_onnx_path.resolve() != artifact_onnx_path.resolve():
+            shutil.copy2(source_onnx_path, artifact_onnx_path)
+        _copy_onnx_external_data_files(source_onnx_path, artifact_onnx_path)
+
+        resolved_weight_spec_path = (
+            Path(weight_spec_path) if weight_spec_path is not None else source_onnx_path.with_name("weight_spec.json")
+        )
+        if _weight_free_spec_input_names(resolved_weight_spec_path):
+            _copy_weight_free_spec(resolved_weight_spec_path, compile_dir)
+        command[index] = f"-m={artifact_onnx_path}"
+        return
 
 
 def _rename_graph_value(graph: onnx.GraphProto, old_name: str, new_name: str) -> None:
@@ -144,6 +288,7 @@ def generate_mdp_compiler_dump(
     specializations: Optional[List[Dict[str, int]]] = None,
     specialization_module_name: Optional[str] = None,
     custom_io: Optional[Dict[str, str]] = None,
+    compiler_env: Optional[Dict[str, str]] = None,
 ) -> str:
     """Generate the compiler MDP dump required by the intersection strategy."""
     # The compiler dump is generated before the final QPC compile hash directory exists.
@@ -187,7 +332,7 @@ def generate_mdp_compiler_dump(
 
     logger.info(f"Running compiler for MDP dump: {' '.join(dump_command)}")
     try:
-        subprocess.run(dump_command, capture_output=True, check=True)
+        subprocess.run(dump_command, capture_output=True, check=True, env=compiler_env)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             "\n".join(
@@ -222,6 +367,18 @@ class QEFFBaseModel(ABC):
     _pytorch_transforms: List[PytorchTransform]
     _onnx_transforms = [BaseOnnxTransform]
     _checkpoint_transforms: List[Type[BaseCheckpointTransform]] = []
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        from_pretrained = cls.__dict__.get("from_pretrained")
+        if isinstance(from_pretrained, classmethod):
+            function = from_pretrained.__func__
+            if not getattr(function, "_qeff_api_dump", False):
+                setattr(cls, "from_pretrained", classmethod(log_from_pretrained_call(function)))
+        generate = cls.__dict__.get("generate")
+        if generate is not None and callable(generate):
+            if not getattr(generate, "_qeff_api_dump", False):
+                setattr(cls, "generate", log_generate_call(generate))
 
     def _transform_names(self) -> List[str]:
         return [x.__name__ for x in self._pytorch_transforms + self._onnx_transforms]
@@ -260,8 +417,18 @@ class QEFFBaseModel(ABC):
     def __init__(self, model: torch.nn.Module, **kwargs) -> None:
         super().__init__()
         self.model = model
+        if not QEFFLogger.has_active_run():
+            QEFFLogger.start_run(self.model_name)
         self.config = model.config
         self.hash_params = create_model_params(self, **kwargs)
+        if getattr(self, "_enable_proxy", False):
+            language_config = self.config
+            for config_name in ("text_config", "llm_config", "language_config"):
+                if nested_config := getattr(self.config, config_name, None):
+                    language_config = nested_config
+                    break
+            if (proxy_num_hidden_layers := getattr(language_config, "num_hidden_layers", None)) is not None:
+                self.hash_params["proxy_num_hidden_layers"] = proxy_num_hidden_layers
         self.onnx_path: Optional[str] = None
         self.qpc_path: Optional[str] = None
         self.compile_artifacts_path: Optional[Path] = None
@@ -287,19 +454,12 @@ class QEFFBaseModel(ABC):
         if not any_transformed:
             warnings.warn(f"No transforms applied to model: {self.model_name}. It may be an unsupported model!")
         else:
-            logger.info(f"Pytorch transforms applied to model: {self.model_name}")
-
-        if self.config.torch_dtype == torch.bfloat16 and constants.DEFAULT_AIC_HW_VERSION != "ai200":
-            logger.warning(
-                "BFloat16 dtype is not supported on %s; converting model to float16 precision for export.",
-                constants.DEFAULT_AIC_HW_VERSION,
+            QEFFLogger.log_event(
+                "milestone",
+                "INFRA",
+                f"Applied PyTorch transforms to model: {self.model_name}.",
+                milestone=QEFFLogger.MILESTONE_LOAD_COMPLETE,
             )
-            self.model = self.model.to(torch.float16)
-            self.config.torch_dtype = torch.float16
-            if hasattr(self.config, "text_config"):
-                self.config.text_config.torch_dtype = torch.float16
-            if hasattr(self.config, "llm_config"):
-                self.config.llm_config.torch_dtype = torch.float16
 
     def _normalize_torch_dtype(self):
         """
@@ -522,6 +682,7 @@ class QEFFBaseModel(ABC):
         if onnx_path.is_file():
             self.onnx_path = onnx_path
             self.weight_spec_path = str(_weight_spec_path) if _weight_spec_path.is_file() else None
+            self._export_cache_hit = True
             return onnx_path
 
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -788,6 +949,7 @@ class QEFFBaseModel(ABC):
         # Return early if ONNX already exists
         if onnx_path.is_file():
             self.onnx_path = onnx_path
+            self._export_cache_hit = True
             return onnx_path
 
         # Layer-wise reuse: if the merged final ONNX from a prior run exists
@@ -806,6 +968,7 @@ class QEFFBaseModel(ABC):
         for cached_merged in cached_merged_paths:
             if cached_merged.is_file():
                 self.onnx_path = cached_merged
+                self._export_cache_hit = True
                 return self.onnx_path
         if cache_probe:
             return None
@@ -1172,6 +1335,12 @@ class QEFFBaseModel(ABC):
         onnx_path = Path(onnx_path)
         if artifacts:
             self.onnx_path = onnx_path
+        existing_weight_spec_path = getattr(self, "weight_spec_path", None)
+        weight_spec_path = (
+            Path(existing_weight_spec_path) if existing_weight_spec_path else resolve_weight_spec_path(onnx_path)
+        )
+        weight_free_inputs = _weight_free_spec_input_names(weight_spec_path)
+        compiler_env = _compiler_env_with_external_data_root(weight_spec_path) if weight_free_inputs else None
 
         compile_dir = Path(compile_dir or onnx_path.parent)
         qpc_path = compile_dir / "qpc"
@@ -1245,11 +1414,11 @@ class QEFFBaseModel(ABC):
             logger.info("Using ONNX subfunctions for compilation.")
             command.append("-sub-functions")
 
-        model_in_bfloat16 = hasattr(self, "config") and (self.config.torch_dtype == torch.bfloat16)
-        pkv_in_bfloat16 = (custom_io is not None) and any(
-            ("past_" in key or "pixel_values" in key) and "bfloat16" in value for key, value in custom_io.items()
+        custom_io_for_compiler = (
+            {key: value for key, value in custom_io.items() if "bfloat16" not in value} or None
+            if custom_io is not None
+            else None
         )
-        custom_io_for_compiler = custom_io if not (model_in_bfloat16 and pkv_in_bfloat16) else None
 
         # MDP partition config selection (highest priority first):
         #   1. User-provided pre-built MDP JSON (mdp_load_partition_config).
@@ -1265,6 +1434,7 @@ class QEFFBaseModel(ABC):
             mdp_ts_json = load_json(str(mdp_ts_json_path))
         elif mdp_num_partitions > 1:
             # Disaggregated (pipeline-parallel) MDP — delegate to focused helper.
+            compile_dir.mkdir(parents=True, exist_ok=True)
             num_cores = compiler_options.get("aic_num_cores", constants.DEFAULT_AIC_NUM_CORES)
             num_layers = getattr(self, "num_layers", None)
             if getattr(self, "model", None) and getattr(self.model, "language_model", None) and not num_layers:
@@ -1282,6 +1452,7 @@ class QEFFBaseModel(ABC):
                     specializations=specializations,
                     specialization_module_name=specialization_module_name,
                     custom_io=custom_io_for_compiler,
+                    compiler_env=compiler_env,
                 )
             mdp_config_dir = (
                 Path(mdp_compiler_dump_path).parent if mdp_strategy is MdpStrategy.INTERSECTION else compile_dir
@@ -1307,7 +1478,7 @@ class QEFFBaseModel(ABC):
         compile_hash_params = {
             "command": command,
             "specializations": specializations,
-            "custom_io": custom_io,
+            "custom_io": custom_io_for_compiler,
             "mdp_ts_num_devices": mdp_ts_num_devices,
             "mdp_num_partitions": mdp_num_partitions,
             "mdp_strategy": mdp_strategy.value,
@@ -1323,7 +1494,38 @@ class QEFFBaseModel(ABC):
             if (qpc_path / "programqpc.bin").is_file():
                 self.qpc_path = qpc_path
                 self.compile_artifacts_path = compile_dir
+
+                # If export() already ran, its cache-hit message is the single
+                # ONNX skip record for this run. Otherwise compilation returned
+                # directly from a cached QPC and must report that export was
+                # skipped as part of the QPC cache path.
+                if not getattr(self, "_export_cache_hit", False):
+                    QEFFLogger.log_event(
+                        "milestone",
+                        "INFRA",
+                        "ONNX export skipped (cached QPC).",
+                        milestone=QEFFLogger.MILESTONE_EXPORT_SKIPPED,
+                    )
+                log_api_arguments(
+                    "compile",
+                    self.__class__.__name__,
+                    {"compile_hash_params": compile_hash_params},
+                )
+                QEFFLogger.log_event(
+                    "milestone",
+                    self.__class__.__name__,
+                    "Compilation skipped (cached QPC).",
+                    api="compile",
+                    milestone=QEFFLogger.MILESTONE_COMPILE_SKIPPED,
+                )
+                logger.info(f"QPC path: {qpc_path}")
                 return qpc_path
+
+            log_api_arguments(
+                "compile",
+                self.__class__.__name__,
+                {"compile_hash_params": compile_hash_params},
+            )
             if qpc_path.is_dir():
                 # Probably compilation failure last time, delete directory to start over.
                 shutil.rmtree(qpc_path)
@@ -1345,17 +1547,12 @@ class QEFFBaseModel(ABC):
             command.append(f"-network-specialization-config={specializations_json}")
 
         # Write custom_io.yaml file
-        if custom_io is not None:
+        if custom_io_for_compiler is not None:
             custom_io_yaml = compile_dir / "custom_io.yaml"
             with open(custom_io_yaml, "w") as fp:
-                for io_name, dtype in custom_io.items():
+                for io_name, dtype in custom_io_for_compiler.items():
                     fp.write(f" - IOName: {io_name}\n   Precision: {dtype}\n\n")
-            if model_in_bfloat16 and pkv_in_bfloat16:
-                logger.warning(
-                    "Model and Past KV types are both bfloat16. Custom IO list file will be ignored during compile."
-                )
-            else:
-                command.append(f"-custom-IO-list-file={custom_io_yaml}")
+            command.append(f"-custom-IO-list-file={custom_io_yaml}")
 
         command.append(f"-aic-binary-dir={qpc_path}")
         if artifacts:
@@ -1364,7 +1561,10 @@ class QEFFBaseModel(ABC):
             logger.info(f"Running compiler: {' '.join(command)}")
 
         if artifacts:
+            _copy_model_compiler_input(command, compile_dir, self.weight_spec_path)
             _copy_existing_compiler_input(command, "-node-precision-info", compile_dir)
+            _copy_existing_compiler_input(command, "-mdp-load-partition-config", compile_dir)
+            external_data_root = Path(compiler_env["AIC_EXTERNAL_DATA_ROOT"]) if compiler_env is not None else None
             path_flags = {
                 "-aic-binary-dir",
                 "-custom-IO-list-file",
@@ -1376,16 +1576,28 @@ class QEFFBaseModel(ABC):
                 "-ols-config",
             }
             replay_command = [Path(command[0]).name]
+            replay_base_dir = compile_dir.resolve()
             for argument in command[1:]:
                 flag, separator, value = argument.partition("=")
                 if separator and flag in path_flags:
-                    argument = f"{flag}={os.path.relpath(Path(value).resolve(), compile_dir)}"
+                    argument = f"{flag}={os.path.relpath(Path(value).resolve(), replay_base_dir)}"
                 replay_command.append(argument)
             compile_command = shlex.join(replay_command)
             script_lines = (
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 'cd -- "$(dirname -- "$0")"',
+                *(
+                    (
+                        'if [[ -z "${AIC_EXTERNAL_DATA_ROOT:-}" ]]; then',
+                        f"  export AIC_EXTERNAL_DATA_ROOT={shlex.quote(str(external_data_root))}",
+                        "else",
+                        "  export AIC_EXTERNAL_DATA_ROOT",
+                        "fi",
+                    )
+                    if external_data_root is not None
+                    else ()
+                ),
                 compile_command,
                 "",
             )
@@ -1399,8 +1611,9 @@ class QEFFBaseModel(ABC):
             return compile_dir
 
         try:
-            subprocess.run(command, capture_output=True, check=True)
+            subprocess.run(command, capture_output=True, check=True, env=compiler_env)
         except subprocess.CalledProcessError as e:
+            QEFFLogger.log_api_failure("compile", self.__class__.__name__, e)
             raise RuntimeError(
                 "\n".join(
                     [
@@ -1418,4 +1631,12 @@ class QEFFBaseModel(ABC):
         logger.info("Hashed parameters exported successfully.")
 
         self.qpc_path = qpc_path
+        QEFFLogger.log_event(
+            "milestone",
+            self.__class__.__name__,
+            "Compilation completed.",
+            api="compile",
+            milestone=QEFFLogger.MILESTONE_COMPILE_COMPLETE,
+        )
+        logger.info(f"QPC path: {qpc_path}")
         return qpc_path

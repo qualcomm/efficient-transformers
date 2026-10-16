@@ -28,7 +28,9 @@ from transformers import (
 
 from QEfficient.utils.constants import KWARGS_INCLUSION_LIST, QEFF_MODELS_DIR, Constants, QnnConstants
 from QEfficient.utils.hash_utils import json_serializable
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
+
+logger = QEFFLogger.get_logger("INFRA")
 
 # Retained-state buffer name stems that correspond to per-sequence decoder state vLLM transfers
 # between disaggregated prefill and decode workers: classical attention KV (past_key/past_value),

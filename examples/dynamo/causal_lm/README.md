@@ -86,3 +86,35 @@ This example:
 - [QEfficient Documentation](../../../docs/source/index.rst)
 - [Text Generation Examples (TorchScript path)](../../text_generation/README.md)
 - [Validated Models](../../../docs/source/validate.md)
+
+
+## Disaggregated weight-free serving
+
+`disagg_weight_free_inference.py` compiles separate prefill and decode QPCs for
+disaggregated serving. It supports the same weight-free flow for dense and MoE
+causal language models, and `--continuous-batching` enables the CB graph with
+retained KV state and split retained-state IO.
+
+Standard disaggregated compile:
+
+```bash
+python examples/dynamo/causal_lm/disagg_weight_free_inference.py \
+    --model-name tiny-random/qwen3-moe \
+    --prefill-seq-len 32 \
+    --ctx-len 128 \
+    --num-cores 4
+```
+
+Continuous-batching disaggregated compile:
+
+```bash
+python examples/dynamo/causal_lm/disagg_weight_free_inference.py \
+    --model-name tiny-random/gpt-oss-mxfp4 \
+    --continuous-batching \
+    --full-batch-size 2 \
+    --prefill-seq-len 32 \
+    --ctx-len 128 \
+    --num-cores 4
+```
+
+The script prints separate QPC paths for the prefill and decode workers. In standard mode it then runs a prompt through prefill, transfers the retained KV state to decode, and prints generated text. With `--continuous-batching`, it compiles the CB QPCs and leaves the runtime KV-DMA handoff to the serving integration.

@@ -9,11 +9,13 @@ import copy
 import inspect
 import re
 import warnings
+from collections import Counter
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict
 
+import onnx
 import torch
 import torch.nn as nn
 from torch.export import Dim
@@ -35,7 +37,7 @@ from QEfficient.utils.constants import (
     DYNAMO_DIM_MIN_COMP_CTX_LENGTHS,
 )
 from QEfficient.utils.hash_utils import create_export_hash
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger, log_api_arguments
 from QEfficient.utils.runtime_requirements import validate_dynamo_export_requirements
 from QEfficient.utils.torch_patches import (
     apply_torch_patches,
@@ -43,6 +45,7 @@ from QEfficient.utils.torch_patches import (
     undo_torch_patches,
 )
 
+logger = QEFFLogger.get_logger("INFRA")
 _EXPORT_FROM_COMPILE = ContextVar("export_from_compile", default=False)
 
 
@@ -262,6 +265,80 @@ def get_decoder_layer_classes_for_export(model):
     return []
 
 
+def _iter_onnx_nodes(nodes):
+    """Yield graph nodes recursively, including nodes inside nested ONNX subgraphs."""
+    for node in nodes:
+        yield node
+        for attr in node.attribute:
+            if attr.HasField("g"):
+                yield from _iter_onnx_nodes(attr.g.node)
+
+
+def _function_call_counts(onnx_model, function_names: set[str]) -> Counter:
+    """Count call sites for the selected local function names in an ONNX model."""
+    nodes = list(_iter_onnx_nodes(onnx_model.graph.node))
+    for function_proto in onnx_model.functions:
+        nodes.extend(_iter_onnx_nodes(function_proto.node))
+    return Counter(node.op_type for node in nodes if node.op_type in function_names)
+
+
+def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
+    """Return language-layer classes that need repeated proxy subfunction calls."""
+    if qeff_model.__class__.__name__ == "QEffVisionEncoderForTextImageToTextModel":
+        return set()
+
+    model = qeff_model.model
+    get_language_decoder = getattr(model, "get_qeff_language_decoder", None)
+    if callable(get_language_decoder):
+        try:
+            language_decoder = get_language_decoder()
+            language_classes = get_decoder_layer_classes_for_export(language_decoder)
+            if language_classes:
+                return set(language_classes)
+        except Exception as exc:
+            logger.warning(
+                f"get_qeff_language_decoder failed for {model.__class__.__name__}: "
+                f"{type(exc).__name__}: {exc}. Falling back to model-level subfunction validation."
+            )
+
+    submodule_classes = get_decoder_layer_classes_for_export(model)
+    return {cls for cls in submodule_classes if "vision" not in cls.__name__.lower()}
+
+
+def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
+    """Ensure proxy decoder subfunctions are repeated enough to be useful performance proxies."""
+    if not getattr(qeff_model, "_enable_proxy", False):
+        return
+
+    decoder_layer_classes = _proxy_subfunction_validation_classes(qeff_model)
+    if not decoder_layer_classes:
+        return
+
+    target_classnames = {cls.__name__ for cls in decoder_layer_classes}
+    onnx_model = onnx.load(onnx_path, load_external_data=False)
+    function_names = {
+        function_proto.name
+        for function_proto in onnx_model.functions
+        if any(classname in function_proto.name for classname in target_classnames)
+    }
+    if not function_names:
+        raise RuntimeError(
+            "Proxy ONNX subfunction validation failed: no decoder-layer subfunctions were found "
+            f"for expected classes {sorted(target_classnames)}."
+        )
+
+    call_counts = _function_call_counts(onnx_model, function_names)
+    single_call_functions = {
+        name: call_counts.get(name, 0) for name in sorted(function_names) if call_counts.get(name, 0) <= 1
+    }
+    if single_call_functions:
+        raise RuntimeError(
+            "Proxy ONNX subfunction validation failed: each decoder-layer subfunction must be invoked more "
+            "than once for a faithful compiler performance proxy. "
+            f"Observed call counts: {single_call_functions}."
+        )
+
+
 def export_wrapper(func):
     """
     Decorator for export methods that orchestrates the complete export lifecycle.
@@ -325,9 +402,15 @@ def export_wrapper(func):
 
         # 3. Generate hash and finalize export directory path
         export_hash, filtered_hash_params = _generate_export_hash(self, args, kwargs, func)
+        log_api_arguments(
+            "export",
+            self.__class__.__name__,
+            {"export_hash": export_hash, "hash_params": filtered_hash_params},
+        )
         export_dir = export_dir.with_name(export_dir.name + "-" + export_hash)
         kwargs["export_dir"] = export_dir
         self.export_hash = export_hash
+        self._export_cache_hit = False
 
         # Re-inject cache probe flag if needed
         if cache_probe:
@@ -347,6 +430,7 @@ def export_wrapper(func):
                     with dynamo_patch:
                         onnx_path = func(self, *args, **kwargs)
             except Exception as export_exc:
+                QEFFLogger.log_api_failure("export", self.__class__.__name__, export_exc)
                 if use_onnx_subfunctions and dynamo:
                     raise RuntimeError(
                         "Export failed with dynamo=True and use_onnx_subfunctions=True "
@@ -355,6 +439,9 @@ def export_wrapper(func):
                         "Retry export with use_onnx_subfunctions=False for this model/runtime."
                     ) from export_exc
                 raise
+
+            if use_onnx_subfunctions:
+                _validate_proxy_subfunction_calls(self, onnx_path)
 
             # 5. Save export metadata (skip when running cache probe)
             if not cache_probe:
@@ -365,6 +452,22 @@ def export_wrapper(func):
             if use_onnx_subfunctions:
                 _cleanup_onnx_subfunctions(self, subfunction_state)
 
+        if getattr(self, "_export_cache_hit", False):
+            QEFFLogger.log_event(
+                "milestone",
+                self.__class__.__name__,
+                "ONNX export skipped (cached ONNX).",
+                api="export",
+                milestone=QEFFLogger.MILESTONE_EXPORT_SKIPPED,
+            )
+        else:
+            QEFFLogger.log_event(
+                "milestone",
+                self.__class__.__name__,
+                "ONNX export completed.",
+                api="export",
+                milestone=QEFFLogger.MILESTONE_EXPORT_COMPLETE,
+            )
         return onnx_path
 
     return wrapper

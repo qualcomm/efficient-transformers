@@ -60,8 +60,9 @@ from QEfficient.transformers.models._layerwise import (
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
-from QEfficient.utils.logging_utils import logger
+from QEfficient.utils.logging_utils import QEFFLogger
 
+logger = QEFFLogger.get_logger("MODEL")
 QWEN3_5_ROPE_CACHE_EXPORT_CAP = 76800
 
 
@@ -95,7 +96,9 @@ class QEffQwen3_5GatedDeltaNetCustomRMSNormAIC(nn.Module):
 
     def forward(self, hidden_states, gate):
         normed = CustomRMSNormFunc.apply(
-            hidden_states, self.weight, self.variance_epsilon if hasattr(self, "variance_epsilon") else self.eps
+            hidden_states,
+            self.weight.to(hidden_states.dtype),
+            self.variance_epsilon if hasattr(self, "variance_epsilon") else self.eps,
         )
         # silu is computed in float32 for numerical parity, then cast back so the
         # gated output keeps the module dtype (e.g. float16) and matches out_proj.
@@ -469,7 +472,7 @@ def eager_attention_forward(
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
     if attention_mask is not None:
         attn_weights = torch.where(
-            attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=torch.float32), attn_weights
+            attention_mask, torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=module.config.torch_dtype), attn_weights
         )
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
@@ -629,6 +632,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
     def __qeff_init__(self):
         self.chunk_gated_delta_rule = self.torch_chunk_gated_delta_rule_qeff
+        self.torch_dtype = self.out_proj.weight.dtype
         self.chunk_gated_delta_solver = "tree"
         chunk_size = int(getattr(self, "gdn_chunk_size", 64) or 64)
         if chunk_size <= 0:
@@ -829,7 +833,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             query = query * torch.rsqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6)
             key = key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6)
         query, key, value, beta, g = [
-            x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
+            x.transpose(1, 2).contiguous().to(self.torch_dtype) for x in (query, key, value, beta, g)
         ]
 
         mask = (position_ids[0] != -1).unsqueeze(1)
@@ -847,22 +851,21 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         batch_size, num_heads, sequence_length, k_head_dim = key.shape
         v_head_dim = value.shape[-1]
         pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
-        # query = F.pad(query, (0, 0, 0, pad_size))
-        # key = F.pad(key, (0, 0, 0, pad_size))
-        # value = F.pad(value, (0, 0, 0, pad_size))
-        # beta = F.pad(beta, (0, pad_size))
-
-        # # ck = g.clone()
-        # g = F.pad(g, (0, pad_size))
-        query = F.pad(query, (0, 0, 0, pad_size), mode="constant", value=0.0)
-        key = F.pad(key, (0, 0, 0, pad_size), mode="constant", value=0.0)
-        value = F.pad(value, (0, 0, 0, pad_size), mode="constant", value=0.0)
-        beta = F.pad(beta, (0, pad_size), mode="constant", value=0.0)
-
-        # ck = g.clone()
-        g = F.pad(g, (0, pad_size), mode="constant", value=0.0)
+        # QAIC's LoadPad kernel only supports float32/int32/int64 inputs, so bf16/fp16
+        # tensors are padded via torch.cat with a zero tensor instead of F.pad.
+        query = torch.cat(
+            [query, torch.zeros(*query.shape[:2], pad_size, query.shape[3], dtype=query.dtype)],
+            dim=2,
+        )
+        key = torch.cat([key, torch.zeros(*key.shape[:2], pad_size, key.shape[3], dtype=key.dtype)], dim=2)
+        value = torch.cat(
+            [value, torch.zeros(*value.shape[:2], pad_size, value.shape[3], dtype=value.dtype)],
+            dim=2,
+        )
+        beta = torch.cat([beta, torch.zeros(*beta.shape[:2], pad_size, dtype=beta.dtype)], dim=2)
+        g = torch.cat([g, torch.zeros(*g.shape[:2], pad_size, dtype=g.dtype)], dim=2)
         total_sequence_length = sequence_length + pad_size
-        scale = 1 / (query.shape[-1] ** 0.5)
+        scale = 1 / (self.head_k_dim**0.5)
         query = query * scale
 
         v_beta = value * beta.unsqueeze(-1)
@@ -888,7 +891,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         diff = g.unsqueeze(-1) - g.unsqueeze(-2)  # (B, H, num_chunks, C, C)
         diff = diff * (~mask_strict).float()  # zero upper triangle (strict)
         decay_mask = diff.exp().float()
-        decay_mask = decay_mask * (~mask_strict).float()  # ensure upper is zero
+        decay_mask = (decay_mask * (~mask_strict).float()).to(self.torch_dtype)  # ensure upper is zero
 
         attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
         I_base = eye if eye is not None else torch.eye(chunk_size, dtype=attn.dtype)
@@ -925,6 +928,8 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         )
         core_attn_out = core_attn_out[:, :, :sequence_length]
         core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
+        if last_recurrent_state is not None:
+            last_recurrent_state = last_recurrent_state.to(initial_dtype)
         return core_attn_out, last_recurrent_state
 
     def _recurrent_step_batched(self, query, key, value, g, beta, recurrent_state, gdn_num_head_blocks: int = 1):
@@ -1718,7 +1723,7 @@ class QEffQwen3_5VisionAttention(Qwen3_5VisionAttention):
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
         attention_mask = torch.full(
-            [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
+            [1, seq_length, seq_length], MIN_MASKED_ATTENTION_VALUE, device=q.device, dtype=q.dtype
         )
         seq_len = attention_mask.shape[-1]
         rows = torch.arange(seq_len).view(1, -1)
@@ -1730,9 +1735,9 @@ class QEffQwen3_5VisionAttention(Qwen3_5VisionAttention):
         col_mask = (cols >= start) & (cols < end)
         block_mask = row_mask & col_mask
 
-        final_mask = torch.ones((seq_len, seq_len), dtype=torch.float32)
+        final_mask = torch.ones((seq_len, seq_len), dtype=self.config.torch_dtype)
         final_mask[block_mask.any(dim=0)] = 0
-        final_mask = torch.where(final_mask == 1.0, torch.finfo(q.dtype).min, final_mask)
+        final_mask = torch.where(final_mask == 1.0, MIN_MASKED_ATTENTION_VALUE, final_mask)
         attention_mask[0] = final_mask
 
         q = q.transpose(0, 1)
@@ -2296,7 +2301,7 @@ class QEffQwen3_5ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
         return [
             IOInfo(name="input_ids", datatype=torch.int64, shape=("batch_size", "seq_len")),
             IOInfo(name="attention_mask", datatype=torch.int64, shape=("batch_size", "seq_len")),
-            # IOInfo(name="pixel_values", datatype=torch.float32, shape=("batch_size", 3, "image_size", "image_size")),
+            # IOInfo(name="pixel_values", datatype=self.config.torch_dtype, shape=("batch_size", 3, "image_size", "image_size")),
         ]
 
     def prepare_inputs_for_generation(self, inputs, prefill_seq_len=32, batch_size=1):
