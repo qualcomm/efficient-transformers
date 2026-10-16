@@ -2020,7 +2020,10 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         invalid_idx_value = torch.iinfo(torch.int32).max if torch.compiler.is_exporting() else 0
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices).to(torch.int32)
         ctx_indices = ctx_indices.expand(batch_local, rows, block_len)
-        return QEffMiniMaxSparseCache.gather_blocked_kv_dp(cache, ctx_indices)
+        block = QEffMiniMaxSparseCache.gather_blocked_kv_dp(cache, ctx_indices)
+        if zero_invalid:
+            block = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(block), block)
+        return block
 
     def _gqa_dedicated_prefill(
         self,
