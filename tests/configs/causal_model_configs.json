@@ -516,7 +516,6 @@
       "supports_blocking": false,
       "config_attr": "text_config",
       "num_hidden_layers": 4,
-      "known_ccl_export_or_compile_issue": "Llama4 CCL subfunction compilation fails because qaic-compile does not support the dynamic Slice ends tensor in the prefill decoder layer.",
       "config_overrides": {
         "rope_parameters": {
           "rope_type": "llama3",
