@@ -79,10 +79,10 @@ location recorded in `weight_spec.json`.
 
 ### Image-text-to-text models
 
-Weight-free VLM export is currently supported for Qwen3-VL-MoE in dual-QPC
-mode. The vision encoder and language decoder are exported and compiled as
-separate QPCs, and the vision outputs are passed to the language QPC during
-generation.
+Weight-free VLM export is currently supported in dual-QPC mode for Qwen2.5-VL,
+Qwen3-VL, Qwen3-VL-MoE, Qwen3.5, Qwen3.5-MoE, and Gemma4 (dense and MoE).
+The vision encoder and language decoder are exported and compiled as separate
+QPCs, and the vision outputs are passed to the language QPC during generation.
 
 ```Python
 from QEfficient import QEFFAutoModelForImageTextToText
@@ -113,6 +113,7 @@ The supported configuration and current limitations are:
   and validates the required Dynamo environment before building the model.
 - `weight_free=True` and `layerwise=True` are mutually exclusive.
 - Single-QPC weight-free export are not yet supported.
+- Gemma4 BF16 compilation currently fails with a QAIC compiler Glow error.
 
 
 See the
