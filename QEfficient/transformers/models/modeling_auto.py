@@ -1752,8 +1752,14 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 kv_cache_prefix=kv_cache_prefix,
                 **kwargs,
             )
+        dynamo = kwargs.get("dynamo", False) or getattr(self, "_weight_free", False)
         bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
-        seq_len: int = prefill_seq_len or constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+        # TODO: Remove this hack ##################
+        if dynamo:
+            # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
+            bs = max(2, bs)
+        ###########################################
+        seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         qaic_config = kwargs.get("qaic_config", getattr(self.lang_model.model, "qaic_config", None))
         gdn_export_kwargs = _get_gdn_full_state_update_kwargs(
             self.model,
@@ -1819,7 +1825,6 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 == QEfficient.base.modeling_qeff.QEFFBaseModel._total_layers
             )
         )
-        dynamo = kwargs.get("dynamo", False) or getattr(self, "_weight_free", False)
         if should_export and not layerwise_cache_probe:
             self.vision_model.export(
                 inputs["vision"],

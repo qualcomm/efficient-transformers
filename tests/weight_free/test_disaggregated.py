@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 import copy
+import io
 from pathlib import Path
 
 import numpy as np
 import pytest
+import requests
 import torch
 from PIL import Image
 from transformers import (
@@ -37,17 +39,24 @@ DISAGG_MODEL_PARAMS = [
     pytest.param("gpt_oss", "tiny-random/gpt-oss-mxfp4", id="gpt-oss"),
 ]
 
-CTX_LEN = 128
+CTX_LEN = 512
 PREFILL_SEQ_LEN = 32
 MOE_PREFILL_PACKED_CHUNK_SIZE = 16
+VLM_PREFILL_SEQ_LEN = 64
+VLM_CTX_LEN = 512
+VLM_IMAGE_HEIGHT = 354
+VLM_IMAGE_WIDTH = 536
+VLM_NUM_CORES = 16
+VLM_NUM_DEVICES = 1
 MDP_NUM_PARTITIONS = 2
 VLM_GENERATION_LEN = 2
-VLM_IMAGE_SIZE = (536, 354)
-VLM_PROMPT = "Describe this image."
+VLM_PROMPT = "Can you Describe this image in detail?"
+VLM_IMAGE_URL = "https://wallup.net/wp-content/uploads/2017/03/28/351036-San_Francisco-USA-bridge-sunset-Golden_Gate_Bridge-lights.jpg"
 VLM_VISION_INPUTS = {
     "pixel_values",
     "image_grid_thw",
     "image_masks",
+    "image_position_ids",
     "image_input_idx",
     "valid_idx",
     "aspect_ratio_ids",
@@ -227,7 +236,6 @@ def _next_token_ids_from_logits(logits: np.ndarray) -> np.ndarray:
 
 def _load_vlm_hf_reference(model_id: str):
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-    config.text_config.num_hidden_layers = 1
     try:
         model = AutoModelForImageTextToText.from_pretrained(
             model_id,
@@ -247,8 +255,15 @@ def _load_vlm_hf_reference(model_id: str):
     return model.eval()
 
 
-def _prepare_vlm_inputs(processor, image: Image.Image) -> dict:
+def _prepare_vlm_inputs(processor) -> dict:
     process_vision_info = pytest.importorskip("qwen_vl_utils").process_vision_info
+    response = requests.get(VLM_IMAGE_URL, timeout=30)
+    response.raise_for_status()
+    image = Image.open(io.BytesIO(response.content)).convert("RGB")
+    image = image.resize(
+        (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT),
+        Image.Resampling.BICUBIC,
+    )
     messages = [
         [
             {
@@ -306,16 +321,17 @@ def _run_vlm_disaggregated_generation(
         name: value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
         for name, value in processor_inputs.items()
     }
-    inputs = qeff_model.model.prepare_inputs_for_generation(
-        inputs=inputs,
-        prefill_seq_len=PREFILL_SEQ_LEN,
-        batch_size=1,
-    )
-
+    model_type = getattr(qeff_model.model.config, "model_type", None)
+    if model_type == "qwen3_vl_moe":
+        inputs = qeff_model.model.prepare_inputs_for_generation(
+            inputs=inputs,
+            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
+            batch_size=1,
+        )
     pad_token_id = processor.tokenizer.pad_token_id or 1
     input_ids_length = inputs["input_ids"].shape[1]
-    num_chunks = -(input_ids_length // -PREFILL_SEQ_LEN)
-    padded_len = num_chunks * PREFILL_SEQ_LEN
+    num_chunks = -(input_ids_length // -VLM_PREFILL_SEQ_LEN)
+    padded_len = num_chunks * VLM_PREFILL_SEQ_LEN
     inputs["input_ids"] = torch.nn.functional.pad(
         inputs["input_ids"],
         (0, padded_len - input_ids_length),
@@ -353,11 +369,16 @@ def _run_vlm_disaggregated_generation(
     num_hidden_layers = qeff_model.model.config.text_config.num_hidden_layers
     for chunk_idx in range(num_chunks):
         chunk_inputs["input_ids"] = lang_inputs["input_ids"][
-            :, chunk_idx * PREFILL_SEQ_LEN : (chunk_idx + 1) * PREFILL_SEQ_LEN
+            :, chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
         ]
         chunk_inputs["position_ids"] = lang_inputs["position_ids"][
-            ..., chunk_idx * PREFILL_SEQ_LEN : (chunk_idx + 1) * PREFILL_SEQ_LEN
+            ..., chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
         ]
+        if "mm_token_type_ids" in lang_inputs:
+            chunk_inputs["mm_token_type_ids"] = lang_inputs["mm_token_type_ids"][
+                :, chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
+            ]
+        assert chunk_inputs["input_ids"].shape[1] == VLM_PREFILL_SEQ_LEN
         prefill_outputs = prefill_session.run(chunk_inputs)
         _update_vlm_retained_states(chunk_inputs, prefill_outputs, num_hidden_layers)
         chunk_inputs["image_idx"] = prefill_outputs["image_idx_output"]
@@ -367,6 +388,8 @@ def _run_vlm_disaggregated_generation(
         "input_ids": generated_ids[-1].reshape(1, 1),
         "position_ids": np.max(lang_inputs["position_ids"], axis=-1, keepdims=True) + 1,
     }
+    if "mm_token_type_ids" in lang_inputs:
+        decode_inputs["mm_token_type_ids"] = np.zeros((1, 1), dtype=lang_inputs["mm_token_type_ids"].dtype)
     _update_vlm_retained_states(decode_inputs, prefill_outputs, num_hidden_layers)
     decode_outputs = decode_session.run(decode_inputs)
     generated_ids.append(_next_token_ids_from_logits(decode_outputs["logits"]))
@@ -461,28 +484,33 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
     except Exception as exc:
         skip_on_model_fetch_error(exc, model_id)
 
-    image = Image.new("RGB", VLM_IMAGE_SIZE, color=(127, 127, 127))
-    processor_inputs = _prepare_vlm_inputs(processor, image)
+    processor_inputs = _prepare_vlm_inputs(processor)
     hf_tokens = _run_vlm_hf_reference(hf_model, processor_inputs)
 
     common = {
         "batch_size": 1,
-        "ctx_len": 512,
-        "height": 354,
-        "width": 536,
-        "num_cores": 4,
-        "num_devices": 1,
+        "ctx_len": VLM_CTX_LEN,
+        "height": VLM_IMAGE_HEIGHT,
+        "width": VLM_IMAGE_WIDTH,
+        "num_cores": VLM_NUM_CORES,
+        "num_devices": VLM_NUM_DEVICES,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
+        "aic_enable_depth_first": True,
+        "mos": 1,
+        "split_model_io": True,
         "use_onnx_subfunctions": True,
-        "offload_pt_weights": False,
     }
+    config_model_type = getattr(qeff_model.model.config, "model_type", None)
+    if config_model_type == "gemma4":
+        common.pop("height")
+        common.pop("width")
     sessions = []
     compiled_onnx_paths = {}
     try:
         vision_qpcs = qeff_model.compile(
             compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_vision"),
-            prefill_seq_len=PREFILL_SEQ_LEN,
+            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
             skip_lang=True,
             **common,
         )
@@ -490,7 +518,7 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
 
         prefill_qpcs = qeff_model.compile(
             compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_prefill"),
-            prefill_seq_len=PREFILL_SEQ_LEN,
+            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
             prefill_only=True,
             enable_chunking=True,
             retain_full_kv=True,

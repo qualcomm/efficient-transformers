@@ -17,6 +17,7 @@ Covers VLM export, multi-specialization compilation, and HF/QAIC parity.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -49,6 +50,7 @@ WEIGHT_FREE_VLM_QAIC_MODEL_PARAMS = [
     pytest.param("qwen3_vl_moe", marks=pytest.mark.xdist_group(name="qaic-vlm-qwen3-vl-moe"), id="qwen3-vl-moe"),
     pytest.param("qwen3_5", marks=pytest.mark.xdist_group(name="qaic-vlm-qwen3-5"), id="qwen3.5"),
     pytest.param("qwen3_5_moe", marks=pytest.mark.xdist_group(name="qaic-vlm-qwen3-5-moe"), id="qwen3.5-moe"),
+    pytest.param("gemma4", marks=pytest.mark.xdist_group(name="qaic-vlm-gemma4-dense"), id="gemma4"),
 ]
 WEIGHT_FREE_VLM_QAIC_MODEL_IDS = {
     "qwen2_5_vl": "optimum-intel-internal-testing/tiny-random-qwen2.5-vl",
@@ -56,6 +58,7 @@ WEIGHT_FREE_VLM_QAIC_MODEL_IDS = {
     "qwen3_vl_moe": "tiny-random/qwen3-vl-moe",
     "qwen3_5": "tiny-random/qwen3.5",
     "qwen3_5_moe": "tiny-random/qwen3.5-moe",
+    "gemma4": "tiny-random/gemma-4-dense",
 }
 VLM_GENERATION_LEN = 2
 VLM_PREFILL_SEQ_LEN = 64
@@ -133,11 +136,13 @@ def _prepare_vlm_test_inputs(
     )
     qeff_inputs = {key: value.clone() if isinstance(value, torch.Tensor) else value for key, value in hf_inputs.items()}
     if qeff_model is not None:
-        qeff_inputs = qeff_model.prepare_inputs_for_generation(
-            inputs=qeff_inputs,
-            prefill_seq_len=model_config["prompt_len"],
-            batch_size=model_config["batch_size"],
-        )
+        config_model_type = getattr(qeff_model.model.config, "model_type", None)
+        if config_model_type != "gemma4":
+            qeff_inputs = qeff_model.prepare_inputs_for_generation(
+                inputs=qeff_inputs,
+                prefill_seq_len=model_config["prompt_len"],
+                batch_size=model_config["batch_size"],
+            )
     if "image_grid_thw" in qeff_inputs and qeff_inputs["image_grid_thw"].ndim == 2:
         grid = qeff_inputs["image_grid_thw"][0]
         time, grid_height, grid_width = (int(value.item()) for value in grid)
@@ -147,6 +152,68 @@ def _prepare_vlm_test_inputs(
     if "pixel_values" in qeff_inputs:
         qeff_inputs["pixel_values"] = qeff_inputs["pixel_values"].to(torch.float32)
     return hf_inputs, qeff_inputs
+
+
+def _get_vlm_specialization_kwargs(model, model_config, heights, widths, num_frames):
+    parameters = inspect.signature(model.get_specializations).parameters
+    kwargs = {}
+    if "img_size" in parameters:
+        kwargs["img_size"] = model_config.get("img_size")
+    if "height" in parameters and "width" in parameters:
+        kwargs.update(
+            {
+                "height": heights,
+                "width": widths,
+                "num_frames": num_frames,
+            }
+        )
+    return kwargs
+
+
+def _get_vlm_compile_kwargs(
+    model,
+    model_config,
+    image_size,
+    heights=None,
+    widths=None,
+    num_frames=None,
+    min_pixels=None,
+    max_pixels=None,
+):
+    kwargs = {"img_size": model_config.get("img_size")}
+    specialization_kwargs = _get_vlm_specialization_kwargs(
+        model,
+        model_config,
+        heights if heights is not None else image_size[1],
+        widths if widths is not None else image_size[0],
+        num_frames if num_frames is not None else 1,
+    )
+    if "height" in specialization_kwargs:
+        kwargs.update(
+            {
+                "height": specialization_kwargs["height"],
+                "width": specialization_kwargs["width"],
+                "num_frames": specialization_kwargs["num_frames"],
+                "mm_processor_kwargs": {
+                    "min_pixels": min_pixels if min_pixels is not None else image_size[0] * image_size[1],
+                    "max_pixels": max_pixels if max_pixels is not None else image_size[0] * image_size[1],
+                },
+            }
+        )
+    return kwargs
+
+
+def _assert_vlm_specialization_structure(specializations, expected_vision_specs):
+    assert set(specializations) >= {"vision", "lang"}
+    vision_specs = specializations["vision"]
+    assert len(vision_specs) == expected_vision_specs
+    assert vision_specs
+
+    if all("grid_height" in spec and "grid_width" in spec for spec in vision_specs):
+        assert len({(spec["grid_height"], spec["grid_width"]) for spec in vision_specs}) == expected_vision_specs
+    else:
+        assert all("max_patches" in spec for spec in vision_specs)
+        assert all("vision_batch_size" in spec for spec in vision_specs)
 
 
 def _assert_vlm_weight_free_graph(model_type: str, language_onnx: Path) -> None:
@@ -164,6 +231,7 @@ def _assert_vlm_weight_free_graph(model_type: str, language_onnx: Path) -> None:
             "QEffQwen3_5MoeLinearAttentionDecoderLayer",
             "QEffQwen3_5MoeFullAttentionDecoderLayer",
         ),
+        "gemma4": ("QEffGemma4DecoderLayer"),
     }[model_type]
     missing_functions = [
         expected for expected in expected_functions if not any(expected in name for name in function_names)
@@ -367,20 +435,30 @@ def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tm
     assert vision_onnx.is_file()
     _assert_weight_spec(vision_onnx)
 
+    specialization_kwargs = _get_vlm_specialization_kwargs(
+        qeff_model.model,
+        model_config,
+        [224, VLM_IMAGE_HEIGHT],
+        [224, VLM_IMAGE_WIDTH],
+        [1, 1],
+    )
     specializations, _ = qeff_model.model.get_specializations(
         batch_size=model_config["batch_size"],
         prefill_seq_len=model_config["prompt_len"],
         ctx_len=model_config["ctx_len"],
-        height=[224, VLM_IMAGE_HEIGHT],
-        width=[224, VLM_IMAGE_WIDTH],
-        num_frames=[1, 1],
         kv_offload=True,
+        **specialization_kwargs,
     )
-    assert len(specializations["vision"]) == 2
-    assert len({(spec["grid_height"], spec["grid_width"]) for spec in specializations["vision"]}) == 2
+    expected_vision_specs = 2 if "height" in specialization_kwargs else 1
+    _assert_vlm_specialization_structure(specializations, expected_vision_specs)
 
 
-def _prepare_vlm_inputs(processor: AutoProcessor, image: Image.Image) -> dict:
+def _prepare_vlm_inputs(
+    processor: AutoProcessor,
+    image: Image.Image,
+    min_pixels: int | None = None,
+    max_pixels: int | None = None,
+) -> dict:
     process_vision_info = pytest.importorskip("qwen_vl_utils").process_vision_info
     messages = [
         [
@@ -395,7 +473,12 @@ def _prepare_vlm_inputs(processor: AutoProcessor, image: Image.Image) -> dict:
     ]
     texts = [processor.apply_chat_template(message, tokenize=False, add_generation_prompt=True) for message in messages]
     image_inputs, video_inputs = process_vision_info(messages)
-    return dict(processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt"))
+    processor_kwargs = {"padding": True, "return_tensors": "pt"}
+    if min_pixels is not None:
+        processor_kwargs["min_pixels"] = min_pixels
+    if max_pixels is not None:
+        processor_kwargs["max_pixels"] = max_pixels
+    return dict(processor(text=texts, images=image_inputs, videos=video_inputs, **processor_kwargs))
 
 
 def _run_vlm_hf_reference(model, inputs: dict) -> np.ndarray:
@@ -425,7 +508,7 @@ def test_weight_free_vlm_combined_compile(model_type, model_id, tmp_export_dir):
     checkpoint_dir = tmp_export_dir / f"{model_type}_combined_checkpoint"
     try:
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        hf_model, _ = _build_vlm_test_checkpoint(model_type, checkpoint_dir, model_id)
+        hf_model, model_config = _build_vlm_test_checkpoint(model_type, checkpoint_dir, model_id)
         qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
             str(checkpoint_dir),
             kv_offload=True,
@@ -436,28 +519,42 @@ def test_weight_free_vlm_combined_compile(model_type, model_id, tmp_export_dir):
         skip_on_model_fetch_error(exc, model_id)
 
     image = Image.new("RGB", (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT), color=(127, 127, 127))
-    hf_tokens = _run_vlm_hf_reference(hf_model, _prepare_vlm_inputs(processor, image))
-    qeff_inputs = _prepare_vlm_inputs(processor, image)
-    qeff_inputs = qeff_model.model.prepare_inputs_for_generation(
-        inputs=qeff_inputs,
-        prefill_seq_len=VLM_PREFILL_SEQ_LEN,
-        batch_size=1,
+    image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
+    compile_image_kwargs = _get_vlm_compile_kwargs(qeff_model.model, model_config, image_size)
+    mm_processor_kwargs = compile_image_kwargs.get("mm_processor_kwargs", {})
+    hf_inputs = _prepare_vlm_inputs(
+        processor,
+        image,
+        min_pixels=mm_processor_kwargs.get("min_pixels"),
+        max_pixels=mm_processor_kwargs.get("max_pixels"),
     )
-
-    qpc_paths = qeff_model.compile(
-        compile_dir=str(tmp_export_dir / f"{model_type}_combined"),
-        batch_size=1,
-        prefill_seq_len=VLM_PREFILL_SEQ_LEN,
-        ctx_len=VLM_CTX_LEN,
-        height=VLM_IMAGE_HEIGHT,
-        width=VLM_IMAGE_WIDTH,
-        num_cores=VLM_NUM_CORES,
-        num_devices=1,
-        mxfp6_matmul=False,
-        mxint8_kv_cache=False,
-        use_onnx_subfunctions=True,
-        offload_pt_weights=False,
+    hf_tokens = _run_vlm_hf_reference(hf_model, hf_inputs)
+    qeff_inputs = _prepare_vlm_inputs(
+        processor,
+        image,
+        min_pixels=mm_processor_kwargs.get("min_pixels"),
+        max_pixels=mm_processor_kwargs.get("max_pixels"),
     )
+    if "height" in inspect.signature(qeff_model.model.get_specializations).parameters:
+        qeff_inputs = qeff_model.model.prepare_inputs_for_generation(
+            inputs=qeff_inputs,
+            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
+            batch_size=1,
+        )
+    compiler_config = {
+        "batch_size": 1,
+        "prefill_seq_len": VLM_PREFILL_SEQ_LEN,
+        "ctx_len": VLM_CTX_LEN,
+        "num_cores": VLM_NUM_CORES,
+        "num_devices": 1,
+        "mxfp6_matmul": False,
+        "mxint8_kv_cache": False,
+        "use_onnx_subfunctions": True,
+        "offload_pt_weights": False,
+        "retain_full_kv": True,
+    }
+    compiler_config.update(compile_image_kwargs)
+    qpc_paths = qeff_model.compile(compile_dir=str(tmp_export_dir / f"{model_type}_combined"), **compiler_config)
 
     assert qpc_paths.get("vision_qpc_path")
     assert qpc_paths.get("lang_qpc_path")
@@ -542,7 +639,6 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         _assert_weight_spec(vision_onnx)
 
     common_compile_kwargs = {
-        "img_size": model_config["img_size"],
         "ctx_len": model_config["ctx_len"],
         "num_devices": 1,
         "num_cores": 16,
@@ -553,16 +649,15 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         common_compile_kwargs["skip_vision"] = True
     else:
         common_compile_kwargs.update(
-            {
-                "height": image_size[1],
-                "width": image_size[0],
-                "mm_processor_kwargs": {
-                    "min_pixels": image_size[0] * image_size[1],
-                    "max_pixels": image_size[0] * image_size[1],
-                },
-            }
+            _get_vlm_compile_kwargs(
+                qeff_model.model,
+                model_config,
+                image_size,
+                heights=image_size[1],
+                widths=image_size[0],
+                num_frames=1,
+            )
         )
-
     if model_type in {"qwen3_5", "qwen3_5_moe"}:
         vision_qpc = qeff_model.compile(
             **common_compile_kwargs,
@@ -622,7 +717,8 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
     """Compile two vision resolutions in one QPC and run the dummy VLM on QAIC."""
     if model_type == "qwen2_5_vl":
         pytest.skip("Qwen 2.5-VL vision QPC is deferred because QAIC reports a Conv3D bias-shape error")
-
+    if model_type == "gemma4":
+        pytest.skip("Gemma 4 does not support multi-specialization yet")
     model_config = _VLM_MODEL_CONFIGS[model_type]
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_multi_spec_checkpoint"
@@ -672,34 +768,43 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
     _assert_weight_spec(language_onnx)
     _assert_vlm_weight_free_graph(model_type, language_onnx)
 
+    specialization_kwargs = _get_vlm_specialization_kwargs(
+        qeff_model.model,
+        model_config,
+        [224, VLM_IMAGE_HEIGHT],
+        [224, VLM_IMAGE_WIDTH],
+        [1, 1],
+    )
     specializations, _ = qeff_model.model.get_specializations(
         batch_size=model_config["batch_size"],
         prefill_seq_len=model_config["prompt_len"],
         ctx_len=model_config["ctx_len"],
-        height=specialization_heights,
-        width=specialization_widths,
-        num_frames=specialization_frames,
         kv_offload=True,
+        **specialization_kwargs,
     )
-    assert len(specializations["vision"]) == 2
-    assert len({(spec["grid_height"], spec["grid_width"]) for spec in specializations["vision"]}) == 2
+    expected_vision_specs = 2 if "height" in specialization_kwargs else 1
+    _assert_vlm_specialization_structure(specializations, expected_vision_specs)
 
     compile_kwargs = {
-        "img_size": model_config["img_size"],
-        "prefill_seq_len": model_config["prompt_len"],
-        "ctx_len": model_config["ctx_len"],
-        "height": specialization_heights,
-        "width": specialization_widths,
-        "num_frames": specialization_frames,
-        "mm_processor_kwargs": {
-            "min_pixels": 224 * 224,
-            "max_pixels": VLM_IMAGE_WIDTH * VLM_IMAGE_HEIGHT,
-        },
+        "prefill_seq_len": model_config.get("prompt_len"),
+        "ctx_len": model_config.get("ctx_len"),
         "num_devices": 1,
         "num_cores": 16,
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }
+    compile_kwargs.update(
+        _get_vlm_compile_kwargs(
+            qeff_model.model,
+            model_config,
+            image_size,
+            heights=specialization_heights,
+            widths=specialization_widths,
+            num_frames=specialization_frames,
+            min_pixels=224 * 224,
+            max_pixels=VLM_IMAGE_WIDTH * VLM_IMAGE_HEIGHT,
+        )
+    )
     if model_type in {"qwen3_5", "qwen3_5_moe"}:
         vision_qpc = qeff_model.compile(
             **compile_kwargs,

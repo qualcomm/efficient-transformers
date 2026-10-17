@@ -1141,6 +1141,30 @@ class TestWeightFreeCheckpointTransforms:
         assert _is_non_persistent_buffer(module, "generated_mask")
         assert not _is_non_persistent_buffer(module, "checkpoint_buffer")
 
+    def test_resolver_prefers_exact_lm_head_over_tied_embedding_alias(self):
+        checkpoint_index = {
+            "lm_head.weight": "model.safetensors",
+            "model.embed_tokens.weight": "model.safetensors",
+        }
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert find_checkpoint_key("lm_head.weight", checkpoint_index, backbone) == "lm_head.weight"
+
+    def test_resolver_maps_wrapped_vision_model_to_gemma4_vision_tower(self):
+        checkpoint_name = "model.vision_tower.patch_embedder.position_embedding_table"
+        backbone = MagicMock()
+        backbone.base_model_prefix = "model"
+
+        assert (
+            find_checkpoint_key(
+                "model.vision_model.patch_embedder.position_embedding_table",
+                {checkpoint_name: "model.safetensors"},
+                backbone,
+            )
+            == checkpoint_name
+        )
+
     def test_resolver_combines_router_gate_alias_with_active_transform(self):
         checkpoint_name = "model.layers.0.block_sparse_moe.router.weight"
         backbone = MagicMock()
@@ -1223,6 +1247,7 @@ class TestWeightFreeCheckpointTransforms:
             ("buffer", "model.embed_tokens.embed_scale"),
             ("parameter", "model.sin_cached"),
             ("parameter", "model.cos_cached"),
+            ("buffer", "language_model.layers.0.self_attn.v_norm._qeff_unit_weight"),
         ],
     )
     def test_promote_initializers_keeps_computed_state_embedded(self, tmp_path, monkeypatch, state_kind, state_name):

@@ -725,6 +725,7 @@
       "batch_size": 1,
       "prompt_len": 64,
       "ctx_len": 512,
+      "comp_ctx_lengths_decode": [1024, 2048, 4096],
       "img_size": 384,
       "img_url": "https://picsum.photos/id/237/536/354",
       "text_prompt": "Can you describe the image in detail.",
@@ -757,12 +758,14 @@
           "patch_size": 16
         },
       "vision_soft_tokens_per_image": 280 
-      }
+      },
+      "known_bf16_compile_issue":"Gemma-4-dense model compilation fails because qaic-compile glow error."
     },
     {
       "model_name": "tiny-random/gemma-4-moe",
       "model_type": "gemma4",
       "supports_blocking": false,
+      "comp_ctx_lengths_decode": [1024, 2048, 4096],
       "batch_size": 1,
       "prompt_len": 64,
       "ctx_len": 512,
@@ -801,7 +804,8 @@
           "patch_size": 16
         },
       "vision_soft_tokens_per_image": 280 
-      }
+      },
+      "known_bf16_compile_issue":"Gemma-4-moe model compilation fails because qaic-compile glow error."
     }
   ],
   "_comment": "Qwen3-VL blocking is tested in tests/transformers/disaggregated/test_qwen3_vl_moe_disagg_blocked_tiny_model.py.",

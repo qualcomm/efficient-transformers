@@ -97,6 +97,7 @@ def main():
         dtype="float32",
         kv_offload=True,
         ignore_mismatched_sizes=True,
+        weight_free=True,
         ## For CCL activation
         # qaic_config={
         #     "ccl_enabled": True,

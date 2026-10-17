@@ -27,7 +27,6 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4VisionAttention,
     apply_rotary_pos_emb,
     eager_attention_forward,
-    repeat_kv,
     rotate_half,
 )
 
@@ -36,7 +35,7 @@ from QEfficient.blocking.attention_blocking import (
     BlockingMode,
     generic_blocked_attention_interface,
 )
-from QEfficient.customop.rms_norm import CustomRMSNormFunc
+from QEfficient.customop.utils import custom_rms_norm_func
 from QEfficient.transformers.cache_utils import QEffGemma4DynamicCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.transformers.moe import (
@@ -60,6 +59,10 @@ def _is_onnx_export() -> bool:
     return torch.onnx.is_in_onnx_export()
 
 
+def qeff_repeat_kv(hidden_states, n_rep):
+    return torch.repeat_interleave(hidden_states, repeats=n_rep, dim=1)
+
+
 def _clamp_to_fp16_range(hidden_states: torch.Tensor) -> torch.Tensor:
     if not _is_onnx_export() or _DISABLE_EXPORT_FP16_CLAMP:
         return hidden_states
@@ -72,12 +75,14 @@ def _saturating_residual_add(residual: torch.Tensor, hidden_states: torch.Tensor
     return (residual.float() + hidden_states.float()).clamp(_FP16_CLAMP_MIN, _FP16_CLAMP_MAX).to(hidden_states.dtype)
 
 
-def _attention_mask_min(dtype: torch.dtype, device: torch.device | None = None) -> torch.Tensor:
-    # During export with -convert-to-fp16, using finfo(float32).min can create
-    # extreme constants that destabilize downstream compiler passes.
+def _attention_mask_min(
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+) -> torch.Tensor:
     if _is_onnx_export():
-        return torch.tensor(_FP16_CLAMP_MIN, dtype=dtype, device=device)
-    return torch.tensor(torch.finfo(dtype).min, dtype=dtype, device=device)
+        return torch.full((), _FP16_CLAMP_MIN, dtype=dtype, device=device)
+
+    return torch.full((), torch.finfo(dtype).min, dtype=dtype, device=device)
 
 
 def _sanitize_clippable_linear_bounds(module: nn.Module) -> None:
@@ -132,8 +137,13 @@ def _build_bidirectional_vision_attention_mask(
         return base_mask
 
     is_vision = (mm_token_type_ids == 1) | (mm_token_type_ids == 2)
-    is_prev_vision = torch.roll(is_vision, shifts=1, dims=-1)
-    is_prev_vision[..., 0] = False
+    is_prev_vision = torch.cat(
+        [
+            torch.zeros_like(is_vision[..., :1]),
+            is_vision[..., :-1],
+        ],
+        dim=-1,
+    )
     new_vision_starts = is_vision & ~is_prev_vision
     vision_group_ids = torch.cumsum(new_vision_starts.to(torch.int64), dim=1) - 1
     vision_group_ids = torch.where(is_vision, vision_group_ids, torch.full_like(vision_group_ids, -1))
@@ -141,7 +151,14 @@ def _build_bidirectional_vision_attention_mask(
     kv_indices = torch.arange(target_length, device=vision_group_ids.device, dtype=torch.int64).view(1, -1)
     seq_len_limit = torch.full_like(kv_indices, vision_group_ids.shape[1] - 1)
     safe_kv_indices = torch.minimum(kv_indices, seq_len_limit)
-    kv_group_ids = torch.gather(vision_group_ids, 1, safe_kv_indices.expand(vision_group_ids.shape[0], -1))
+    batch_zeros = torch.zeros_like(vision_group_ids[:, :1])
+    gather_indices = safe_kv_indices + batch_zeros
+
+    kv_group_ids = torch.gather(
+        vision_group_ids,
+        1,
+        gather_indices,
+    )
     kv_group_ids = torch.where(kv_indices < vision_group_ids.shape[1], kv_group_ids, torch.full_like(kv_group_ids, -1))
 
     same_group = (vision_group_ids.unsqueeze(-1) == kv_group_ids.unsqueeze(1)) & (vision_group_ids.unsqueeze(-1) >= 0)
@@ -218,8 +235,8 @@ def eager_attention_forward_text(
     softcap: float | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
+    key_states = qeff_repeat_kv(key, module.num_key_value_groups)
+    value_states = qeff_repeat_kv(value, module.num_key_value_groups)
 
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
     if softcap is not None:
@@ -228,11 +245,8 @@ def eager_attention_forward_text(
         attn_weights = attn_weights * softcap
 
     if attention_mask is not None:
-        attn_weights = torch.where(
-            attention_mask,
-            torch.tensor(constants.MIN_MASKED_ATTENTION_VALUE, dtype=module.config.torch_dtype),
-            attn_weights,
-        )
+        masked_fill = torch.full_like(attn_weights, constants.MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype)
+        attn_weights = torch.where(attention_mask, masked_fill, attn_weights)
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -311,7 +325,7 @@ class QEffGemma4CustomRMSNormAIC(nn.Module):
         return hidden_states * torch.pow(mean_squared, -0.5)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if not _is_onnx_export():
+        if not _is_onnx_export() and not torch._dynamo.is_compiling():
             normed_output = self._norm(hidden_states.float())
             if getattr(self, "with_scale", True):
                 normed_output = normed_output * self.weight.float()
@@ -323,9 +337,7 @@ class QEffGemma4CustomRMSNormAIC(nn.Module):
             weight = getattr(self, "_qeff_unit_weight", None)
             if weight is None:
                 weight = hidden_states.new_ones(hidden_states.shape[-1])
-        # Cast weight to match hidden_states dtype so the AIC compiler sees
-        # matching Input/Scale dtypes in the CustomRMSNorm op (e.g. bfloat16).
-        return CustomRMSNormFunc.apply(hidden_states, weight.to(hidden_states.dtype), self.eps)
+        return custom_rms_norm_func(hidden_states, weight, self.eps)
 
 
 class QEffGemma4TextMoeBlock(QEffMoEBlockMixin, nn.Module):
@@ -396,6 +408,8 @@ class QEffGemma4VisionAttention(Gemma4VisionAttention):
         hidden_shape = (*input_shape, -1, self.head_dim)
 
         cos, sin = position_embeddings
+        cos = cos.to(device=position_ids.device)
+        sin = sin.to(device=position_ids.device)
 
         query_states = self.q_proj(hidden_states).view(hidden_shape)
         query_states = self.q_norm(query_states)
@@ -501,6 +515,8 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
         )
 
         cos, sin = position_embeddings
+        cos = cos.to(device=hidden_states.device)
+        sin = sin.to(device=hidden_states.device)
 
         query_states = self.q_proj(hidden_states).view(hidden_shape)
         query_states = self.q_norm(query_states)
@@ -521,12 +537,12 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
 
             key_states = self.k_norm(key_states)
             key_states = qeff_apply_rotary_pos_emb(key_states, cos, sin)
-            key_states = key_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2).clone()
             if key_states.dtype != target_dtype:
                 key_states = key_states.to(target_dtype)
 
             value_states = self.v_norm(value_states)
-            value_states = value_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2).clone()
             if value_states.dtype != target_dtype:
                 value_states = value_states.to(target_dtype)
             token_key_states, token_value_states = key_states, value_states
@@ -634,6 +650,8 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
 
 class QEffGemma4TextDecoderLayer(Gemma4TextDecoderLayer):
     def __qeff_init__(self):
+        if getattr(self, "layer_scalar", None) is not None and self.layer_scalar.is_meta:
+            self.layer_scalar = torch.ones(self.layer_scalar.shape, dtype=self.layer_scalar.dtype)
         if not getattr(self, "enable_moe_block", False) or hasattr(self, "moe_block"):
             return
         router = self._modules.pop("router")
@@ -690,13 +708,19 @@ class QEffGemma4TextDecoderLayer(Gemma4TextDecoderLayer):
             hidden_states = self.post_per_layer_input_norm(hidden_states)
             hidden_states = _saturating_residual_add(residual, hidden_states)
 
-        hidden_states *= self.layer_scalar
-        return hidden_states
+        hidden_states *= self.layer_scalar.to(device=hidden_states.device)
+        return hidden_states.to(device=hidden_states.device)
 
 
 class QEffGemma4TextModel(Gemma4TextModel):
     def __qeff_init__(self):
-        self.rotary_emb = QEffGemma4TextRotaryEmbedding(config=self.config)
+        try:
+            cache_device = next(self.parameters()).device
+        except StopIteration:
+            cache_device = torch.device("cpu")
+        if cache_device.type == "meta":
+            cache_device = torch.device("cpu")
+        self.rotary_emb = QEffGemma4TextRotaryEmbedding(config=self.config, device=cache_device)
         for layer_type in sorted(self.rotary_emb.layer_types):
             attention_scaling = getattr(self.rotary_emb, f"{layer_type}_attention_scaling")
             sin_cached = getattr(self.rotary_emb, f"{layer_type}_sin_cached") * attention_scaling
@@ -1098,10 +1122,10 @@ class QEffGemma4ForCausalLM(Gemma4ForCausalLM):
                 layer_seq_len = seq_len
             cache_shape = [batch_size, n_heads, layer_seq_len, d_head]
             past_key_values.append(
-                (
+                [
                     torch.zeros(cache_shape, dtype=config.dtype),
                     torch.zeros(cache_shape, dtype=config.dtype),
-                )
+                ]
             )
         return past_key_values
 
@@ -1137,7 +1161,7 @@ class QEffGemma4ForCausalLM(Gemma4ForCausalLM):
             else:
                 hidden_states = hidden_states[:, -1:, :]
 
-        logits = self.lm_head(hidden_states)
+        logits = self.model.lm_head(hidden_states)
         if self.config.final_logit_softcapping is not None:
             logits = logits / self.config.final_logit_softcapping
             logits = torch.tanh(logits)
@@ -1155,7 +1179,6 @@ class QEffGemma4DecoderWrapper(nn.Module):
         self.model = model
         self.language_model = self.model.model.language_model
         self.config = self.model.config
-        self.lm_head = self.model.lm_head
 
     def get_submodules_for_export(self) -> type[nn.Module]:
         return {QEffGemma4TextDecoderLayer}
@@ -1190,12 +1213,12 @@ class QEffGemma4DecoderWrapper(nn.Module):
             inputs_embeds = inputs_embeds.to(target_dtype)
 
         next_image_idx = image_idx
-        if input_ids.shape[1] != 1 and special_image_mask.any() and vision_embeds is None:
+        if input_ids.shape[1] != 1 and vision_embeds is None:
             raise RuntimeError(
                 "Image placeholder tokens were found in decoder input, but `vision_embeds` is missing. "
                 "This indicates the vision encoder path did not run."
             )
-        if vision_embeds is not None and input_ids.shape[1] != 1 and special_image_mask.any():
+        if vision_embeds is not None and input_ids.shape[1] != 1:
             if vision_embeds.dim() == 2:
                 vision_embeds = vision_embeds.unsqueeze(0)
             if next_image_idx is None:
@@ -1240,7 +1263,7 @@ class QEffGemma4DecoderWrapper(nn.Module):
         else:
             logit_index = position_ids.to(torch.int32).argmax(1, keepdim=True)
             hidden_states = outputs[0][torch.arange(position_ids.shape[0]).view(-1, 1), logit_index]
-        logits = self.lm_head(hidden_states)
+        logits = self.model.lm_head(hidden_states)
         if self.config.text_config.final_logit_softcapping is not None:
             logits = logits / self.config.text_config.final_logit_softcapping
             logits = torch.tanh(logits)
@@ -1253,13 +1276,14 @@ class QEffGemma4DecoderWrapper(nn.Module):
         if getattr(self.language_model, "target_layer_ids", None):
             return logits, vision_embeds, next_image_idx, outputs.past_key_values, outputs.hidden_states
 
-        return logits, vision_embeds, next_image_idx, outputs.past_key_values
+        return logits, vision_embeds.clone(), next_image_idx.clone(), outputs.past_key_values
 
 
 class QEffGemma4EncoderWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
+        self.config = model.config
         self.model.vision_model = self.model.model.vision_tower
         self.mm_tokens_per_image = getattr(
             self.model.config,
@@ -1269,6 +1293,26 @@ class QEffGemma4EncoderWrapper(nn.Module):
 
     def get_submodules_for_export(self) -> type[nn.Module]:
         return {self.model.model.vision_tower.encoder.layers[0].__class__}
+
+    @staticmethod
+    def _avg_pool_by_positions_static_kernel(
+        hidden_states: torch.Tensor, pixel_position_ids: torch.Tensor, length: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Keep pooling math ONNX/AIC-friendly by avoiding floor-division on symbolic shapes.
+        input_seq_len = hidden_states.shape[1]
+        kernel_size = int((input_seq_len // length) ** 0.5)
+        k_squared = kernel_size * kernel_size
+        clamped_positions = pixel_position_ids.clamp(min=0)
+        max_x = clamped_positions[..., 0].max(dim=-1, keepdim=True)[0] + 1
+        kernel_idxs = torch.div(clamped_positions, kernel_size, rounding_mode="floor")
+        # Coordinates are clamped to nonnegative values, so floor division is
+        # equivalent to truncation without expanding to Abs/Floor/Sign/Mul.
+        pooled_width = torch.div(max_x, kernel_size, rounding_mode="floor")
+        kernel_idxs = kernel_idxs[..., 0] + pooled_width * kernel_idxs[..., 1]
+        weights = nn.functional.one_hot(kernel_idxs.long(), length).float() / k_squared
+        output = weights.transpose(1, 2) @ hidden_states.float()
+        mask = torch.logical_not((weights == 0).all(dim=1))
+        return output.to(hidden_states.dtype), mask
 
     def forward(self, pixel_values, image_position_ids):
         vision_tower = self.model.model.vision_tower
@@ -1300,14 +1344,23 @@ class QEffGemma4EncoderWrapper(nn.Module):
             output_length = pixel_values.shape[-2] // (
                 vision_tower.config.pooling_kernel_size * vision_tower.config.pooling_kernel_size
             )
-        hidden_states, pooler_mask = vision_tower.pooler(
-            hidden_states=hidden_states,
-            pixel_position_ids=image_position_ids,
-            padding_positions=padding_positions,
-            output_length=output_length,
-        )
+        if output_length > hidden_states.shape[1]:
+            raise ValueError(
+                f"Cannot output more soft tokens (requested {output_length}) than there are patches"
+                f" ({hidden_states.shape[1]}). Change the value of `num_soft_tokens` when processing."
+            )
+        hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0.0)
+        if hidden_states.shape[1] != output_length:
+            hidden_states, pooler_mask = self._avg_pool_by_positions_static_kernel(
+                hidden_states=hidden_states,
+                pixel_position_ids=image_position_ids,
+                length=output_length,
+            )
+        hidden_states = hidden_states * vision_tower.pooler.root_hidden_size
         if vision_tower.config.standardize:
-            hidden_states = (hidden_states - vision_tower.std_bias) * vision_tower.std_scale
+            std_bias = vision_tower.std_bias.to(hidden_states.device)
+            std_scale = vision_tower.std_scale.to(hidden_states.device)
+            hidden_states = (hidden_states - std_bias) * std_scale
 
         vision_embeds = self.model.model.embed_vision(inputs_embeds=hidden_states)
         if vision_embeds.dim() == 2:
@@ -1501,10 +1554,10 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
                 layer_seq_len = seq_len
             cache_shape = [batch_size, n_heads, layer_seq_len, d_head]
             past_key_values.append(
-                (
+                [
                     torch.zeros(cache_shape, dtype=config.dtype),
                     torch.zeros(cache_shape, dtype=config.dtype),
-                )
+                ]
             )
         return past_key_values
 

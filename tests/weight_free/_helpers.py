@@ -102,6 +102,12 @@ WEIGHT_FREE_VLM_MODEL_PARAMS = [
         marks=pytest.mark.xdist_group(name="qaic-runtime-qwen3-vl-moe"),
         id="qwen3-vl-moe",
     ),
+    pytest.param(
+        "gemma4_moe",
+        "tiny-random/gemma-4-moe",
+        marks=pytest.mark.xdist_group(name="qaic-runtime-gemma-4-moe"),
+        id="gemma-4-moe",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -164,11 +170,11 @@ def load_tokenizer(model_id: str) -> AutoTokenizer:
 
 def load_weight_free_vlm_model(model_id: str) -> QEFFAutoModelForImageTextToText:
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-    config.text_config.num_hidden_layers = 1
     return QEFFAutoModelForImageTextToText.from_pretrained(
         model_id,
         config=config,
         attn_implementation="eager",
+        torch_dtype=torch.float32,
         kv_offload=True,
         trust_remote_code=True,
         weight_free=True,
