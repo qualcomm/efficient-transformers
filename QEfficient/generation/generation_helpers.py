@@ -25,6 +25,8 @@ logger = QEFFLogger.get_logger("INFRA")
 
 def prepare_tokenizer(tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]) -> None:
     """Configure tokenizer padding consistently for prefill generation."""
+    if tokenizer is None:
+        return
     if tokenizer.padding_side != "right":
         logger.warning("Please use padding_side='right' while initializing the tokenizer")
         tokenizer.padding_side = "right"

@@ -6,17 +6,13 @@
 # -----------------------------------------------------------------------------
 
 """
-Weight-free on-QAIC tests.
+Weight-free causal-LM and embedding tests on QAIC.
 
 All tests require QAIC hardware (marked @pytest.mark.on_qaic).
 All tests run with weight_free=True (set on the QEff model, which forces
 dynamo=True internally) and use_onnx_subfunctions=True.
 
-Covers:
-  - Generate smoke test (weight-free export -> compile -> generate on QAIC)
-  - HF PT vs QAIC HW parity (HF PT tokens == weight-free QAIC top-1 token)
-  - Weight-free vs legacy/dynamo QAIC parity (two independently compiled QPCs
-    of the same model, generated output compared directly)
+Covers causal-LM generation, HF/QAIC parity, and embedding parity.
 """
 
 from __future__ import annotations
@@ -24,7 +20,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from transformers import AutoConfig, AutoModel, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoTokenizer,
+)
 
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM

@@ -5,15 +5,18 @@
 #
 # -----------------------------------------------------------------------------
 """
-Tests for utility functions: get_padding_shape_from_config, sampler_utils, hash_utils.
+Tests for utility functions: export_utils, get_padding_shape_from_config, sampler_utils, hash_utils.
 
 Tests verify:
+  - convert_dynamic_axes_to_dynamic_shapes: correct bounds from flat and nested configs
   - get_padding_shape_from_config: correct KV cache shapes for various model configs
   - get_sampling_inputs_and_outputs: correct input/output names for sampler
   - hash_dict_params: deterministic, correct length, different configs → different hashes
 
 All tests run on CPU only.
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,8 +27,25 @@ from transformers import (
 )
 
 from QEfficient.utils.constants import HASH_HEXDIGEST_STR_LEN
+from QEfficient.utils.export_utils import convert_dynamic_axes_to_dynamic_shapes
 from QEfficient.utils.hash_utils import hash_dict_params
 from QEfficient.utils.sampler_utils import get_sampling_inputs_and_outputs
+
+# ---------------------------------------------------------------------------
+# Tests: convert_dynamic_axes_to_dynamic_shapes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.cpu_only
+def test_dynamic_shapes_use_nested_text_config_max_position_embeddings():
+    """VLM decoder dimensions must use text_config.max_position_embeddings."""
+    config = SimpleNamespace(text_config=SimpleNamespace(max_position_embeddings=32768))
+    dynamic_axes = {"past_key.0": {0: "batch_size", 2: "ctx_len"}}
+
+    dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(dynamic_axes, config)
+
+    assert dynamic_shapes["past_key_values"][0][0][2].max == 32768
+
 
 # ---------------------------------------------------------------------------
 # Helpers: get_padding_shape_from_config

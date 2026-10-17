@@ -122,6 +122,7 @@ def CtxScatter3D(data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates
 
     # keep index tensor types aligned for backend that require exact dtype match
     batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
+    position_ids = ops.Cast(position_ids, to=onnxscript.INT32.dtype)
     ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
 
@@ -188,6 +189,7 @@ def CtxScatter3DInt(
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2]), exp_shape)
     batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
+    position_ids = ops.Cast(position_ids, to=onnxscript.INT32.dtype)
     ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
 

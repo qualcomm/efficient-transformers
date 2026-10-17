@@ -43,6 +43,18 @@ from QEfficient.utils.logging_utils import QEFFLogger
 logger = QEFFLogger.get_logger("INFRA")
 
 
+def _max_allowed_sequence_length(session, binding_name: str, sequence_dim: int) -> int:
+    binding_index = session.binding_index_map[binding_name]
+    allowed_lengths = [
+        shape_spec[binding_index][1][sequence_dim]
+        for shape_spec in session.allowed_shapes
+        if len(shape_spec) > binding_index and len(shape_spec[binding_index][1]) > sequence_dim
+    ]
+    if allowed_lengths:
+        return max(allowed_lengths)
+    return int(session.bindings[binding_index].dims[sequence_dim])
+
+
 class VisionLanguageGeneration(QEffTextGenerationBase):
     """
     Enhanced vision-language generation class inheriting from QEffTextGenerationBase.
@@ -711,11 +723,12 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
                         (vision_outputs["vision_embeds"], chunk_outputs["vision_embeds"]), axis=1
                     )
 
+            vision_sequence_length = _max_allowed_sequence_length(self._session, "vision_embeds", 1)
             vision_outputs["vision_embeds"] = np.pad(
                 vision_outputs["vision_embeds"],
                 pad_width=(
                     (0, 0),
-                    (0, self._session.allowed_shapes[0][1][1][1] - vision_outputs["vision_embeds"].shape[-2]),
+                    (0, vision_sequence_length - vision_outputs["vision_embeds"].shape[-2]),
                     (0, 0),
                 ),  # pad axis=1 only
                 mode="constant",
@@ -727,7 +740,7 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
                     pad_width=(
                         (0, 0),
                         (0, 0),
-                        (0, self._session.allowed_shapes[0][1][1][1] - vision_outputs["deepstack_features"].shape[-2]),
+                        (0, vision_sequence_length - vision_outputs["deepstack_features"].shape[-2]),
                         (0, 0),
                     ),  # pad axis=1 only
                     mode="constant",
