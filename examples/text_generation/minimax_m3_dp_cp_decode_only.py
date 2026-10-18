@@ -45,6 +45,7 @@ def parse_device_ids(value: str) -> list[int]:
 def main():
     parser = argparse.ArgumentParser(description="MiniMax-M3 text-only decode (PL=1) with DP and GP enabled.")
     parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument("--dtype", choices=("float16", "float32"), default="float16")
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--num-devices", type=int, default=16)
     parser.add_argument("--num-cores", type=int, default=16)
@@ -58,6 +59,24 @@ def main():
     parser.add_argument("--prompt", default="Tell me about yourself.")
     parser.add_argument("--num-layers", type=int, default=None)
     parser.add_argument("--skip-generate", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--node-precision-info",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Generate and pass the MiniMax FP32 node-precision file to QAIC compile.",
+    )
+    parser.add_argument(
+        "--mxfp6-matmul",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use MXFP6 matmul quantization during QAIC compilation.",
+    )
+    parser.add_argument(
+        "--mxint8-kv-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use MXINT8 precision for retained KV-cache inputs and outputs.",
+    )
     parser.add_argument(
         "--static-export-dims",
         action="store_true",
@@ -97,6 +116,12 @@ def main():
         type=int,
         default=2,
         help="Number of NSP cores assigned to each expert during decode.",
+    )
+    parser.add_argument(
+        "--moe-flavour",
+        choices=("decode_bmm", "expert_parallel"),
+        default="decode_bmm",
+        help="MoE decode implementation passed to the MiniMax QAIC export.",
     )
     parser.add_argument(
         "--no-tree-reduce",
@@ -170,8 +195,11 @@ def main():
             parser.error(f"--{name.replace('_', '-')} must be positive")
     execution_batch_size = _execution_batch_size(args.batch_size, args.msa_indexer_dp, args.msa_attn_dp, args.attn_dp)
 
-    factory_kwargs = dict(kv_offload=True, dtype=torch.float16)
+    model_dtype = torch.float32 if args.dtype == "float32" else torch.float16
+    factory_kwargs = dict(kv_offload=True, dtype=model_dtype)
     config = AutoConfig.from_pretrained(args.model_id)
+    config.dtype = model_dtype
+    config.torch_dtype = model_dtype
     if args.num_layers is not None:
         config.text_config.num_hidden_layers = args.num_layers
     factory_kwargs["config"] = config
@@ -188,12 +216,12 @@ def main():
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,
         num_devices=args.num_devices,
-        mxfp6_matmul=True,
-        mxint8_kv_cache=True,
+        mxfp6_matmul=args.mxfp6_matmul,
+        mxint8_kv_cache=args.mxint8_kv_cache,
         use_onnx_subfunctions=True,
         dynamo=True,
         skip_vision=True,
-        node_precision_info=True,
+        node_precision_info=args.node_precision_info,
         offload_pt_weights=False,
         log_times=True,
         qaic_config={
@@ -211,12 +239,16 @@ def main():
             "indexer_n_head": args.indexer_n_head,
             "num_cores_per_device": args.num_cores,
             "static_export_dims": args.static_export_dims,
-            "moe_config": {
-                "flavour": "expert_parallel",
-                "expert_parallel_chunk_size": args.expert_parallel_chunk_size,
-                "cores_per_expert": args.cores_per_expert,
-                "tree_reduce": args.tree_reduce,
-            },
+            "moe_config": (
+                {"flavour": "decode_bmm"}
+                if args.moe_flavour == "decode_bmm"
+                else {
+                    "flavour": "expert_parallel",
+                    "expert_parallel_chunk_size": args.expert_parallel_chunk_size,
+                    "cores_per_expert": args.cores_per_expert,
+                    "tree_reduce": args.tree_reduce,
+                }
+            ),
         },
     )
     print(f"[timing] compile total:       {time.perf_counter() - t0:.2f}s")
