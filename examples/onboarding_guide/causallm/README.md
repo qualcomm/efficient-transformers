@@ -290,3 +290,4 @@ Follow guidelines in [CONTRIBUTING.md](../../../CONTRIBUTING.md):
 - [QEfficient Transformers](https://github.com/quic/efficient-transformers)
 - [Contributing Guidelines](../../../CONTRIBUTING.md)
 - [Test Suite](../../../tests/transformers/models/test_causal_lm_models.py)
+- [Remote-code worked example: K2 Horizon](REMOTE_CODE_K2_HORIZON.md)
