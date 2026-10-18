@@ -204,6 +204,9 @@ Prompt mode: greedy on both sides, pass = the first `--min-match` tokens identic
 
 ## Checklist per size
 
+The ordered run with every command and expected result is `examples/text_generation/k2_horizon/E2E_TESTING.md`.
+
+
 A size is onboarded when all four hold:
 
 1. HF PyTorch == QEff PyTorch == ONNX Runtime on the reduced config and on real weights (Steps 4, 5).
