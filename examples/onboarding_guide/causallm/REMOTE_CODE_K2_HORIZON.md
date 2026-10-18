@@ -114,6 +114,8 @@ ort_tokens = runner.run_kv_model_on_ort(str(qeff_model.export()))
 
 Pass: `hf_tokens == kv_tokens == ort_tokens` for every size. A KV mismatch is the wrapper; an ORT mismatch is the export (an op that traces differently, a shape-derived slice).
 
+This is `examples/text_generation/k2_horizon/tools/k2_tiny_check.py`; it runs all four sizes with no arguments, or one size by name.
+
 ---
 
 ## Step 5: stages 1 to 3 on real weights, CPU
@@ -167,6 +169,20 @@ Rerun Step 6 with `--mxfp6 --mxint8-kv-cache`. Read the text, not only the numbe
 
 ---
 
+## Step 8b: the compiled QPC against Hugging Face at the shipped shape, and at long context
+
+The repo lanes compare at 32 tokens; Steps 6 and 8 compare by eye. `examples/text_generation/k2_horizon/tools/qpc_vs_hf.py` compares a compiled QPC with the original model token by token at the shape that will ship, and checks long range:
+
+```bash
+cd examples/text_generation/k2_horizon
+python tools/qpc_vs_hf.py IFM/K2-Horizon-7B --prefill-seq-len 128 --ctx-len 4096 --device-group '[0,1,2,3]' \
+    --mxfp6 --mxint8-kv-cache --use-onnx-subfunctions --min-match 8
+python tools/qpc_vs_hf.py IFM/K2-Horizon-7B --needle-tokens 60000 --prefill-seq-len 1024 --ctx-len 65536 \
+    --device-group '[0,1,2,3]' --mxfp6 --mxint8-kv-cache --use-onnx-subfunctions --skip-hf
+```
+
+Prompt mode: greedy on both sides, pass = the first `--min-match` tokens identical (fp16 agrees with bf16 for 20 or more, MXFP6 for fewer; a different first token is a failure). Needle mode: a prose prompt of N tokens with a code word planted near the start, pass = the QPC answers with the word. It is the only step that exercises rope and the cache past a few thousand positions; the 0.9B's YaRN scaling is identity below 8192, so nothing before this touches it. Run it at 32K and at the 64K cap for every size. Results land in `tools/results/`.
+
 ## Step 9: docs
 
 | File | What |
@@ -193,6 +209,6 @@ A size is onboarded when all four hold:
 1. HF PyTorch == QEff PyTorch == ONNX Runtime on the reduced config and on real weights (Steps 4, 5).
 2. The fp16 card output equals the Hugging Face greedy text (Step 6).
 3. The `dummy`, `few` and per-PR lanes pass on the card with goldens committed (Step 7).
-4. The production-precision output still reads right (Step 8), and the size has its row in `validate.md` (Step 9).
+4. The production-precision output still reads right (Step 8), the QPC matches HF at the shipped shape and answers the needle at 32K and 64K (Step 8b), and the size has its row in `validate.md` (Step 9).
 
-K2 Horizon files in this PR: `QEfficient/transformers/models/k2_horizon/`, `pytorch_transforms.py`, `modeling_utils.py`, `constants.py`, `test_utils.py`, `tests/configs/causal_model_configs.json`, `tests/golden_outputs/goldens.json`, `check_causal_models.py`, the three unit test files, `docs/source/validate.md`, `examples/text_generation/README.md`.
+K2 Horizon files in this PR: `examples/text_generation/k2_horizon/tools/` (the two check scripts), `QEfficient/transformers/models/k2_horizon/`, `pytorch_transforms.py`, `modeling_utils.py`, `constants.py`, `test_utils.py`, `tests/configs/causal_model_configs.json`, `tests/golden_outputs/goldens.json`, `check_causal_models.py`, the three unit test files, `docs/source/validate.md`, `examples/text_generation/README.md`.
