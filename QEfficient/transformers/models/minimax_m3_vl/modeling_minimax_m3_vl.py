@@ -2242,7 +2242,10 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             torch.where(relative_slot >= core_start, relative_slot - core_start, torch.full_like(relative_slot, -1)),
         )
         maxima_groups, sum_groups, output_groups = [], [], []
-        is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()
+        # Skip fully future blocks only in eager runtime. During torch.export,
+        # the data-dependent .item() guard must stay out of the traced graph;
+        # export preserves the static loop and applies the skip mask below.
+        is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
         for batch_idx in range(batch_local):
             q_core = query_rows[batch_idx : batch_idx + 1].unsqueeze(2).expand(1, rows, num_cores, ql_eff, head_dim)
             maxima, sums, outputs = [], [], []
