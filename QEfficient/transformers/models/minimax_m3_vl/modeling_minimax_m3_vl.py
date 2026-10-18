@@ -5,6 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
+import re
 from functools import partial
 from math import lcm
 from pathlib import Path
@@ -133,7 +134,7 @@ def _dynamic_sequence_nested_chunks(
 
 
 def _decoder_function_npi_names(model: onnx.ModelProto) -> list[str]:
-    """Collect Add and CustomRMSNorm names inside MiniMax decoder functions."""
+    """Collect RMSNorms and decoder residual merges inside MiniMax functions."""
     functions = {(function.domain, function.name): function for function in model.functions}
     npi_names = []
     for function_call in model.graph.node:
@@ -143,11 +144,20 @@ def _decoder_function_npi_names(model: onnx.ModelProto) -> list[str]:
         )
         if function is None or not is_decoder_call:
             continue
-        npi_names.extend(
-            f"{function_node.name}_output_0"
+        layer_match = re.search(r"(?:/layers\.|DecoderLayer(?:_\d+)?\.)(\d+)(?:/|$)", function_call.name)
+        if layer_match is None:
+            layer_match = re.search(r"(?:/layers\.|DecoderLayer(?:_\d+)?\.)(\d+)(?:/|$)", function_call.op_type)
+        layer_scope = (
+            f"/language_model/layers.{layer_match.group(1)}"
+            if layer_match is not None
+            else function_call.name.rsplit("/", 1)[0]
+        )
+        residual_adds = [
+            function_node
             for function_node in function.node
             if function_node.op_type in ("Add", "CustomRMSNorm") and function_node.name
-        )
+        ]
+        npi_names.extend(f"{layer_scope}/{function_node.name}_output_0" for function_node in residual_adds)
     return npi_names
 
 
@@ -164,6 +174,18 @@ def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
         if output_name and output_name.endswith(_MINIMAX_NPI_OUTPUT_SUFFIXES)
     ]
     fp32_names.extend(_decoder_function_npi_names(model))
+    # Dynamo/torch.export can flatten decoder functions and replace the
+    # hierarchical output names with generated names such as ``add_42`` and
+    # ``rms_norm_7``.  Include graph-level residual/RMSNorm outputs, while
+    # leaving internal attention and MoE arithmetic in the compiler's normal
+    # precision path.
+    fp32_names.extend(
+        output_name
+        for node in model.graph.node
+        if node.op_type in ("Add", "CustomRMSNorm")
+        for output_name in node.output
+        if output_name
+    )
     fp32_names = list(dict.fromkeys(fp32_names))
     if not fp32_names:
         raise ValueError(f"Could not find Minimax FP32 NPI nodes in ONNX graph: {onnx_path}")
@@ -307,7 +329,7 @@ def qeff_eager_attention_forward(
         if attention_mask.dtype == torch.bool:
             attn_weights = torch.where(
                 attention_mask,
-                torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=torch.float32, device=attn_weights.device),
+                _scalar_like(attn_weights.float(), MIN_MASKED_ATTENTION_VALUE),
                 attn_weights,
             )
         else:
@@ -2123,7 +2145,6 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 safe_indices = safe_indices.expand(batch, num_kv_heads, -1).to(torch.int32)
                 key_block = ctx_gather_blocked_kv(key_cache, safe_indices).repeat_interleave(kv_repeat, dim=1)
                 value_block = ctx_gather_blocked_kv(value_cache, safe_indices).repeat_interleave(kv_repeat, dim=1)
-                value_block = torch.where(invalid.unsqueeze(-1), torch.zeros_like(value_block), value_block)
                 key_positions = torch.arange(start_index, end_index, device=query_states.device)
                 for query_len, positions, accumulators in states:
                     causal = key_positions.view(1, 1, 1, -1) > positions[:, None, :, None]
@@ -2238,7 +2259,11 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                     start_index,
                     end_index,
                     cp,
-                    zero_invalid=False,
+                    # Invalid/future positions use INT32_MAX at export time.
+                    # Zero the gathered keys before QK matmul as well as the
+                    # values; otherwise an invalid cache read can overflow or
+                    # produce NaN before the later score mask is applied.
+                    zero_invalid=True,
                 ).view(1, rows, num_cores, tokens_per_core, head_dim)
                 value_block = self._gqa_read_blocked_dp(
                     value_cache[batch_idx : batch_idx + 1],
@@ -2250,16 +2275,28 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 ).view(1, rows, num_cores, tokens_per_core, head_dim)
                 causal = torch.arange(tokens_per_core, device=query_states.device).view(1, 1, 1, -1)
                 causal = (causal > threshold.unsqueeze(-1)).unsqueeze(3).expand(-1, -1, -1, n_rep, -1)
-                scores = torch.matmul(q_core, key_block.transpose(-1, -2)) * self.scaling
+                scores = torch.bmm(
+                    q_core.reshape(-1, ql_eff, head_dim),
+                    key_block.reshape(-1, tokens_per_core, head_dim).transpose(1, 2),
+                ).reshape(1, rows, num_cores, ql_eff, tokens_per_core)
+                scores = scores * self.scaling
                 scores = scores.masked_fill(causal, MASKED_ATTENTION_LOGIT)
                 block_max = scores.max(dim=-1).values
                 block_exp = torch.exp(scores - block_max.unsqueeze(-1))
+                # A finite masked sentinel becomes exp(0) when an entire
+                # core is masked.  Remove masked positions explicitly so
+                # causal/future entries cannot inflate the denominator or
+                # participate in the value BMM.
+                block_exp = torch.where(causal, torch.zeros_like(block_exp), block_exp)
                 block_sum = block_exp.sum(dim=-1)
                 if skip_kv:
                     block_max = torch.where(skip_future, _scalar_like(block_max, MASKED_ATTENTION_LOGIT), block_max)
                     block_exp = torch.where(skip_future.unsqueeze(-1), torch.zeros_like(block_exp), block_exp)
                     block_sum = torch.where(skip_future, torch.zeros_like(block_sum), block_sum)
-                block_output = torch.matmul(block_exp, value_block)
+                block_output = torch.bmm(
+                    block_exp.reshape(-1, ql_eff, tokens_per_core),
+                    value_block.reshape(-1, tokens_per_core, head_dim),
+                ).reshape(1, rows, num_cores, ql_eff, head_dim)
                 if skip_kv and is_export:
                     block_output = torch.where(skip_future.unsqueeze(-1), torch.zeros_like(block_output), block_output)
                 maxima.append(block_max)
@@ -3059,6 +3096,14 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             selected_k = ctx_gather_blocked_kv_dp(key_cache, gather_idx.to(torch.int32))
             selected_v = ctx_gather_blocked_kv_dp(value_cache, gather_idx.to(torch.int32))
 
+        # Invalid selector entries gather a safe index (zero) because the
+        # QAIC gather op cannot consume a negative index.  Clear those values
+        # before QK/V contractions; masking only the score is insufficient if
+        # an entire row is invalid, because softmax over a finite sentinel
+        # otherwise returns a uniform distribution over the safe-index data.
+        selected_k = torch.where(valid_idx.unsqueeze(-1), selected_k, torch.zeros_like(selected_k))
+        selected_v = torch.where(valid_idx.unsqueeze(-1), selected_v, torch.zeros_like(selected_v))
+
         num_cores = (
             blocking_config.num_cores_per_device
             if blocking_config is not None and blocking_config.num_cores_per_device
@@ -3083,6 +3128,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         scores = torch.matmul(q.float(), selected_k.float().transpose(-1, -2)) * (head_dim**-0.5)
         scores = scores.masked_fill(~valid.unsqueeze(3), -1.0e30)
         probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(selected_v.dtype)
+        probs = torch.where(valid.unsqueeze(3), probs, torch.zeros_like(probs))
         out = torch.matmul(probs, selected_v)
         out = (
             out.reshape(batch_local, rows, num_kv_groups, query_len, head_dim)
@@ -3104,7 +3150,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         blocking_config,
         position_ids=None,
     ):
-        """Run retained sparse attention with interleaved context partitioning."""
+        """Run retained sparse attention with contiguous context partitioning."""
         batch, _, query_len, head_dim = query_states.shape
         cfg = self.config
         hkv = self.config.num_key_value_heads
@@ -3135,19 +3181,25 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 raise ValueError("MSA index_block_size must be divisible by msa_attn_cp.")
 
             selected_blocks = token_indices.shape[-1]
-            local_block_size = cfg.index_block_size // cp
-            selected_len = selected_blocks * local_block_size
+            blocks_per_cp = key_cache.shape[2] // cfg.index_block_size
+            selected_len = selected_blocks * cfg.index_block_size
             block_ids_global = token_indices.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
             valid_global = token_valid.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
-            gather_block_ids = block_ids_global.unsqueeze(2).expand(
-                batch_local, dp, cp, hkv, selected_blocks
+            block_cp = block_ids_global // blocks_per_cp
+            block_cp_valid = (block_cp >= 0) & (block_cp < cp)
+            gather_block_local = block_ids_global - block_cp * blocks_per_cp
+            cp_idx = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1)
+            valid_cp_blocks = (
+                valid_global.unsqueeze(2) & block_cp_valid.unsqueeze(2) & (block_cp.unsqueeze(2) == cp_idx)
             )
-            valid_blocks = valid_global.unsqueeze(2).expand_as(gather_block_ids)
-            gather_block_ids = torch.where(valid_blocks, gather_block_ids, torch.zeros_like(gather_block_ids))
-            gather_block_ids = gather_block_ids.reshape(batch_local, rows, selected_blocks)
+            gather_block_ids = torch.where(
+                valid_cp_blocks,
+                gather_block_local.unsqueeze(2),
+                torch.zeros_like(gather_block_local).unsqueeze(2),
+            ).reshape(batch_local, rows, selected_blocks)
 
-            key_blocks = key_cache.reshape(batch_local, rows, -1, local_block_size, head_dim)
-            value_blocks = value_cache.reshape(batch_local, rows, -1, local_block_size, head_dim)
+            key_blocks = key_cache.reshape(batch_local, rows, -1, cfg.index_block_size, head_dim)
+            value_blocks = value_cache.reshape(batch_local, rows, -1, cfg.index_block_size, head_dim)
             selected_k = QEffMiniMaxSparseCache.gather_blocked_kv_dp(
                 key_blocks, gather_block_ids.to(torch.int32)
             ).reshape(batch_local, rows, selected_len, head_dim)
@@ -3155,18 +3207,17 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 value_blocks, gather_block_ids.to(torch.int32)
             ).reshape(batch_local, rows, selected_len, head_dim)
 
-            cp_offsets = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1, 1)
-            local_offsets = torch.arange(local_block_size, device=query_states.device).view(1, 1, 1, 1, 1, -1)
-            selected_token_ids = (
-                block_ids_global.unsqueeze(2).unsqueeze(-1) * cfg.index_block_size
-                + cp_offsets
-                + local_offsets * cp
+            offsets = torch.arange(cfg.index_block_size, device=query_states.device).view(
+                1, 1, 1, 1, cfg.index_block_size
             )
+            selected_token_ids = block_ids_global.unsqueeze(-1) * cfg.index_block_size + offsets
             position_ids_dp = position_ids.reshape(dp, batch_local, query_len).permute(1, 0, 2)
-            valid_tokens = valid_blocks.unsqueeze(-1)
+            valid_tokens = valid_global.unsqueeze(-1)
             valid_tokens = valid_tokens & (selected_token_ids < ctx_len)
-            valid_tokens = valid_tokens & (selected_token_ids <= position_ids_dp[:, :, None, None, None, :])
-            valid_idx = valid_tokens.reshape(batch_local, rows, selected_len)
+            valid_tokens = valid_tokens & (selected_token_ids <= position_ids_dp[:, :, None, :, None])
+            valid_idx = (valid_cp_blocks.unsqueeze(-1) & valid_tokens.unsqueeze(2)).reshape(
+                batch_local, rows, selected_len
+            )
         else:
             if token_indices.ndim == 4:
                 selected_len = token_indices.shape[-2] * token_indices.shape[-1]
@@ -3178,9 +3229,9 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 raise ValueError("Retained CP attention requires token indices shaped [batch, Hkv, ...].")
             global_idx = global_idx.reshape(dp, batch_local, hkv, selected_len).permute(1, 0, 2, 3)
             global_valid = global_valid.reshape(dp, batch_local, hkv, selected_len).permute(1, 0, 2, 3)
-            token_cp = global_idx.remainder(cp)
+            token_cp = global_idx // local_ctx_len
             token_cp_valid = (token_cp >= 0) & (token_cp < cp)
-            gather_idx_local = global_idx // cp
+            gather_idx_local = global_idx - token_cp * local_ctx_len
             cp_idx = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1)
             valid_cp = global_valid.unsqueeze(2) & token_cp_valid.unsqueeze(2) & (token_cp.unsqueeze(2) == cp_idx)
             gather_idx = (
@@ -3192,6 +3243,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             gather_idx = torch.where(valid_idx, gather_idx, torch.zeros_like(gather_idx)).to(torch.int32)
             selected_k = ctx_gather_blocked_kv_dp(key_cache, gather_idx)
             selected_v = ctx_gather_blocked_kv_dp(value_cache, gather_idx)
+
         num_cores = (
             blocking_config.num_cores_per_device if blocking_config and blocking_config.num_cores_per_device else 1
         )
