@@ -9,8 +9,23 @@ import torch
 
 
 def select_interface(eager_impl, custom_op_impl):
-    use_custom_op = torch._dynamo.is_compiling()
+    use_custom_op = torch.compiler.is_exporting() or torch._dynamo.is_compiling()
     return custom_op_impl if use_custom_op else eager_impl
+
+
+def _dynamo_symbolic(domain_op: str, inputs: tuple[torch.Tensor, ...], dtype: torch.dtype, shape):
+    """Emit a first-class ONNX custom node during Dynamo export.
+
+    The ``torch.library`` path is retained for ``torch.compile``.  ONNX's
+    symbolic API is more reliable for the QSA cache operators because it
+    prevents Dynamo from decomposing their eager indexing implementation.
+    """
+    output = torch.onnx.ops.symbolic(domain_op, inputs, {}, dtype=dtype, shape=shape, version=1)
+    # Weight-free Dynamo export traces model tensors on ``meta``.  ONNX
+    # symbolic outputs default to CPU unless their device is made explicit,
+    # which later causes mixed-device failures when the result is consumed by
+    # ordinary ATen operators.
+    return output.to(inputs[0].device)
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +158,13 @@ def ctx_gather_blocked_kv_batch(data: torch.Tensor, ctx_indices: torch.Tensor) -
 def ctx_paged_scatter(data, block_id, addr, updates):
     from QEfficient.customop.ctx_scatter_gather import CtxPagedScatterFunc
 
+    if torch.compiler.is_exporting():
+        return _dynamo_symbolic(
+            "com.qualcomm.cloud::CtxPagedScatter",
+            (data, block_id, addr, updates),
+            data.dtype,
+            data.shape,
+        )
     return select_interface(CtxPagedScatterFunc.apply, torch.ops.qefficient.ctx_paged_scatter)(
         data, block_id, addr, updates
     )
@@ -151,6 +173,13 @@ def ctx_paged_scatter(data, block_id, addr, updates):
 def ctx_gather_rows(data, ctx_indices):
     from QEfficient.customop.ctx_scatter_gather import CtxGatherRowsFunc
 
+    if torch.compiler.is_exporting():
+        return _dynamo_symbolic(
+            "com.qualcomm.cloud::CtxGatherRows",
+            (data, ctx_indices),
+            data.dtype,
+            (*ctx_indices.shape, data.shape[-1]),
+        )
     return select_interface(CtxGatherRowsFunc.apply, torch.ops.qefficient.ctx_gather_rows)(data, ctx_indices)
 
 
