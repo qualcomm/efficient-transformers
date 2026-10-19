@@ -45,7 +45,12 @@ def parse_device_ids(value: str) -> list[int]:
 def main():
     parser = argparse.ArgumentParser(description="MiniMax-M3 text-only decode (PL=1) with DP and GP enabled.")
     parser.add_argument("--model-id", default=MODEL_ID)
-    parser.add_argument("--dtype", choices=("float16", "float32"), default="float16")
+    parser.add_argument(
+        "--dtype",
+        choices=("float16", "bfloat16", "float32"),
+        default="float16",
+        help="Model/export floating-point dtype (default: float16).",
+    )
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--num-devices", type=int, default=16)
     parser.add_argument("--num-cores", type=int, default=16)
@@ -195,7 +200,7 @@ def main():
             parser.error(f"--{name.replace('_', '-')} must be positive")
     execution_batch_size = _execution_batch_size(args.batch_size, args.msa_indexer_dp, args.msa_attn_dp, args.attn_dp)
 
-    model_dtype = torch.float32 if args.dtype == "float32" else torch.float16
+    model_dtype = getattr(torch, args.dtype)
     factory_kwargs = dict(kv_offload=True, dtype=model_dtype)
     config = AutoConfig.from_pretrained(args.model_id)
     config.dtype = model_dtype

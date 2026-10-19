@@ -122,6 +122,12 @@ def main():
         description="Export, compile, and run a MiniMax-M3 prefill-only QPC, then report TTFT."
     )
     parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument(
+        "--dtype",
+        choices=("float16", "bfloat16", "float32"),
+        default="float16",
+        help="Model/export floating-point dtype (default: float16).",
+    )
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--num-devices", type=int, default=16)
     parser.add_argument(
@@ -333,6 +339,12 @@ def main():
     num_q_blocks = max(1, math.ceil(args.prefill_seq_len / args.q_block_size))
     n_rep_chunk = args.q_block_chunk // args.q_block_size
     config = AutoConfig.from_pretrained(args.model_id)
+    model_dtype = getattr(torch, args.dtype)
+    config.dtype = model_dtype
+    config.torch_dtype = model_dtype
+    if hasattr(config, "text_config"):
+        config.text_config.dtype = model_dtype
+        config.text_config.torch_dtype = model_dtype
     if args.num_layers is not None:
         config.text_config.num_hidden_layers = args.num_layers
 
@@ -342,7 +354,7 @@ def main():
         config=config,
         kv_offload=True,
         weight_free=True,
-        dtype=torch.float16,
+        dtype=model_dtype,
     )
     print(f"[timing] model load: {time.perf_counter() - load_start:.2f}s")
 
