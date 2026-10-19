@@ -60,16 +60,19 @@ def _gdn_recurrent_step(query, key, value, decay, beta, state):
     key = key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6)
     query = query / (query.shape[-1] ** 0.5)
     recurrent_state = state.to(value)
-    output = torch.zeros_like(value)
-    for token_idx in range(query.shape[2]):
-        query_token, key_token, value_token = query[:, :, token_idx], key[:, :, token_idx], value[:, :, token_idx]
-        recurrent_state = recurrent_state * decay[:, :, token_idx].exp()[..., None, None]
-        beta_token = beta[:, :, token_idx].unsqueeze(-1)
-        kv_mem = (recurrent_state * key_token.unsqueeze(-1)).sum(dim=-2)
-        delta = (value_token - kv_mem) * beta_token
-        recurrent_state = recurrent_state + key_token.unsqueeze(-1) * delta.unsqueeze(-2)
-        output[:, :, token_idx] = (recurrent_state * query_token.unsqueeze(-1)).sum(dim=-2)
-    return output.transpose(1, 2).contiguous().to(initial_dtype), recurrent_state
+    # Qwen4-Exp's QEfficient path is decode-only (one token).  Compute the
+    # output directly, matching the linear-attention benchmark, instead of
+    # writing it into a preallocated tensor with an indexed assignment.  The
+    # latter exports as ScatterElements and becomes an expensive aicscatterdata
+    # sequence on QAIC.
+    query_token, key_token, value_token = query[:, :, 0], key[:, :, 0], value[:, :, 0]
+    recurrent_state = recurrent_state * decay[:, :, 0].exp()[..., None, None]
+    beta_token = beta[:, :, 0].unsqueeze(-1)
+    kv_mem = (recurrent_state * key_token.unsqueeze(-1)).sum(dim=-2)
+    delta = (value_token - kv_mem) * beta_token
+    recurrent_state = recurrent_state + key_token.unsqueeze(-1) * delta.unsqueeze(-2)
+    output = (recurrent_state * query_token.unsqueeze(-1)).sum(dim=-2)
+    return output.unsqueeze(1).contiguous().to(initial_dtype), recurrent_state
 
 
 class QEffQwen4ExpTextRotaryEmbedding(Qwen4ExpTextRotaryEmbedding):
