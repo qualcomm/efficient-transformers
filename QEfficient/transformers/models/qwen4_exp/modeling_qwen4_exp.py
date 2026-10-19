@@ -399,13 +399,17 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             index_slots = block.reshape(batch, 1, 1).expand(-1, 1, index_cache.shape[-1])
             pooled_update = pooled.reshape(batch, 1, index_cache.shape[-1])
             scattered_index = index_cache.scatter(1, index_slots, pooled_update)
-        boundary_shape = (boundary[:, None, None, None] if index_cache.ndim == 4 else boundary[:, None, None])
+        if index_cache.ndim == 4:
+            index_dp = deployment["indexer_dp"]
+            boundary_shape = boundary.reshape(batch // index_dp, index_dp, 1, 1)
+        else:
+            boundary_shape = boundary[:, None, None]
         next_index = torch.where(boundary_shape, scattered_index, index_cache)
         next_partial = torch.where(boundary[:, None, None], torch.zeros_like(total), total)
         index_attention = next_index[:, 0] if next_index.ndim == 4 and next_index.shape[1] == 1 else next_index
         complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
         if index_cache.ndim == 4:
-            index_dp, index_cp = deployment["indexer_dp"], deployment["indexer_cp"]
+            index_cp = deployment["indexer_cp"]
             batch_local = batch // index_dp
             local_context = next_index.shape[2]
             cache_grouped = next_index.reshape(batch_local, index_dp, index_cp, local_context, -1)
@@ -792,7 +796,21 @@ class QEffQwen4ExpDecodeExportMixin:
         return specs
 
     def get_dummy_inputs(self, continuous_batching=False, **kwargs):
-        batch_size = min(kwargs.get("batch_size", constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE), 2)
+        requested_batch_size = kwargs.get("batch_size", constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE)
+        batch_size = min(requested_batch_size, 2)
+        # Folded QSA caches are partitioned by DP.  The generic export clamp
+        # to batch 2 would otherwise create zero-sized cache dimensions when
+        # attn/indexer DP is greater than 2 (for example, the Qwen DP16 path).
+        qsa_dp = max(
+            (
+                int((getattr(layer.self_attn, "_qsa_config", None) or {}).get(key, 1))
+                for layer in self.model.layers
+                if hasattr(layer, "self_attn")
+                for key in ("attn_dp", "indexer_dp")
+            ),
+            default=1,
+        )
+        batch_size = max(batch_size, qsa_dp)
         seq_len = int(kwargs.get("seq_len", self.get_export_seq_len()))
         specs = self.get_onnx_retained_state_specs(batch_size, seq_len, continuous_batching=continuous_batching)
         inputs = {
@@ -806,6 +824,19 @@ class QEffQwen4ExpDecodeExportMixin:
         if continuous_batching:
             inputs["batch_index"] = torch.arange(batch_size, dtype=torch.int64).view(batch_size, 1)
         return inputs
+
+    def get_export_batch_size(self, requested_batch_size: int) -> int:
+        """Keep QSA partitioned retained-state dimensions non-empty during export."""
+        qsa_dp = max(
+            (
+                int((getattr(layer.self_attn, "_qsa_config", None) or {}).get(key, 1))
+                for layer in self.model.layers
+                if hasattr(layer, "self_attn")
+                for key in ("attn_dp", "indexer_dp")
+            ),
+            default=1,
+        )
+        return max(requested_batch_size, qsa_dp)
 
     def get_onnx_dynamic_axes(self, continuous_batching=False, **kwargs):
         del kwargs
@@ -876,6 +907,21 @@ class QEffQwen4ExpDecodeExportMixin:
         dynamic_axes["ngram_embeddings"] = {0: "batch_size", 1: "seq_len"}
         dynamic_axes["position_ids"] = {1: "batch_size", 2: "seq_len"}
         return example_inputs, dynamic_axes
+
+    def prepare_export_dynamic_axes(self, dynamic_axes):
+        """Use fixed DP16 batch/context cache shapes for Dynamo export."""
+        static_dims = {
+            "batch_size",
+            "full_batch_size",
+            "ctx_len",
+            "local_ctx_len",
+            "pooled_ctx_len",
+            "local_pooled_ctx_len",
+        }
+        return {
+            name: {axis: dim for axis, dim in axes.items() if dim not in static_dims}
+            for name, axes in dynamic_axes.items()
+        }
 
 
 class QEffQwen4ExpForCausalLM(QEffQwen4ExpDecodeExportMixin, Qwen4ExpForCausalLM):

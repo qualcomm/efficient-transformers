@@ -26,7 +26,7 @@ import torch
 
 
 NUM_DEVICES = 16
-NUM_CORES = 10
+NUM_CORES = 4
 BATCH_SIZE = 16
 LAYERS = 4
 CONTEXT_LENGTH = 65_536
@@ -54,13 +54,15 @@ def build_model(snapshot: Path, checkpoint: Path, compile_dir: Path):
     config = _window_config(snapshot, LAYERS, CONTEXT_LENGTH)
     from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
-    return QEFFAutoModelForCausalLM.from_pretrained(
+    model = QEFFAutoModelForCausalLM.from_pretrained(
         str(checkpoint),
         config=config,
         qaic_config=qaic_config,
         weight_free=True,
         torch_dtype=torch.float32,
     )
+    model.model.eval()
+    return model
 
 
 def is_retained_state(name: str) -> bool:
@@ -142,6 +144,7 @@ def main() -> None:
         if not args.checkpoint.is_dir():
             raise FileNotFoundError(f"Four-layer checkpoint directory not found: {args.checkpoint}")
         qeff_model = build_model(args.snapshot, args.checkpoint, args.compile_dir)
+        qeff_model.model.eval()
         qpc_path = Path(
             qeff_model.compile(
                 compile_dir=str(args.compile_dir),
@@ -150,7 +153,7 @@ def main() -> None:
                 prefill_seq_len=1,
                 num_devices=NUM_DEVICES,
                 num_cores=NUM_CORES,
-                mxfp6_matmul=True,
+                mxfp6_matmul=False,
                 offload_pt_weights=False,
                 dynamo=True,
                 use_onnx_subfunctions=False,
