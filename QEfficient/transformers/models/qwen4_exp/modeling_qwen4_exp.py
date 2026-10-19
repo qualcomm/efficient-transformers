@@ -364,7 +364,8 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         index_query = index_query.reshape(batch, -1, self.indexer.index_head_dim)
         ratio = self.indexer.compress_ratio
         block = torch.div(positions, ratio, rounding_mode="trunc")
-        boundary = (positions + 1).remainder(ratio) == 0
+        complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
+        boundary = positions + 1 == complete * ratio
         total = partial + raw_key.float()
         if len(position_embeddings) == 6:
             _, _, cos_cached, sin_cached, rotary_position_ids, mrope_section = position_embeddings
@@ -410,7 +411,6 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         next_index = torch.where(boundary_shape, scattered_index, index_cache)
         next_partial = torch.where(boundary[:, None, None], torch.zeros_like(total), total)
         index_attention = next_index[:, 0] if next_index.ndim == 4 and next_index.shape[1] == 1 else next_index
-        complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
         if index_cache.ndim == 4:
             index_cp = deployment["indexer_cp"]
             batch_local = batch // index_dp
@@ -472,7 +472,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         batch_local = batch // dp
         positions_dp = positions.reshape(batch_local, dp)
         slots = torch.div(positions_dp, cp, rounding_mode="trunc")
-        ways = positions_dp.remainder(cp)
+        ways = torch.zeros_like(positions_dp) if cp == 1 else positions_dp.remainder(cp)
         rows = dp * cp * rows_per_way
         updates_rows = updates.reshape(batch_local, dp, rows_per_way, 1, dim).unsqueeze(2).expand(
             batch_local, dp, cp, rows_per_way, 1, dim
@@ -496,7 +496,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         pos = selected[:, None, :].expand(batch, kv_heads, count)
         pos_dp = pos.reshape(batch_local, dp, kv_heads, count)
         slots = torch.div(pos_dp, cp, rounding_mode="trunc")
-        ways = pos_dp.remainder(cp)
+        ways = torch.zeros_like(pos_dp) if cp == 1 else pos_dp.remainder(cp)
         row = (
             torch.arange(dp, device=selected.device).view(1, dp, 1, 1) * cp * kv_heads
             + ways * kv_heads
@@ -879,15 +879,26 @@ class QEffQwen4ExpDecodeExportMixin:
         return [dict(specialization), dict(specialization)]
 
     def get_custom_io(self, **kwargs):
-        """Return custom I/O for every retained state input/output pair."""
+        """Return custom I/O for QSA and linear-attention retained states.
+
+        MXINT8 cache compression is supported for QSA states, but the GDN/PLE
+        states used by linear-attention layers must remain in FP16.  The compile
+        path passes ``mxint8_kv_cache`` explicitly so enabling that option does
+        not accidentally change the precision of every retained state.
+        """
         dtype = kwargs.pop("dtype", "float16")
+        mxint8_kv_cache = kwargs.pop("mxint8_kv_cache", False)
         if kwargs:
             raise TypeError(f"Unexpected custom I/O options: {sorted(kwargs)}")
-        return {
-            name: dtype
-            for state_name in self._iter_retained_state_names()
-            for name in (state_name, f"{state_name}_RetainedState")
-        }
+        custom_io = {}
+        for state_name in self._iter_retained_state_names():
+            if mxint8_kv_cache:
+                state_dtype = "mxint8" if state_name.startswith("qsa_") else "float16"
+            else:
+                state_dtype = dtype
+            for name in (state_name, f"{state_name}_RetainedState"):
+                custom_io[name] = state_dtype
+        return custom_io
 
     def get_export_seq_len(self):
         """Return a configured QSA export length, preserving decode by default."""

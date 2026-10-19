@@ -11,7 +11,9 @@ The tested configuration is:
 - indexer DP16/CP1 and attention DP16/CP1;
 - 16 QAIC devices and 4 cores per device;
 - FP16 matmul compilation (`mxfp6_matmul=False`);
-- MXINT8 custom IO for every GDN, PLE, and QSA retained-state input/output;
+- routed MoE FFN token blocking with a token block size of `4`;
+- MXINT8 custom IO for QSA retained-state input/output only; GDN recurrent/conv
+  and PLE retained states remain FP16;
 - weight-free export with host-provided `ngram_embeddings`.
 
 The 256K configuration does not compile on the current layout because the
@@ -61,7 +63,12 @@ sg qaic -c '/home/ochougul/envs/qwen38f/bin/python examples/text_generation/qwen
 
 The script uses `.compile()` with `dynamo=True`, `weight_free=True`, 16 devices,
 4 cores per device, `-retained-state`, FP16 matmul compilation,
-`-allow-mxint8-mdp-io`, and MXINT8 custom IO for all retained-state pairs.
+`-allow-mxint8-mdp-io`, and `mxint8_kv_cache=True`. The Qwen4-Exp custom-IO
+policy applies MXINT8 only to QSA retained-state pairs; GDN recurrent/conv and
+PLE retained-state pairs remain FP16.
+The Qwen4-Exp MoE path is configured with `ffn_blocking_mode="token"` and
+`ffn_token_block_size=4`, so routed expert execution processes at most four
+flattened tokens per block.
 The generated ONNX contains `CtxPagedScatter` and `CtxGatherRows` function
 definitions whose bodies lower to `ScatterND` and `GatherND`.
 
@@ -104,6 +111,36 @@ The script supplies zero-valued example `input_ids`, `position_ids`, and host
 `ngram_embeddings`, skips retained-state buffers so they remain device-owned,
 and performs one decode step. Successful execution requires the selected QAIC
 devices and their P2P fabric to be available to the user.
+
+## Step 4: validate HF versus QEff PyTorch parity
+
+The parity runner compares the four-layer Hugging Face and QEfficient models
+token by token without loading the full 48-layer model or the host-side PLE
+embedding table. This is a CPU/PyTorch check and does not require a QPC:
+
+```bash
+"$VENV/bin/python" examples/text_generation/qwen4_exp_decode_parity.py \
+  --snapshot "$SNAPSHOT" \
+  --layers 4 \
+  --context 32 \
+  --steps 4
+```
+
+To compare HF, QEfficient, and an existing QAIC QPC, add `--qpc-path` and run
+under `sg qaic` with the device IDs assigned to the QPC:
+
+```bash
+sg qaic -c '/home/ochougul/envs/qwen38f/bin/python examples/text_generation/qwen4_exp_decode_parity.py \
+  --snapshot /home/huggingface_hub/models--Qwen--Qwen3.8-Flash-Next/snapshots/de4b8e4d43b917e7706784d8bb445c9af86a3540 \
+  --qpc-path /absolute/path/to/qpc \
+  --layers 4 \
+  --context 512 \
+  --steps 4 \
+  --device-id 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15'
+```
+
+The QAIC mode requires a QPC compiled for the same four-layer decode graph and
+uses context `512` because that is the parity runner's QAIC validation shape.
 
 ## Relevant files
 

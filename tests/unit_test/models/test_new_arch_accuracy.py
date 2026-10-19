@@ -1063,6 +1063,12 @@ class TestQwen4ExpDecode:
         }
         assert set(custom_io.values()) == {"float16"}
 
+        mxint8_custom_io = model.get_custom_io(dtype="mxint8", mxint8_kv_cache=True)
+        for state_name in retained_names:
+            expected_dtype = "mxint8" if state_name.startswith("qsa_") else "float16"
+            assert mxint8_custom_io[state_name] == expected_dtype
+            assert mxint8_custom_io[f"{state_name}_RetainedState"] == expected_dtype
+
     def test_qwen4_exp_host_ngram_lookup_matches_reference_hash_and_tracks_history(self, tmp_path):
         """The host lookup follows upstream PLE IDs without retaining a table in QEff."""
         import json
