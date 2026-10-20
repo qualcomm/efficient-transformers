@@ -83,9 +83,9 @@ Expected: 4 passed, 1 xfail, 1 failed on an AI 100-only host. The xfail is specu
 ```bash
 git status --short tests/golden_outputs/goldens.json
 ```
-The file now has entries for every lane that ran. Commit it; it is part of the PR:
+The dummy and per-PR goldens are part of the PR (upstream commits those for every model; they are computed from random 2-layer models and need no weights). The `few` and `full` goldens are optional: upstream has them for 9 of 39 models and computes the rest live, so if the server cannot push, leave them there. Commit what the PR needs:
 ```bash
-git add tests/golden_outputs/goldens.json && git commit -s -m "K2 Horizon: goldens for the real-weight and 3.7B/32B lanes"
+git add tests/golden_outputs/goldens.json && git commit -s -m "K2 Horizon: goldens for the dummy and per-PR lanes"
 ```
 On later runs leave `QEFF_REGENERATE_GOLDEN` unset: an existing golden must only change after a change that alters the model output.
 
