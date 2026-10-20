@@ -2246,6 +2246,14 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         # the data-dependent .item() guard must stay out of the traced graph;
         # export preserves the static loop and applies the skip mask below.
         is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
+        # Online softmax sums exp(score - max_score) over the context.  At
+        # long context, that sum can reach 65536.  The denominator reduction
+        # can execute in FP16; FP16's largest finite value is only
+        # 65504, so the denominator becomes inf and the quotient NaN.
+        # Scale the weights by 1/ctx_len before reducing them.  The same
+        # factor is used for the value numerator below, so it cancels from
+        # numerator / denominator while keeping every FP16 reduction finite.
+        softmax_scale = 1.0 / float(max(ctx_len, 1))
         for batch_idx in range(batch_local):
             q_core = query_rows[batch_idx : batch_idx + 1].unsqueeze(2).expand(1, rows, num_cores, ql_eff, head_dim)
             maxima, sums, outputs = [], [], []
@@ -2291,6 +2299,11 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 # causal/future entries cannot inflate the denominator or
                 # participate in the value BMM.
                 block_exp = torch.where(causal, torch.zeros_like(block_exp), block_exp)
+                # Apply the scale before both the denominator sum and value
+                # BMM.  Scaling after either reduction would be too late to
+                # prevent overflow in the FP16 accumulation path, especially
+                # in an inlined graph.
+                block_exp = block_exp * softmax_scale
                 block_sum = block_exp.sum(dim=-1)
                 if skip_kv:
                     block_max = torch.where(skip_future, _scalar_like(block_max, MASKED_ATTENTION_LOGIT), block_max)
