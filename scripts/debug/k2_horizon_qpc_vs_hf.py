@@ -12,19 +12,21 @@ shapes we ship (prefill length, context, devices, precision), including long con
 Two modes:
 
   prompt: one prompt, greedy on both sides, report the first token where they differ.
-    python3 qpc_vs_hf.py IFM/K2-Horizon-7B --prefill-seq-len 128 --ctx-len 4096 --device-group '[0]'
-    python3 qpc_vs_hf.py IFM/K2-Horizon-7B --prefill-seq-len 128 --ctx-len 4096 --device-group '[0,1,2,3]' \\
+    python scripts/debug/k2_horizon_qpc_vs_hf.py --model-name IFM/K2-Horizon-7B --prefill-seq-len 128 --ctx-len 4096 --device-group '[0]'
+    python scripts/debug/k2_horizon_qpc_vs_hf.py --model-name IFM/K2-Horizon-7B --prefill-seq-len 128 --ctx-len 4096 --device-group '[0,1,2,3]' \\
         --mxfp6 --mxint8-kv-cache --use-onnx-subfunctions
 
   needle: a prompt of --needle-tokens tokens of prose with a code word planted near the
   start and a question at the end; pass = the QPC answers with the code word. Checks the
   rope and cache at long range. The HF leg is optional here (slow on CPU at 50K tokens).
-    python3 qpc_vs_hf.py IFM/K2-Horizon-7B --needle-tokens 50000 --prefill-seq-len 1024 --ctx-len 65536 \\
+    python scripts/debug/k2_horizon_qpc_vs_hf.py --model-name IFM/K2-Horizon-7B --needle-tokens 50000 --prefill-seq-len 1024 --ctx-len 65536 \\
         --device-group '[0,1,2,3]' --mxfp6 --mxint8-kv-cache --use-onnx-subfunctions --skip-hf
 
 Pass in prompt mode: the first --min-match tokens are identical (default 16; fp16 vs bf16
-usually agree for 20+ tokens, MXFP6 for fewer, then they drift, which is normal). A
-different first token, or junk, is a failure. Results go to results/qpc_vs_hf_<model>_<tag>.json.
+usually agree for 20+ tokens, then they drift, which is normal). For a quantized QPC
+(MXFP6) pass --hf-topk K instead: the QPC's own tokens are fed back to HF and every one
+must be inside HF's top-K at its position, which judges a run that forked on a near-tie
+at the first token without calling it wrong. Junk text is a failure under both. Results go to --out-dir (default: scripts/debug/results/).
 """
 
 import argparse
@@ -37,6 +39,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
+from QEfficient.utils import constants
 
 FILLER = (
     "The harbour town wakes before the sun. Fishing boats leave the quay in a line, their engines "
@@ -93,25 +96,38 @@ def run_qpc(args, tokenizer, prompt):
     return np.asarray(exec_info.generated_ids).reshape(-1).tolist()
 
 
-def run_hf(args, tokenizer, prompt):
+def load_hf(args):
     dtype = getattr(torch, args.hf_dtype)
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, trust_remote_code=True, dtype=dtype).eval()
+    return AutoModelForCausalLM.from_pretrained(args.model_name, trust_remote_code=True, dtype=dtype).eval()
+
+
+def run_hf(model, tokenizer, prompt, generation_len):
     inputs = tokenizer(prompt, return_tensors="pt")
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=args.generation_len, do_sample=False)
+        out = model.generate(**inputs, max_new_tokens=generation_len, do_sample=False)
     return out[0][inputs["input_ids"].shape[1] :].tolist()
+
+
+def hf_ranks(model, tokenizer, prompt, qpc_ids):
+    """Rank (0 = argmax) of each QPC token under HF's distribution, teacher-forced on the QPC's own prefix."""
+    prompt_ids = tokenizer(prompt)["input_ids"]
+    ids = torch.tensor([prompt_ids + qpc_ids[:-1]])
+    with torch.no_grad():
+        logits = model(input_ids=ids).logits[0, len(prompt_ids) - 1 :].float()
+    chosen = logits.gather(1, torch.tensor(qpc_ids).unsqueeze(1))
+    return (logits > chosen).sum(1).tolist()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("model_name")
+    parser.add_argument("--model-name", default="IFM/K2-Horizon-7B")
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--needle-tokens", type=int, help="needle mode: prompt length in tokens")
     parser.add_argument("--needle-word", default="marigold")
     parser.add_argument("--prefill-seq-len", type=int, default=128)
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--generation-len", type=int, default=64)
-    parser.add_argument("--num-cores", type=int, default=16)
+    parser.add_argument("--num-cores", type=int, default=constants.DEFAULT_AIC_NUM_CORES)
     parser.add_argument(
         "--device-group",
         type=lambda ids: [int(x) for x in ids.strip("[]").split(",")],
@@ -123,9 +139,17 @@ def main():
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
     parser.add_argument("--hf-dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--min-match", type=int, default=16, help="prompt mode: identical tokens needed to pass")
+    parser.add_argument(
+        "--hf-topk",
+        type=int,
+        help="prompt mode, quantized QPC: pass if every QPC token is in HF's top-K (teacher-forced)",
+    )
     parser.add_argument("--skip-hf", action="store_true", help="needle mode: judge the QPC answer only")
     parser.add_argument("--skip-qpc", action="store_true", help="laptop dry run of the prompt and HF legs")
     parser.add_argument("--tag", default="", help="suffix for the results file")
+    parser.add_argument(
+        "--out-dir", default=str(Path(__file__).with_name("results")), help="where the result JSON goes"
+    )
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
@@ -154,7 +178,10 @@ def main():
     }
 
     qpc_ids = None if args.skip_qpc else trim(run_qpc(args, tokenizer, prompt), eos_ids, pad_id)
-    hf_ids = None if (needle and args.skip_hf) else trim(run_hf(args, tokenizer, prompt), eos_ids, pad_id)
+    hf_model = None if (needle and args.skip_hf) else load_hf(args)
+    hf_ids = (
+        None if hf_model is None else trim(run_hf(hf_model, tokenizer, prompt, args.generation_len), eos_ids, pad_id)
+    )
     if qpc_ids is not None:
         result["qpc_text"] = tokenizer.decode(qpc_ids)
         print(f"QPC: {result['qpc_text']!r}")
@@ -177,12 +204,20 @@ def main():
         n = min(len(qpc_ids), len(hf_ids))
         first_diff = next((i for i in range(n) if qpc_ids[i] != hf_ids[i]), n)
         result.update({"first_diff": first_diff, "compared": n, "min_match": args.min_match})
-        ok = first_diff >= args.min_match
         print(f"first differing token: {first_diff} of {n} compared (need {args.min_match})")
+        if args.hf_topk is None:
+            ok = first_diff >= args.min_match
+        else:
+            ranks = hf_ranks(hf_model, tokenizer, prompt, qpc_ids)
+            result.update({"hf_topk": args.hf_topk, "ranks": ranks, "max_rank": max(ranks)})
+            ok = max(ranks) < args.hf_topk
+            print(
+                f"teacher-forced ranks under HF: max {max(ranks)}, {sum(r < args.hf_topk for r in ranks)}/{len(ranks)} in top-{args.hf_topk}"
+            )
 
     result["pass"] = ok
-    out_dir = Path(__file__).with_name("results")
-    out_dir.mkdir(exist_ok=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     tag = args.tag or re.sub(
         r"[^A-Za-z0-9]+", "_", f"{result['mode']}_ctx{args.ctx_len}_{'mx' if args.mxfp6 else 'fp16'}"
     )

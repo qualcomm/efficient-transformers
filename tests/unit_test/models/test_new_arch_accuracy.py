@@ -13,6 +13,7 @@ Covers the 14 architectures that had zero unit test coverage:
   - OLMo2, MPT, CodeGen, GPTJ
   - GPT-OSS (structure only — external module mapper)
   - Grok1 (structure only — external module mapper)
+  - K2 Horizon (structure, specialization guard, grouped RMSNorm — external module mapper)
 
 All tests run on CPU only, using tiny in-memory models.
 """
@@ -1128,6 +1129,46 @@ class TestK2HorizonTransformStructure:
         assert callable(mapping["K2HorizonModel"]["__qeff_init__"])
         assert callable(mapping["K2HorizonAttention"]["__qeff_init__"])
         assert callable(mapping["K2HorizonRMSNorm"]["__qeff_init__"])
+
+    def test_k2_horizon_model_init_refuses_experts(self):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonModel
+
+        model = SimpleNamespace(config=SimpleNamespace(num_experts=2, max_position_embeddings=256))
+        with pytest.raises(NotImplementedError, match="experts"):
+            QEffK2HorizonModel.__qeff_init__(model)
+
+    @pytest.mark.parametrize(
+        ("attrs", "message"),
+        [
+            ({"rope_head_dim": 16}, "partial rotary"),
+            ({"sliding_window": 128}, "sliding-window"),
+            ({"query_key_norm": True}, "query_key_norm"),
+            ({"gate_func": "softplus"}, "attention_gate_func"),
+        ],
+    )
+    def test_k2_horizon_attention_init_refuses_unsupported_options(self, attrs, message):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonAttention
+
+        # the dense sizes: full rotary, no window, no QK norm, no gate
+        attn = SimpleNamespace(
+            head_dim=32,
+            rope_head_dim=32,
+            sliding_window=None,
+            gate_func=None,
+            config=SimpleNamespace(query_key_norm=False),
+        )
+        QEffK2HorizonAttention.__qeff_init__(attn)
+        for name, value in attrs.items():
+            if name == "query_key_norm":
+                attn.config.query_key_norm = value
+            else:
+                setattr(attn, name, value)
+        with pytest.raises(NotImplementedError, match=message):
+            QEffK2HorizonAttention.__qeff_init__(attn)
 
     def test_k2_horizon_specializations_follow_the_baked_rotary_table(self):
         from types import SimpleNamespace

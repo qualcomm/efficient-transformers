@@ -4,7 +4,7 @@
 
 Remote code changes three things compared with an in-tree model:
 
-1. The HF classes cannot be imported, so the wrapper is registered by class name through `KVCacheExternalModuleMapperTransform`, not by class through `KVCacheModuleMapperTransform`.
+1. The HF classes cannot be imported, so the wrapper is registered by class name through `KVCacheExternalModuleMapperTransform`, not by class through `KVCacheTransform`.
 2. The config class has to be routed to the right auto class in `EXTERNAL_MODEL_CLASS_MAPPING`.
 3. Every test loader needs to know to pass `trust_remote_code`, which is what `ModelConfig.EXTERNAL_MODELS` is for.
 
@@ -49,9 +49,9 @@ One `QEff` class per HF class whose `forward` must change. The HF math stays; on
 | Class | What it does |
 |---|---|
 | `QEffK2HorizonRMSNorm` | `forward` calls the compiler RMSNorm custom op. With `n_groups > 1` it reshapes to groups, normalises against a unit weight, and multiplies by the full weight after. `__qeff_init__` registers that unit weight once as a non-persistent buffer so `forward` allocates nothing. |
-| `QEffK2HorizonAttention` | `forward` takes `position_ids`, `past_key_value` (`QEffDynamicCache`) and `batch_index`, writes K/V through `past_key_value.update`, runs the eager attention loop. `__qeff_init__` keeps the optional gate and QK norm wired. |
+| `QEffK2HorizonAttention` | `forward` takes `position_ids`, `past_key_value` (`QEffDynamicCache`) and `batch_index`, writes K/V through `past_key_value.update`, runs the eager attention loop. `__qeff_init__` raises `NotImplementedError` for partial rotary, a sliding window, QK norm or an attention gate: config options no dense size sets, so there is no code for them. |
 | `QEffK2HorizonDecoderLayer` | threads the new arguments through attention and MLP. |
-| `QEffK2HorizonModel` | `__qeff_init__` bakes `cos_cached` / `sin_cached` for `min(max_position_embeddings, K2_HORIZON_MAX_POSITION_EMBEDDINGS)` positions and raises `NotImplementedError` for a config with experts, partial rotary or a sliding window. `forward` builds the causal mask from `position_ids` and returns the cache in the tuple layout the exporter expects. |
+| `QEffK2HorizonModel` | `__qeff_init__` raises `NotImplementedError` for a config with experts, then bakes `cos_cached` / `sin_cached` for `min(max_position_embeddings, K2_HORIZON_MAX_POSITION_EMBEDDINGS)` positions. `forward` builds the causal mask from `position_ids` and returns the cache in the tuple layout the exporter expects. |
 | `QEffK2HorizonForCausalLM` | `forward` gathers the last logits. `get_submodules_for_export` names the decoder layer for ONNX subfunctions. `get_specializations` returns `[prefill_spec, decode_spec]` and rejects `prefill_seq_len` or `ctx_len` beyond `self.model.cos_cached.shape[0]`, the real table size. |
 
 Rules that came out of review:
@@ -59,7 +59,7 @@ Rules that came out of review:
 - Refuse what is out of scope at transform time with a clear error. A silent fallback hides a wrong model.
 - Validate against the tensor that was built, not against the constant that sized it.
 - Build once in `__qeff_init__` what `forward` would otherwise rebuild on every call.
-- Do not leave code for a path you refuse (the router-logits unpack for experts was removed).
+- Do not leave code for a path no supported size takes. The router-logits unpack for experts and the gate / QK-norm branches were removed and the options refused instead; dummy test configs must mirror the real configs, not toggle unused features.
 
 ---
 
@@ -85,7 +85,7 @@ pytest tests/unit_test/utils/test_modeling_registry.py tests/unit_test/transform
 File: `tests/unit_test/models/test_new_arch_accuracy.py`, class `TestK2HorizonTransformStructure`. It asserts:
 
 - every mapper entry exists and is callable
-- a config with experts raises at transform time
+- a config with experts raises at transform time, and so do partial rotary, a sliding window, QK norm and an attention gate on the attention
 - `get_specializations` returns two specs and rejects lengths beyond the baked table (a `SimpleNamespace` with `cos_cached=torch.zeros(128, 32)` is enough)
 - the grouped RMSNorm equals the reference formula for `n_groups` 1 and 4 (`atol=1e-5`)
 
@@ -114,7 +114,11 @@ ort_tokens = runner.run_kv_model_on_ort(str(qeff_model.export()))
 
 Pass: `hf_tokens == kv_tokens == ort_tokens` for every size. A KV mismatch is the wrapper; an ORT mismatch is the export (an op that traces differently, a shape-derived slice).
 
-This is `examples/text_generation/k2_horizon/tools/k2_tiny_check.py`; it runs all four sizes with no arguments, or one size by name.
+This lives in the quickcheck gate, `tests/unit_test/models/test_model_quickcheck.py::test_k2_horizon_reduced_config_cpu_runtime_parity`, one case per size:
+
+```bash
+pytest tests/unit_test/models/test_model_quickcheck.py -k k2_horizon -v
+```
 
 ---
 
@@ -155,9 +159,9 @@ pytest tests/transformers/models/causal_lm_models/test_causal_lm_models.py -k "K
 pytest tests/transformers/models/causal_lm_models/test_causal_lm_models.py -k "k2_horizon_text" -v
 ```
 
-Expected: dummy 2 passed 1 skipped (the repeat-KV test skips models not in its list); few 4 passed; full 2 passed; per-PR 4 passed, 1 xfail (speculative decoding does not apply to a class-keyed external model), and on an AI 100-only host 1 failed (the bf16 case compiles for AI 200, see `test_causal_lm_models.py` where `aic_hw_version` follows the dtype). The `full` lane holds the fp32 checkpoint twice on the host; skip sizes that do not fit.
+Expected: dummy 2 passed 1 skipped (the repeat-KV test skips models not in its list); few 2 passed plus 2 failures of `test_few_causal_lm_onnx_mdp_compile_only`, an upstream test that asks for 2 MDP partitions on 1 device and fails for every model; full 2 passed; per-PR 4 passed, 1 xfail (speculative decoding does not apply to a class-keyed external model), and on an AI 100-only host 1 failed (the bf16 case compiles for AI 200, see `test_causal_lm_models.py` where `aic_hw_version` follows the dtype). The `full` lane holds the fp32 checkpoint twice on the host; skip sizes that do not fit.
 
-Goldens: the HF reference tokens of every lane live in `tests/golden_outputs/goldens.json`. A missing entry is computed on the CPU on first use and written; commit the file. Set `QEFF_REGENERATE_GOLDEN=1` only after a change that alters the model output. `QEFF_RUN_CPU_REFERENCES=1` runs the QEff PyTorch and ONNX Runtime legs live instead of trusting the golden.
+Goldens: the HF reference tokens of every lane live in `tests/golden_outputs/goldens.json`. A lane with no entry computes the reference live and warns, but never writes the file; the first run of a new lane, and any run after a change that alters the model output, is done with `QEFF_REGENERATE_GOLDEN=1`, and the file is committed. `QEFF_RUN_CPU_REFERENCES=1` runs the QEff PyTorch and ONNX Runtime legs live as well.
 
 `tests/transformers/models/causal_lm_models/check_causal_models.py` was changed so external models run the HF reference leg unless their `EXTERNAL_MODELS` entry sets `skip_hf_reference` (grok-1 keeps the skip).
 
@@ -171,17 +175,16 @@ Rerun Step 6 with `--mxfp6 --mxint8-kv-cache`. Read the text, not only the numbe
 
 ## Step 8b: the compiled QPC against Hugging Face at the shipped shape, and at long context
 
-The repo lanes compare at 32 tokens; Steps 6 and 8 compare by eye. `examples/text_generation/k2_horizon/tools/qpc_vs_hf.py` compares a compiled QPC with the original model token by token at the shape that will ship, and checks long range:
+The repo lanes compare at 32 tokens; Steps 6 and 8 compare by eye. `scripts/debug/k2_horizon_qpc_vs_hf.py` compares a compiled QPC with the original model token by token at the shape that will ship, and checks long range:
 
 ```bash
-cd examples/text_generation/k2_horizon
-python tools/qpc_vs_hf.py IFM/K2-Horizon-7B --prefill-seq-len 128 --ctx-len 4096 --device-group '[0,1,2,3]' \
-    --mxfp6 --mxint8-kv-cache --use-onnx-subfunctions --min-match 8
-python tools/qpc_vs_hf.py IFM/K2-Horizon-7B --needle-tokens 60000 --prefill-seq-len 1024 --ctx-len 65536 \
+python scripts/debug/k2_horizon_qpc_vs_hf.py --model-name IFM/K2-Horizon-7B --prefill-seq-len 128 --ctx-len 4096 \
+    --device-group '[0,1,2,3]' --mxfp6 --mxint8-kv-cache --use-onnx-subfunctions --hf-topk 5
+python scripts/debug/k2_horizon_qpc_vs_hf.py --model-name IFM/K2-Horizon-7B --needle-tokens 60000 --prefill-seq-len 1024 --ctx-len 65536 \
     --device-group '[0,1,2,3]' --mxfp6 --mxint8-kv-cache --use-onnx-subfunctions --skip-hf
 ```
 
-Prompt mode: greedy on both sides, pass = the first `--min-match` tokens identical (fp16 agrees with bf16 for 20 or more, MXFP6 for fewer; a different first token is a failure). Needle mode: a prose prompt of N tokens with a code word planted near the start, pass = the QPC answers with the word. It is the only step that exercises rope and the cache past a few thousand positions; the 0.9B's YaRN scaling is identity below 8192, so nothing before this touches it. Run it at 32K and at the 64K cap for every size. Results land in `tools/results/`.
+Prompt mode: greedy on both sides. In fp16, pass = the first `--min-match` tokens identical (fp16 agrees with bf16 for 20 or more; a different first token is a failure). At MXFP6 use `--hf-topk 5`: the QPC's tokens are fed back to HF and each must be in HF's top-5 at its position, since a quantized run can fork on a near-tie at the first token (the 32B does) and still be right. Needle mode: a prose prompt of N tokens with a code word planted near the start, pass = the QPC answers with the word. It is the only step that exercises rope and the cache past a few thousand positions; the 0.9B's YaRN scaling is identity below 8192, so nothing before this touches it. Run it at 32K and at the 64K cap for every size. Results land in `scripts/debug/results/` (`--out-dir`).
 
 ## Step 9: docs
 
@@ -214,4 +217,4 @@ A size is onboarded when all four hold:
 3. The `dummy`, `few` and per-PR lanes pass on the card with goldens committed (Step 7).
 4. The production-precision output still reads right (Step 8), the QPC matches HF at the shipped shape and answers the needle at 32K and 64K (Step 8b), and the size has its row in `validate.md` (Step 9).
 
-K2 Horizon files in this PR: `examples/text_generation/k2_horizon/tools/` (the two check scripts), `QEfficient/transformers/models/k2_horizon/`, `pytorch_transforms.py`, `modeling_utils.py`, `constants.py`, `test_utils.py`, `tests/configs/causal_model_configs.json`, `tests/golden_outputs/goldens.json`, `check_causal_models.py`, the three unit test files, `docs/source/validate.md`, `examples/text_generation/README.md`.
+K2 Horizon files in this PR: `scripts/debug/k2_horizon_qpc_vs_hf.py`, the quickcheck case, `QEfficient/transformers/models/k2_horizon/`, `pytorch_transforms.py`, `modeling_utils.py`, `constants.py`, `test_utils.py`, `tests/configs/causal_model_configs.json`, `tests/golden_outputs/goldens.json`, `check_causal_models.py`, the three unit test files, `docs/source/validate.md`, `examples/text_generation/README.md`.

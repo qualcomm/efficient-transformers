@@ -1106,6 +1106,54 @@ def test_causal_lm_cpu_runtime_parity_with_api_runner(model_type, model_id, tmp_
     assert np.array_equal(kv_tokens, ort_tokens)
 
 
+K2_HORIZON_SIZES = ["IFM/K2-Horizon-0.9B", "IFM/K2-Horizon-3.7B", "IFM/K2-Horizon-7B", "IFM/K2-Horizon-32B"]
+
+
+def _reduced_k2_horizon_config(model_id: str):
+    """The real Hub config cut to 2 layers / 4 heads, keeping what differs between sizes:
+    norm groups, head_dim, rope type and vocabulary. The 32B keeps hidden_size != heads * head_dim."""
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    config.num_hidden_layers = 2
+    config.num_attention_heads = 4
+    config.num_key_value_heads = 2
+    config.hidden_size = 3 * config.head_dim if model_id.endswith("32B") else 4 * config.head_dim
+    config.intermediate_size = 512
+    config.mlp_only_layers = [0, 1]
+    config.max_position_embeddings = 256
+    config.dtype = torch.float32  # the Hub configs say bfloat16; the CPU reference cache is float32
+    return config
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize("model_id", K2_HORIZON_SIZES, ids=[m.split("-")[-1] for m in K2_HORIZON_SIZES])
+def test_k2_horizon_reduced_config_cpu_runtime_parity(model_id, tmp_path):
+    # remote-code model with no tiny Hub checkpoint: one reduced config per published size
+    torch.manual_seed(0)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    config = _reduced_k2_horizon_config(model_id)
+    model_hf = AutoModelForCausalLM.from_config(config, trust_remote_code=True, **MODEL_KWARGS)
+    model_hf.eval()
+
+    api_runner = ApiRunner(
+        batch_size=1,
+        tokenizer=tokenizer,
+        config=config,
+        prompt=["hello world"],
+        prompt_len=8,
+        ctx_len=12,
+        full_batch_size=None,
+    )
+
+    hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
+    qeff_model = QEFFAutoModelForCausalLM(model_hf, pretrained_model_name_or_path=model_id)
+    kv_tokens = api_runner.run_kv_model_on_pytorch(qeff_model.model)
+    onnx_path = _exported_onnx_path(qeff_model.export(tmp_path))
+    ort_tokens = api_runner.run_kv_model_on_ort(str(onnx_path))
+
+    assert np.array_equal(hf_tokens, kv_tokens.squeeze(0))
+    assert np.array_equal(kv_tokens, ort_tokens)
+
+
 @pytest.mark.llm_model
 def test_vlm_text_side_runtime_parity_and_full_export(tmp_path):
     tokenizer = AutoTokenizer.from_pretrained(VLM_TEXT_RUNTIME_MODEL_ID, trust_remote_code=True)

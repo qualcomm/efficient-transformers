@@ -13,16 +13,12 @@ wrappers are wired by class name through KVCacheExternalModuleMapperTransform
 instead of by class object.
 
 Only the dense sizes (0.9B, 3.7B, 7B, 32B: K2HorizonAttention + K2HorizonMLP in
-every layer) are covered; a config with experts is refused at transform time.
-The upstream attention gate and QK norm
-are config options that no published dense size enables; they are supported and
-covered by the dummy-layer test config.
+every layer) are covered. Configs with experts, partial rotary, a sliding window,
+QK norm or an attention gate are refused at transform time; no published dense
+size sets any of them.
 """
 
-import math
-
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -76,6 +72,10 @@ class QEffK2HorizonAttention(nn.Module):
             raise NotImplementedError("K2 Horizon partial rotary (rope_head_dim != head_dim) is not supported yet")
         if self.sliding_window is not None:
             raise NotImplementedError("K2 Horizon sliding-window attention is not supported yet")
+        if self.config.query_key_norm:
+            raise NotImplementedError("K2 Horizon query_key_norm is not supported; no dense size sets it")
+        if self.gate_func is not None:
+            raise NotImplementedError("K2 Horizon attention_gate_func is not supported; no dense size sets it")
 
     def forward(
         self,
@@ -99,9 +99,6 @@ class QEffK2HorizonAttention(nn.Module):
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
-        if self.config.query_key_norm:
-            query_states = self.q_norm(query_states)
-            key_states = self.k_norm(key_states)
         query_states = query_states.view(hidden_shape).transpose(1, 2)
         key_states = key_states.view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
@@ -121,15 +118,6 @@ class QEffK2HorizonAttention(nn.Module):
         attn_output, attn_weights = eager_attention_forward(
             self, query_states, key, value, attention_mask, scaling=self.scaling, **kwargs
         )
-
-        if self.gate_func is not None:
-            gate = self.gate_proj(hidden_states).view(*input_shape, -1, self.head_dim)
-            if self.gate_func == "silu":
-                gate = F.silu(gate)
-            else:
-                # softplus has no bf16 kernel on the compiler side, keep it in float32
-                gate = F.softplus(gate.float(), beta=math.log(2)).to(gate.dtype)
-            attn_output = attn_output * gate
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -182,7 +170,7 @@ class QEffK2HorizonModel(nn.Module):
             )
         max_seq_len = min(self.config.max_position_embeddings, constants.K2_HORIZON_MAX_POSITION_EMBEDDINGS)
         if max_seq_len < self.config.max_position_embeddings:
-            logger.warning(
+            logger.info(
                 f"K2 Horizon rotary tables are capped at {max_seq_len} positions "
                 f"(config has {self.config.max_position_embeddings}); ctx_len must stay within the cap"
             )

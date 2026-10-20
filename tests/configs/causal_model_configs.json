@@ -366,9 +366,7 @@
         "mlp_only_layers": [
           0,
           1
-        ],
-        "query_key_norm": true,
-        "attention_gate_func": "softplus"
+        ]
       }
     },
     {
@@ -970,8 +968,6 @@
         "head_dim": 32,
         "rope_head_dim": 32,
         "layernorm_num_groups": 4,
-        "query_key_norm": true,
-        "attention_gate_func": "softplus",
         "mlp_only_layers": [
           0,
           1
