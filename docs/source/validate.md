@@ -39,7 +39,7 @@
 | **LlamaSwiftKVForCausalLM**  | swiftkv            | [Snowflake/Llama-3.1-SwiftKV-8B-Instruct](https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct)                                                  | ✔️          |
 | **Grok1ModelForCausalLM** ** |  grok-1②          | [hpcai-tech/grok-1](https://huggingface.co/hpcai-tech/grok-1)                                                  | ✕          |
 | **Glm4MoeForCausalLM**  |     GLM-4.5       | [zai-org/GLM-4.5](https://huggingface.co/zai-org/GLM-4.5)                                                  |          |
-| **K2HorizonForCausalLM** | K2 Horizon②④ (dense) | [IFM/K2-Horizon-0.9B](https://huggingface.co/IFM/K2-Horizon-0.9B)<br>[IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B) | ✕ |
+| **K2HorizonForCausalLM** | K2 Horizon②④ (dense) | [IFM/K2-Horizon-0.9B](https://huggingface.co/IFM/K2-Horizon-0.9B)<br>[IFM/K2-Horizon-3.7B](https://huggingface.co/IFM/K2-Horizon-3.7B)<br>[IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B)<br>[IFM/K2-Horizon-32B](https://huggingface.co/IFM/K2-Horizon-32B) | ✕ |
 
 ---
 
@@ -196,7 +196,7 @@ Models marked with `**` are currently not functional on the `main` and `release/
 
 ③ Pass `disable_sliding_window` for few family models when using vLLM.
 
-④ K2-Horizon-0.9B is validated with fp16 weights and MXINT8 KV cache; MXFP6 weights degrade its output (first-layer sensitivity). The 7B takes MXFP6.
+④ K2 Horizon dense sizes, validated on Cloud AI 100 Ultra against the Hugging Face model at the shipped shape (128-token prompt, 4096 context) and with a planted-fact recall at 32K and 64K context. The 3.7B, 7B and 32B take MXFP6 weights with MXINT8 KV cache; the 0.9B keeps fp16 weights with MXINT8 KV cache, MXFP6 degrades its output (first-layer sensitivity). The 32B needs all 4 devices of a card and, at 64K context, `prefill_seq_len` 256 (the 1024 variant does not finish compiling). The rotary tables are capped at 65536 positions (`K2_HORIZON_MAX_POSITION_EMBEDDINGS`), so `ctx_len` is limited to 64K; the configs declare up to 512K.
 ```
 ---
 
