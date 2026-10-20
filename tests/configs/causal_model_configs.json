@@ -353,6 +353,7 @@
       "model_name": "IFM/K2-Horizon-7B",
       "model_type": "k2_horizon",
       "additional_params": {
+        "initializer_range": 0.5,
         "vocab_size": 250624,
         "max_position_embeddings": 128,
         "num_hidden_layers": 2,
@@ -373,6 +374,7 @@
       "model_name": "IFM/K2-Horizon-0.9B",
       "model_type": "k2_horizon",
       "additional_params": {
+        "initializer_range": 0.5,
         "vocab_size": 64256,
         "max_position_embeddings": 128,
         "num_hidden_layers": 2,
@@ -393,6 +395,7 @@
       "model_name": "IFM/K2-Horizon-3.7B",
       "model_type": "k2_horizon",
       "additional_params": {
+        "initializer_range": 0.5,
         "vocab_size": 250624,
         "max_position_embeddings": 128,
         "num_hidden_layers": 2,
@@ -413,6 +416,7 @@
       "model_name": "IFM/K2-Horizon-32B",
       "model_type": "k2_horizon",
       "additional_params": {
+        "initializer_range": 0.5,
         "vocab_size": 250624,
         "max_position_embeddings": 128,
         "num_hidden_layers": 2,

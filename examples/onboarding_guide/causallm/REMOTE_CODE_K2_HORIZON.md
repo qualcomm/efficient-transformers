@@ -146,6 +146,7 @@ Pass: the text equals a greedy Hugging Face run on CPU of the same prompt (`do_s
 Register the model in `tests/configs/causal_model_configs.json`:
 
 - `causal_lm_models`: one entry per size with `additional_params` that reduce the config to 2 layers but keep the features that differ between sizes (the 32B entry uses 8 query heads over 1 KV head with `hidden_size != heads * head_dim`, as the real config does). This feeds the `dummy` (random weights), `few` (real checkpoint, first layer) and `full` (real checkpoint, all layers, 4 devices) lanes.
+  The dummy entries also set `initializer_range: 0.5` (default 0.02). The dummy lane compares fp32 CPU tokens with fp16 card tokens exactly, and a random 2-layer model with a 250k-row lm_head over a 128-wide hidden state has nearly flat logits: with the default init the smallest top-1/top-2 gap along the 24-token greedy path was 0.0004 to 0.0018 logits for the four sizes, below fp16 resolution, and the 3.7B flipped a token on the card. At 0.5 the smallest gaps are 0.016 to 0.14. Measure this (greedy path, top-2 logit gap per step) before choosing a dummy shape for a new model.
 - `per_pr_causal_text_models`: one `k2_horizon_text` entry with `config_overrides` for the continuous-batching, ONNX-subfunction, CCL, fp16/fp32/bf16 and speculative lanes.
 
 Run from the repo root; the card tests run one at a time, so no `-n auto`:
