@@ -128,6 +128,12 @@ def main():
         default="float16",
         help="Model/export floating-point dtype (default: float16).",
     )
+    parser.add_argument(
+        "--mxint8-kv-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use MXINT8 for retained KV-cache I/O; disabled by default for FP16 parity.",
+    )
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--num-devices", type=int, default=16)
     parser.add_argument(
@@ -377,7 +383,7 @@ def main():
         num_cores=args.num_cores,
         num_devices=args.num_devices,
         mxfp6_matmul=True,
-        mxint8_kv_cache=True,
+        mxint8_kv_cache=args.mxint8_kv_cache,
         use_onnx_subfunctions=args.use_onnx_subfunctions,
         skip_vision=True,
         offload_pt_weights=False,
