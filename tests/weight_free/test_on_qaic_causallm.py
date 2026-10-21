@@ -17,7 +17,9 @@ Covers causal-LM generation, HF/QAIC parity, and embedding parity.
 
 from __future__ import annotations
 
+from pathlib import Path
 import numpy as np
+import onnx
 import pytest
 import torch
 from transformers import (
@@ -35,6 +37,7 @@ from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_
 from ._helpers import (
     BATCH_SIZE,
     CTX_LEN,
+    FP8_RETAINED_QAIC_MODEL_PARAMS,
     PROMPT_LEN,
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_BLOCKING_QAIC_CASES,
@@ -64,6 +67,26 @@ def _blocking_compile_options(blocking_key: str) -> dict:
     if device_ids is None:
         pytest.skip("No available QAIC device")
     return {}
+
+
+def _assert_retained_fp8_onnx(onnx_path: Path) -> None:
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    fp8_names = {
+        initializer.name
+        for initializer in model.graph.initializer
+        if initializer.data_type == onnx.TensorProto.FLOAT8E4M3FN
+    }
+    fp8_names.update(
+        value_info.name
+        for value_info in model.graph.input
+        if value_info.type.tensor_type.elem_type == onnx.TensorProto.FLOAT8E4M3FN
+    )
+    assert fp8_names, f"Expected retained FP8 weights in {onnx_path}"
+
+    nodes = list(model.graph.node)
+    nodes.extend(node for function in model.functions for node in function.node)
+    fp8_casts = [node for node in nodes if node.op_type == "Cast" and fp8_names.intersection(node.input)]
+    assert not fp8_casts, f"Retained FP8 weights are directly typecast: {[node.name for node in fp8_casts]}"
 
 
 @pytest.mark.weight_free
@@ -153,6 +176,53 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
     )
     assert output is not None
     assert output.generated_texts is not None
+
+
+@pytest.mark.weight_free
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+@pytest.mark.parametrize("model_type,model_id", FP8_RETAINED_QAIC_MODEL_PARAMS)
+def test_weight_free_fp8_retained_export_compile(model_type, model_id, tmp_export_dir):
+    """Export retained FP8 weights and compile the resulting ONNX on QAIC."""
+    try:
+        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        config.num_hidden_layers = 2
+        quantization_config = getattr(config, "quantization_config", None)
+        if isinstance(quantization_config, dict):
+            quantization_config["scale_dtype"] = torch.float16
+        elif quantization_config is not None:
+            quantization_config.scale_dtype = torch.float16
+
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            torch_dtype=torch.float16,
+            fp8_retain_weights=True,
+            weight_free=True,
+        )
+    except Exception as exc:
+        skip_on_model_fetch_error(exc, model_id)
+
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            tmp_export_dir / f"fp8_{model_type}_export",
+            dynamo=True,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    _assert_retained_fp8_onnx(onnx_path)
+
+    qpc_path = qeff_model.compile(
+        onnx_path=str(onnx_path),
+        compile_dir=tmp_export_dir / f"fp8_{model_type}_compile",
+        prefill_seq_len=PROMPT_LEN,
+        ctx_len=CTX_LEN,
+        num_cores=16,
+        batch_size=BATCH_SIZE,
+        use_onnx_subfunctions=True,
+    )
+    assert Path(qpc_path).is_dir(), f"Expected QPC directory for {model_type}: {qpc_path}"
 
 
 @pytest.mark.weight_free

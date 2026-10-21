@@ -62,6 +62,12 @@ WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
     "starcoder2": "hf-tiny-v2/tiny-random-Starcoder2ForCausalLM",
 }
 
+FP8_RETAINED_QAIC_MODEL_IDS = {
+    "tensor": "neuralmagic/Llama-3.2-3B-Instruct-FP8",
+    "channel": "RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic",
+    "block": "Qwen/Qwen3-0.6B-FP8",
+}
+
 WEIGHT_FREE_EMBEDDING_MODELS = {
     "bge_reranker": ("BAAI/bge-reranker-v2-m3", "mean"),
     "bge_small": ("BAAI/bge-small-en-v1.5", "mean"),
@@ -90,6 +96,16 @@ WEIGHT_FREE_QAIC_MODEL_PARAMS = [
         id=model_type,
     )
     for model_type, model_id in sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.items())
+]
+
+FP8_RETAINED_QAIC_MODEL_PARAMS = [
+    pytest.param(
+        model_type,
+        model_id,
+        marks=pytest.mark.xdist_group(name=f"qaic-fp8-{model_type}"),
+        id=f"fp8-{model_type}",
+    )
+    for model_type, model_id in sorted(FP8_RETAINED_QAIC_MODEL_IDS.items())
 ]
 
 WEIGHT_FREE_EMBEDDING_MODEL_PARAMS = [

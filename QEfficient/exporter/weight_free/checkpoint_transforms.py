@@ -167,7 +167,7 @@ def _split_gate_up_bias(gate_up_bias: torch.Tensor, *, interleaved: bool = False
 class DtypeConversionCheckpointTransform(BaseCheckpointTransform):
     """Plan dense shard reuse or dtype conversion into final checkpoint shards."""
 
-    TRANSFORM_ID = "dtype_conversion_v1"
+    TRANSFORM_ID = "dtype_conversion_v3"
 
     @classmethod
     def plan_tasks(cls, context: CheckpointPlanningContext) -> None:
@@ -592,6 +592,11 @@ def _make_dtype_stage(cls, input_refs: tuple[TensorRef, ...], target_dtype: torc
             tensor = get_tensor(input_ref)
             if tensor.is_floating_point() and tensor.dtype != requested_dtype:
                 tensor = tensor.to(requested_dtype)
+            if input_ref.key.endswith("weight_scale"):
+                if tensor.ndim == 2 and tensor.shape[1] == 1:
+                    tensor = tensor.squeeze(-1)
+                elif tensor.numel() == 1:
+                    tensor = tensor.reshape(())
             outputs[output_ref] = tensor.contiguous()
         return outputs
 

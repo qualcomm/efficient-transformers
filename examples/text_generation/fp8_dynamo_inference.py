@@ -14,9 +14,10 @@ Before running this example, configure the Hugging Face cache explicitly::
 
 The ``retained`` FP8 mode keeps FP8 weights in ONNX and emits dequantization
 nodes. The ``dequantized`` mode converts FP8 weights to regular Linear layers
-before export.
+before export. ``--weight-free`` builds a meta-device model and externalizes
+model weights into a weight specification consumed during compile.
 One can use the following example command to run this script:
-    ``python examples/text_generation/fp8_dynamo_inference.py --model-name Qwen/Qwen3-0.6B-FP8 --dtype fp16 --fp8-mode retained --action all --device-group [0] --output-dir ./qeff_output_fp8``
+    ``python examples/text_generation/fp8_dynamo_inference.py --model-name Qwen/Qwen3-0.6B-FP8 --dtype fp16 --fp8-mode retained --action all --device-group [0] --artifact-dir ./qeff_output_fp8``
 """
 
 import argparse
@@ -54,21 +55,41 @@ def _safe_model_name(model_name: str) -> str:
 
 def _default_artifact_dir(args: argparse.Namespace) -> Path:
     mode = "fp8_retained" if args.fp8_mode == "retained" else "fp8_dequantized"
-    return Path(args.artifact_dir).expanduser() / f"{_safe_model_name(args.model_name)}_{args.dtype}_{mode}"
+    weight_free_suffix = "_weight_free" if args.weight_free else ""
+    return (
+        Path(args.artifact_dir).expanduser()
+        / f"{_safe_model_name(args.model_name)}_{args.dtype}_{mode}{weight_free_suffix}"
+    )
 
 
 def _load_model(args: argparse.Namespace):
     compute_dtype = _DTYPE_MAP[args.dtype]
     config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=args.trust_remote_code)
-    if args.num_hidden_layers > 0 and hasattr(config, "num_hidden_layers"):
+    if args.num_hidden_layers != -1:
+        if args.num_hidden_layers < 1:
+            raise ValueError("--num-hidden-layers must be -1 or a positive integer")
+        if not hasattr(config, "num_hidden_layers"):
+            raise ValueError(f"The model config does not define num_hidden_layers: {type(config).__name__}")
         config.num_hidden_layers = args.num_hidden_layers
+
+    quantization_config = getattr(config, "quantization_config", None)
+    if isinstance(quantization_config, dict):
+        quant_method = quantization_config.get("quant_method")
+        if quant_method in {"fp8", "compressed-tensors"}:
+            quantization_config["scale_dtype"] = compute_dtype
+    elif quantization_config is not None:
+        quant_method = getattr(quantization_config, "quant_method", None)
+        quant_method = getattr(quant_method, "value", quant_method)
+        if quant_method in {"fp8", "compressed-tensors"}:
+            quantization_config.scale_dtype = compute_dtype
 
     model = QEFFAutoModelForCausalLM.from_pretrained(
         args.model_name,
         config=config,
         torch_dtype=compute_dtype,
         trust_remote_code=args.trust_remote_code,
-        dequantize_fp8_weights=args.fp8_mode == "dequantized",
+        fp8_retain_weights=args.fp8_mode == "retained",
+        weight_free=args.weight_free,
     )
     return model
 
@@ -110,7 +131,7 @@ def _run_inference(model, tokenizer, args: argparse.Namespace, qpc_path: Optiona
     execution = model.generate(
         tokenizer=tokenizer,
         prompts=[args.prompt],
-        device_id=args.device_group,
+        device_ids=args.device_group,
         generation_len=args.generation_len,
     )
     generated_text = execution.generated_texts[0]
@@ -136,6 +157,11 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("retained", "dequantized"),
         default="retained",
         help="Keep FP8 weights in ONNX or dequantize them before export",
+    )
+    parser.add_argument(
+        "--weight-free",
+        action="store_true",
+        help="Build a meta-device model and externalize weights for compile-time loading",
     )
     parser.add_argument(
         "--artifact-dir",
