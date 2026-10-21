@@ -111,7 +111,7 @@ def _dynamic_sequence_chunk(
         return compile_length_sequence_chunk(tensor, dim, num_chunks, chunk_idx, compile_axis_size)
     shape = tensor.shape
     chunked = tensor.reshape(*shape[:dim], num_chunks, -1, *shape[dim + 1 :])
-    return chunked.select(dim, chunk_idx)
+    return chunked.select(dim, chunk_idx).clone()
 
 
 def _dynamic_sequence_nested_chunks(
@@ -2567,8 +2567,8 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
 
         num_q_chunks = int(query_len // ql_chunk)
         compile_seq_len = getattr(blocking_config, "prefill_compile_seq_len", None)
+        export_seq_len = getattr(blocking_config, "prefill_export_seq_len", None)
         if torch._dynamo.is_compiling():
-            export_seq_len = getattr(blocking_config, "prefill_export_seq_len", None)
             if export_seq_len is not None:
                 num_q_chunks = int(export_seq_len // ql_chunk)
         output_seq_len = compile_seq_len if compile_seq_len is not None else query_len
@@ -2922,23 +2922,35 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
 
             def _loop_body(chunk_idx, output):
                 chunk_idx_value = chunk_idx.item()
-                q_chunk = _dynamic_sequence_chunk(q, num_q_chunks, chunk_idx_value, 3, compile_seq_len)
-                block_chunk = _dynamic_sequence_chunk(token_indices, num_q_chunks, chunk_idx_value, 2, compile_seq_len)
+                # Use reshape/select when no derived export length exists, or
+                # when export and compile lengths are identical.  This avoids
+                # lowering the loop-carried index to a dynamic Slice.start.
+                chunk_compile_seq_len = (
+                    None if export_seq_len is None or export_seq_len == compile_seq_len else compile_seq_len
+                )
+                q_chunk = _dynamic_sequence_chunk(q, num_q_chunks, chunk_idx_value, 3, chunk_compile_seq_len)
+                block_chunk = _dynamic_sequence_chunk(
+                    token_indices, num_q_chunks, chunk_idx_value, 2, chunk_compile_seq_len
+                )
                 block_valid_chunk = _dynamic_sequence_chunk(
-                    token_valid, num_q_chunks, chunk_idx_value, 2, compile_seq_len
+                    token_valid, num_q_chunks, chunk_idx_value, 2, chunk_compile_seq_len
                 )
                 position_chunk = _dynamic_sequence_chunk(
-                    position_ids, num_q_chunks, chunk_idx_value, 1, compile_seq_len
+                    position_ids, num_q_chunks, chunk_idx_value, 1, chunk_compile_seq_len
                 )
                 out_chunk = _compute_q_chunk(q_chunk, block_chunk, block_valid_chunk, position_chunk)
                 chunk_start = chunk_idx_value * out_chunk.shape[2]
-                updated_output = torch.slice_scatter(
-                    output,
-                    out_chunk,
-                    dim=2,
-                    start=chunk_start,
-                    end=chunk_start + out_chunk.shape[2],
-                )
+                # QAIC requires constant Slice starts.  Indexed writeback
+                # avoids the loop-carried dynamic Slice produced by
+                # torch.slice_scatter.
+                chunk_length = out_chunk.shape[2]
+                chunk_positions = torch.arange(chunk_length, device=output.device, dtype=torch.int64) + chunk_start
+                batch_indices = torch.arange(output.shape[0], device=output.device, dtype=torch.int64).view(-1, 1, 1)
+                head_indices = torch.arange(output.shape[1], device=output.device, dtype=torch.int64).view(1, -1, 1)
+                batch_indices = batch_indices.expand(output.shape[0], output.shape[1], chunk_length)
+                head_indices = head_indices.expand(output.shape[0], output.shape[1], chunk_length)
+                chunk_positions = chunk_positions.view(1, 1, -1).expand_as(batch_indices)
+                updated_output = output.index_put((batch_indices, head_indices, chunk_positions), out_chunk)
                 return chunk_idx + 1, updated_output
 
             loop_index = torch.zeros((), dtype=torch.int64, device=q.device)
