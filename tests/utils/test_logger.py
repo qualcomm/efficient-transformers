@@ -85,6 +85,23 @@ def test_complete_timing_table(tmp_path, capsys):
     assert "Total Time" in output
 
 
+def test_console_logging_env_mirrors_logs_and_timing_table(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv(LoggerConfig.log_to_console_env, "1")
+    logger = QEFFLogger.get_logger("MODEL", "INFO", str(tmp_path))
+    logger.info("visible on console")
+    QEFFLogger.start_run("console-model")
+    QEFFLogger.log_event("milestone", "MODEL", "load", milestone=QEFFLogger.MILESTONE_LOAD_COMPLETE)
+    QEFFLogger.finish_run()
+
+    output = capsys.readouterr().err
+    assert "visible on console" in output
+    assert "===== QEfficient Timing Summary: console-model =====" in output
+
+    log_path = QEFFLogger.get_logfile_path()
+    assert log_path is not None
+    assert "===== QEfficient Timing Summary: console-model =====" in Path(log_path).read_text()
+
+
 def test_cached_stages_are_zero_in_timing_table(tmp_path):
     QEFFLogger.get_logger("infra", "INFO", str(tmp_path))
     QEFFLogger.start_run("cached-model")
