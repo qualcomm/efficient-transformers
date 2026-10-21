@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import random
 from collections import Counter
+import json
 from pathlib import Path
 
 import numpy as np
@@ -62,11 +63,11 @@ WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
     "starcoder2": "hf-tiny-v2/tiny-random-Starcoder2ForCausalLM",
 }
 
-FP8_RETAINED_QAIC_MODEL_IDS = {
-    "tensor": "neuralmagic/Llama-3.2-3B-Instruct-FP8",
-    "channel": "RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic",
-    "block": "Qwen/Qwen3-0.6B-FP8",
-}
+_CAUSAL_MODEL_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "causal_model_configs.json"
+with _CAUSAL_MODEL_CONFIG_PATH.open() as _config_file:
+    _CAUSAL_MODEL_CONFIGS = json.load(_config_file)
+
+FP8_RETAINED_QAIC_MODEL_CONFIGS = _CAUSAL_MODEL_CONFIGS["per_pr_fp8_quantized_models"]
 
 WEIGHT_FREE_EMBEDDING_MODELS = {
     "bge_reranker": ("BAAI/bge-reranker-v2-m3", "mean"),
@@ -100,12 +101,11 @@ WEIGHT_FREE_QAIC_MODEL_PARAMS = [
 
 FP8_RETAINED_QAIC_MODEL_PARAMS = [
     pytest.param(
-        model_type,
-        model_id,
-        marks=pytest.mark.xdist_group(name=f"qaic-fp8-{model_type}"),
-        id=f"fp8-{model_type}",
+        model_config,
+        marks=pytest.mark.xdist_group(name=f"qaic-fp8-{model_config['quantization_type']}"),
+        id=f"fp8-{model_config['quantization_type']}",
     )
-    for model_type, model_id in sorted(FP8_RETAINED_QAIC_MODEL_IDS.items())
+    for model_config in FP8_RETAINED_QAIC_MODEL_CONFIGS
 ]
 
 WEIGHT_FREE_EMBEDDING_MODEL_PARAMS = [
@@ -198,6 +198,92 @@ BATCH_SIZE = 1
 FULL_BATCH_SIZE = 4
 MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False, "torch_dtype": torch.float32}
 
+
+def _fp8_quantization_config(quantization_type: str) -> dict:
+    if quantization_type in {"tensor", "channel"}:
+        return {
+            "config_groups": {
+                "group_0": {
+                    "input_activations": {
+                        "dynamic": True,
+                        "num_bits": 8,
+                        "strategy": "token",
+                        "symmetric": True,
+                        "type": "float",
+                        "block_structure": None,
+                        "group_size": None,
+                        "observer": "minmax",
+                        "observer_kwargs": {},
+                    },
+                    "output_activations": None,
+                    "targets": ["Linear"],
+                    "weights": {
+                        "dynamic": False,
+                        "num_bits": 8,
+                        "strategy": quantization_type,
+                        "symmetric": True,
+                        "type": "float",
+                        "block_structure": None,
+                        "group_size": None,
+                        "observer": "minmax",
+                        "observer_kwargs": {},
+                    },
+                }
+            },
+            "format": "float-quantized",
+            "ignore": ["lm_head"],
+            "quant_method": "compressed-tensors",
+            "quantization_status": "compressed",
+            "kv_cache_scheme": None,
+        }
+    if quantization_type == "block":
+        return {
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "quant_method": "fp8",
+            "weight_block_size": [128, 128],
+        }
+    raise ValueError(f"Unsupported FP8 quantization type: {quantization_type}")
+
+
+def build_fp8_test_checkpoint(model_config: dict, checkpoint_dir: Path) -> Path:
+    """Create a tiny local FP8 checkpoint matching one configured quantization layout."""
+    quantization_type = model_config["quantization_type"]
+    config = AutoConfig.for_model(model_config["model_type"], **model_config.get("additional_params", {}))
+    config.quantization_config = _fp8_quantization_config(quantization_type)
+    config.dtype = torch.float16
+    config.torch_dtype = torch.float16
+
+    torch.manual_seed(42)
+    model = AutoModelForCausalLM.from_config(config)
+    model.eval()
+    linear_weight_names = {
+        f"{module_name}.weight"
+        for module_name, module in model.named_modules()
+        if isinstance(module, torch.nn.Linear) and module_name != "lm_head"
+    }
+    scale_name = "weight_scale_inv" if quantization_type == "block" else "weight_scale"
+    state_dict = {}
+    for name, value in model.state_dict().items():
+        if name in linear_weight_names:
+            state_dict[name] = torch.randn(value.shape, dtype=torch.float32).to(torch.float8_e4m3fn)
+            if quantization_type == "tensor":
+                scale_shape = ()
+            elif quantization_type == "channel":
+                scale_shape = (value.shape[0],)
+            else:
+                scale_shape = (value.shape[0] // 128, value.shape[1] // 128)
+            state_dict[name.rsplit(".", 1)[0] + f".{scale_name}"] = torch.ones(scale_shape, dtype=torch.float16)
+        elif value.is_floating_point():
+            state_dict[name] = value.to(torch.float16)
+        else:
+            state_dict[name] = value
+
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(checkpoint_dir, state_dict=state_dict, safe_serialization=True)
+    return checkpoint_dir
+
+
 # ---------------------------------------------------------------------------
 # Load helpers
 # ---------------------------------------------------------------------------
@@ -273,6 +359,26 @@ def exported_onnx_path(export_result) -> Path:
     onnx_path = Path(export_result)
     assert onnx_path.is_file(), f"Expected ONNX file at {onnx_path}"
     return onnx_path
+
+
+def assert_retained_fp8_onnx(onnx_path: Path) -> None:
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    fp8_names = {
+        initializer.name
+        for initializer in model.graph.initializer
+        if initializer.data_type == onnx.TensorProto.FLOAT8E4M3FN
+    }
+    fp8_names.update(
+        value_info.name
+        for value_info in model.graph.input
+        if value_info.type.tensor_type.elem_type == onnx.TensorProto.FLOAT8E4M3FN
+    )
+    assert fp8_names, f"Expected retained FP8 weights in {onnx_path}"
+
+    nodes = list(model.graph.node)
+    nodes.extend(node for function in model.functions for node in function.node)
+    fp8_casts = [node for node in nodes if node.op_type == "Cast" and fp8_names.intersection(node.input)]
+    assert not fp8_casts, f"Retained FP8 weights are directly typecast: {[node.name for node in fp8_casts]}"
 
 
 # ---------------------------------------------------------------------------

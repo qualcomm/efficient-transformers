@@ -384,6 +384,54 @@
       }
     }
   ],
+  "per_pr_fp8_quantized_models": [
+    {
+      "model_name": "tiny-fp8-llama-tensor",
+      "model_type": "llama",
+      "quantization_type": "tensor",
+      "additional_params": {
+        "max_position_embeddings": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "vocab_size": 128,
+        "tie_word_embeddings": false
+      }
+    },
+    {
+      "model_name": "tiny-fp8-llama-channel",
+      "model_type": "llama",
+      "quantization_type": "channel",
+      "additional_params": {
+        "max_position_embeddings": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "vocab_size": 128,
+        "tie_word_embeddings": false
+      }
+    },
+    {
+      "model_name": "tiny-fp8-qwen3-block",
+      "model_type": "qwen3",
+      "quantization_type": "block",
+      "additional_params": {
+        "max_position_embeddings": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 1,
+        "num_key_value_heads": 1,
+        "head_dim": 128,
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "vocab_size": 128,
+        "tie_word_embeddings": false
+      }
+    }
+  ],
   "spd_causal_lm_models": [
     {
       "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
