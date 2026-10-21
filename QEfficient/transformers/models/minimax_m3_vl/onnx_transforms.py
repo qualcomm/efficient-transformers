@@ -32,7 +32,12 @@ class MiniMaxM3StaticPrefillLoopTransform(BaseOnnxTransform):
             return False
         body_values = [output.name for output in body.output]
         body_values.extend(output for body_node in body.node for output in body_node.output)
-        return any("slice_scatter" in value for value in body_values)
+        # The writeback is an indexed scatter after replacing dynamic
+        # torch.slice_scatter; the exporter may expose it as ScatterND or an
+        # index_put-generated value inside the loop body.
+        return any(
+            "slice_scatter" in value or "scatter_" in value or "index_put_" in value for value in body_values
+        ) or any(body_node.op_type in {"ScatterElements", "ScatterND"} for body_node in body.node)
 
     @staticmethod
     def _used_graph_values(graph: onnx.GraphProto) -> set[str]:
