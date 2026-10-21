@@ -29,6 +29,7 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokeni
 
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.transformers.quantizers.quantizer_utils import blockwise_dequantize
 
 # ---------------------------------------------------------------------------
 # Worker-level model cache
@@ -246,7 +247,41 @@ def _fp8_quantization_config(quantization_type: str) -> dict:
     raise ValueError(f"Unsupported FP8 quantization type: {quantization_type}")
 
 
-def build_fp8_test_checkpoint(model_config: dict, checkpoint_dir: Path) -> Path:
+class TinyRandomTokenizer:
+    """Local tokenizer for generated FP8 fixtures without a Hub tokenizer."""
+
+    padding_side = "right"
+    pad_token_id = 0
+    vocab_size = 128
+    eos_token_id = vocab_size
+    _prompt_ids = (2, 3, 4, 5, 6, 7, 8, 9)
+
+    def __call__(self, prompts, return_tensors=None, padding=False, max_length=None, **kwargs):
+        prompts = [prompts] if isinstance(prompts, str) else prompts
+        sequences = [list(self._prompt_ids) for _ in prompts]
+        target_length = max_length if padding == "max_length" else max(map(len, sequences))
+        input_ids = np.full((len(sequences), target_length), self.pad_token_id, dtype=np.int64)
+        attention_mask = np.zeros_like(input_ids)
+        for row, sequence in enumerate(sequences):
+            length = min(len(sequence), target_length)
+            input_ids[row, :length] = sequence[:length]
+            attention_mask[row, :length] = 1
+        if return_tensors == "pt":
+            return {"input_ids": torch.from_numpy(input_ids), "attention_mask": torch.from_numpy(attention_mask)}
+        if return_tensors == "np":
+            return {"input_ids": input_ids, "attention_mask": attention_mask}
+        return {"input_ids": input_ids.tolist(), "attention_mask": attention_mask.tolist()}
+
+    def decode(self, token_ids, skip_special_tokens=True):
+        return " ".join(str(int(token_id)) for token_id in token_ids if token_id not in {self.pad_token_id})
+
+    def batch_decode(self, sequences, skip_special_tokens=True):
+        return [self.decode(sequence, skip_special_tokens=skip_special_tokens) for sequence in sequences]
+
+
+def build_fp8_test_checkpoint(
+    model_config: dict, checkpoint_dir: Path, return_reference_model: bool = False
+) -> Path | tuple[Path, AutoModelForCausalLM]:
     """Create a tiny local FP8 checkpoint matching one configured quantization layout."""
     quantization_type = model_config["quantization_type"]
     config = AutoConfig.for_model(model_config["model_type"], **model_config.get("additional_params", {}))
@@ -264,23 +299,43 @@ def build_fp8_test_checkpoint(model_config: dict, checkpoint_dir: Path) -> Path:
     }
     scale_name = "weight_scale_inv" if quantization_type == "block" else "weight_scale"
     state_dict = {}
+    reference_state_dict = {}
     for name, value in model.state_dict().items():
         if name in linear_weight_names:
-            state_dict[name] = torch.randn(value.shape, dtype=torch.float32).to(torch.float8_e4m3fn)
+            quantized_weight = torch.randn(value.shape, dtype=torch.float32).to(torch.float8_e4m3fn)
+            state_dict[name] = quantized_weight
             if quantization_type == "tensor":
                 scale_shape = ()
             elif quantization_type == "channel":
                 scale_shape = (value.shape[0],)
             else:
                 scale_shape = (value.shape[0] // 128, value.shape[1] // 128)
-            state_dict[name.rsplit(".", 1)[0] + f".{scale_name}"] = torch.ones(scale_shape, dtype=torch.float16)
+            scale = torch.ones(scale_shape, dtype=torch.float16)
+            state_dict[name.rsplit(".", 1)[0] + f".{scale_name}"] = scale
+            if quantization_type == "block":
+                reference_state_dict[name] = blockwise_dequantize(quantized_weight, scale, [128, 128])
+            else:
+                reference_scale = scale if quantization_type == "tensor" else scale[:, None]
+                reference_state_dict[name] = quantized_weight.to(torch.float16) * reference_scale
         elif value.is_floating_point():
             state_dict[name] = value.to(torch.float16)
+            reference_state_dict[name] = state_dict[name]
         else:
             state_dict[name] = value
+            reference_state_dict[name] = value
+
+    reference_model = None
+    if return_reference_model:
+        reference_config = copy.deepcopy(config)
+        reference_config.quantization_config = None
+        reference_model = AutoModelForCausalLM.from_config(reference_config).to(torch.float16)
+        reference_model.load_state_dict(reference_state_dict)
+        reference_model.eval()
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(checkpoint_dir, state_dict=state_dict, safe_serialization=True)
+    if reference_model is not None:
+        return checkpoint_dir, reference_model
     return checkpoint_dir
 
 

@@ -44,6 +44,7 @@ from ._helpers import (
     WEIGHT_FREE_QAIC_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
+    TinyRandomTokenizer,
     assert_retained_fp8_onnx,
     build_fp8_test_checkpoint,
     exported_onnx_path,
@@ -184,9 +185,13 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
 @pytest.mark.llm_model
 @pytest.mark.parametrize("model_config", FP8_RETAINED_QAIC_MODEL_PARAMS)
 def test_weight_free_fp8_retained_export_compile(model_config, tmp_export_dir):
-    """Export retained FP8 weights and compile the resulting ONNX on QAIC."""
+    """Export, compile, and compare greedy HF and QAIC tokens for retained FP8."""
     model_type = model_config["quantization_type"]
-    checkpoint_dir = build_fp8_test_checkpoint(model_config, tmp_export_dir / f"fp8_{model_type}_checkpoint")
+    checkpoint_dir, model_hf = build_fp8_test_checkpoint(
+        model_config,
+        tmp_export_dir / f"fp8_{model_type}_checkpoint",
+        return_reference_model=True,
+    )
     config = AutoConfig.from_pretrained(checkpoint_dir)
     config.quantization_config["scale_dtype"] = torch.float16
     qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
@@ -217,6 +222,31 @@ def test_weight_free_fp8_retained_export_compile(model_config, tmp_export_dir):
         use_onnx_subfunctions=True,
     )
     assert Path(qpc_path).is_dir(), f"Expected QPC directory for {model_type}: {qpc_path}"
+
+    tokenizer = TinyRandomTokenizer()
+    prompt = "hello world"
+    model_inputs = tokenizer(prompt, return_tensors="pt")
+    generation_len = CTX_LEN - PROMPT_LEN
+    with torch.inference_mode():
+        hf_output = model_hf.generate(
+            **model_inputs,
+            do_sample=False,
+            max_new_tokens=generation_len,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+    hf_tokens = hf_output[0, model_inputs["input_ids"].shape[1] :].cpu().numpy()
+
+    qaic_output = qeff_model.generate(
+        tokenizer=tokenizer,
+        prompts=[prompt],
+        generation_len=generation_len,
+    )
+    assert qaic_output.generated_ids is not None, f"QAIC generation returned no tokens for {model_type}"
+    qaic_tokens = np.asarray(qaic_output.generated_ids[0]).reshape(-1)[:generation_len]
+    assert np.array_equal(hf_tokens, qaic_tokens), (
+        f"HF/QPC token mismatch for {model_type}: HF={hf_tokens.tolist()}, QPC={qaic_tokens.tolist()}"
+    )
 
 
 @pytest.mark.weight_free
