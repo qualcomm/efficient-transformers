@@ -53,6 +53,12 @@ def _parse_args():
         type=int,
         default=int(os.environ.get("QEFF_DECODE_NUM_DEVICES", "4")),
     )
+    parser.add_argument(
+        "--recurrent-state-dtype",
+        choices=("float16", "mxfp6", "mxint8"),
+        default=os.environ.get("QEFF_RECURRENT_STATE_DTYPE", "float16"),
+        help="Retained recurrent-state precision for both prefill and decode QPCs.",
+    )
     return parser.parse_args()
 
 
@@ -91,11 +97,13 @@ def _timed_call(timings, key, method):
 args = _parse_args()
 model_id = args.model_id
 DECODE_NUM_DEVICES = args.decode_num_devices
+RECURRENT_STATE_DTYPE = args.recurrent_state_dtype
 config = AutoConfig.from_pretrained(model_id)
+print(f"Recurrent-state retained I/O dtype: {RECURRENT_STATE_DTYPE}")
 
 # For faster execution user can run with lesser layers, For Testing Purpose Only
-config.vision_config.depth = 5
-config.text_config.num_hidden_layers = 8
+# config.vision_config.depth = 5
+# config.text_config.num_hidden_layers = 8
 config.torch_dtype = "float16"
 layer_types = list(getattr(config.text_config, "layer_types", []))
 if len(layer_types) < config.text_config.num_hidden_layers:
@@ -150,10 +158,10 @@ PREFILL_SEQ_LEN = 512
 # The GDN prefill mini-chunk follows the prefill/CPL by default. This is passed
 # explicitly because the shared compile API does not infer model-specific options.
 gdn_chunk_size = PREFILL_SEQ_LEN
-CTX_LEN = 14 * 1024
-BATCH_SIZE = 512  # Per-slot prefill batch size
+CTX_LEN = 16 * 1024
+BATCH_SIZE = 256  # Per-slot prefill batch size
 BS = BATCH_SIZE
-FULL_BATCH_SIZE = 512  # Total concurrent CB slots
+FULL_BATCH_SIZE = 256  # Total concurrent CB slots
 
 # Online-prefill KV blocking (matches GQA_Benchmark_Merged/qwen3_35b_a3b_online_prefill.sh:
 # NUM_KV_BLOCKS=8, IMPLS=online, Q_BLOCK_SIZE=256 -> num_q_blocks=ceil(1024/256)=4,
@@ -250,10 +258,12 @@ else:
             ctx_len=CTX_LEN,
             height=354,
             width=536,
-            num_cores=16,
+            num_cores=4,
+            aic_hw_version="ai200",
             num_devices=1,
             mxfp6_matmul=True,
             mxint8_kv_cache=True,
+            recurrent_state_dtype=RECURRENT_STATE_DTYPE,
             retain_full_kv=True,
             split_model_io=True,  # This should be used for disagg serving via VLLM
             # mos=1,
@@ -301,18 +311,20 @@ else:
             ctx_len=CTX_LEN,
             height=354,
             width=536,
-            num_cores=16,
+            num_cores=4,
+            aic_hw_version="ai200",
             num_devices=DECODE_NUM_DEVICES,
             mxfp6_matmul=True,
             mxint8_kv_cache=True,
+            recurrent_state_dtype=RECURRENT_STATE_DTYPE,
             retain_full_kv=True,
             split_model_io=True,  # This should be used for disagg serving via VLLM
             aic_enable_depth_first=False,
             user_tiled=True,
             prefill_only=False,
             skip_vision=True,
-            use_onnx_subfunctions=True,
-            stats_level=70,
+            use_onnx_subfunctions=False,
+            stats_level=50,
             ddr_stats=True,
             aic_pmu_recipe="KernelUtil",
             aic_perf_metrics=True,
