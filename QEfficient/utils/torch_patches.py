@@ -61,6 +61,7 @@ _original_get_module_attributes = getattr(onnx_utils, "_get_module_attributes", 
 _original_model_to_graph = onnx_utils._model_to_graph
 _original_track_scope_attrs = getattr(_C, "_jit_pass_onnx_track_scope_attributes", None)
 _original_ts_setup_trace_module_map = ts_utils._setup_trace_module_map if _ts_utils_available else None
+_original_ts_model_to_graph = ts_utils._model_to_graph if _ts_utils_available else None
 _original_ts_get_module_attributes = getattr(ts_utils, "_get_module_attributes", None) if _ts_utils_available else None
 _original_ts_model_to_graph = getattr(ts_utils, "_model_to_graph", None) if _ts_utils_available else None
 
@@ -321,8 +322,6 @@ def apply_torch_patches():
             ts_utils._model_to_graph = _model_to_graph_patched
         if hasattr(ts_utils, "_get_module_attributes"):
             ts_utils._get_module_attributes = _get_module_attributes
-        if hasattr(ts_utils, "_model_to_graph"):
-            ts_utils._model_to_graph = _model_to_graph_patched
 
     # Patch _C scope-attribute tracker to filter out IValue-incompatible types
     if _original_track_scope_attrs is not None:
@@ -348,8 +347,6 @@ def undo_torch_patches():
             ts_utils._model_to_graph = _original_ts_model_to_graph
         if _original_ts_get_module_attributes:
             ts_utils._get_module_attributes = _original_ts_get_module_attributes
-        if _original_ts_model_to_graph:
-            ts_utils._model_to_graph = _original_ts_model_to_graph
 
     if _original_track_scope_attrs is not None:
         _C._jit_pass_onnx_track_scope_attributes = _original_track_scope_attrs
