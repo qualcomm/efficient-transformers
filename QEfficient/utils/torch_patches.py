@@ -61,7 +61,6 @@ _original_get_module_attributes = getattr(onnx_utils, "_get_module_attributes", 
 _original_model_to_graph = onnx_utils._model_to_graph
 _original_track_scope_attrs = getattr(_C, "_jit_pass_onnx_track_scope_attributes", None)
 _original_ts_setup_trace_module_map = ts_utils._setup_trace_module_map if _ts_utils_available else None
-_original_ts_model_to_graph = ts_utils._model_to_graph if _ts_utils_available else None
 _original_ts_get_module_attributes = getattr(ts_utils, "_get_module_attributes", None) if _ts_utils_available else None
 _original_ts_model_to_graph = getattr(ts_utils, "_model_to_graph", None) if _ts_utils_available else None
 

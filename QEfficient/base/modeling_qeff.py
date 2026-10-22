@@ -248,16 +248,37 @@ def _build_blocked_translation_table(model: "torch.nn.Module") -> dict:
     from QEfficient.customop.fp8_dequantize import get_blocked_fn
     from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8BlockWiseDequantLinear
 
-    table = {}
+    block_sizes = set()
     for module in model.modules():
         if not isinstance(module, FP8BlockWiseDequantLinear):
             continue
-        row_bs, col_bs = module.weight_block_size
-        try:
-            table[torch.ops.qefficient.fp8_dequantize_blocked.default] = get_blocked_fn(row_bs, col_bs)
-        except ValueError:
-            pass
-    return table
+        block_sizes.add(tuple(module.weight_block_size))
+
+    if not block_sizes:
+        return {}
+    if len(block_sizes) > 1:
+        raise ValueError(f"Mixed FP8 block sizes are not supported in one export: {sorted(block_sizes)}")
+
+    row_bs, col_bs = next(iter(block_sizes))
+    translation = get_blocked_fn(row_bs, col_bs)
+    return {torch.ops.qefficient.fp8_dequantize_blocked.default: translation}
+
+
+def _validate_legacy_fp8_export(model: "torch.nn.Module", dynamo: bool) -> None:
+    """Reject legacy export when retained FP8 dequantization would emit invalid ONNX."""
+    if dynamo:
+        return
+
+    from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
+        FP8BlockWiseDequantLinear,
+        FP8DeQuantLinear,
+    )
+
+    fp8_modules = (FP8DeQuantLinear, FP8BlockWiseDequantLinear)
+    if any(isinstance(module, fp8_modules) for module in model.modules()):
+        raise ValueError(
+            "Legacy TorchScript ONNX export is not supported for retained FP8 weights; use dynamo=True instead."
+        )
 
 
 def _rename_graph_value(graph: onnx.GraphProto, old_name: str, new_name: str) -> None:
@@ -788,6 +809,8 @@ class QEFFBaseModel(ABC):
             return onnx_path
 
         export_dir.mkdir(parents=True, exist_ok=True)
+
+        _validate_legacy_fp8_export(self.model, dynamo)
 
         def _resolve_pkv_layers(pkv_obj):
             if isinstance(pkv_obj, (list, tuple)):

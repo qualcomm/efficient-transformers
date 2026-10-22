@@ -100,7 +100,7 @@ def export_via_dynamo(
         if onnx_program is None:
             raise RuntimeError("torch.onnx.export returned None for dynamo export")
         PruneFakeInitializersTransform.apply(onnx_program)
-        onnx_program.save(str(onnx_path), external_data=True)
+        onnx_program.save(str(onnx_path))
     return ExportResult(onnx_path=onnx_path)
 
 
