@@ -228,7 +228,6 @@ def main():
         skip_vision=True,
         node_precision_info=args.node_precision_info,
         offload_pt_weights=False,
-        log_times=True,
         qaic_config={
             "blocking_mode": "kv_minimax_dedicated",
             "num_kv_blocks": args.num_kv_blocks,

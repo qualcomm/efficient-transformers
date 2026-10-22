@@ -160,7 +160,6 @@ def main():
         skip_vision=True,
         node_precision_info=True,
         offload_pt_weights=False,
-        log_times=True,
         qaic_config={
             "blocking_mode": "kv_headpar",
             "num_kv_blocks": 2,
