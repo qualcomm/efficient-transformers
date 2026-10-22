@@ -2210,7 +2210,10 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         if tuple(key_cache.shape) != (batch_local, rows, cache_slots, head_dim) or tuple(value_cache.shape) != tuple(
             key_cache.shape
         ):
-            raise ValueError(f"Dedicated MiniMax GQA cache must be [{batch_local}, {rows}, {cache_slots}, D].")
+            raise ValueError(
+                f"Dedicated MiniMax GQA cache expected [{batch_local}, {rows}, {cache_slots}, {head_dim}], "
+                f"got key={tuple(key_cache.shape)}, value={tuple(value_cache.shape)}."
+            )
 
         query_cp = query_states.unsqueeze(2).expand(batch, num_heads, cp, query_len, head_dim)
         query_cp = query_cp.reshape(batch, num_heads * cp, query_len, head_dim)
@@ -3514,6 +3517,29 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
 
         if self.indexer is not None and isinstance(past_key_values, QEffMiniMaxSparseCache):
             blocking_config = getattr(self, "attn_blocking_config", None)
+            if blocking_config is None:
+                model_config = getattr(self, "config", None)
+                existing_index_cache = past_key_values.index_keys.get(self.layer_idx)
+                ctx_len = (
+                    int(existing_index_cache.shape[2])
+                    if existing_index_cache is not None
+                    else getattr(model_config, "max_position_embeddings", None) or 1
+                )
+                cache_heads = int(existing_index_cache.shape[1]) if existing_index_cache is not None else 1
+                blocking_config = AttentionBlockingConfig(
+                    ctx_len=int(ctx_len),
+                    indexer_num_blocks=max(1, int(ctx_len) // int(self.config.index_block_size)),
+                    num_kv_blocks=1,
+                    msa_indexer_dp=1,
+                    msa_indexer_cp=1,
+                    msa_attn_dp=1,
+                    msa_attn_cp=1,
+                    attn_dp=1,
+                    attn_cp=1,
+                    indexer_n_head=cache_heads,
+                    indexer_q_size=int(self.config.index_block_size),
+                    indexer_q_chunk=int(self.config.index_block_size),
+                )
             if blocking_config:
                 cache_kwargs["dp"] = getattr(blocking_config, "msa_attn_dp", 1)
                 cache_kwargs["hkv"] = self.config.num_key_value_heads
@@ -4937,11 +4963,12 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
         **kwargs,
     ):
         ctx_len = constants.ONNX_EXPORT_CTX_LEN if ctx_len is None else int(ctx_len)
-        prefill_seq_len = kwargs.get("prefill_seq_len")
+        requested_prefill_seq_len = kwargs.get("prefill_seq_len")
+        prefill_seq_len = requested_prefill_seq_len
         if prefill_seq_len is None:
             prefill_seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         prefill_seq_len = int(prefill_seq_len)
-        if prefill_seq_len > 1:
+        if requested_prefill_seq_len is None and prefill_seq_len > 1:
             for module in self.model.language_model.modules():
                 blocking_config = getattr(module, "attn_blocking_config", None)
                 export_seq_len = getattr(blocking_config, "prefill_export_seq_len", None)
