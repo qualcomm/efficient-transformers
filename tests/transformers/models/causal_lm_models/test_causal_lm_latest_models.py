@@ -110,6 +110,8 @@ def _flatten_minimax_paged_ort_inputs(session, inputs):
             ort_inputs[name] = inputs['past_key_values'][layer_idx][cache_idx].detach().numpy()
         elif name.startswith('index_key.'):
             ort_inputs[name] = inputs['index_keys'][0].detach().numpy()
+        elif name == "index_keys":
+            ort_inputs[name] = inputs['index_keys'][0].detach().numpy()
         else:
             raise AssertionError(f"Unhandled MiniMax ORT input: {name}")
     return ort_inputs
@@ -267,6 +269,8 @@ def test_minimax_m3_decode_qeff_pytorch_vs_aic(tmp_path):
             elif input_name.startswith(("past_key.", "past_value.")):
                 aic_inputs[input_name] = binding_zeros(input_name)
             elif input_name.startswith("index_key."):
+                aic_inputs[input_name] = binding_zeros(input_name)
+            elif input_name == "index_keys":
                 aic_inputs[input_name] = binding_zeros(input_name)
             else:
                 raise AssertionError(f"Unhandled Minimax AIC input: {input_name}")
