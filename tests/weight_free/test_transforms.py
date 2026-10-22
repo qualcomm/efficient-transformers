@@ -65,7 +65,7 @@ from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_fre
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.transformers.moe.weights import MoEWeights, pack_moe_weights_for_expert_parallel
-from QEfficient.utils import runtime_requirements
+from QEfficient.utils import resolve_retained_state_output, runtime_requirements
 from QEfficient.utils.checkpoint_utils import checkpoint_root
 from QEfficient.utils.export_utils import _generate_export_hash, convert_dynamic_axes_to_dynamic_shapes
 from QEfficient.utils.runtime_requirements import validate_runtime_requirements
@@ -1698,6 +1698,33 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert "moe_scatter_0" not in fn.output
         assert fn.output[-2:] == ["scatter_0_0", "scatter_0_1"]
         assert call_node.output[-2:] == ["past_key.0_RetainedState", "past_value.0_RetainedState"]
+
+
+class TestRetainedStateOutputResolver:
+    def test_resolves_prefixed_retained_state_stem(self):
+        outputs = {"past_key.3_vllmKvCache_RetainedState": object()}
+
+        target_name, value = resolve_retained_state_output(outputs, "past_key.3")
+
+        assert target_name == "past_key.3_vllmKvCache"
+        assert value is outputs["past_key.3_vllmKvCache_RetainedState"]
+
+    def test_resolves_internal_retained_state_suffix_and_basename(self):
+        outputs = {"decoder/past_value.1_InternalRetainedState": object()}
+
+        target_name, value = resolve_retained_state_output(outputs, "past_value.1")
+
+        assert target_name == "past_value.1"
+        assert value is outputs["decoder/past_value.1_InternalRetainedState"]
+
+    def test_raises_on_ambiguous_retained_state_outputs(self):
+        outputs = {
+            "conv_state.0_RetainedState": object(),
+            "conv_state.0_vllmKvCache_RetainedState": object(),
+        }
+
+        with pytest.raises(KeyError, match="Expected one retained-state output"):
+            resolve_retained_state_output(outputs, "conv_state.0")
 
 
 # ---------------------------------------------------------------------------

@@ -547,15 +547,22 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
             token_key_states, token_value_states = key_states, value_states
 
         if use_blocking:
-            if (
+            use_mm_bidirectional_mask = (
                 mm_token_type_ids is not None
                 and hidden_states.shape[1] != 1
                 and getattr(self.config, "use_bidirectional_attention", None) == "vision"
-            ):
+                and self.layer_type == "sliding_attention"
+            )
+            if use_mm_bidirectional_mask:
+                mask_target_length = (
+                    blocking_config.ctx_len
+                    if blocking_config.mode == BlockingMode.PREFILL_ONLINE and blocking_config.ctx_len is not None
+                    else key_states.shape[-2]
+                )
                 attention_mask = _build_bidirectional_vision_attention_mask(
                     position_ids=position_ids,
                     mm_token_type_ids=mm_token_type_ids,
-                    target_length=key_states.shape[-2],
+                    target_length=mask_target_length,
                     dtype=query_states.dtype,
                     sliding_window=self.sliding_window,
                 )
@@ -581,6 +588,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
                 past_seen_tokens=past_seen_tokens,
                 sliding_window=self.sliding_window,
                 prefill_only=blocking_config.mode.is_prefill,
+                skip_kv=False if use_mm_bidirectional_mask else None,
             )
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
@@ -621,6 +629,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
             mm_token_type_ids is not None
             and hidden_states.shape[1] != 1
             and getattr(self.config, "use_bidirectional_attention", None) == "vision"
+            and self.layer_type == "sliding_attention"
         ):
             attention_mask = _build_bidirectional_vision_attention_mask(
                 position_ids=position_ids,
@@ -794,6 +803,7 @@ class QEffGemma4TextModel(Gemma4TextModel):
                 kwargs.get("mm_token_type_ids") is not None
                 and inputs_embeds.shape[1] != 1
                 and getattr(self.config, "use_bidirectional_attention", None) == "vision"
+                and layer_type == "sliding_attention"
             )
             if isinstance(attention_mask, dict):
                 layer_attention_mask = attention_mask[layer_type]
@@ -801,15 +811,23 @@ class QEffGemma4TextModel(Gemma4TextModel):
                 layer_attention_mask = None
             else:
                 sliding_window = self.config.sliding_window if layer_type == "sliding_attention" else None
-                target_length = (
-                    min(self.config.sliding_window, self.config.max_position_embeddings)
-                    if sliding_window
-                    else inputs_embeds.shape[1]
-                )
-                if past_key_values is not None and len(past_key_values.layers) > i:
-                    layer_keys = past_key_values.layers[i].keys
-                    if layer_keys is not None and layer_keys.numel() > 0:
-                        target_length = layer_keys.shape[-2]
+                blocking_config = getattr(decoder_layer.self_attn, "attn_blocking_config", None)
+                if (
+                    blocking_config is not None
+                    and blocking_config.mode == BlockingMode.PREFILL_ONLINE
+                    and blocking_config.ctx_len is not None
+                ):
+                    target_length = blocking_config.ctx_len
+                else:
+                    target_length = (
+                        min(self.config.sliding_window, self.config.max_position_embeddings)
+                        if sliding_window
+                        else inputs_embeds.shape[1]
+                    )
+                    if past_key_values is not None and len(past_key_values.layers) > i:
+                        layer_keys = past_key_values.layers[i].keys
+                        if layer_keys is not None and layer_keys.numel() > 0:
+                            target_length = layer_keys.shape[-2]
                 layer_attention_mask = _build_additive_attention_mask(
                     position_ids=position_ids,
                     target_length=target_length,
@@ -1313,6 +1331,17 @@ class QEffGemma4EncoderWrapper(nn.Module):
         mask = torch.logical_not((weights == 0).all(dim=1))
         return output.to(hidden_states.dtype), mask
 
+    @staticmethod
+    def _compact_valid_tokens_static(hidden_states: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        valid_mask_i64 = valid_mask.to(torch.int64)
+        invalid_mask_i64 = (~valid_mask).to(torch.int64)
+        valid_count = valid_mask_i64.sum(dim=1, keepdim=True)
+        valid_rank = torch.cumsum(valid_mask_i64, dim=1) - 1
+        invalid_rank = torch.cumsum(invalid_mask_i64, dim=1) - 1 + valid_count
+        target_indices = torch.where(valid_mask, valid_rank, invalid_rank).clamp(min=0)
+        weights = nn.functional.one_hot(target_indices, hidden_states.shape[1]).to(hidden_states.dtype)
+        return weights.transpose(1, 2) @ hidden_states
+
     def forward(self, pixel_values, image_position_ids):
         vision_tower = self.model.model.vision_tower
         padding_positions = (image_position_ids == -1).all(dim=-1)
@@ -1349,6 +1378,7 @@ class QEffGemma4EncoderWrapper(nn.Module):
                 f" ({hidden_states.shape[1]}). Change the value of `num_soft_tokens` when processing."
             )
         hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0.0)
+        pooler_mask = valid_tokens
         if hidden_states.shape[1] != output_length:
             hidden_states, pooler_mask = self._avg_pool_by_positions_static_kernel(
                 hidden_states=hidden_states,
@@ -1366,10 +1396,10 @@ class QEffGemma4EncoderWrapper(nn.Module):
             vision_embeds = vision_embeds.unsqueeze(0)
 
         # Keep the encoder output fixed-shape for dual-QPC export/compile.
-        # Gemma4 uses vision_config.default_output_length/image_seq_length
-        # image placeholders (280), while the vision pooler may emit extra
-        # padded bins for the max-patch canvas.
-        del pooler_mask
+        # HF strips invalid pooler bins before projecting image features. Compact
+        # valid bins to the front, then leave padded bins at the tail so the
+        # language QPC still sees the static max-token shape it was compiled for.
+        vision_embeds = self._compact_valid_tokens_static(vision_embeds, pooler_mask)
         return vision_embeds[:, : self.mm_tokens_per_image, :]
 
 

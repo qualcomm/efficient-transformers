@@ -2074,6 +2074,15 @@ class QEffGPTOSSHybridCache(QEffDynamicCache):
     def read_only_blockedKV(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
         return self.layers[layer_idx].read_only_blockedKV(start_idx, end_idx, cache_kwargs)
 
+    def read_only_blocked_kv(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
+        return self.layers[layer_idx].read_only_blocked_kv(start_idx, end_idx, cache_kwargs)
+
+    def read_only_blocked_K(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
+        return self.layers[layer_idx].read_only_blocked_K(start_idx, end_idx, cache_kwargs)
+
+    def read_only_blocked_V(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
+        return self.layers[layer_idx].read_only_blocked_V(start_idx, end_idx, cache_kwargs)
+
     def full_cache_update_chunked(self, key_states, value_states, layer_idx, cache_kwargs=None):
         self.append_new_layers(layer_idx)
         outputs = self.layers[layer_idx].full_cache_update_chunked(key_states, value_states, cache_kwargs)

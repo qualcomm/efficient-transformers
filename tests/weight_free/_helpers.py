@@ -129,6 +129,16 @@ WEIGHT_FREE_BLOCKING_MODE_CASES = {
     "kv_headpar": {"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "headpar_split": 2},
 }
 
+WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES = {
+    "prefill_online": {
+        "blocking_mode": "prefill_online",
+        "num_kv_blocks": 2,
+        "num_q_blocks": 2,
+        "n_rep_chunk": 1,
+        "skip_kv": True,
+    },
+}
+
 _BLOCKING_SUPPORTED_TYPES = {
     "gemma",
     "gemma2",
@@ -359,6 +369,7 @@ def assert_blocked_kv_ops_for_mode(
         "hqkv": {"CtxGatherBlockedKV"},
         "bhqkv": {"CtxGatherBlockedKV"},
         "kv_headpar": {"CtxGatherBlockedKV"},
+        "prefill_online": {"CtxGatherBlockedKV"},
     }
     expected_ops = marker_modes.get(blocking_key, set())
     if not expected_ops:
