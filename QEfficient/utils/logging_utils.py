@@ -303,13 +303,19 @@ def log_from_pretrained_call(func):
         model_name = arguments.get("pretrained_model_name_or_path", "unknown")
         if QEFFLogger.is_api_logging_suppressed():
             return func(cls, *args, **kwargs)
-        QEFFLogger.start_run(str(model_name))
+        started_run = False
+        if not QEFFLogger.has_active_run():
+            QEFFLogger.start_run(str(model_name))
+            started_run = True
+        if not started_run:
+            return func(cls, *args, **kwargs)
         log_api_arguments("from_pretrained", cls.__name__, arguments)
         try:
             result = func(cls, *args, **kwargs)
         except Exception as exc:
             QEFFLogger.log_api_failure("from_pretrained", cls.__name__, exc)
-            QEFFLogger.finish_run()
+            if started_run:
+                QEFFLogger.finish_run()
             raise
         else:
             QEFFLogger.log_event(
