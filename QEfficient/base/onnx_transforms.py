@@ -120,14 +120,6 @@ class CustomOpTransform(BaseOnnxTransform):
         "CtxScatterFuncCB": (CtxScatterFuncCB, CtxScatterCB),
         "CtxGatherFuncCB": (CtxGatherFuncCB, CtxGatherCB),
         "CastToUInt4": (CastToUInt4Func, CastToUInt4),
-        # FP8 retained-weight ops emit standard DequantizeLinear from their
-        # TorchScript symbolics on the legacy path, so no ONNX function proto is
-        # appended here.
-        "FP8DequantizePerTensorFunc": (FP8DequantizePerTensorFunc, None),
-        "FP8DequantizePerAxisFunc": (FP8DequantizePerAxisFunc, None),
-        "FP8DequantizeBlockedFunc": (FP8DequantizeBlockedFunc, None),
-        "CtxChunkScatterBatchFunc": (CtxChunkScatterBatchFunc, CtxChunkScatterBatch),
-        "CtxGatherFuncBlockedKVBatch": (CtxGatherFuncBlockedKVBatch, CtxGatherBlockedKVBatch),
     }
 
     @classmethod

@@ -32,6 +32,7 @@ from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
+from tests.transformers.models.golden_utils import config_fingerprint, golden_variant_key, resolve_hf_golden
 
 from ._helpers import (
     BATCH_SIZE,
@@ -227,15 +228,45 @@ def test_weight_free_fp8_retained_export_compile(model_config, tmp_export_dir):
     prompt = "hello world"
     model_inputs = tokenizer(prompt, return_tensors="pt")
     generation_len = CTX_LEN - PROMPT_LEN
-    with torch.inference_mode():
-        hf_output = model_hf.generate(
-            **model_inputs,
-            do_sample=False,
-            max_new_tokens=generation_len,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-    hf_tokens = hf_output[0, model_inputs["input_ids"].shape[1] :].cpu().numpy()
+    config_fp = config_fingerprint(qeff_model.config)
+    variant_key = golden_variant_key(
+        continuous_batching=False,
+        torch_dtype=torch.float16,
+        prompt_len=PROMPT_LEN,
+        ctx_len=CTX_LEN,
+        generation_len=generation_len,
+        full_batch_size=None,
+        prompts=[prompt],
+        config_fp=config_fp,
+    )
+
+    def _compute_hf_tokens():
+        with torch.inference_mode():
+            hf_output = model_hf.generate(
+                **model_inputs,
+                do_sample=False,
+                max_new_tokens=generation_len,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        return hf_output[0, model_inputs["input_ids"].shape[1] :].cpu().numpy()
+
+    hf_tokens = resolve_hf_golden(
+        family="causal_lm",
+        model_name=model_config["model_name"],
+        variant_key=variant_key,
+        params={
+            "config_fp": config_fp,
+            "continuous_batching": False,
+            "dtype": str(torch.float16),
+            "prompt_len": PROMPT_LEN,
+            "ctx_len": CTX_LEN,
+            "generation_len": generation_len,
+            "full_batch_size": None,
+            "prompts": [prompt],
+        },
+        compute_fn=_compute_hf_tokens,
+    )
 
     qaic_output = qeff_model.generate(
         tokenizer=tokenizer,
