@@ -671,7 +671,7 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert list(model.functions[0].output) == ["cache_result"]
         assert list(model.graph.node[0].output) == [retained_state]
 
-    def test_preserves_unchanged_prefill_retained_state(self):
+    def test_drops_unchanged_prefill_retained_state(self):
         retained_state = "past_compressor_kv_state.0_RetainedState"
         state_input = "past_compressor_kv_state.0"
         function = helper.make_function(
@@ -698,7 +698,6 @@ class TestPreserveNestedCacheRetainedStateTransform:
             ],
             [
                 helper.make_tensor_value_info("output", TensorProto.FLOAT, None),
-                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
             ],
         )
         model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
@@ -707,9 +706,10 @@ class TestPreserveNestedCacheRetainedStateTransform:
         changed = PreserveNestedCacheRetainedStateTransform.apply(model)
 
         assert changed
-        assert list(model.functions[0].output) == ["output", retained_state]
+        assert list(model.functions[0].output) == ["output"]
         assert list(model.graph.node[0].input) == [state_input, "hidden_states"]
-        assert list(model.graph.node[0].output) == ["output", retained_state]
+        assert list(model.graph.node[0].output) == ["output"]
+        assert [output.name for output in model.graph.output] == ["output"]
 
 
 # ---------------------------------------------------------------------------

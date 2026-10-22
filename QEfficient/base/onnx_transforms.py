@@ -490,6 +490,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         changed = False
         state_rename_map: dict[str, str] = {}
         remaining_dangling_outputs = set(dangling_retained_outputs)
+        dropped_retained_outputs: set[str] = set()
 
         for node in graph.node:
             fn = fn_by_name.get(node.op_type)
@@ -572,6 +573,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             # writers from the positional function inputs.
             original_outputs = list(fn.output)
             retained_state_values: dict[str, str] = {}
+            handled_retained_state = False
             for input_index, retained_input in enumerate(node.input):
                 if retained_input not in remaining_dangling_outputs:
                     continue
@@ -587,16 +589,22 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
                 function_input = fn.input[input_index]
                 scatter_output = cls._resolve_retained_state_output(fn, function_input, allow_unchanged=True)
-                retained_state_values[retained_input] = scatter_output
-
                 plain_input = re.sub(r"_(?:Internal)?RetainedState$", "", retained_input)
                 state_rename_map[retained_input] = plain_input
+                handled_retained_state = True
+                if scatter_output == function_input:
+                    dropped_retained_outputs.add(retained_input)
+                    changed = True
+                    continue
+
+                dropped_retained_outputs.discard(retained_input)
+                retained_state_values[retained_input] = scatter_output
                 if retained_input not in node.output:
                     node.output.append(retained_input)
                     changed = True
                 remaining_dangling_outputs.discard(retained_input)
 
-            if retained_state_values:
+            if handled_retained_state:
                 aligned_outputs = []
                 for output_index, call_output in enumerate(node.output):
                     retained_state_value = retained_state_values.get(call_output)
@@ -624,6 +632,13 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
         if state_rename_map:
             changed |= cls._rename_graph_inputs_bulk(graph, state_rename_map)
+        if dropped_retained_outputs:
+            retained_outputs = [output for output in graph.output if output.name not in dropped_retained_outputs]
+            if len(retained_outputs) != len(graph.output):
+                del graph.output[:]
+                graph.output.extend(retained_outputs)
+                changed = True
+
         return changed
 
     @staticmethod
