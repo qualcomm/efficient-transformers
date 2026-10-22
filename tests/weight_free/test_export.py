@@ -41,6 +41,7 @@ from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
     WEIGHT_FREE_EMBEDDING_MODEL_PARAMS,
+    WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
     assert_no_int64_kv_cache_inputs,
@@ -245,6 +246,46 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
         f"Functions present: {[fn.name for fn in onnx_model.functions]}"
     )
 
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_export
+@pytest.mark.weight_free_blocking
+@pytest.mark.parametrize("blocking_key", list(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES))
+def test_weight_free_gpt_oss_prefill_online_export_gather_ops(blocking_key, tmp_export_dir):
+    """GPT-OSS weight-free prefill-only export honors prefill_online blocking."""
+    model_type = "gpt_oss"
+    model_id = WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS[model_type]
+    qaic_config = dict(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES[blocking_key])
+    qaic_config["ctx_len"] = 16
+    try:
+        config = load_causal_lm_config(model_id)
+        config.num_hidden_layers = 2
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            weight_free=True,
+            qaic_config=qaic_config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        skip_on_model_fetch_error(exc, model_id)
+
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            tmp_export_dir / f"wf_{model_type}_{blocking_key}_prefill_export",
+            prefill_only=True,
+            enable_chunking=True,
+            prefill_seq_len=8,
+            qaic_config=qaic_config,
+            use_onnx_subfunctions=False,
+            offload_pt_weights=False,
+        )
+    )
+
+    blocking_config = qeff_model.hash_params.get("blocking_kwargs")
+    assert blocking_config is not None
+    assert blocking_config.mode == BlockingMode(qaic_config["blocking_mode"])
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
 
