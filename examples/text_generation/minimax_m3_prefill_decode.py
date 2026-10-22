@@ -325,7 +325,6 @@ def main():
         skip_vision=True,
         offload_pt_weights=False,
         node_precision_info=True,
-        log_times=True,
         retain_full_kv=True,
         split_model_io=True,
     )
