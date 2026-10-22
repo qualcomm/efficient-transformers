@@ -5073,7 +5073,10 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
         past_key_values = self.get_dummy_pkv_cache(
             config=self.model.language_model.config,
             batch_size=cache_batch_size if continuous_batching else batch_size,
-            seq_len=past_seq_len,
+            # Prefill calls use absolute position_ids for every chunk
+            # Allocate the dense KV cache for the complete context so
+            # later chunks cannot address past_seq_len-sized storage.
+            seq_len=ctx_len if prefill else past_seq_len,
             dtype=dtype,
             paged=paged_kv,
             dp=attn_dp,
