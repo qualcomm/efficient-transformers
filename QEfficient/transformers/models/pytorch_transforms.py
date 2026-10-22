@@ -1952,7 +1952,8 @@ class BlockingAttentionTransform:
             )
         supported_attention_classes = {
             qeff_class
-            for qeff_class in KVCacheTransform._module_mapping.values()
+            for transform in (KVCacheTransform, PrefillOnlyTransform, PrefillOnlyChunkedTransform)
+            for qeff_class in transform._module_mapping.values()
             if qeff_class.__name__.endswith("Attention")
         }
         supported_attention_classes.add(QEffPrefillOnlyChunkedGptOssAttention)

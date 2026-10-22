@@ -38,6 +38,7 @@ from QEfficient.utils._utils import (  # noqa: F401
     qpc_exists,
     require_value,
     resolve_torch_dtype,
+    resolve_retained_state_output,
     to_named_specializations,
     validate_kv_cache_prefix,
 )
