@@ -589,6 +589,60 @@ class TestRenameFunctionOutputsTransform:
 
 
 # ---------------------------------------------------------------------------
+# Tests: PreserveNestedCacheRetainedStateTransform
+# ---------------------------------------------------------------------------
+
+
+class TestPreserveNestedCacheRetainedStateTransform:
+    def test_drops_unchanged_nested_retained_state(self):
+        import onnx
+        from onnx import TensorProto, helper
+
+        from QEfficient.base.onnx_transforms import PreserveNestedCacheRetainedStateTransform
+
+        retained_name = "past_compressor_gate_buffer.5_InternalRetainedState"
+        function = helper.make_function(
+            "test.qeff",
+            "DecoderLayer",
+            ["hidden_states", retained_name],
+            ["output", retained_name],
+            [helper.make_node("Identity", ["hidden_states"], ["output"])],
+            opset_imports=[helper.make_opsetid("", 17)],
+        )
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    "DecoderLayer",
+                    ["hidden_states", retained_name],
+                    ["logits"],
+                    name="decoder_layer",
+                    domain="test.qeff",
+                )
+            ],
+            "retained_state_graph",
+            [
+                helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [1]),
+                helper.make_tensor_value_info(retained_name, TensorProto.FLOAT, [1]),
+            ],
+            [
+                helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1]),
+                helper.make_tensor_value_info(retained_name, TensorProto.FLOAT, [1]),
+            ],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("test.qeff", 1)],
+            functions=[function],
+        )
+
+        assert PreserveNestedCacheRetainedStateTransform.apply(model)
+        assert [output.name for output in model.graph.output] == ["logits"]
+        assert list(model.graph.input)[1].name == "past_compressor_gate_buffer.5"
+        assert list(model.graph.node[0].output) == ["logits"]
+        onnx.checker.check_model(model)
+
+
+# ---------------------------------------------------------------------------
 # Tests: SplitTensorsTransform functional (GAP E)
 # ---------------------------------------------------------------------------
 
