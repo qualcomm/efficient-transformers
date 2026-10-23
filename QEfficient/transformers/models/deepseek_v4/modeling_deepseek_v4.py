@@ -1365,7 +1365,8 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         local_valid = torch.cat((carry_query_valid, in_chunk_valid.expand(batch_size, -1, -1)), dim=-1)
         key_states = torch.cat((carry_kv, kv), dim=2)
         attention_output, _ = self._attention_forward(query, key_states, ~local_valid.unsqueeze(1))
-
+        attention_output = qeff_apply_rotary_pos_emb(attention_output.transpose(1, 2), cos, -sin).transpose(1, 2)
+        
         cache_layer.sliding_window_kv = ctx_scatter_folded_rows(
             cache_layer.sliding_window_kv,
             torch.remainder(position_ids, self.sliding_window).to(torch.int32),

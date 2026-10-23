@@ -253,6 +253,20 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Export repeated decoder blocks as ONNX subfunctions.",
     )
+    parser.add_argument(
+        "--mdp-num-partitions",
+        "--pp-size",
+        dest="mdp_num_partitions",
+        type=int,
+        default=1,
+        help="Pipeline-parallel MDP partitions for prefill; values above one enable disaggregated ONNX MDP.",
+    )
+    parser.add_argument(
+        "--mdp-strategy",
+        choices=("onnx", "intersection"),
+        default="onnx",
+        help="Partition-assignment strategy used when pipeline parallelism is enabled.",
+    )
     parser.add_argument("--generation-len", type=int, default=250)
     parser.add_argument("--num-hidden-layers", type=int, default=43)
     parser.add_argument("--num-cores", "--compile-num-cores", dest="num_cores", type=int, default=12)
@@ -262,12 +276,17 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--indexer-cp", type=int, default=1, help="CSA indexer compressed-cache context parallelism.")
     parser.add_argument(
         "--csa-prefill-attn-gather-sub-qc",
+        "--csa-prefill-q-block-size",
+        dest="csa_prefill_attn_gather_sub_qc",
         type=int,
         default=None,
         help="CSA prefill compressed-attention query subchunk size.",
     )
     parser.add_argument(
         "--csa-prefill-indexer-kv-block-size",
+        "--csa-prefill-kv-block-size",
+        "--csa-block-size",
+        dest="csa_prefill_indexer_kv_block_size",
         type=int,
         default=None,
         help="CSA prefill indexer score tile size.",
@@ -295,6 +314,12 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="HCA dense compressed-attention tiles; defaults to the hardware attention-core count.",
+    )
+    parser.add_argument(
+        "--hca-prefill-q-block-size",
+        type=int,
+        default=None,
+        help="HCA prefill query block size; defaults to the model sliding-window length.",
     )
     parser.add_argument("--hw-version", choices=tuple(HW_CORES_PER_DEVICE), default="ai100")
     parser.add_argument(
@@ -352,6 +377,9 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
         raise ValueError("hca_compressed_kv_cp must be at least 1.")
     if hca_attn_blocks < 1:
         raise ValueError("hca_attn_blocks must be at least 1.")
+    hca_prefill_q_block_size = getattr(args, "hca_prefill_q_block_size", None)
+    if hca_prefill_q_block_size is not None and hca_prefill_q_block_size < 1:
+        raise ValueError("hca_prefill_q_block_size must be at least 1.")
     if args.batch_size % attention_dp:
         raise ValueError("batch_size must be divisible by attn_dp.")
 
@@ -391,6 +419,8 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
     config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
     config.qeff_hca_attn_blocks = hca_attn_blocks
     config.qeff_hca_folded_row_cache = True
+    if hca_prefill_q_block_size is not None:
+        config.qeff_hca_prefill_q_block_size = hca_prefill_q_block_size
     print(
         "Folded decode layout: "
         f"batch_size={args.batch_size}, attn_dp={attention_dp}, indexer_cp={indexer_cp}, "
@@ -412,8 +442,17 @@ def main(defaults: dict[str, object] | None = None) -> None:
         raise ValueError("num_hidden_layers must be at least 1.")
     if not args.device_group:
         raise ValueError("device_group must contain at least one QAIC device ID.")
-    if args.batch_size % len(args.device_group):
+    if not args.prefill_only and args.batch_size % len(args.device_group):
         raise ValueError("DeepSeek V4 Flash decode requires batch_size to be divisible by the device-group size.")
+    if args.mdp_num_partitions < 1:
+        raise ValueError("mdp_num_partitions must be at least 1.")
+    if args.mdp_num_partitions > 1:
+        if not args.prefill_only:
+            raise ValueError("Pipeline-parallel MDP is supported only for prefill-only compilation.")
+        if len(args.device_group) % args.mdp_num_partitions:
+            raise ValueError("device_group size must be divisible by mdp_num_partitions.")
+        if args.export_only:
+            raise ValueError("Pipeline-parallel MDP export requires compilation; do not use --export-only.")
     os.environ["HF_HUB_CACHE"] = str(args.hf_cache)
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     os.environ.setdefault("QEFF_HOME", str(args.artifact_root))
@@ -465,31 +504,35 @@ def main(defaults: dict[str, object] | None = None) -> None:
     model_dtype = MODEL_DTYPES[args.model_dtype]
     qeff_model.model.to(dtype=model_dtype)
     qeff_model.model.config.torch_dtype = model_dtype
-    qeff_model.transform(
-        ctx_len=args.ctx_len,
-        seq_len=args.prefill_seq_len if args.prefill_only else 1,
-        bs=batch_size,
-        num_devices=len(args.device_group),
-        qaic_config=qaic_config,
-        prefill_only=args.prefill_only,
-        num_cores=args.num_cores,
-    )
+    pipeline_parallel = args.mdp_num_partitions > 1
+    if not pipeline_parallel:
+        qeff_model.transform(
+            ctx_len=args.ctx_len,
+            seq_len=args.prefill_seq_len if args.prefill_only else 1,
+            bs=batch_size,
+            num_devices=len(args.device_group),
+            qaic_config=qaic_config,
+            prefill_only=args.prefill_only,
+            num_cores=args.num_cores,
+        )
 
     graph_kind = "blocked DeepSeek V4 prefill" if args.prefill_only else "one-token decode"
-    print(f"Exporting the {graph_kind} graph through qeff_model.export()")
-    onnx_path = Path(
-        qeff_model.export(
-            export_dir=str(export_root),
-            prefill_only=args.prefill_only,
-            prefill_seq_len=args.prefill_seq_len,
-            use_onnx_subfunctions=args.use_onnx_subfunctions,
-            dynamo=True,
-            export_batch_size=batch_size,
-            cache_ctx_len=args.ctx_len,
-            qaic_config=qaic_config,
+    onnx_path = None
+    if not pipeline_parallel:
+        print(f"Exporting the {graph_kind} graph through qeff_model.export()")
+        onnx_path = Path(
+            qeff_model.export(
+                export_dir=str(export_root),
+                prefill_only=args.prefill_only,
+                prefill_seq_len=args.prefill_seq_len,
+                use_onnx_subfunctions=args.use_onnx_subfunctions,
+                dynamo=True,
+                export_batch_size=batch_size,
+                cache_ctx_len=args.ctx_len,
+                qaic_config=qaic_config,
+            )
         )
-    )
-    print(f"ONNX_PATH={onnx_path}")
+        print(f"ONNX_PATH={onnx_path}")
 
     # npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
     # print(f"NPI_PATH={npi_path}")
@@ -500,26 +543,41 @@ def main(defaults: dict[str, object] | None = None) -> None:
     print(
         f"Compiling {graph_kind} specialization: seq_len={args.prefill_seq_len if args.prefill_only else 1}, ctx_len={args.ctx_len}"
     )
-    qpc_path = Path(
-        qeff_model.compile(
-            onnx_path=str(onnx_path),
-            compile_dir=str(compile_root),
-            prefill_seq_len=args.prefill_seq_len if args.prefill_only else 1,
-            ctx_len=args.ctx_len,
-            batch_size=batch_size,
-            num_cores=args.num_cores,
-            num_devices=len(args.device_group),
-            aic_hw_version=args.hw_version,
-            prefill_only=args.prefill_only,
-            use_onnx_subfunctions=args.use_onnx_subfunctions,
-            mxint8_kv_cache=False,
-            mxfp6_matmul=True,
-            user_tiled=True,
-            qaic_config=qaic_config,
-            # node_precision_info=str(npi_path),
-            dynamo=True,
+    compile_kwargs = {
+        "onnx_path": str(onnx_path) if onnx_path is not None else None,
+        "compile_dir": str(compile_root),
+        "prefill_seq_len": args.prefill_seq_len if args.prefill_only else 1,
+        "ctx_len": args.ctx_len,
+        "batch_size": batch_size,
+        "num_cores": args.num_cores,
+        "num_devices": len(args.device_group),
+        "aic_hw_version": args.hw_version,
+        "prefill_only": args.prefill_only,
+        "use_onnx_subfunctions": args.use_onnx_subfunctions,
+        "mxint8_kv_cache": False,
+        "mxfp6_matmul": True,
+        "user_tiled": True,
+        "qaic_config": qaic_config,
+        # node_precision_info=str(npi_path),
+        "dynamo": True,
+    }
+    if args.mdp_num_partitions > 1:
+        compile_kwargs.update(
+            enable_chunking=True,
+            retain_full_kv=True,
+            split_model_io=True,
+            mdp_num_partitions=args.mdp_num_partitions,
+            mdp_strategy=args.mdp_strategy,
         )
-    )
+        print(
+            "Pipeline-parallel prefill: "
+            f"partitions={args.mdp_num_partitions}, devices_per_partition="
+            f"{len(args.device_group) // args.mdp_num_partitions}, mdp_strategy={args.mdp_strategy}"
+        )
+    qpc_path = Path(qeff_model.compile(**compile_kwargs))
+    if onnx_path is None:
+        onnx_path = Path(qeff_model.onnx_path)
+        print(f"ONNX_PATH={onnx_path}")
     print(f"QPC_PATH={qpc_path}")
     print(f"SPECIALIZATIONS_PATH={qpc_path.parent / 'specializations.json'}")
     print(f"CUSTOM_IO_PATH={qpc_path.parent / 'custom_io.yaml'}")
