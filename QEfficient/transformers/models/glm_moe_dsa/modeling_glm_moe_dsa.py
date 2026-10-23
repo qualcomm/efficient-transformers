@@ -51,6 +51,11 @@ from QEfficient.transformers.moe import (
 from QEfficient.utils.constants import MAX_POSITION_EMBEDDINGS
 
 
+def _is_glm_dsa_layer_type(layer_type: str) -> bool:
+    """Return whether a GLM layer uses indexed/DSA attention."""
+    return layer_type in {"deepseek_sparse_attention", "indexed_attention"}
+
+
 @dataclass(frozen=True)
 class GlmAttentionLayerConfig:
     attention_type: str
@@ -219,7 +224,7 @@ def resolve_glm_attention_layer_configs(
     indexer_tokens_per_core = indexer_block_width // num_cores_per_device
     indexer_block_topk = min(dsa_topk, indexer_block_width)
     attention_tokens_per_core = dsa_topk // num_cores_per_device
-    has_dsa = any(layer_type == "deepseek_sparse_attention" for layer_type in layer_types[: config.num_hidden_layers])
+    has_dsa = any(_is_glm_dsa_layer_type(layer_type) for layer_type in layer_types[: config.num_hidden_layers])
     if has_dsa and seq_len > 1:
         if not prefill_only:
             raise ValueError("GLM DSA multi-token execution requires prefill_only=True.")
@@ -240,7 +245,7 @@ def resolve_glm_attention_layer_configs(
     resolved = []
     for layer_idx in range(config.num_hidden_layers):
         layer_type = layer_types[layer_idx]
-        is_dsa = layer_type == "deepseek_sparse_attention"
+        is_dsa = _is_glm_dsa_layer_type(layer_type)
         if not is_dsa and layer_type not in {"full_attention", "dense_attention"}:
             raise ValueError(f"Unsupported GLM layer_types[{layer_idx}]={layer_type!r}.")
         indexer_type = indexer_types[layer_idx]
@@ -423,9 +428,7 @@ class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
             cache_layer = indexer_key_cache.layers[indexer_key_cache.layer_to_cache_idx[self.layer_idx]]
             layer_config = cache_layer.layout_config
             if layer_config is not None and (
-                layer_config.indexer_prefill_parallel
-                or layer_config.indexer_dp > 1
-                or layer_config.indexer_cp > 1
+                layer_config.indexer_prefill_parallel or layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1
             ):
                 weights = self.weights_proj(hidden_states.to(self.weights_proj.weight.dtype)).float()
                 weights = weights * (self.n_heads**-0.5)
@@ -562,10 +565,10 @@ class QEffGlmMoeDsaAttention(GlmMoeDsaAttention):
         indexer_types = list(getattr(self.config, "indexer_types", []) or [])
         indexer_type = indexer_types[self.layer_idx] if self.layer_idx < len(indexer_types) else "full"
         self.glm_attention_config = GlmAttentionLayerConfig(
-            attention_type="dsa" if layer_type == "deepseek_sparse_attention" else "dense_mla",
+            attention_type="dsa" if _is_glm_dsa_layer_type(layer_type) else "dense_mla",
             indexer_type=indexer_type,
-            blocking_mode="dsa" if layer_type == "deepseek_sparse_attention" else "none",
-            absorption=layer_type == "deepseek_sparse_attention",
+            blocking_mode="dsa" if _is_glm_dsa_layer_type(layer_type) else "none",
+            absorption=_is_glm_dsa_layer_type(layer_type),
             online=False,
             cache_compressed=True,
             num_kv_blocks=1,
@@ -937,9 +940,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
                 local_context = seq_len
             caches.append(
                 (
-                    torch.zeros(
-                        (*prefix, local_context, config.kv_lora_rank), dtype=config.torch_dtype, device=device
-                    ),
+                    torch.zeros((*prefix, local_context, config.kv_lora_rank), dtype=config.torch_dtype, device=device),
                     torch.zeros(
                         (*prefix, local_context, config.qk_rope_head_dim), dtype=config.torch_dtype, device=device
                     ),
@@ -951,11 +952,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         caches = []
         for layer_idx in self.get_indexer_cache_layers(config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
-            if (
-                layer_config.indexer_prefill_parallel
-                or layer_config.indexer_dp > 1
-                or layer_config.indexer_cp > 1
-            ):
+            if layer_config.indexer_prefill_parallel or layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
                 shape = (
                     batch_size // layer_config.indexer_dp,
                     layer_config.indexer_dp * layer_config.indexer_cp,
@@ -1004,11 +1001,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         indexer_axes = {}
         for layer_idx in self.get_indexer_cache_layers(self.config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
-            if (
-                layer_config.indexer_prefill_parallel
-                or layer_config.indexer_dp > 1
-                or layer_config.indexer_cp > 1
-            ):
+            if layer_config.indexer_prefill_parallel or layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
                 axes = {}
                 if layer_config.indexer_dp == 1:
                     axes[0] = batch_symbol
@@ -1033,5 +1026,5 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
                     indexer_types[: config.num_hidden_layers],
                 )
             )
-            if layer_type == "deepseek_sparse_attention" and indexer_type != "shared"
+            if _is_glm_dsa_layer_type(layer_type) and indexer_type != "shared"
         )
