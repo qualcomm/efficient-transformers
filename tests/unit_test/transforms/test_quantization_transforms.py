@@ -311,11 +311,48 @@ class TestQEFFAutoModelQuantizationIntegration:
 
     def test_pytorch_transforms_include_fp8_transform(self):
         from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-        from QEfficient.transformers.quantizers.quant_transforms import FP8DeQuantLinearToLinearTransform
+        from QEfficient.transformers.quantizers.quant_transforms import (
+            FP8BlockWiseDequantLinearToLinearTransform,
+            FP8DeQuantLinearToLinearTransform,
+        )
 
         assert FP8DeQuantLinearToLinearTransform in QEFFAutoModelForCausalLM._pytorch_transforms, (
             "FP8DeQuantLinearToLinearTransform not in QEFFAutoModelForCausalLM._pytorch_transforms"
         )
+        assert FP8BlockWiseDequantLinearToLinearTransform in QEFFAutoModelForCausalLM._pytorch_transforms, (
+            "FP8BlockWiseDequantLinearToLinearTransform not in QEFFAutoModelForCausalLM._pytorch_transforms"
+        )
+
+    def test_causal_lm_fp8_transforms_dequantize_by_default(self):
+        import torch
+        from transformers import Qwen3Config
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+
+        from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8BlockWiseDequantLinear
+
+        def build_model():
+            config = Qwen3Config(
+                vocab_size=128,
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                head_dim=8,
+                max_position_embeddings=32,
+            )
+            model = Qwen3ForCausalLM(config)
+            model.model.layers[0].mlp.gate_proj = FP8BlockWiseDequantLinear.for_fp8_layer_with_blocksize(
+                32, 64, [32, 32], "e4m3", False, scale_dtype=torch.float16
+            )
+            return model
+
+        dequantized_model = QEFFAutoModelForCausalLM(build_model())
+        retained_model = QEFFAutoModelForCausalLM(build_model(), fp8_retain_weights=True)
+
+        assert not any(isinstance(module, FP8BlockWiseDequantLinear) for module in dequantized_model.model.modules())
+        assert any(isinstance(module, FP8BlockWiseDequantLinear) for module in retained_model.model.modules())
 
     def test_quantization_transforms_come_before_kv_cache_transform(self):
         """Quantization transforms must be applied before KVCacheTransform."""
@@ -372,6 +409,38 @@ class TestQEFFAutoModelQuantizationIntegration:
             assert FP8DeQuantLinearToLinearTransform in transforms
             assert FP8BlockWiseDequantLinearToLinearTransform in transforms
             assert FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform in transforms
+
+    def test_fp8_retention_removes_dequant_transforms_for_vlm_wrappers(self):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.modeling_auto import (
+            QEffCausalLMForTextImageToTextModel,
+            QEffVisionEncoderForTextImageToTextModel,
+            _configure_fp8_retention,
+            _QEFFAutoModelForImageTextToTextSingleQPC,
+        )
+        from QEfficient.transformers.quantizers.quant_transforms import (
+            FP8BlockWiseDequantLinearToLinearTransform,
+            FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform,
+            FP8DeQuantLinearToLinearTransform,
+        )
+
+        fp8_transforms = {
+            FP8DeQuantLinearToLinearTransform,
+            FP8BlockWiseDequantLinearToLinearTransform,
+            FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform,
+        }
+        for wrapper_cls in [
+            QEffVisionEncoderForTextImageToTextModel,
+            QEffCausalLMForTextImageToTextModel,
+            _QEFFAutoModelForImageTextToTextSingleQPC,
+        ]:
+            wrapper = SimpleNamespace(_pytorch_transforms=wrapper_cls._pytorch_transforms)
+            kwargs = {"fp8_retain_weights": True}
+            _configure_fp8_retention(wrapper, kwargs)
+
+            assert not fp8_transforms.intersection(wrapper._pytorch_transforms)
+            assert kwargs["fp8_retain_weights"] is True
 
     def test_pack_quantized_int4_transform_matches_compressed_linear_metadata(self, monkeypatch):
         import importlib

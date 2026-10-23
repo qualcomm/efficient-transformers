@@ -51,7 +51,7 @@ def test_compiler_invalid_flag(tmp_path):
         QEFFBaseModel._compile(qeff_obj, valid_file, tmp_path, convert_tofp16=True, aic_binary_dir=tmp_path)
 
 
-def test_dynamo_export_forces_external_data(tmp_path, mocker):
+def test_dynamo_export_saves_standard_onnx(tmp_path, mocker):
     onnx_program = mocker.MagicMock()
     mocker.patch("QEfficient.exporter.onnx_exporter.torch.onnx.export", return_value=onnx_program)
     mocker.patch("QEfficient.exporter.onnx_exporter.PruneFakeInitializersTransform.apply")
@@ -67,7 +67,7 @@ def test_dynamo_export_forces_external_data(tmp_path, mocker):
         {},
     )
 
-    onnx_program.save.assert_called_once_with(str(onnx_path), external_data=True)
+    onnx_program.save.assert_called_once_with(str(onnx_path))
     assert result.onnx_path == onnx_path
 
 
