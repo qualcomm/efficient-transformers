@@ -97,17 +97,19 @@ def update_running_softmax_prefill(
     skip_kv: bool = False,
     skip_future: Optional[torch.Tensor] = None,
 ):
+    # Scores, exp(scores - max) <= 1 and the per-block PV matmul stay in the input dtype; only the small running
+    # state (max, denominator, accumulator) is kept in its own (FP32) dtype.
+    state_dtype = current_max.dtype
     prev_max = current_max
-    attn_weights_block = attn_weights_block.to(current_max.dtype)
-    v_block = v_block.to(output.dtype)
-    current_max_updated = torch.max(prev_max, attn_weights_block.max(dim=-1).values)
+    current_max_updated = torch.max(prev_max, attn_weights_block.max(dim=-1).values.to(state_dtype))
     delta_max = prev_max - current_max_updated
-    current_exp = torch.exp(attn_weights_block - current_max_updated.unsqueeze(-1))
+    current_exp = torch.exp(attn_weights_block - current_max_updated.unsqueeze(-1).to(attn_weights_block.dtype))
     prev_denominator = current_denominator
-    curr_exp_sum = current_exp.sum(dim=-1)
-    current_denominator_updated = prev_denominator * torch.exp(delta_max) + curr_exp_sum
+    curr_exp_sum = current_exp.sum(dim=-1).to(state_dtype)
+    rescale = torch.exp(delta_max)
+    current_denominator_updated = prev_denominator * rescale + curr_exp_sum
     prev_output = output
-    output_updated = prev_output * torch.exp(delta_max.unsqueeze(-1)) + torch.matmul(current_exp, v_block)
+    output_updated = prev_output * rescale.unsqueeze(-1) + torch.matmul(current_exp, v_block).to(state_dtype)
     if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing()):
         assert skip_future is not None
         current_max = torch.where(skip_future, prev_max, current_max_updated)
@@ -925,7 +927,7 @@ def blocked_qkv_attention_forward_prefill_online(
         r_chunks = []
         for acc in accs:
             rc = acc["rc"]
-            out = (acc["o_acc"] / acc["s_acc"].unsqueeze(-1)).to(query.dtype)
+            out = (acc["o_acc"] * (1.0 / acc["s_acc"]).unsqueeze(-1)).to(query.dtype)
             r_chunks.append(out.view(B, num_cores, rc, tc, D))
         t_chunks.append(torch.cat(r_chunks, dim=2))
 
