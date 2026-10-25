@@ -83,7 +83,7 @@ def device_ids(value: str) -> list[int]:
 def set_runtime_env(ids: list[int]) -> None:
     value = ",".join(str(item) for item in ids)
     os.environ["DEVICE_GROUP"] = value
-    os.environ["QAIC_VISIBLE_DEVICES"] = value
+    os.environ.pop("QAIC_VISIBLE_DEVICES", None)
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
@@ -354,7 +354,7 @@ def run_command(args: argparse.Namespace, root: Path) -> int:
         result = run_one(session, processor, chunk, SAMPLE_RATE, chunk_samples, args.generation_len, args.stop_on_eos, prefill, decode, names, eos_ids)
         row = {"chunk_index": index, "chunk_start_s": start / SAMPLE_RATE, "chunk_end_s": (start + chunk_samples) / SAMPLE_RATE, **result}
         rows.append(row)
-        print(f"chunk={index} start_s={row['chunk_start_s']:.3f} elapsed_s={result['elapsed_s']:.4f} tokens={len(result['tokens'])} transcript={result['decoded']!r}")
+        print(f"chunk={index} start_s={row['chunk_start_s']:.3f} elapsed_s={result['elapsed_s']:.4f} token_ids={result['tokens']} transcript={result['decoded']!r}")
     transcript = "".join(row["decoded"] for row in rows)
     print(f"manifest={manifest_path}\nqpc_dir={manifest['qpc_dir']}\nchunks={len(rows)}\ntranscript={transcript!r}")
     return 0
