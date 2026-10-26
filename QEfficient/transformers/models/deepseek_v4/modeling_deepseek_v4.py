@@ -1217,14 +1217,22 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         capacity = indexer_kv_cache.shape[1]
         tile_size = int(getattr(self.config, "qeff_csa_prefill_indexer_kv_block_size", 512))
         topk_per_tile = int(getattr(self.config, "qeff_csa_prefill_indexer_topk_per_block", 4))
-        if tile_size < 1 or topk_per_tile < 1:
-            raise ValueError("CSA prefill indexer tile size and top-k per tile must be positive.")
+        indexer_mode = getattr(self.config, "qeff_csa_prefill_indexer_mode", "global")
+        if tile_size < 1:
+            raise ValueError("CSA prefill indexer tile size must be positive.")
+        if indexer_mode not in {"global", "blockwise"}:
+            raise ValueError("CSA prefill indexer mode must be 'global' or 'blockwise'.")
+        if indexer_mode == "blockwise" and topk_per_tile < 1:
+            raise ValueError("CSA prefill indexer top-k per tile must be positive.")
 
-        num_tiles = (capacity + tile_size - 1) // tile_size
-        top_k = min(index_topk, capacity)
-        topk_per_tile = max(topk_per_tile, (top_k + num_tiles - 1) // num_tiles)
-        causal_threshold = torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype).unsqueeze(-1)
+        causal_threshold = torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype)
+        causal_threshold = causal_threshold.unsqueeze(-1)
+        if indexer_mode == "blockwise":
+            num_tiles = (capacity + tile_size - 1) // tile_size
+            top_k = min(index_topk, capacity)
+            topk_per_tile = max(topk_per_tile, (top_k + num_tiles - 1) // num_tiles)
 
+        score_parts = []
         candidate_scores = []
         candidate_indices = []
         for tile_start in range(0, capacity, tile_size):
@@ -1234,19 +1242,31 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             tile_scores = (tile_scores * index_weights.unsqueeze(-1)).sum(dim=2)
             tile_indices = torch.arange(tile_start, tile_end, device=indexer_kv_cache.device).view(1, 1, -1)
             tile_scores = tile_scores.masked_fill(tile_indices >= causal_threshold, -3.0e4)
-            tile_topk = torch.topk(tile_scores, k=min(topk_per_tile, tile_end - tile_start), dim=-1)
-            candidate_scores.append(tile_topk.values)
-            candidate_indices.append(tile_start + tile_topk.indices)
 
-        candidate_scores = torch.cat(candidate_scores, dim=-1)
-        candidate_indices = torch.cat(candidate_indices, dim=-1)
-        candidate_count = candidate_scores.shape[-1]
-        if index_topk >= candidate_count:
-            selection = torch.arange(candidate_count, device=indexer_kv_cache.device).view(1, 1, -1)
-            selection = selection.expand(batch_size, chunk_length, -1)
+            if indexer_mode == "global":
+                score_parts.append(tile_scores)
+            else:
+                tile_topk = torch.topk(tile_scores, k=min(topk_per_tile, tile_end - tile_start), dim=-1)
+                candidate_scores.append(tile_topk.values)
+                candidate_indices.append(tile_start + tile_topk.indices)
+
+        if indexer_mode == "global":
+            scores = torch.cat(score_parts, dim=-1)
+            if index_topk >= capacity:
+                selected = torch.arange(capacity, device=indexer_kv_cache.device).view(1, 1, -1)
+                selected = selected.expand(batch_size, chunk_length, -1)
+            else:
+                selected = torch.topk(scores, k=index_topk, dim=-1).indices
         else:
-            selection = torch.topk(candidate_scores, k=index_topk, dim=-1).indices
-        selected = torch.gather(candidate_indices, dim=-1, index=selection)
+            candidate_scores = torch.cat(candidate_scores, dim=-1)
+            candidate_indices = torch.cat(candidate_indices, dim=-1)
+            candidate_count = candidate_scores.shape[-1]
+            if index_topk >= candidate_count:
+                selection = torch.arange(candidate_count, device=indexer_kv_cache.device).view(1, 1, -1)
+                selection = selection.expand(batch_size, chunk_length, -1)
+            else:
+                selection = torch.topk(candidate_scores, k=index_topk, dim=-1).indices
+            selected = torch.gather(candidate_indices, dim=-1, index=selection)
         return selected, selected < causal_threshold
 
     def _csa_prefill_update(

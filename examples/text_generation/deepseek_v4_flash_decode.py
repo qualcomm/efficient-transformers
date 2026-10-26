@@ -298,6 +298,12 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
         help="CSA prefill candidates retained from each indexer score tile.",
     )
     parser.add_argument(
+        "--csa-prefill-indexer-mode",
+        choices=("global", "blockwise"),
+        default=None,
+        help="CSA prefill indexer selection: exact global top-k or approximate blockwise candidate merge.",
+    )
+    parser.add_argument(
         "--num-kv-blocks",
         type=int,
         default=1,
@@ -415,6 +421,9 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
     csa_prefill_indexer_topk_per_block = getattr(args, "csa_prefill_indexer_topk_per_block", None)
     if csa_prefill_indexer_topk_per_block is not None:
         config.qeff_csa_prefill_indexer_topk_per_block = csa_prefill_indexer_topk_per_block
+    csa_prefill_indexer_mode = getattr(args, "csa_prefill_indexer_mode", None)
+    if csa_prefill_indexer_mode is not None:
+        config.qeff_csa_prefill_indexer_mode = csa_prefill_indexer_mode
     config.qeff_hca_attention_dp = attention_dp
     config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
     config.qeff_hca_attn_blocks = hca_attn_blocks
