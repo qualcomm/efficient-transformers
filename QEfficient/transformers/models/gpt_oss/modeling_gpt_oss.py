@@ -140,10 +140,8 @@ class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
                 )
                 num_ffn_blocks = int(env_val)
 
-        # TODO: investigate whether NUM_Q_BLOCKS should also gate the MoE FFN path.
-        # Currently NUM_Q_BLOCKS only applies to opt_eager_attention_forward_blocked (attention
-        # Q-tiling) and was not present in the old blocked_ffn_forward. If seq_len-axis blocking
-        # is needed here too, add it as an outer token-block loop before the expert loop.
+        # TODO: deprecate NUM_Q_BLOCKS entirely; it was never supported in the MoE FFN path
+        # and only applies to opt_eager_attention_forward_blocked (attention Q-tiling).
         if os.environ.get("NUM_Q_BLOCKS", None) is not None:
             logger.warning(
                 "NUM_Q_BLOCKS has no effect on the MoE FFN path. "
