@@ -140,12 +140,10 @@ class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
                 )
                 num_ffn_blocks = int(env_val)
 
-        # TODO: NUM_Q_BLOCKS (hidden-state seq_len blocking for the MoE FFN path) is not yet
-        # supported in execute_moe_flavour. In the old _QEffGptOssLegacyBlockedMixin the token
-        # axis was already flattened to [T, H] before the expert loop so NUM_Q_BLOCKS had no
-        # effect there either; it only applies to opt_eager_attention_forward_blocked (attention
-        # Q-tiling), which remains unchanged. If seq_len-axis FFN blocking is needed in future,
-        # add it here as an outer loop over token blocks before the expert loop.
+        # TODO: investigate whether NUM_Q_BLOCKS should also gate the MoE FFN path.
+        # Currently NUM_Q_BLOCKS only applies to opt_eager_attention_forward_blocked (attention
+        # Q-tiling) and was not present in the old blocked_ffn_forward. If seq_len-axis blocking
+        # is needed here too, add it as an outer token-block loop before the expert loop.
         if os.environ.get("NUM_Q_BLOCKS", None) is not None:
             logger.warning(
                 "NUM_Q_BLOCKS has no effect on the MoE FFN path. "
