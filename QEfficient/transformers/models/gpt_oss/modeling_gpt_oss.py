@@ -45,7 +45,6 @@ from QEfficient.transformers.moe import (
     QEffMoEBlockMixin,
     build_canonical_expert_weights,
     delete_module_attrs,
-    gptoss_clamp,
     gptoss_clamped_glu_mlp,
     resolve_routing,
     unpack_moe_weights_from_expert_parallel,
@@ -92,6 +91,7 @@ class QEffGptOssExperts(GptOssExperts):
         return self.moe_weights
 
 
+class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
     _moe_return_router_logits = True
     supported_moe_flavours = (
         MoEFlavour.SIMPLE_LOOP,
