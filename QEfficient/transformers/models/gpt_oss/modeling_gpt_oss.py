@@ -140,12 +140,12 @@ class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
                 )
                 num_ffn_blocks = int(env_val)
 
-        # TODO: deprecate NUM_Q_BLOCKS entirely; it was never supported in the MoE FFN path
-        # and only applies to opt_eager_attention_forward_blocked (attention Q-tiling).
+        # TODO: NUM_Q_BLOCKS is not currently supported in the MoE FFN path.
+        # It only applies to opt_eager_attention_forward_blocked (attention Q-tiling).
         if os.environ.get("NUM_Q_BLOCKS", None) is not None:
             logger.warning(
-                "NUM_Q_BLOCKS has no effect on the MoE FFN path. "
-                "It is only supported for the prefill attention path (opt_eager_attention_forward_blocked)."
+                "NUM_Q_BLOCKS is not supported in the MoE FFN path. "
+                "It only applies to the prefill attention path (opt_eager_attention_forward_blocked)."
             )
         if num_ffn_blocks is None:
             return super().execute_moe_flavour(x, routing)
