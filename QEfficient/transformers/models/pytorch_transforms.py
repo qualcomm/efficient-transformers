@@ -59,6 +59,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4TextModel,
     Gemma4TextRouter,
     Gemma4VisionAttention,
+    Gemma4VisionEncoderLayer,
 )
 from transformers.models.glm4_moe.modeling_glm4_moe import (
     Glm4MoeAttention,
@@ -377,6 +378,7 @@ from QEfficient.transformers.models.gemma4.modeling_gemma4 import (
     QEffGemma4TextModel,
     QEffGemma4TextRouter,
     QEffGemma4VisionAttention,
+    QEffGemma4VisionEncoderLayer,
 )
 from QEfficient.transformers.models.glm4_moe.modeling_glm4_moe import (
     QEffGlm4MoeAttention,
@@ -811,6 +813,7 @@ class KVCacheTransform(ModuleMappingTransform):
         Gemma4ForCausalLM: QEffGemma4ForCausalLM,
         Gemma4ForConditionalGeneration: QEffGemma4ForConditionalGeneration,
         Gemma4VisionAttention: QEffGemma4VisionAttention,
+        Gemma4VisionEncoderLayer: QEffGemma4VisionEncoderLayer,
         Gemma4ClippableLinear: QEffGemma4ClippableLinear,
         # GPT_OSS
         GptOssAttention: QEffGptOssAttention,
