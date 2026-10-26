@@ -4580,9 +4580,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         # (e.g. past_key.0_RetainedState -> past_key.0_<prefix>_RetainedState) so downstream consumers
         # (vLLM disaggregated serving) can regex-select only the LLM KV buffers for transfer.
         kv_cache_prefix = validate_kv_cache_prefix(kv_cache_prefix)
+        onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
         if kv_cache_prefix:
             output_names = apply_kv_cache_prefix(output_names, kv_cache_prefix)
             self.hash_params["kv_cache_prefix"] = kv_cache_prefix
+            # output_names already gives the top-level graph output its public name.
+            # Dynamo may still omit the KV producer, so pass the prefix separately
+            # to PreserveNestedCacheRetainedStateTransform, which creates that wiring.
+            onnx_transform_kwargs["kv_cache_prefix"] = kv_cache_prefix
 
         if getattr(self, "dflash_tlm", None):
             output_names.append("hidden_states")
@@ -4612,6 +4617,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
                 dynamo=dynamo,
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
+                onnx_transform_kwargs=onnx_transform_kwargs,
             )
 
     def build_prefill_specialization(

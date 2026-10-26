@@ -839,6 +839,18 @@ class QEFFBaseModel(ABC):
             )
             if self._weight_free and export_result.weight_spec_path:
                 embed_weight_spec_as_metadata(model, export_result.weight_spec_path)
+
+            # Input names were aligned before export, but Dynamo may regenerate structured
+            # KV leaf names in the serialized graph.
+            # QAIC pairs X_RetainedState with input X. Re-read the actual graph names and
+            # align those inputs with the retained-state outputs before compilation.
+            graph_input_names = [value.name for value in model.graph.input]
+            graph_output_names = [value.name for value in model.graph.output]
+            aligned_graph_input_names = align_kv_input_names_to_retained_outputs(graph_input_names, graph_output_names)
+            for old_name, new_name in zip(graph_input_names, aligned_graph_input_names):
+                if old_name != new_name:
+                    _rename_graph_value(model.graph, old_name, new_name)
+
             logger.info("ONNX transforms applied")
 
             onnx_path_tmp = onnx_path.with_suffix(onnx_path.suffix + ".tmp")

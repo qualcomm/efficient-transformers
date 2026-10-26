@@ -305,6 +305,20 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         }
     )
 
+    @staticmethod
+    def _retained_state_name(state_kind: str, layer_idx: str, kv_cache_prefix: str | None = None) -> str:
+        name = f"{state_kind}.{layer_idx}_RetainedState"
+        if kv_cache_prefix and state_kind in {
+            "past_key",
+            "past_value",
+            "compressed_kv",
+            "k_pe",
+            "conv_state",
+            "recurrent_state",
+        }:
+            name = f"{state_kind}.{layer_idx}_{kv_cache_prefix}_RetainedState"
+        return name
+
     @classmethod
     def _resolve_state_scatter_outputs(cls, fn, node, layer_idx: str, state_kinds: set[str]) -> dict[str, str] | None:
         """Resolve nested cache-state scatter outputs from function data flow.
@@ -360,7 +374,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         return scatter_outputs
 
     @classmethod
-    def apply(cls, model: ModelProto) -> bool:
+    def apply(cls, model: ModelProto, kv_cache_prefix: str | None = None) -> bool:
         graph = model.graph
         produced_names = {name for node in graph.node for name in node.output}
         dangling_retained_outputs = {
@@ -398,7 +412,10 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
             for layer_idx, state_inputs in state_inputs_by_layer.items():
                 present_states = frozenset(state_inputs)
-                desired_outputs = {state_kind: f"{state_kind}.{layer_idx}_RetainedState" for state_kind in state_inputs}
+                desired_outputs = {
+                    state_kind: cls._retained_state_name(state_kind, layer_idx, kv_cache_prefix)
+                    for state_kind in state_inputs
+                }
                 dangling_outputs = {
                     state_kind: output_name
                     for state_kind, output_name in desired_outputs.items()
@@ -973,7 +990,9 @@ class OnnxTransformPipeline(BaseOnnxTransform):
             applied[LocalizeFunctionReduceSumAxesTransform] = LocalizeFunctionReduceSumAxesTransform.apply(model)
 
         if PreserveNestedCacheRetainedStateTransform in requested:
-            applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(model)
+            applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(
+                model, kv_cache_prefix=kwargs.get("kv_cache_prefix")
+            )
 
         if RenameRepeatedSubgraphTransform in requested:
             applied[RenameRepeatedSubgraphTransform] = RenameRepeatedSubgraphTransform.apply(model, **kwargs)
