@@ -326,6 +326,7 @@ def test_deepseek_v4_example_parallel_layout_controls():
             csa_prefill_attn_gather_sub_qc=4,
             csa_prefill_indexer_kv_block_size=512,
             csa_prefill_indexer_topk_per_block=4,
+            csa_prefill_indexer_mode="blockwise",
             num_kv_blocks=1,
             hca_compressed_kv_cp=2,
             hca_attn_blocks=2,
@@ -342,6 +343,7 @@ def test_deepseek_v4_example_parallel_layout_controls():
     assert config.qeff_csa_prefill_attn_gather_sub_qc == 4
     assert config.qeff_csa_prefill_indexer_kv_block_size == 512
     assert config.qeff_csa_prefill_indexer_topk_per_block == 4
+    assert config.qeff_csa_prefill_indexer_mode == "blockwise"
     assert config.qeff_hca_attention_dp == 2
     assert config.qeff_hca_compressed_kv_cp == 2
     assert config.qeff_hca_attn_blocks == 2
@@ -451,6 +453,44 @@ def test_deepseek_v4_csa_prefill_rotates_indexer_queries_per_chunk():
 
     assert output.logits.shape == (1, 1, config.vocab_size)
     assert torch.isfinite(output.logits).all()
+
+
+def test_deepseek_v4_csa_prefill_indexer_global_selection_is_exact():
+    config = _tiny_deepseek_v4_config()
+    config.qeff_csa_prefill_indexer_kv_block_size = 2
+    config.qeff_csa_prefill_indexer_topk_per_block = 1
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    attention = qeff_model.model.layers[0].self_attn
+
+    q_index = torch.tensor([[[[1.0]], [[1.0]]]])
+    index_weights = torch.ones((1, 2, 1))
+    position_ids = torch.tensor([[8, 8]])
+    indexer_kv_cache = torch.tensor([[[1.0], [2.0], [3.0], [4.0]]])
+
+    selected, valid = attention._csa_prefill_select_indexer_slots(
+        q_index,
+        index_weights,
+        position_ids,
+        indexer_kv_cache,
+        index_topk=2,
+        compression_rate=2,
+    )
+
+    torch.testing.assert_close(selected, torch.tensor([[[3, 2], [3, 2]]]))
+    assert valid.all()
+
+    config.qeff_csa_prefill_indexer_mode = "blockwise"
+    selected, valid = attention._csa_prefill_select_indexer_slots(
+        q_index,
+        index_weights,
+        position_ids,
+        indexer_kv_cache,
+        index_topk=2,
+        compression_rate=2,
+    )
+
+    torch.testing.assert_close(selected, torch.tensor([[[3, 1], [3, 1]]]))
+    assert valid.all()
 
 
 def test_deepseek_v4_hca_prefill_preserves_rank_four_compressed_cache():
