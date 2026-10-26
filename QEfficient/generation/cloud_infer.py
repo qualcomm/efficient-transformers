@@ -65,6 +65,7 @@ except ImportError:
 # `is_retained_state_name` is re-exported here for existing external importers
 # (vlm_generation.py, text_generation_inference.py, modeling_auto.py).
 from QEfficient.generation._kv_dma_handoff import KvDmaHandoff, is_retained_state_name  # noqa: E402,F401
+from QEfficient.generation.input_dump import QAICInputDumper  # noqa: E402
 
 
 class QAICInferenceSession:
@@ -82,6 +83,8 @@ class QAICInferenceSession:
         profiling_type: str | None = None,
         profiling_output_dir: Path | str | None = None,
         profiling_file_prefix: str = "aic-profiling-python",
+        dump_inputs_path: Path | str | bool | None = None,
+        dump_component_name: str | None = None,
     ):
         """
         Initialise for QAIC inference Session
@@ -108,6 +111,10 @@ class QAICInferenceSession:
         :profiling_output_dir: Optional[Union[Path, str]]. Directory to write the profiling report to. Defaults to
             a "profiling_output" directory alongside `qpc_path`. Only used when `profiling_type` is set.
         :profiling_file_prefix: str. Filename prefix for the profiling report. Default="aic-profiling-python".
+        :dump_inputs_path: Optional path or True. When provided, dump every runtime invocation's host inputs in a
+            qaic-runner-compatible directory. When omitted, the QEFFICIENT_DUMP_INPUTS environment variable enables
+            dumping. True uses a local ``qeff_input_dumps`` directory.
+        :dump_component_name: Optional name used for this session's dump subdirectory.
         """
         if not (is_qaicrt_imported and is_aicapi_imported):
             raise ImportError(
@@ -182,6 +189,14 @@ class QAICInferenceSession:
         self.bindings = iodesc.selected_set.bindings
         self.binding_index_map = {binding.name: binding.index for binding in self.bindings}
         _add_basename_binding_aliases(self.binding_index_map, self.bindings)
+        self.input_dumper = QAICInputDumper.from_config(
+            session=self,
+            qpc_path=qpc_path,
+            dump_inputs_path=dump_inputs_path,
+            component_name=dump_component_name,
+        )
+        self._dump_invocation_context = None
+        self._dump_bound_inputs: Dict[str, np.ndarray] = {}
         # Create and load Program
         prog_properties = qaicrt.QAicProgramProperties()
         prog_properties.dataPathTimeoutMs = data_path_timeout_ms
@@ -372,6 +387,12 @@ class QAICInferenceSession:
                 buffer.itemsize,
                 buffer.shape if len(buffer.shape) > 0 else (1,),
             )
+            input_dumper = getattr(self, "input_dumper", None)
+            if input_dumper is not None and self.bindings[buffer_index].dir == aicapi.BUFFER_IO_TYPE_INPUT:
+                if buffer.size == 0:
+                    self._dump_bound_inputs.pop(buffer_name, None)
+                else:
+                    self._dump_bound_inputs[buffer_name] = np.asarray(buffer)
 
     def skip_buffers(self, skipped_buffer_names: List[str]):
         """
@@ -382,6 +403,29 @@ class QAICInferenceSession:
         """
 
         self.set_buffers({k: np.array([]) for k in skipped_buffer_names})
+
+    def _dumpable_output_names(self, qbuffers=None) -> List[str]:
+        qbuffers = self.qbuffers if qbuffers is None else qbuffers
+        output_names = []
+        for name in self.output_names:
+            buffer_index = self.binding_index_map[name]
+            if qbuffers[buffer_index].size == 0:
+                continue
+            output_names.append(name)
+        return output_names
+
+    def _output_shapes_from_buf_dims(self, output_names: List[str], buf_dims=None) -> Dict[str, tuple]:
+        buf_dims = self.buf_dims if buf_dims is None else buf_dims
+        return {name: tuple(buf_dims[self.binding_index_map[name]][1]) for name in output_names}
+
+    @contextmanager
+    def invocation_context(self, **metadata):
+        previous_context = self._dump_invocation_context
+        self._dump_invocation_context = metadata or None
+        try:
+            yield
+        finally:
+            self._dump_invocation_context = previous_context
 
     def run(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """
@@ -395,6 +439,18 @@ class QAICInferenceSession:
         """
         # Set inputs
         self.set_buffers(inputs)
+        input_dumper = getattr(self, "input_dumper", None)
+        if input_dumper is not None:
+            output_names = self._dumpable_output_names()
+            dumped_inputs = {**self._dump_bound_inputs, **inputs}
+            invocation_context = getattr(self, "_dump_invocation_context", None)
+            input_dumper.record_invocation(
+                kind="run",
+                inputs=dumped_inputs,
+                output_names=output_names,
+                output_shapes=self._output_shapes_from_buf_dims(output_names),
+                metadata={"invocation_context": invocation_context} if invocation_context else None,
+            )
         if self.execObj.setData(self.qbuffers, self.buf_dims) != qaicrt.QStatus.QS_SUCCESS:
             self._release_program_after_run_failure()
             raise MemoryError("Failed to setData")

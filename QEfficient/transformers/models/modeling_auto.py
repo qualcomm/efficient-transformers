@@ -43,6 +43,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     MoEFusedExpertSplitCheckpointTransform,
 )
 from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_state_name
+from QEfficient.generation.input_dump import resolve_runtime_dump_inputs_path
 from QEfficient.generation.runner_io import (
     write_causal_lm_runner_bundle,
     write_dual_qpc_vlm_runner_bundle,
@@ -1783,7 +1784,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             "continuous_batching": self.continuous_batching,
             "comp_ctx_lengths": self.comp_ctx_lengths_decode,
         }
-        if getattr(self.model.config, "model_type", None) in {"qwen3_vl_moe", "qwen3_5_moe", "qwen3_5"}:
+        if getattr(self.model.config, "model_type", None) in {"qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"}:
             _blocking_cfg = self.lang_model.hash_params.get("blocking_kwargs", None)
             batch_fold = (
                 not prefill_only and _blocking_cfg is not None and _blocking_cfg.mode == BlockingMode.KV_BATCH_FOLD
@@ -2420,7 +2421,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         num_frames: int | None = None,
         skip_vision: bool = False,
         skip_lang: bool = False,
-        artifacts: bool = False,
+        artifacts: bool | str | Path = False,
         **kwargs,
     ) -> torch.Tensor | np.ndarray | Path:
         """
@@ -2452,8 +2453,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         generation_len : int, optional
             The maximum number of tokens to generate. If None, it's inferred from `ctx_len`.
 
-        artifacts : bool, optional
-            Write first-prefill ``qaic-runner`` inputs without constructing a runtime session.
+        artifacts : bool or path-like, optional
+            ``True`` writes first-prefill ``qaic-runner`` inputs without constructing a runtime session.
+            A string or ``Path`` dumps every executed runtime invocation under that directory.
         Returns
         -------
         CloudAI100ExecInfoNew or np.ndarray
@@ -2464,7 +2466,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         NotImplementedError
             If `runtime_ai100` is False.
         """
-        if artifacts:
+        if artifacts is True:
             return write_dual_qpc_vlm_runner_bundle(
                 model=self,
                 processor=processor,
@@ -2473,6 +2475,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 skip_vision=skip_vision,
                 skip_lang=skip_lang,
             )
+        runtime_dump_inputs_path = resolve_runtime_dump_inputs_path(artifacts, kwargs.pop("dump_inputs_path", None))
         if not runtime_ai100:
             raise NotImplementedError("PyTorch execution is not supported yet for this model!")
 
@@ -2494,6 +2497,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 comp_ctx_lengths_decode=self.comp_ctx_lengths_decode,
                 image_height=image_height,
                 image_width=image_width,
+                dump_inputs_path=runtime_dump_inputs_path,
                 **kwargs,
             )
 
@@ -2510,7 +2514,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
 
         # Fallback to kv_offload_generate for direct inputs (backward compatibility)
         return self.kv_offload_generate(
-            inputs=inputs, device_ids=device_ids, streamer=streamer, generation_len=generation_len
+            inputs=inputs,
+            device_ids=device_ids,
+            streamer=streamer,
+            generation_len=generation_len,
+            dump_inputs_path=runtime_dump_inputs_path,
         )
 
     def kv_offload_generate(
@@ -2519,6 +2527,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         streamer: TextStreamer | None = None,
         device_ids: list[int] | None = None,
         generation_len: int | None = None,
+        dump_inputs_path: str | bool | None = None,
     ):
         """
         Performs generation for multimodal models with KV offloading to CPU.
@@ -2552,10 +2561,21 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if not self.lang_model.qpc_path:
             raise TypeError("Please run compile API for language model first!")
 
-        lang_session = QAICInferenceSession(self.lang_model.qpc_path, device_ids, activate=False)
+        lang_session = QAICInferenceSession(
+            self.lang_model.qpc_path,
+            device_ids,
+            activate=False,
+            dump_inputs_path=dump_inputs_path,
+            dump_component_name="text",
+        )
 
         if self.vision_model.qpc_path:
-            vision_session = QAICInferenceSession(self.vision_model.qpc_path, device_ids)
+            vision_session = QAICInferenceSession(
+                self.vision_model.qpc_path,
+                device_ids,
+                dump_inputs_path=dump_inputs_path,
+                dump_component_name="vision",
+            )
 
         batch_size, ctx_len, _fbs, num_kv_blocks = get_compilation_dims(self.lang_model.qpc_path)
 
@@ -3238,6 +3258,7 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         images: list[str] | None = None,
         prompts: list[str] | None = None,
         artifacts: bool = False,
+        dump_inputs_path: str | bool | None = None,
     ) -> torch.Tensor | np.ndarray | Path:
         """
         Generates output by executing the compiled single QPC on Cloud AI 100 Hardware cards.
@@ -3258,8 +3279,9 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         generation_len : int, optional
             The maximum number of tokens to generate. If None, it's inferred from `ctx_len`.
 
-        artifacts : bool, optional
-            Write first-prefill ``qaic-runner`` inputs without constructing a runtime session.
+        artifacts : bool or path-like, optional
+            ``True`` writes first-prefill ``qaic-runner`` inputs without constructing a runtime session.
+            A string or ``Path`` dumps every executed runtime invocation under that directory.
         Returns
         -------
         CloudAI100ExecInfoNew or np.ndarray
@@ -3270,13 +3292,18 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         NotImplementedError
             If `runtime_ai100` is False.
         """
-        if artifacts:
+        if artifacts is True:
             return write_single_qpc_vlm_runner_bundle(model=self, processor=processor, images=images, prompts=prompts)
+        runtime_dump_inputs_path = resolve_runtime_dump_inputs_path(artifacts)
         if not runtime_ai100:
             raise NotImplementedError("PyTorch execution is not supported yet for this model!")
 
         return self.cloud_ai_100_generate(
-            inputs=inputs, device_ids=device_ids, generation_len=generation_len, streamer=streamer
+            inputs=inputs,
+            device_ids=device_ids,
+            generation_len=generation_len,
+            streamer=streamer,
+            dump_inputs_path=runtime_dump_inputs_path,
         )
 
     def cloud_ai_100_generate(
@@ -3286,6 +3313,7 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         enable_debug_logs: bool = False,
         generation_len: int | None = None,
         streamer: TextStreamer | None = None,
+        dump_inputs_path: str | bool | None = None,
     ) -> np.ndarray:
         """
         Performs generation for multimodal models using a single QPC on Cloud AI 100 hardware.
@@ -3315,7 +3343,12 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         """
         inputs = self.auto_correct_inputs(inputs)
         qpc_session = QAICInferenceSession(
-            self.qpc_path, device_ids, enable_debug_logs=enable_debug_logs, activate=False
+            self.qpc_path,
+            device_ids,
+            enable_debug_logs=enable_debug_logs,
+            activate=False,
+            dump_inputs_path=dump_inputs_path,
+            dump_component_name="vision_text",
         )
         batch_size, ctx_len, _fbs, _ = get_compilation_dims(self.qpc_path)
         pad_token_id = 1
@@ -4218,6 +4251,37 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
 
+        # TODO: Remove this hack ##################
+        if dynamo:
+            # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
+            bs = max(2, bs)
+        ###########################################
+
+        requested_blocking_mode = str((qaic_config or {}).get("blocking_mode", "")).lower()
+        batch_fold_export = self.continuous_batching and requested_blocking_mode == BlockingMode.KV_BATCH_FOLD.value
+        if batch_fold_export:
+            bs = fbs
+
+        if qaic_config is not None and qaic_config.get("blocking_mode") is not None:
+            current_blocking_config = self.hash_params.get("blocking_kwargs")
+            requested_mode = qaic_config.get("blocking_mode")
+            current_mode = getattr(getattr(current_blocking_config, "mode", None), "value", None)
+            if current_blocking_config is None or current_mode != requested_mode:
+                export_ctx_len = int(
+                    qaic_config.get(
+                        "ctx_len",
+                        seq_len * 2 if getattr(self, "dflash_dlm", None) else seq_len,
+                    )
+                )
+                self._apply_attention_blocking_from_qaic(
+                    ctx_len=export_ctx_len,
+                    seq_len=seq_len,
+                    bs=bs,
+                    num_devices=int(kwargs.get("mdp_ts_num_devices", kwargs.get("num_devices", 1))),
+                    qaic_config=qaic_config,
+                    aic_num_cores=num_cores,
+                )
+
         supports_paged_attention = False
         # increase seq_len if using a larger number of blocks and set PagedAttention params if required
         if self.hash_params.get("blocking_kwargs", None):
@@ -4236,12 +4300,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             seq_len = kv_block_size = (
                 -(-blocking_kwargs.ctx_len // num_kv_blocks) if supports_paged_attention else seq_len
             )
-
-        # TODO: Remove this hack ##################
-        if dynamo:
-            # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
-            bs = max(2, bs)
-        ###########################################
 
         #### HANDLE KV CACHE SHAPE ################
         kv_cache_shape = get_padding_shape_from_config(
@@ -4587,8 +4645,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         Dict[str, Union[int, str]]
             A dictionary defining the prefill specialization.
         """
+        is_batch_fold = (
+            self.model.qaic_config is not None
+            and self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
+        )
         if not self.continuous_batching:
             exec_batch_size = batch_size
+        elif is_batch_fold:
+            exec_batch_size = full_batch_size or batch_size
         elif getattr(self, "dflash_dlm", None):
             # DFlash DLM: route decode_bsz rows via batch_index; use full_batch_size.
             exec_batch_size = full_batch_size or batch_size
@@ -4619,8 +4683,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             spec["batch_size"] = kv_cache_batch_size
         # TODO: remove this; not required
         if full_batch_size:
-            spec["full_batch_exec_size"] = exec_batch_size
-        if self.model.qaic_config is not None and "paged" in self.model.qaic_config.get("blocking_mode", ""):
+            if is_batch_fold:
+                spec["full_batch_exec_size"] = full_batch_size
+            else:
+                spec["full_batch_exec_size"] = exec_batch_size
+        if self.model.qaic_config is not None and (
+            "paged" in self.model.qaic_config.get("blocking_mode", "")
+            or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
+        ):
             num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
             spec["num_kv_blocks"] = num_kv_blocks
             spec["total_num_kv_blocks"] = kv_cache_batch_size * num_kv_blocks
@@ -4692,7 +4762,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             spec["full_batch_size"] = kv_cache_batch_size
         else:
             spec["batch_size"] = kv_cache_batch_size
-        if self.model.qaic_config is not None and "paged" in self.model.qaic_config.get("blocking_mode", ""):
+        if self.model.qaic_config is not None and (
+            "paged" in self.model.qaic_config.get("blocking_mode", "")
+            or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
+        ):
             num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
             spec["num_kv_blocks"] = num_kv_blocks
             spec["total_num_kv_blocks"] = kv_cache_batch_size * num_kv_blocks
@@ -5113,7 +5186,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         prompts: list[str],
         device_ids: list[int] | None = None,
         runtime_ai100: bool = True,
-        artifacts: bool = False,
+        artifacts: bool | str | Path = False,
         **kwargs,
     ) -> CloudAI100ExecInfoNew | Path:
         """
@@ -5136,8 +5209,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             Additional keyword arguments. Currently supports:
             - `generation_len (int, optional)`: The maximum number of tokens to generate.
 
-        artifacts : bool, optional
-            Write first-prefill ``qaic-runner`` inputs without constructing a runtime session.
+        artifacts : bool or path-like, optional
+            ``True`` writes first-prefill ``qaic-runner`` inputs without constructing a runtime session.
+            A string or ``Path`` dumps every executed runtime invocation under that directory.
         Returns
         -------
         CloudAI100ExecInfoNew
@@ -5150,13 +5224,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         NotImplementedError
             If `runtime_ai100` is False.
         """
-        if artifacts:
+        if artifacts is True:
             return write_causal_lm_runner_bundle(
                 model=self,
                 tokenizer=tokenizer,
                 prompts=prompts,
                 sampling_params=kwargs.get("sampling_params"),
             )
+        runtime_dump_inputs_path = resolve_runtime_dump_inputs_path(artifacts, kwargs.pop("dump_inputs_path", None))
         if runtime_ai100:
             if not isinstance(self.qpc_path, Path):
                 raise TypeError("Please run compile API first!")
@@ -5172,6 +5247,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 automation=kwargs.pop("automation", False),
                 iteration=kwargs.pop("iteration", 1),
                 is_tlm=self.is_tlm,
+                dump_inputs_path=runtime_dump_inputs_path,
                 **kwargs,
             )
         else:

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
@@ -821,24 +822,41 @@ class CheckpointTransformPipeline:
                 return out
             logger.warning("Prepared checkpoint at %s is incomplete or unreadable; rebuilding.", out)
 
-        _clear_stale_prepared_dir(out, src)
-        out.mkdir(parents=True, exist_ok=True)
+        if out.exists():
+            _clear_stale_prepared_dir(out, src)
+        work_out = out.with_name(f".{out.name}.tmp-{os.getpid()}-{time.time_ns()}")
+        _clear_stale_prepared_dir(work_out, src)
+        work_out.mkdir(parents=True, exist_ok=True)
 
         try:
             new_weight_map = execute_checkpoint_plan(
                 plan,
                 src,
-                out,
+                work_out,
                 target_dtype,
                 max_ram_bytes=max_ram_bytes,
                 max_workers=max_workers,
             )
-            _validate_final_weight_map(out, new_weight_map)
-            copy_checkpoint_aux_files(src, out)
-            write_index(out, new_weight_map)
-            _write_manifest(out, expected_manifest)
-            (out / CHECKPOINT_PREPARED_SENTINEL).touch()
+            _validate_final_weight_map(work_out, new_weight_map)
+            copy_checkpoint_aux_files(src, work_out)
+            write_index(work_out, new_weight_map)
+            _write_manifest(work_out, expected_manifest)
+            (work_out / CHECKPOINT_PREPARED_SENTINEL).touch()
+            if (out / CHECKPOINT_PREPARED_SENTINEL).exists() and _manifest_matches(out, expected_manifest):
+                if _prepared_checkpoint_is_readable(out):
+                    _clear_stale_prepared_dir(work_out, src)
+                    return out
+                logger.warning("Prepared checkpoint at %s is incomplete or unreadable; rebuilding.", out)
+                _clear_stale_prepared_dir(out, src)
+            try:
+                work_out.rename(out)
+            except OSError:
+                if (out / CHECKPOINT_PREPARED_SENTINEL).exists() and _manifest_matches(out, expected_manifest):
+                    if _prepared_checkpoint_is_readable(out):
+                        _clear_stale_prepared_dir(work_out, src)
+                        return out
+                raise
         except Exception:
-            _clear_stale_prepared_dir(out, src)
+            _clear_stale_prepared_dir(work_out, src)
             raise
         return out

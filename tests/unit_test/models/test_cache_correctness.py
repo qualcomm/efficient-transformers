@@ -130,7 +130,7 @@ class TestQEffDynamicLayerCorrectness:
         v_new = torch.ones(batch, heads, 1, head_dim) * 7.0
         pos_decode = torch.tensor([[5]])
 
-        k_out, v_out = layer.update(k_new, v_new, cache_kwargs={"position_ids": pos_decode})
+        k_out, _v_out = layer.update(k_new, v_new, cache_kwargs={"position_ids": pos_decode})
 
         assert k_out.shape[2] == ctx_len
         assert k_out[0, 0, 5, 0].item() == pytest.approx(7.0, abs=1e-5), (
@@ -202,6 +202,69 @@ class TestQEffDynamicLayerCorrectness:
         for batch_idx, position in enumerate(positions.flatten()):
             assert torch.equal(layer.keys[batch_idx, :, position], keys[batch_idx, :, 0])
             assert torch.equal(layer.values[batch_idx, :, position], values[batch_idx, :, 0])
+
+    def test_batch_fold_write_honors_continuous_batching_batch_index(self):
+        batch, heads, ctx_len, head_dim = 4, 2, 8, 4
+        layer = QEffDynamicLayer.from_tensors(
+            torch.zeros(batch, heads, ctx_len, head_dim),
+            torch.zeros(batch, heads, ctx_len, head_dim),
+        )
+        batch_index = torch.tensor([[2]])
+        positions = torch.tensor([[1]])
+        keys = torch.full((1, heads, 1, head_dim), 13.0)
+        values = torch.full((1, heads, 1, head_dim), 29.0)
+
+        layer.write_only_batch(keys, values, cache_kwargs={"position_ids": positions, "batch_index": batch_index})
+
+        assert torch.equal(layer.keys[2, :, 1], keys[0, :, 0])
+        assert torch.equal(layer.values[2, :, 1], values[0, :, 0])
+        assert torch.count_nonzero(layer.keys[0]) == 0
+        assert torch.count_nonzero(layer.keys[1]) == 0
+        assert torch.count_nonzero(layer.keys[3]) == 0
+
+    def test_batch_fold_write_skips_invalid_continuous_batching_positions(self):
+        batch, heads, ctx_len, head_dim = 4, 2, 8, 4
+        layer = QEffDynamicLayer.from_tensors(
+            torch.zeros(batch, heads, ctx_len, head_dim),
+            torch.zeros(batch, heads, ctx_len, head_dim),
+        )
+        batch_index = torch.tensor([[2], [3]])
+        positions = torch.tensor([[1], [-1]])
+        keys = torch.stack(
+            [
+                torch.full((heads, 1, head_dim), 13.0),
+                torch.full((heads, 1, head_dim), 17.0),
+            ]
+        )
+        values = keys + 100
+
+        layer.write_only_batch(keys, values, cache_kwargs={"position_ids": positions, "batch_index": batch_index})
+
+        assert torch.equal(layer.keys[2, :, 1], keys[0, :, 0])
+        assert torch.equal(layer.values[2, :, 1], values[0, :, 0])
+        assert torch.count_nonzero(layer.keys[3]) == 0
+        assert torch.count_nonzero(layer.values[3]) == 0
+
+    def test_batch_fold_read_honors_continuous_batching_batch_index(self):
+        batch, heads, ctx_len, head_dim = 4, 2, 8, 4
+        keys = torch.arange(batch * heads * ctx_len * head_dim, dtype=torch.float32).reshape(
+            batch, heads, ctx_len, head_dim
+        )
+        values = keys + 100
+        layer = QEffDynamicLayer.from_tensors(keys, values)
+        batch_index = torch.tensor([[2]])
+        cache_kwargs = {
+            "batch_index": batch_index,
+            "position_ids": torch.tensor([[1]], dtype=torch.int32),
+        }
+
+        key_block = layer.read_only_blocked_K_batch(0, 2, cache_kwargs)
+        value_block = layer.read_only_blocked_V_batch(0, 2, cache_kwargs)
+
+        expected_keys = keys[2:3, :, :2].reshape(1, heads, 2, head_dim)
+        expected_values = values[2:3, :, :2].reshape(1, heads, 2, head_dim)
+        assert torch.equal(key_block, expected_keys)
+        assert torch.equal(value_block, expected_values)
 
     def test_batch_fold_read_uses_folded_compute_view(self):
         batch, heads, ctx_len, head_dim = 3, 2, 8, 4
@@ -304,7 +367,7 @@ class TestQEffDynamicCacheCorrectness:
         v_decode = torch.ones(batch, heads, 1, head_dim) * 42.0
         pos_decode = torch.tensor([[3]])
 
-        k_out, v_out = cache.update(k_decode, v_decode, layer_idx=0, cache_kwargs={"position_ids": pos_decode})
+        k_out, _v_out = cache.update(k_decode, v_decode, layer_idx=0, cache_kwargs={"position_ids": pos_decode})
 
         assert k_out[0, 0, 3, 0].item() == pytest.approx(42.0, abs=1e-5), (
             f"Expected 42.0 at position 3, got {k_out[0, 0, 3, 0].item()}"
@@ -427,7 +490,7 @@ class TestCacheScatterGatherNumericalCorrectness:
         for pos, val in [(2, 10.0), (5, 20.0), (10, 30.0)]:
             k_d = torch.ones(batch, heads, 1, head_dim) * val
             v_d = torch.ones(batch, heads, 1, head_dim) * val
-            k_out, v_out = cache.update(k_d, v_d, layer_idx=0, cache_kwargs={"position_ids": torch.tensor([[pos]])})
+            k_out, _v_out = cache.update(k_d, v_d, layer_idx=0, cache_kwargs={"position_ids": torch.tensor([[pos]])})
 
         # Final state: position 10 should have 30.0
         assert k_out[0, 0, 10, 0].item() == pytest.approx(30.0, abs=1e-5)
@@ -443,7 +506,7 @@ class TestCacheScatterGatherNumericalCorrectness:
             cache.write_only(k, v, layer_idx=layer_idx, cache_kwargs={"position_ids": pos_ids(seq=ctx_len)})
 
         for layer_idx in range(3):
-            k_out, v_out = cache.read_only(layer_idx=layer_idx, cache_kwargs={"position_ids": pos_ids(seq=ctx_len)})
+            k_out, _v_out = cache.read_only(layer_idx=layer_idx, cache_kwargs={"position_ids": pos_ids(seq=ctx_len)})
             expected_val = float(layer_idx + 1)
             assert k_out[0, 0, 0, 0].item() == pytest.approx(expected_val, abs=1e-5), (
                 f"Layer {layer_idx} key value mismatch: expected {expected_val}, got {k_out[0, 0, 0, 0].item()}"
@@ -472,7 +535,9 @@ class TestCacheScatterGatherNumericalCorrectness:
         # Decode: overwrite position 4 with 999.0
         k_decode = torch.ones(batch, heads, 1, head_dim) * 999.0
         v_decode = torch.ones(batch, heads, 1, head_dim) * 999.0
-        k_out, v_out = cache.update(k_decode, v_decode, layer_idx=0, cache_kwargs={"position_ids": torch.tensor([[4]])})
+        k_out, _v_out = cache.update(
+            k_decode, v_decode, layer_idx=0, cache_kwargs={"position_ids": torch.tensor([[4]])}
+        )
 
         # Position 4 must be 999.0
         assert k_out[0, 0, 4, 0].item() == pytest.approx(999.0, abs=1e-5)
@@ -664,7 +729,7 @@ class TestPagedAttentionBlockTableRegression:
         )
 
         # Gather logical block 0 (shared prefix, physical block 3) for both rows.
-        k_block0, v_block0 = layer.read_only_paged_attention(
+        k_block0, _v_block0 = layer.read_only_paged_attention(
             block_index=self.BLOCK_TABLE[:, 0],
             updated=torch.tensor([[False], [False]]),
             cache_kwargs={"position_ids": torch.arange(self.BLOCK_SIZE).unsqueeze(0).expand(2, -1)},
@@ -672,7 +737,7 @@ class TestPagedAttentionBlockTableRegression:
         assert torch.allclose(k_block0[0], k_block0[1]), "Both rows must read the identical shared prefix"
 
         # Gather logical block 1 (divergent tail, physical blocks 7/12) for both rows.
-        k_block1, v_block1 = layer.read_only_paged_attention(
+        k_block1, _v_block1 = layer.read_only_paged_attention(
             block_index=self.BLOCK_TABLE[:, 1],
             updated=torch.tensor([[True], [True]]),
             cache_kwargs={"position_ids": torch.tensor([[4], [4]])},

@@ -15,6 +15,7 @@ both suites exercise the same model families.
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -110,6 +111,62 @@ WEIGHT_FREE_VLM_MODEL_PARAMS = [
     ),
 ]
 
+WEIGHT_FREE_BLOCKING_MODE_CASES = {
+    "h": {"blocking_mode": "h", "head_block_size": 8},
+    "q": {"blocking_mode": "q", "num_q_blocks": 2},
+    "kv": {"blocking_mode": "kv", "num_kv_blocks": 2},
+    "qkv": {"blocking_mode": "qkv", "num_kv_blocks": 2, "num_q_blocks": 2},
+    "hq": {"blocking_mode": "hq", "head_block_size": 2, "num_q_blocks": 2},
+    "hkv": {"blocking_mode": "hkv", "head_block_size": 2, "num_kv_blocks": 2},
+    "hqkv": {"blocking_mode": "hqkv", "head_block_size": 2, "num_kv_blocks": 2, "num_q_blocks": 2},
+    "bhqkv": {
+        "blocking_mode": "bhqkv",
+        "head_block_size": 2,
+        "num_batch_blocks": 1,
+        "num_kv_blocks": 2,
+        "num_q_blocks": 2,
+    },
+    "kv_headpar": {"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "headpar_split": 2},
+}
+
+_BLOCKING_SUPPORTED_TYPES = {
+    "gemma",
+    "gemma2",
+    "glm4_moe",
+    "gpt_oss",
+    "granite",
+    "granitemoe",
+    "llama",
+    "mistral",
+    "mixtral",
+    "qwen2",
+    "qwen3",
+    "qwen3_moe",
+    "starcoder2",
+}
+
+WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS = {
+    model_type: WEIGHT_FREE_CAUSAL_LM_MODEL_IDS[model_type] for model_type in _BLOCKING_SUPPORTED_TYPES
+}
+
+
+def _is_weight_free_blocking_qaic_case_supported(model_type: str, blocking_key: str) -> bool:
+    return not (model_type == "mixtral" and blocking_key == "h")
+
+
+WEIGHT_FREE_BLOCKING_QAIC_CASES = [
+    pytest.param(
+        model_type,
+        model_id,
+        blocking_key,
+        marks=pytest.mark.xdist_group(name=f"qaic-runtime-{model_type}"),
+        id=f"{model_type}-{blocking_key}",
+    )
+    for model_type, model_id in sorted(WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS.items())
+    for blocking_key in WEIGHT_FREE_BLOCKING_MODE_CASES
+    if _is_weight_free_blocking_qaic_case_supported(model_type, blocking_key)
+]
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -117,6 +174,7 @@ WEIGHT_FREE_VLM_MODEL_PARAMS = [
 PROMPT_LEN = 8
 CTX_LEN = 16
 BATCH_SIZE = 1
+FULL_BATCH_SIZE = 4
 MODEL_KWARGS = {"attn_implementation": "eager", "low_cpu_mem_usage": False, "torch_dtype": torch.float32}
 
 # ---------------------------------------------------------------------------
@@ -128,6 +186,13 @@ def skip_on_model_fetch_error(exc: Exception, model_id: str) -> None:
     pytest.skip(
         f"Skipping {model_id}: model unavailable or unsupported in this environment ({type(exc).__name__}: {exc})"
     )
+
+
+def load_causal_lm_config(model_id: str):
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    if not hasattr(config, "vocab_size") and hasattr(config, "text_config"):
+        config = config.text_config
+    return config
 
 
 def load_hf_model(model_id: str) -> AutoModelForCausalLM:
@@ -277,6 +342,51 @@ def assert_no_int64_kv_cache_inputs(onnx_path: Path) -> None:
                 f"Graph input '{inp.name}' has dtype int64 — this is position_ids mislabeled "
                 "as a KV cache tensor due to a weight-free export input-naming mismatch."
             )
+
+
+def assert_blocked_kv_ops_for_mode(
+    onnx_path: Path,
+    qeff_model: QEFFAutoModelForCausalLM,
+    blocking_key: str,
+    *,
+    continuous_batching: bool = False,
+) -> None:
+    """Assert stable blocked-KV custom op markers for KV-bearing blocking modes."""
+    marker_modes = {
+        "kv": {"CtxGatherBlockedKV"},
+        "qkv": {"CtxGatherBlockedKV"},
+        "hkv": {"CtxGatherBlockedKV"},
+        "hqkv": {"CtxGatherBlockedKV"},
+        "bhqkv": {"CtxGatherBlockedKV"},
+        "kv_headpar": {"CtxGatherBlockedKV"},
+    }
+    expected_ops = marker_modes.get(blocking_key, set())
+    if not expected_ops:
+        return
+    if continuous_batching:
+        expected_ops = {"CtxGatherBlockedKVCB"}
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    get_submodules = getattr(qeff_model.model, "get_submodules_for_export", None)
+    decoder_names = set()
+    if callable(get_submodules):
+        submodule_classes = get_submodules()
+        decoder_names = {
+            cls.__name__
+            for cls in (submodule_classes if isinstance(submodule_classes, (set, list, tuple)) else [submodule_classes])
+        }
+
+    function_nodes = [
+        node
+        for fn in model.functions
+        if not decoder_names or any(decoder_name in fn.name for decoder_name in decoder_names)
+        for node in fn.node
+    ]
+    op_counts = Counter(node.op_type for node in list(model.graph.node) + function_nodes)
+    missing_ops = sorted(op_name for op_name in expected_ops if not op_counts[op_name])
+    assert not missing_ops, (
+        f"Expected blocked KV custom op marker(s) {sorted(expected_ops)} for mode {blocking_key!r} "
+        f"in {onnx_path.name}, but missing {missing_ops}. Ops present: {dict(op_counts)}"
+    )
 
 
 # ---------------------------------------------------------------------------

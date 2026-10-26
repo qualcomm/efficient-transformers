@@ -1546,6 +1546,7 @@ class BlockingAttentionTransform:
             for qeff_class in KVCacheTransform._module_mapping.values()
             if qeff_class.__name__.endswith("Attention")
         }
+        supported_attention_classes.add(QEffPrefillOnlyChunkedGptOssAttention)
         for module in model.modules():
             if type(module) in cls._skip_classes:
                 warnings.warn(f"Blocking is not yet supported for {type(module)}.")

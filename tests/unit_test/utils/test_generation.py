@@ -176,6 +176,11 @@ class TestGenerationModuleImportability:
 
         assert QEfficient.generation.text_generation_inference is not None
 
+    def test_retained_state_name_accepts_subfunction_prefix(self):
+        from QEfficient.generation.cloud_infer import is_retained_state_name
+
+        assert is_retained_state_name("repeated_subgraph0/past_key.0_InternalRetainedState")
+
     def test_vlm_generation_importable(self):
         import QEfficient.generation.vlm_generation
 
@@ -638,6 +643,31 @@ class TestRunPrefill:
         obj.run_prefill(prompt=["Hello world"], generation_len=None)
         assert mock_session.run.called
 
+    def test_run_prefill_records_invocation_context(self):
+        obj, _, mock_session = _make_base_instance()
+        contexts = []
+
+        class InvocationContext:
+            def __init__(self, **metadata):
+                self.metadata = metadata
+
+            def __enter__(self):
+                contexts.append(self.metadata)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_session.invocation_context.side_effect = lambda **metadata: InvocationContext(**metadata)
+        obj.initialize_decode_inputs(1, 1, CTX_LEN)
+
+        obj.run_prefill(prompt=["Hello world"], generation_len=None)
+
+        assert contexts[0]["phase"] == "prefill"
+        assert contexts[0]["prefill_chunk"] == 0
+        assert contexts[0]["logical_invocation"] == "prefill_chunk"
+        assert contexts[0]["is_prefill"] is True
+        assert contexts[0]["is_decode"] is False
+
     def test_run_prefill_generation_len_bounded_by_ctx_len(self):
         obj, _, _ = _make_base_instance(ctx_len=CTX_LEN)
         obj.initialize_decode_inputs(1, 1, CTX_LEN)
@@ -708,6 +738,30 @@ class TestRunDecode:
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
         obj.run_decode(decode_inputs, gen_len, automation=True)
         assert mock_session.run.called
+
+    def test_run_decode_records_invocation_context(self):
+        obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
+        contexts = []
+
+        class InvocationContext:
+            def __init__(self, **metadata):
+                self.metadata = metadata
+
+            def __enter__(self):
+                contexts.append(self.metadata)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_session.invocation_context.side_effect = lambda **metadata: InvocationContext(**metadata)
+
+        obj.run_decode(decode_inputs, gen_len, automation=True)
+
+        assert contexts[0]["phase"] == "decode"
+        assert contexts[0]["decode_step"] == 1
+        assert contexts[0]["logical_invocation"] == "decode"
+        assert contexts[0]["is_prefill"] is False
+        assert contexts[0]["is_decode"] is True
 
     def test_run_decode_updates_generated_ids(self):
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
@@ -860,7 +914,7 @@ class TestPrefillChunking:
 class TestContinuousBatching:
     """run_continuous_batching_decode must handle the CB decode loop correctly."""
 
-    def _make_cb_instance(self, full_batch_size=2):
+    def _make_cb_instance(self, full_batch_size=2, enable_full_batch_prefill=False):
         from QEfficient.generation.text_generation_inference import QEffTextGenerationBase
 
         tok = _make_tokenizer()
@@ -911,6 +965,7 @@ class TestContinuousBatching:
                 qpc_path="/fake/path/model.qpc",
                 ctx_len=CTX_LEN,
                 full_batch_size=full_batch_size,
+                enable_full_batch_prefill=enable_full_batch_prefill,
             )
         return obj, tok, mock_session
 
@@ -949,6 +1004,143 @@ class TestContinuousBatching:
         prompt_queue = deque(["Hello", "World"])
         obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
         assert len(prompt_queue) == 0
+
+    def test_continuous_batching_records_terminal_decode_schedule(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11], [12]], dtype=np.int64)
+        obj.decode_pos_ids[:] = np.array([[1], [1]], dtype=np.int64)
+        obj.generation_len[:] = 1
+        obj.generated_ids[:, 0] = obj.decode_input_ids[:, 0]
+        obj.batch_index = np.arange(2).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(), generation_len=1)
+
+        event_types = [event["type"] for event in schedule_events]
+        assert event_types == [
+            "decode_invocation",
+            "slot_completed",
+            "slot_released",
+            "slot_completed",
+            "slot_released",
+        ]
+        assert schedule_events[0]["active_slots"] == [0, 1]
+        assert schedule_events[1]["reason"] == "generation_len"
+        assert schedule_events[1]["terminal_decode"] is True
+        assert schedule_events[3]["terminal_decode"] is True
+
+    def test_continuous_batching_records_replacement_prefill_schedule(self):
+        obj, tok, mock_session = self._make_cb_instance(full_batch_size=1)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 1, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11]], dtype=np.int64)
+        obj.decode_pos_ids[:] = np.array([[1]], dtype=np.int64)
+        obj.generation_len[:] = 1
+        obj.generated_ids[0, 0] = 11
+        obj.batch_index = np.arange(1).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(["replacement"]), generation_len=1)
+
+        event_types = [event["type"] for event in schedule_events]
+        assert "replacement_prefill" in event_types
+        replacement_event = next(event for event in schedule_events if event["type"] == "replacement_prefill")
+        assert replacement_event["slot"] == 0
+        assert replacement_event["logical_prompt_index"] == 1
+        assert replacement_event["trigger"] == "generation_len"
+        assert replacement_event["queue_depth_before_pop"] == 1
+        assert replacement_event["queue_depth_after_pop"] == 0
+
+    def test_runtime_schedule_position_ids_do_not_assume_batch_major(self):
+        obj, _, _ = self._make_cb_instance(full_batch_size=2)
+        decode_inputs = {
+            "input_ids": np.array([[11], [12]], dtype=np.int64),
+            "position_ids": np.array(
+                [
+                    [[10], [20]],
+                    [[110], [120]],
+                    [[210], [220]],
+                    [[310], [320]],
+                ],
+                dtype=np.int64,
+            ),
+        }
+
+        position_ids = obj._runtime_schedule_position_ids(decode_inputs)
+
+        assert position_ids == [[10, 110, 210, 310], [20, 120, 220, 320]]
+        assert obj._runtime_schedule_position_id_for_slot(decode_inputs, 1) == [20, 120, 220, 320]
+
+    def test_continuous_batching_logs_non_batch_major_position_ids(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11], [12]], dtype=np.int64)
+        obj.decode_pos_ids = np.array(
+            [
+                [[10], [20]],
+                [[110], [120]],
+                [[210], [220]],
+                [[310], [320]],
+            ],
+            dtype=np.int64,
+        )
+        obj.generation_len[:] = 2
+        obj.generated_ids[:, 0] = obj.decode_input_ids[:, 0]
+        obj.batch_index = np.arange(2).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(), generation_len=2)
+
+        decode_invocation = next(event for event in schedule_events if event["type"] == "decode_invocation")
+        slot_advanced = [event for event in schedule_events if event["type"] == "slot_advanced"]
+        assert decode_invocation["decode_position_ids"] == [[10, 110, 210, 310], [20, 120, 220, 320]]
+        assert slot_advanced[0]["next_position_id"] == [11, 110, 210, 310]
+
+    def test_full_batch_prefill_uses_full_batch_bindings(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        prefill_inputs = mock_session.run.call_args_list[0][0][0]
+        assert prefill_inputs["input_ids"].shape == (2, PREFILL_LEN)
+        assert prefill_inputs["position_ids"].shape == (2, PREFILL_LEN)
+        assert prefill_inputs["batch_index"].shape == (2, 1)
+        assert prefill_inputs["batch_index"].tolist() == [[0], [1]]
+
+    def test_full_batch_prefill_supports_decode_sized_chunks(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj._prefill_seq_len = 1
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        first_chunk_inputs = mock_session.run.call_args_list[0][0][0]
+        assert first_chunk_inputs["input_ids"].shape == (2, 1)
+        assert first_chunk_inputs["position_ids"].shape == (2, 1)
+        assert first_chunk_inputs["batch_index"].shape == (2, 1)
+
+    def test_full_batch_prefill_sends_block_table_and_slot_id_when_kv_blocked(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj._prefill_seq_len = 1
+        obj.num_kv_blocks = 2
+        obj.kv_block_size = 16
+        obj.block_table = np.arange(4, dtype=np.int64).reshape(2, 2)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        first_chunk_inputs = mock_session.run.call_args_list[0][0][0]
+        assert first_chunk_inputs["block_table"].shape == (2, 2)
+        assert first_chunk_inputs["block_table"].tolist() == [[0, 1], [2, 3]]
+        assert first_chunk_inputs["slot_id"].shape == (2,)
+        assert first_chunk_inputs["slot_id"].tolist() == [0, 0]
 
 
 # ---------------------------------------------------------------------------

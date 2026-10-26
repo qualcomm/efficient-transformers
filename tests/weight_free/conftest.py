@@ -35,18 +35,11 @@ def _parse_torch_version() -> tuple:
 def pytest_configure(config):
     config.addinivalue_line("markers", "weight_free: mark a test as part of the weight-free export test suite")
     config.addinivalue_line("markers", "weight_free_export: CPU-only weight-free export smoke and parity tests")
-
-
-_XFAIL_MODELS = {}
-_XFAIL_REASON = (
-    "gpt_oss: dynamo=True + use_onnx_subfunctions=True triggers SerdeError "
-    "(ir_version=10, serialize_model_into); export must use use_onnx_subfunctions=False"
-)
+    config.addinivalue_line("markers", "weight_free_blocking: weight-free CausalLM blocking parity tests")
 
 
 def pytest_collection_modifyitems(config, items):
     torch_version = _parse_torch_version()
-    xfail_models = pytest.mark.xfail(reason=_XFAIL_REASON, strict=False)
     for item in items:
         if not (item.fspath.parts and "weight_free" in str(item.fspath)):
             continue
@@ -54,9 +47,6 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(
                 pytest.mark.skip(reason=f"Weight-free tests require torch >= 2.13; running {torch.__version__}")
             )
-        for model in _XFAIL_MODELS:
-            if f"[{model}]" in item.nodeid or f"[{model}@" in item.nodeid:
-                item.add_marker(xfail_models)
 
 
 @pytest.fixture(autouse=True)
@@ -85,5 +75,8 @@ def tmp_export_dir(tmp_path):
 def skip_if_no_qaic_device(request):
     """Auto-skip any on_qaic test when no QAIC device is ready."""
     if request.node.get_closest_marker("on_qaic"):
+        test_name = getattr(request.node, "originalname", request.node.name.split("[", 1)[0])
+        if test_name == "test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics":
+            return
         if get_available_device_id() is None:
             pytest.skip("No available QAIC device")

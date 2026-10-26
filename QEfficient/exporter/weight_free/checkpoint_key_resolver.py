@@ -46,6 +46,10 @@ _COMPUTED_INITIALIZER_NAMES = {
     "position_ids",
     "token_type_ids",
     "_qeff_unit_weight",
+    "_mask_causal",
+    "_mask_strict",
+    "_ones_lower",
+    "_eye",
 }
 
 
@@ -240,7 +244,9 @@ def find_checkpoint_key(
         candidates.append(f"{prefix}.{stripped}")
 
     if prefix and stripped.startswith(f"{prefix}."):
-        candidates.append(stripped[len(f"{prefix}.") :])
+        unprefixed = stripped[len(f"{prefix}.") :]
+        candidates.append(unprefixed)
+        candidates.append(f"{prefix}.language_model.{unprefixed}")
 
     key = _find_checkpoint_key(candidates, checkpoint_index, onnx_name)
     if key is not None:
@@ -322,7 +328,7 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
     # (which would fail — the prepared checkpoint has canonical output keys like
     # moe_weights.gate, not the original per-expert keys that trigger detection).
 
-    from QEfficient.base.checkpoint_transforms import (  # noqa: PLC0415
+    from QEfficient.base.checkpoint_transforms import (
         CHECKPOINT_PREPARED_MANIFEST,
         _find_transform_by_id,
     )

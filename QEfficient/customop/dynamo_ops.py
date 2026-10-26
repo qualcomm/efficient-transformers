@@ -7,15 +7,17 @@
 
 import torch
 
-from QEfficient.customop.ctx_scatter_gather import (  # noqa: E402
+from QEfficient.customop.ctx_scatter_gather import (
+    CtxChunkScatterBatch,
     CtxGather,
     CtxGather3D,
     CtxGatherBlockedKV,
+    CtxGatherBlockedKVBatch,
     CtxScatter,
     CtxScatter3D,
     CtxScatter3DInt,
 )
-from QEfficient.customop.ctx_scatter_gather_cb import (  # noqa: E402
+from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxGatherBlockedKVCB,
     CtxGatherCB,
     CtxGatherCB3D,
@@ -23,7 +25,7 @@ from QEfficient.customop.ctx_scatter_gather_cb import (  # noqa: E402
     CtxScatterCB3D,
 )
 from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
-from QEfficient.customop.rms_norm import CustomRMSNorm  # noqa: E402
+from QEfficient.customop.rms_norm import CustomRMSNorm
 
 
 @torch.library.custom_op("qefficient::rms_norm", mutates_args=())
@@ -140,10 +142,12 @@ def ctx_scatter_cb_op(
     """
     # Clone to avoid aliasing issues with custom_op
     result = data.clone()
-    batch_idx = batch_index.view(-1, 1, 1)
+    batch_idx = batch_index.view(-1, 1, 1).expand(-1, result.shape[1], position_ids.shape[1])
     head_idx = torch.arange(result.shape[1], device=result.device).view(1, -1, 1)
-    ctx_idx = position_ids.unsqueeze(1)
-    result[batch_idx, head_idx, ctx_idx] = updates
+    head_idx = head_idx.expand_as(batch_idx)
+    ctx_idx = position_ids.unsqueeze(1).expand_as(batch_idx)
+    valid = ctx_idx != torch.iinfo(torch.int32).max
+    result[batch_idx[valid], head_idx[valid], ctx_idx[valid].long()] = updates[valid]
     return result
 
 
@@ -174,9 +178,10 @@ def ctx_scatter_cb_3d_op(
     Semantics: same as CtxScatterFuncCB3D.forward but returns new tensor.
     """
     result = data.clone()
-    batch_idx = batch_index.view(-1, 1)
-    ctx_idx = position_ids
-    result[batch_idx, ctx_idx] = updates
+    batch_idx = batch_index.view(-1, 1).expand(-1, position_ids.shape[-1])
+    ctx_idx = position_ids.expand(batch_idx.shape[0], -1)
+    valid = ctx_idx != torch.iinfo(torch.int32).max
+    result[batch_idx[valid], ctx_idx[valid].long()] = updates[valid]
     return result
 
 
@@ -191,6 +196,45 @@ def _(
     Fake implementation for torch.export: same shape/dtype/device as data.
     """
     return torch.empty_like(data)
+
+
+# BATCH-FOLDED SCATTER/GATHER
+@torch.library.custom_op("qefficient::ctx_chunk_scatter_batch", mutates_args=())
+def ctx_chunk_scatter_batch_op(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    """Batch-folded scatter. Semantics: same as CtxChunkScatterBatchFunc.forward."""
+    batch_size, num_kv_heads, q_len, _ = updates.shape
+    pos = position_ids.long()
+    batch_idx = (
+        torch.arange(batch_size, device=data.device).view(batch_size, 1, 1).expand(batch_size, num_kv_heads, q_len)
+    )
+    head_idx = (
+        torch.arange(num_kv_heads, device=data.device).view(1, num_kv_heads, 1).expand(batch_size, num_kv_heads, q_len)
+    )
+    head_flat_idx = batch_idx * num_kv_heads + head_idx
+    pos_idx = pos.unsqueeze(1).expand(batch_size, num_kv_heads, q_len)
+    result = data.clone()
+    result[0, head_flat_idx, pos_idx] = updates
+    return result
+
+
+@ctx_chunk_scatter_batch_op.register_fake
+def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(data)
+
+
+@torch.library.custom_op("qefficient::ctx_gather_blocked_kv_batch", mutates_args=())
+def ctx_gather_blocked_kv_batch_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    """Batch-folded blocked-KV gather. Semantics: same as CtxGatherFuncBlockedKVBatch.forward."""
+    bh = data.shape[1]
+    ctx_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    head_idx = torch.arange(bh, device=data.device).view(bh, 1)
+    return data[0, head_idx, ctx_indices[0]].unsqueeze(0)
+
+
+@ctx_gather_blocked_kv_batch_op.register_fake
+def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    out_shape = (data.shape[0], data.shape[1], ctx_indices.shape[-1], *data.shape[3:])
+    return torch.empty(out_shape, dtype=data.dtype, device=data.device)
 
 
 # GATHER CB
@@ -387,4 +431,6 @@ DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.ctx_gather_blocked_kv.default: get_dynamo_onnxscript_func(CtxGatherBlockedKV),
     torch.ops.qefficient.ctx_gather_blocked_kv_cb.default: get_dynamo_onnxscript_func(CtxGatherBlockedKVCB),
     torch.ops.qefficient.ctx_gather_3d_generalized.default: get_dynamo_onnxscript_func(CtxGather3D),
+    torch.ops.qefficient.ctx_chunk_scatter_batch.default: get_dynamo_onnxscript_func(CtxChunkScatterBatch),
+    torch.ops.qefficient.ctx_gather_blocked_kv_batch.default: get_dynamo_onnxscript_func(CtxGatherBlockedKVBatch),
 }

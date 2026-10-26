@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import io
+import time
 from pathlib import Path
 
 import numpy as np
@@ -28,15 +29,32 @@ from transformers import (
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
 
+from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
-from ._helpers import WEIGHT_FREE_VLM_MODEL_PARAMS, load_weight_free_vlm_model, skip_on_model_fetch_error
+from ._helpers import (
+    WEIGHT_FREE_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_VLM_MODEL_PARAMS,
+    assert_blocked_kv_ops_for_mode,
+    assert_has_subfunctions,
+    load_weight_free_vlm_model,
+    skip_on_model_fetch_error,
+)
 
+GPT_OSS_TINY_MODEL_ID = "tiny-random/gpt-oss"
+
+DISAGG_MODEL_IDS = (
+    ("qwen3_moe", "tiny-random/qwen3-moe"),
+    ("gpt_oss", GPT_OSS_TINY_MODEL_ID),
+)
 DISAGG_MODEL_PARAMS = [
-    pytest.param("glm4_moe", "tiny-random/glm-4-moe", id="glm4-moe"),
-    pytest.param("qwen3_moe", "tiny-random/qwen3-moe", id="qwen3-moe"),
-    pytest.param("gpt_oss", "tiny-random/gpt-oss-mxfp4", id="gpt-oss"),
+    pytest.param(model_type, model_id, id=model_type.replace("_", "-")) for model_type, model_id in DISAGG_MODEL_IDS
+]
+WEIGHT_FREE_DISAGG_DECODE_BLOCKING_CASES = [
+    pytest.param(model_type, model_id, blocking_key, id=f"{model_type.replace('_', '-')}-{blocking_key}")
+    for model_type, model_id in DISAGG_MODEL_IDS
+    for blocking_key in WEIGHT_FREE_BLOCKING_MODE_CASES
 ]
 
 CTX_LEN = 512
@@ -64,6 +82,11 @@ VLM_VISION_INPUTS = {
 }
 VLM_VISION_FP16_INPUTS = {"pixel_values", "image_masks"}
 VLM_VISION_OUTPUTS = ("vision_embeds", "deepstack_features")
+DECODE_BLOCKING_PREFILL_NUM_DEVICES = 4
+DECODE_BLOCKING_DECODE_NUM_DEVICES = 1
+DECODE_BLOCKING_PREFILL_STAGES = 2
+DECODE_BLOCKING_PARITY_PROMPT = "Hello world"
+DECODE_BLOCKING_PARITY_GENERATION_LEN = 10
 
 
 def _compile_dir(tmp_export_dir, name):
@@ -73,8 +96,28 @@ def _compile_dir(tmp_export_dir, name):
     return str(compile_dir)
 
 
+def _build_disagg_decode_blocking_qaic_config(blocking_key: str) -> dict:
+    qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
+    qaic_config["ctx_len"] = CTX_LEN
+    return qaic_config
+
+
+def _assert_disagg_blocking_artifact(
+    onnx_path: Path,
+    qeff_model: QEFFAutoModelForCausalLM,
+    blocking_key: str,
+    qaic_config: dict,
+    use_onnx_subfunctions: bool,
+) -> None:
+    blocking_config = qeff_model.hash_params.get("blocking_kwargs")
+    assert blocking_config is not None
+    assert blocking_config.mode == BlockingMode(qaic_config["blocking_mode"])
+    if use_onnx_subfunctions:
+        assert_has_subfunctions(onnx_path, qeff_model)
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key, continuous_batching=True)
+
+
 PREFILL_NUM_DEVICES = 2
-GPT_OSS_TINY_MODEL_ID = "tiny-random/gpt-oss"
 GPT_OSS_PARITY_CTX_LEN = 256
 GPT_OSS_PARITY_GENERATION_LEN = 40
 GPT_OSS_PARITY_FULL_BATCH_SIZE = 2
@@ -121,6 +164,21 @@ def _load_weight_free_model(model_id: str, continuous_batching: bool = False, nu
         weight_free=True,
         continuous_batching=continuous_batching,
     )
+
+
+def _load_hf_reference_model(model_id: str, num_hidden_layers: int | None = 2) -> AutoModelForCausalLM:
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    if num_hidden_layers is not None:
+        config.num_hidden_layers = num_hidden_layers
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        config=config,
+        trust_remote_code=True,
+        attn_implementation="eager",
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=False,
+    )
+    return model.eval()
 
 
 def _build_gpt_oss_parity_config(dtype: str = "float32"):
@@ -205,6 +263,22 @@ def _run_hf_torch_fp32_from_input_ids(model, input_ids: np.ndarray, generation_l
     return outputs[0, prompt_len:].detach().cpu().numpy()
 
 
+def _run_hf_torch_fp32_text(model, tokenizer, prompt: str, generation_len: int) -> np.ndarray:
+    model = model.to(dtype=torch.float32).eval()
+    inputs = tokenizer(prompt, return_tensors="pt")
+    with torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=generation_len,
+            min_new_tokens=generation_len,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+        )
+    prompt_len = inputs["input_ids"].shape[-1]
+    return outputs[0, prompt_len:].detach().cpu().numpy()
+
+
 def _prepare_gpt_oss_parity_prompt(tokenizer, prompt: str):
     enc = tokenizer(prompt, return_tensors="np", padding=True)
     prompt_len = enc["input_ids"].shape[1]
@@ -227,11 +301,23 @@ def _prepare_parity_input_ids(input_ids: np.ndarray):
     return padded_input_ids.astype(np.int64), position_ids, num_chunks, prompt_len
 
 
-def _next_token_ids_from_logits(logits: np.ndarray) -> np.ndarray:
+def _next_token_ids_from_logits(logits: np.ndarray, token_index: int | None = None) -> np.ndarray:
     logits = np.asarray(logits)
     if logits.ndim == 2:
         return logits.argmax(axis=-1).astype(np.int64)
-    return logits[:, -1, :].argmax(axis=-1).astype(np.int64)
+    if token_index is None:
+        token_index = -1
+    if logits.shape[1] == 1:
+        token_index = 0
+    return logits[:, token_index, :].argmax(axis=-1).astype(np.int64)
+
+
+def test_next_token_ids_from_logits_uses_single_kept_prefill_logit() -> None:
+    logits = np.array([[[0.1, 0.2, 0.9, 0.3]]], dtype=np.float32)
+
+    token_ids = _next_token_ids_from_logits(logits, token_index=7)
+
+    assert token_ids.tolist() == [2]
 
 
 def _load_vlm_hf_reference(model_id: str):
@@ -399,9 +485,11 @@ def _run_vlm_disaggregated_generation(
 def _prefill_gpt_oss_parity_slot(prefill_session, input_ids, position_ids, num_chunks, slot: int, slot_kv_view):
     chunk_inputs = {"batch_index": np.array([[slot]], dtype=np.int64)}
     exec_idx = None
+    chunk_position_ids = None
     for i in range(num_chunks):
         chunk_inputs["input_ids"] = input_ids[:, i * PREFILL_SEQ_LEN : (i + 1) * PREFILL_SEQ_LEN]
         chunk_inputs["position_ids"] = position_ids[:, i * PREFILL_SEQ_LEN : (i + 1) * PREFILL_SEQ_LEN]
+        chunk_position_ids = chunk_inputs["position_ids"]
         last_chunk = i == num_chunks - 1
         exec_idx = prefill_session.np_run_pipeline(
             chunk_inputs,
@@ -411,9 +499,80 @@ def _prefill_gpt_oss_parity_slot(prefill_session, input_ids, position_ids, num_c
         prefill_session.complete_inf(exec_idx, is_prefill=True)
 
     prefill_out = prefill_session.get_outputs(index=exec_idx)
-    first_token = int(_next_token_ids_from_logits(prefill_out["logits"])[0])
+    valid_token_indices = np.flatnonzero(chunk_position_ids[0] >= 0)
+    token_index = int(valid_token_indices[-1])
+    first_token = int(_next_token_ids_from_logits(prefill_out["logits"], token_index=token_index)[0])
     next_pos = int(np.max(position_ids)) + 1
     return first_token, next_pos
+
+
+def _run_disagg_prefill_decode_tokens(
+    prefill_qpc: Path,
+    decode_qpc: Path,
+    tokenizer,
+    prompt: str,
+    generation_len: int,
+    full_batch_size: int,
+    stages: int,
+) -> np.ndarray:
+    assert generation_len >= 1, "disaggregated compile/artifact token check expects at least one generated token"
+    sessions = []
+    try:
+        prefill_session = QAICInferenceSession(
+            str(prefill_qpc),
+            kv_dma_share=True,
+            stages=stages,
+            full_batch_size=full_batch_size,
+            cluster_id="prefill",
+        )
+        decode_session = QAICInferenceSession(
+            str(decode_qpc),
+            kv_dma_share=True,
+            full_batch_size=full_batch_size,
+            cluster_id="decode",
+        )
+        sessions.extend([prefill_session, decode_session])
+
+        assert "batch_index" in decode_session.binding_index_map, "batch_index not a compiled decode input binding"
+
+        kv_caches = [np.zeros(shape, dtype=dtype) for (shape, dtype) in decode_session.kv_cache_info]
+        assert kv_caches and kv_caches[0].shape[0] == full_batch_size, (
+            f"decode KV batch dim {kv_caches[0].shape[0] if kv_caches else None} != full_batch_size {full_batch_size}"
+        )
+
+        input_ids, position_ids, num_chunks, _ = _prepare_gpt_oss_parity_prompt(tokenizer, prompt)
+        first_token, next_pos = _prefill_gpt_oss_parity_slot(
+            prefill_session,
+            input_ids,
+            position_ids,
+            num_chunks,
+            slot=0,
+            slot_kv_view=[kv[:1] for kv in kv_caches],
+        )
+
+        decode_kv_map = decode_session.decode_buff_map + decode_session.decode_rs_kv_only_buff_map
+        generated_ids = [first_token]
+        for position in range(next_pos, next_pos + generation_len - 1):
+            decode_session.set_data_for_kv_handoff(
+                kv_caches + kv_caches,
+                [("batch_index", 0), ("ctx_start", 0)],
+                index=decode_session.decode_execObj_idx,
+                buff_map=decode_kv_map,
+            )
+            decode_inputs = {
+                "input_ids": np.array([[generated_ids[-1]]] + [[-1]] * (full_batch_size - 1), dtype=np.int64),
+                "position_ids": np.array([[position]] + [[-1]] * (full_batch_size - 1), dtype=np.int64),
+                "batch_index": np.array([[0]] + [[-1]] * (full_batch_size - 1), dtype=np.int64),
+            }
+            exec_idx = decode_session.np_run(decode_inputs, is_prefill=False)
+            decode_session.complete_inf(exec_idx, is_prefill=False)
+            decode_out = decode_session.get_outputs(index=exec_idx)
+            logits = decode_out["logits"].reshape(full_batch_size, -1, decode_out["logits"].shape[-1])[:, -1, :]
+            generated_ids.append(int(np.argmax(logits, axis=-1)[0]))
+        return np.asarray(generated_ids, dtype=np.int64)
+    finally:
+        for session in sessions:
+            session.deactivate()
 
 
 def _assert_onnx_path(onnx_path, label: str) -> Path:
@@ -432,7 +591,7 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
     """Compile weight-free decode and chunked-prefill QPCs for disaggregated serving."""
     try:
         qeff_model = _load_weight_free_model(model_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     moe_config = {"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}}
@@ -574,7 +733,7 @@ def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp
     """Compile CB decode and chunked-prefill QPCs for weight-free disaggregated serving."""
     try:
         qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     full_batch_size = 2
@@ -608,6 +767,123 @@ def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp
 
     assert decode_qpc
     assert prefill_qpc
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_blocking
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+@pytest.mark.disagg_dma
+@pytest.mark.parametrize("model_type,model_id,decode_blocking_key", WEIGHT_FREE_DISAGG_DECODE_BLOCKING_CASES)
+def test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics(
+    model_type,
+    model_id,
+    decode_blocking_key,
+    tmp_export_dir,
+    record_property,
+):
+    """Compile decode-blocked weight-free disaggregated QPCs and record artifact metrics."""
+    use_onnx_subfunctions = True
+    decode_qaic_config = _build_disagg_decode_blocking_qaic_config(decode_blocking_key)
+    prefill_qaic_config = {"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}}
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        hf_model = _load_hf_reference_model(model_id)
+        decode_qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
+        prefill_qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
+        decode_qeff_model.model.eval()
+        prefill_qeff_model.model.eval()
+    except Exception as exc:  # noqa: BLE001
+        skip_on_model_fetch_error(exc, model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    hf_tokens = _run_hf_torch_fp32_text(
+        hf_model,
+        tokenizer,
+        DECODE_BLOCKING_PARITY_PROMPT,
+        DECODE_BLOCKING_PARITY_GENERATION_LEN,
+    )
+
+    full_batch_size = 2
+    common = {
+        "ctx_len": CTX_LEN,
+        "full_batch_size": full_batch_size,
+        "num_cores": 4,
+        "mxfp6_matmul": False,
+        "mxint8_kv_cache": False,
+        "split_retained_state_io": True,
+        "retain_full_kv": True,
+        "use_onnx_subfunctions": use_onnx_subfunctions,
+        "offload_pt_weights": True,
+    }
+
+    decode_compile_start = time.perf_counter()
+    decode_qpc = Path(
+        decode_qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_blocked_{decode_blocking_key}_cb_decode"),
+            prefill_seq_len=1,
+            num_devices=DECODE_BLOCKING_DECODE_NUM_DEVICES,
+            qaic_config=decode_qaic_config,
+            **common,
+        )
+    )
+    decode_compile_seconds = time.perf_counter() - decode_compile_start
+    decode_onnx_path = _assert_onnx_path(decode_qeff_model.onnx_path, "decode")
+    _assert_disagg_blocking_artifact(
+        decode_onnx_path,
+        decode_qeff_model,
+        decode_blocking_key,
+        decode_qaic_config,
+        use_onnx_subfunctions,
+    )
+
+    prefill_compile_start = time.perf_counter()
+    prefill_qpc = Path(
+        prefill_qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_decode_blocked_{decode_blocking_key}_cb_prefill"),
+            prefill_seq_len=PREFILL_SEQ_LEN,
+            prefill_only=True,
+            enable_chunking=True,
+            num_devices=DECODE_BLOCKING_PREFILL_NUM_DEVICES,
+            mdp_num_partitions=DECODE_BLOCKING_PREFILL_STAGES,
+            qaic_config=prefill_qaic_config,
+            **common,
+        )
+    )
+    prefill_compile_seconds = time.perf_counter() - prefill_compile_start
+    prefill_onnx_path = _assert_onnx_path(prefill_qeff_model.onnx_path, "prefill")
+    if use_onnx_subfunctions:
+        assert_has_subfunctions(prefill_onnx_path, prefill_qeff_model)
+
+    assert decode_qpc
+    assert prefill_qpc
+    assert decode_qpc.exists(), f"decode QPC path does not exist: {decode_qpc}"
+    assert prefill_qpc.exists(), f"prefill QPC path does not exist: {prefill_qpc}"
+    assert decode_onnx_path != prefill_onnx_path
+
+    qaic_tokens = _run_disagg_prefill_decode_tokens(
+        prefill_qpc,
+        decode_qpc,
+        tokenizer,
+        DECODE_BLOCKING_PARITY_PROMPT,
+        DECODE_BLOCKING_PARITY_GENERATION_LEN,
+        full_batch_size,
+        DECODE_BLOCKING_PREFILL_STAGES,
+    )
+    hf_tokens_for_compare = np.asarray(hf_tokens).flatten()[:DECODE_BLOCKING_PARITY_GENERATION_LEN]
+    assert np.array_equal(hf_tokens_for_compare, qaic_tokens), (
+        f"Decode-blocked disaggregated weight-free HW/HF parity failed for {model_id} "
+        f"mode={decode_blocking_key}: HF={hf_tokens_for_compare.tolist()}, QAIC={qaic_tokens.tolist()}"
+    )
+
+    metrics = {
+        "decode_qpc_compile_seconds": decode_compile_seconds,
+        "prefill_qpc_compile_seconds": prefill_compile_seconds,
+    }
+    for name, value in metrics.items():
+        record_property(name, value)
 
 
 @pytest.mark.weight_free
@@ -818,7 +1094,7 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
         config = _build_gpt_oss_parity_config(dtype="float32")
         hf_model = _load_gpt_oss_parity_hf_model(config)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     checkpoint_dir = tmp_path / "gpt_oss_fp32_checkpoint"
