@@ -17,6 +17,7 @@ Covers causal-LM generation, HF/QAIC parity, and embedding parity.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -59,19 +60,27 @@ HEAD_BLOCKING_NUM_DEVICES = 4
 def _directory_size_bytes(path: Path) -> int:
     return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
 
-
-def _blocking_runtime_options(blocking_key: str) -> tuple[dict, list[int] | None]:
+#Adding a deterministic hash based on the pytest worker id to avoid conflicts between workers when running tests in parallel. 
+#This ensures that each worker gets a unique device group for blocking tests.
+def _blocking_runtime_options(blocking_key: str):
     if blocking_key in {"h", "hq", "hkv"}:
-        device_groups = get_qaic_mdp_device_groups(devices_per_group=HEAD_BLOCKING_NUM_DEVICES)
+        device_groups = get_qaic_mdp_device_groups(
+            devices_per_group=HEAD_BLOCKING_NUM_DEVICES
+        )
+
         if not device_groups:
-            pytest.skip(f"No available QAIC MDP device group with {HEAD_BLOCKING_NUM_DEVICES} devices")
-        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}, device_groups[0]
+            pytest.skip(
+                f"No available QAIC MDP device group with "
+                f"{HEAD_BLOCKING_NUM_DEVICES} devices"
+            )
 
-    device_ids = get_available_device_id()
-    if device_ids is None:
-        pytest.skip("No available QAIC device")
-    return {}, device_ids
+        worker_id = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+        index = abs(hash(worker_id)) % len(device_groups)
 
+        return {
+            "num_devices": HEAD_BLOCKING_NUM_DEVICES,
+            "user_tiled": True,
+        }, device_groups[index]
 
 @pytest.mark.weight_free
 @pytest.mark.on_qaic
