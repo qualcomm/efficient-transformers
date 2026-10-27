@@ -17,6 +17,7 @@ Covers causal-LM generation, HF/QAIC parity, and embedding parity.
 
 from __future__ import annotations
 
+import random
 import time
 from pathlib import Path
 
@@ -33,7 +34,7 @@ from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
 from QEfficient.utils import get_num_layers_from_config
-from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
+from QEfficient.utils.device_utils import get_qaic_mdp_device_groups
 
 from ._helpers import (
     BATCH_SIZE,
@@ -60,17 +61,30 @@ def _directory_size_bytes(path: Path) -> int:
     return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
 
 
-def _blocking_runtime_options(blocking_key: str) -> tuple[dict, list[int] | None]:
+def _blocking_runtime_options(
+    blocking_key: str,
+) -> tuple[dict, list[int] | None]:
     if blocking_key in {"h", "hq", "hkv"}:
-        device_groups = get_qaic_mdp_device_groups(devices_per_group=HEAD_BLOCKING_NUM_DEVICES)
-        if not device_groups:
-            pytest.skip(f"No available QAIC MDP device group with {HEAD_BLOCKING_NUM_DEVICES} devices")
-        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}, device_groups[0]
+        device_groups = get_qaic_mdp_device_groups(
+            devices_per_group=HEAD_BLOCKING_NUM_DEVICES,
+        )
 
-    device_ids = get_available_device_id()
-    if device_ids is None:
-        pytest.skip("No available QAIC device")
-    return {}, device_ids
+        if not device_groups:
+            pytest.skip(
+                f"Need {HEAD_BLOCKING_NUM_DEVICES} free QAIC devices "
+                "for blocking test, but no suitable device group is available"
+            )
+
+        selected_group = random.choice(device_groups)
+
+        print(f"Selected QAIC device group: {selected_group} from available groups: {device_groups}")
+
+        return {
+            "num_devices": HEAD_BLOCKING_NUM_DEVICES,
+            "user_tiled": True,
+        }, selected_group
+
+    return {}, None
 
 
 @pytest.mark.weight_free
