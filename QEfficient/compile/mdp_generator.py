@@ -91,7 +91,12 @@ def _find_mdp_partition_order_violations(onnx_path: str, mdp_json: Dict[str, Any
     return violations
 
 
-def _drop_alias_prone_top_level_nodes(onnx_path: str, mdp_json: Dict[str, Any], dropped_nodes: Set[str]) -> int:
+def _drop_alias_prone_top_level_nodes(
+    onnx_path: str,
+    mdp_json: Dict[str, Any],
+    dropped_nodes: Set[str],
+    protected_nodes: Set[str],
+) -> int:
     """Drop alias-prone top-level nodes that conflict with /language_model siblings.
 
     In some subfunction compile flows, compiler IR may materialize dotted aliases
@@ -117,7 +122,7 @@ def _drop_alias_prone_top_level_nodes(onnx_path: str, mdp_json: Dict[str, Any], 
     for node_name in name_to_node:
         if not node_name.startswith("/") or node_name.startswith("/language_model/"):
             continue
-        if node_name in dropped_nodes:
+        if node_name in dropped_nodes or node_name in protected_nodes:
             continue
         if _is_decoder_layer_callsite(node_name):
             continue
@@ -158,10 +163,12 @@ def precheck_and_autofix_mdp_partition_order(
     onnx_path: str,
     mdp_json: Dict[str, Any],
     max_rounds: int = 8,
+    protected_nodes: Optional[Set[str]] = None,
 ) -> int:
     """Best-effort pre-check: scan all violation pairs and auto-fix before compile."""
     removed_total = 0
     dropped_nodes: Set[str] = set()
+    protected_nodes = protected_nodes or set()
     for _ in range(max_rounds):
         violations = _find_mdp_partition_order_violations(onnx_path=onnx_path, mdp_json=mdp_json)
         if not violations:
@@ -169,6 +176,7 @@ def precheck_and_autofix_mdp_partition_order(
                 onnx_path=onnx_path,
                 mdp_json=mdp_json,
                 dropped_nodes=dropped_nodes,
+                protected_nodes=protected_nodes,
             )
             if alias_removed <= 0:
                 break
@@ -193,7 +201,7 @@ def precheck_and_autofix_mdp_partition_order(
         trigger_consumer, trigger_producer = violations[0]
         for consumer_node, producer_node in violations:
             for candidate in (consumer_node, producer_node):
-                if not candidate or candidate in dropped_nodes:
+                if not candidate or candidate in dropped_nodes or candidate in protected_nodes:
                     continue
                 if _is_decoder_layer_callsite(candidate):
                     continue
@@ -825,10 +833,18 @@ def generate_disagg_mdp_config(
             num_cores=num_cores,
         )
 
+    # Every intersection node was observed in the compiler dump and must remain assigned.
+    protected_nodes = (
+        {name for partition in mdp_ts_json["partitions"] for name in partition["nodeList"]}
+        if mdp_strategy is MdpStrategy.INTERSECTION
+        else set()
+    )
+
     # Best-effort pre-check for producer->consumer ordering in nodeList before compile.
     precheck_removed = precheck_and_autofix_mdp_partition_order(
         onnx_path=str(onnx_path),
         mdp_json=mdp_ts_json,
+        protected_nodes=protected_nodes,
     )
     if precheck_removed:
         logger.warning(
