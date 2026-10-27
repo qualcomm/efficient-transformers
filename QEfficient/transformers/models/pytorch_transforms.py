@@ -18,6 +18,13 @@ from transformers.models.codegen.modeling_codegen import (
     CodeGenForCausalLM,
     CodeGenModel,
 )
+from transformers.models.cohere_asr.modeling_cohere_asr import (
+    CohereAsrCrossAttention,
+    CohereAsrDecoder,
+    CohereAsrDecoderLayer,
+    CohereAsrForConditionalGeneration,
+    CohereAsrSelfAttention,
+)
 from transformers.models.deberta_v2.modeling_deberta_v2 import (
     DisentangledSelfAttention,
 )
@@ -184,6 +191,7 @@ from transformers.models.olmo2.modeling_olmo2 import (
     Olmo2Model,
     Olmo2RMSNorm,
 )
+from transformers.models.parakeet.modeling_parakeet import ParakeetEncoderAttention, ParakeetEncoderSubsamplingConv2D
 from transformers.models.phi.modeling_phi import PhiAttention, PhiDecoderLayer, PhiForCausalLM, PhiModel
 from transformers.models.phi3.modeling_phi3 import (
     Phi3Attention,
@@ -337,6 +345,15 @@ from QEfficient.transformers.models.codegen.modeling_codegen import (
     QEffCodeGenBlock,
     QEffCodeGenForCausalLM,
     QEffCodeGenModel,
+)
+from QEfficient.transformers.models.cohere_asr.modeling_cohere_asr import (
+    QEffCohereAsrCrossAttention,
+    QEffCohereAsrDecoder,
+    QEffCohereAsrDecoderLayer,
+    QEffCohereAsrForConditionalGeneration,
+    QEffCohereAsrSelfAttention,
+    QEffParakeetEncoderAttention,
+    QEffParakeetEncoderSubsamplingConv2D,
 )
 from QEfficient.transformers.models.deberta_v2.modeling_deberta_v2 import (
     QEffDisentangledSelfAttention,
@@ -952,6 +969,14 @@ class KVCacheTransform(ModuleMappingTransform):
         WhisperDecoder: QEffWhisperDecoder,
         WhisperModel: QEffWhisperModel,
         WhisperForConditionalGeneration: QEffWhisperForConditionalGeneration,
+        # CohereAsr decoder layers and Parakeet encoder attention
+        ParakeetEncoderAttention: QEffParakeetEncoderAttention,
+        ParakeetEncoderSubsamplingConv2D: QEffParakeetEncoderSubsamplingConv2D,
+        CohereAsrSelfAttention: QEffCohereAsrSelfAttention,
+        CohereAsrCrossAttention: QEffCohereAsrCrossAttention,
+        CohereAsrDecoderLayer: QEffCohereAsrDecoderLayer,
+        CohereAsrDecoder: QEffCohereAsrDecoder,
+        CohereAsrForConditionalGeneration: QEffCohereAsrForConditionalGeneration,
     }
 
     @classmethod

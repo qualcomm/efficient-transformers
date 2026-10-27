@@ -129,6 +129,7 @@ If the `kv_offload` is set to `True` it runs in dual QPC and if its set to `Fals
 
 | Architecture | Model Family | Representative Models                                                                 | vLLM Support |
 |--------------|--------------|----------------------------------------------------------------------------------------|--------------|
+| **CohereAsrForConditionalGeneration** | cohere_asr | [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) |  |
 | **Whisper**  | Whisper      | [openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny)<br>[openai/whisper-base](https://huggingface.co/openai/whisper-base)<br>[openai/whisper-small](https://huggingface.co/openai/whisper-small)<br>[openai/whisper-medium](https://huggingface.co/openai/whisper-medium)<br>[openai/whisper-large](https://huggingface.co/openai/whisper-large)<br>[openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) | ✔️          |
 | **Wav2Vec2** | Wav2Vec2     | [facebook/wav2vec2-base](https://huggingface.co/facebook/wav2vec2-base)<br>[facebook/wav2vec2-large](https://huggingface.co/facebook/wav2vec2-large) |           |
 
