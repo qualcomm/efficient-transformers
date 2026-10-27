@@ -5,7 +5,10 @@
 #
 # -----------------------------------------------------------------------------
 
+import argparse
+import io
 import os
+from time import perf_counter
 
 import numpy as np
 import requests
@@ -17,9 +20,25 @@ from transformers import AutoConfig, AutoProcessor
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 
-model_id = "Qwen/Qwen3.5-35B-A3B"
-DECODE_NUM_DEVICES = int(os.environ.get("QEFF_DECODE_NUM_DEVICES", "1"))
-WEIGHT_FREE = 1
+parser = argparse.ArgumentParser(description="Full-model Qwen3.5-MoE weight-free vision inference")
+parser.add_argument("--model-id", default="Qwen/Qwen3.5-35B-A3B")
+parser.add_argument(
+    "--image",
+    default="https://picsum.photos/id/237/536/354",
+    help="Local image path or HTTP(S) image URL",
+)
+parser.add_argument(
+    "--prompt",
+    default="Describe all the colors seen in this image.",
+    help="Question to ask about the image",
+)
+parser.add_argument("--generation-len", type=int, default=100)
+args = parser.parse_args()
+
+model_id = args.model_id
+DECODE_NUM_DEVICES = int(os.environ.get("QEFF_DECODE_NUM_DEVICES", "4"))
+DECODE_NUM_CORES = int(os.environ.get("QEFF_DECODE_NUM_CORES", "4"))
+WEIGHT_FREE = True
 config = AutoConfig.from_pretrained(model_id)
 
 # For faster execution user can run with lesser layers, For Testing Purpose Only
@@ -81,7 +100,14 @@ processor = AutoProcessor.from_pretrained(model_id)
 # Enable KV blocking for full-attention layers with 2 KV blocks
 # To disable KV blocking, comment out the qaic_config line below
 # Set skip_kv=True to skip future KV blocks during inference (optimization)
-qaic_config = {"blocking_mode": "kv", "num_kv_blocks": 2, "skip_kv": True}
+qaic_config = {
+    "moe_config": {
+        "flavour": "expert_parallel",
+        "cores_per_expert": 1,
+        "tree_reduce": False,
+        "expert_parallel_chunk_size": 256,
+    }
+}
 
 enable_blocking = False  ## By default blocking is false
 ### use skip_vision=Ture, if want to run only text, or false ###
@@ -103,7 +129,7 @@ if skip_vision:
         batch_size=BS,
         prefill_seq_len=PREFILL_SEQ_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=4,
         num_devices=1,
         height=354,
         width=536,
@@ -178,7 +204,7 @@ else:
         batch_size=BS,
         prefill_seq_len=PREFILL_SEQ_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=4,
         num_devices=1,
         height=354,
         width=536,
@@ -196,7 +222,7 @@ else:
         batch_size=BS,
         prefill_seq_len=PREFILL_SEQ_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=4,
         num_devices=4,
         height=354,
         width=536,
@@ -216,8 +242,8 @@ else:
         batch_size=BS,
         prefill_seq_len=1,
         ctx_len=CTX_LEN,
-        num_cores=16,
-        num_devices=4,
+        num_cores=DECODE_NUM_CORES,
+        num_devices=DECODE_NUM_DEVICES,
         height=354,
         width=536,
         mxfp6_matmul=True,
@@ -229,6 +255,7 @@ else:
         skip_vision=True,
         mos=1,
         use_onnx_subfunctions=True,
+        qaic_config=qaic_config,
     )
 
     if enable_blocking:
@@ -259,16 +286,20 @@ else:
         print("=" * 80 + "\n")
 
     ### IMAGE + TEXT ###
-    image_url = "https://picsum.photos/id/237/536/354"
-
-    image = Image.open(requests.get(image_url, stream=True).raw)
+    image_source = args.image
+    if image_source.startswith(("http://", "https://")):
+        response = requests.get(image_source, timeout=60)
+        response.raise_for_status()
+        image = Image.open(io.BytesIO(response.content)).convert("RGB")
+    else:
+        image = Image.open(image_source).convert("RGB")
 
     messages_1 = [
         {
             "role": "user",
             "content": [
                 {"type": "image", "image": image},
-                {"type": "text", "text": "Descibe all the colors seen in the image."},
+                {"type": "text", "text": args.prompt},
             ],
         },
     ]
@@ -296,18 +327,31 @@ else:
     for key, value in inputs.items():
         inputs[key] = np.array(value)
 
+    vision_input_keys = {
+        "pixel_values",
+        "image_grid_thw",
+        "image_masks",
+        "image_input_idx",
+        "valid_idx",
+        "aspect_ratio_ids",
+        "aspect_ratio_mask",
+    }
+    # Some Qwen3.5 vision specializations use image_grid_thw only while
+    # exporting/specializing the graph.  Pass only actual QAIC bindings to the
+    # session, but keep all vision keys out of the language inputs.
     vision_inputs = {
         key: value
         for key, value in inputs.items()
-        if key
-        in {"pixel_values", "image_masks", "image_input_idx", "valid_idx", "aspect_ratio_ids", "aspect_ratio_mask"}
+        if key in vision_input_keys and key in vision_session.binding_index_map
     }
     for key in {"pixel_values", "image_masks"}:
         if key in vision_inputs:
             vision_inputs[key] = vision_inputs[key].astype("float16")
 
+    vision_start = perf_counter()
     vision_outputs = vision_session.run(vision_inputs)
-    lang_inputs = {key: value for key, value in inputs.items() if key not in vision_inputs}
+    vision_time = perf_counter() - vision_start
+    lang_inputs = {key: value for key, value in inputs.items() if key not in vision_input_keys}
     lang_inputs.pop("attention_mask", None)
     lang_inputs["image_idx"] = np.array([[0]])
 
@@ -323,6 +367,7 @@ else:
     prefill_session.set_buffers(vision_outputs)
     chunk_inputs = dict(lang_inputs)
     prefill_out = None
+    prefill_start = perf_counter()
     for chunk_idx in range(num_chunks):
         chunk_inputs["input_ids"] = lang_inputs["input_ids"][
             :, chunk_idx * PREFILL_SEQ_LEN : (chunk_idx + 1) * PREFILL_SEQ_LEN
@@ -333,6 +378,7 @@ else:
         prefill_out = prefill_session.run(chunk_inputs)
         _update_retained_states(chunk_inputs, prefill_out)
         chunk_inputs["image_idx"] = prefill_out["image_idx_output"]
+    prefill_time = perf_counter() - prefill_start
 
     if prefill_out is None:
         raise RuntimeError("Prefill produced no output chunks")
@@ -345,7 +391,9 @@ else:
     decode_inputs["position_ids"] = np.max(lang_inputs["position_ids"], axis=-1, keepdims=True) + 1
 
     generated_ids = [decode_inputs["input_ids"].copy()]
-    for _ in range(99):
+    decode_steps = max(0, args.generation_len - 1)
+    decode_start = perf_counter()
+    for _ in range(decode_steps):
         decode_out = lang_decode_session.run(decode_inputs)
         _update_retained_states(decode_inputs, decode_out)
         decode_inputs.update(
@@ -357,5 +405,12 @@ else:
             }
         )
         generated_ids.append(decode_inputs["input_ids"].copy())
+    decode_time = perf_counter() - decode_start
 
+    print(f"Vision time : {vision_time:.2f} secs")
+    print(f"Initial prefill time : {prefill_time:.2f} secs")
+    if decode_steps:
+        print(f"decode steps={decode_steps} tok/sec={decode_steps / decode_time:.2f}")
+    else:
+        print("decode steps=0")
     print(tokenizer.decode(np.asarray(generated_ids).reshape(-1).tolist()))

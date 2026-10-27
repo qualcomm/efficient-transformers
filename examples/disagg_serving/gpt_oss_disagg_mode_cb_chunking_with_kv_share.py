@@ -32,11 +32,12 @@ DEFAULT_CTX_LEN = DEFAULT_PREFILL_SEQ_LEN * 2
 DEFAULT_GENERATION_LEN = 200
 DEFAULT_FULL_BATCH_SIZE = 4
 
-NUM_CORES = 16
+NUM_CORES = 4
 MOE_PREFILL_PACKED_CHUNK_SIZE = 256
 STAGES = 4
 PREFILL_NUM_DEVICES = 8
 DECODE_NUM_DEVICES = 4
+DECODE_EXPERT_PARALLEL_CHUNK_SIZE = 256
 
 
 def _build_config(model_id: str, num_hidden_layers: int = None):
@@ -60,12 +61,21 @@ def _compile_sessions(
     non_subfunc_npi,
 ):
     """Compile decode/prefill QPCs (CB flags) and open kv_dma_share sessions."""
+    decode_qaic_config = {
+        "moe_config": {
+            "flavour": "expert_parallel",
+            "cores_per_expert": 1,
+            "tree_reduce": False,
+            "expert_parallel_chunk_size": DECODE_EXPERT_PARALLEL_CHUNK_SIZE,
+        }
+    }
     decode_qpc_path = qeff_model.compile(
         prefill_seq_len=1,
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_cores=NUM_CORES,
         num_devices=decode_num_devices,
+        qaic_config=decode_qaic_config,
         mos=1,
         aic_enable_depth_first=True,
         num_speculative_tokens=None,
@@ -113,6 +123,7 @@ def run(
     num_hidden_layers: int = None,
     subfunc_npi: str = DEFAULT_SUBFUNC_NPI,
     non_subfunc_npi: str = DEFAULT_NON_SUBFUNC_NPI,
+    weight_free: bool = False,
 ):
     """Run CB (chunked-prefill + batched decode) over ``prompts`` with the DMA KV handoff."""
     prompts = list(prompts) if prompts else list(DEFAULT_PROMPTS)
@@ -120,7 +131,12 @@ def run(
 
     config = _build_config(model_id, num_hidden_layers)
     from_pretrained_kwargs = {"config": config} if config is not None else {}
-    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, continuous_batching=True, **from_pretrained_kwargs)
+    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+        model_id,
+        continuous_batching=True,
+        weight_free=weight_free,
+        **from_pretrained_kwargs,
+    )
     prefill_session, decode_session = _compile_sessions(
         qeff_model,
         prefill_seq_len,
@@ -308,6 +324,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--non-subfunc-npi", default=DEFAULT_NON_SUBFUNC_NPI, help="decode (non-subfunction) NPI yaml path"
     )
+    parser.add_argument(
+        "--weight-free",
+        action="store_true",
+        help="export and compile without embedding model weights in the ONNX graph",
+    )
     args = parser.parse_args()
 
     run(
@@ -323,4 +344,5 @@ if __name__ == "__main__":
         num_hidden_layers=args.num_hidden_layers,
         subfunc_npi=args.subfunc_npi,
         non_subfunc_npi=args.non_subfunc_npi,
+        weight_free=args.weight_free,
     )

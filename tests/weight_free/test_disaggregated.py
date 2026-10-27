@@ -940,6 +940,9 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
             use_onnx_subfunctions=dma_config.get("use_onnx_subfunctions", True),
         )
         compiled_onnx_paths["decode"] = _assert_onnx_path(qeff_model.onnx_path, "decode")
+        assert qeff_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
+        if use_onnx_subfunctions:
+            assert_has_subfunctions(compiled_onnx_paths["decode"], qeff_model)
 
         prefill_qpc_path = qeff_model.compile(
             compile_dir=_compile_dir(tmp_export_dir, "qwen3_moe_wf_cb_prefill_parity"),
@@ -1124,6 +1127,14 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
             full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
             num_cores=GPT_OSS_PARITY_NUM_CORES,
             num_devices=dma_config["decode_num_devices"],
+            qaic_config={
+                "moe_config": {
+                    "flavour": "expert_parallel",
+                    "cores_per_expert": 1,
+                    "tree_reduce": False,
+                    "expert_parallel_chunk_size": 256,
+                }
+            },
             mos=1,
             mxfp6_matmul=False,
             mxint8_kv_cache=False,
