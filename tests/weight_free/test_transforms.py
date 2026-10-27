@@ -1665,6 +1665,23 @@ class TestPreserveNestedCacheRetainedStateTransform:
                 f"Function '{fn.name}' should have at least 2 outputs after transform, got {list(fn.output)}"
             )
 
+    def test_preserves_kv_cache_prefix_when_wiring_call_outputs(self):
+        model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=1, scatter_count_per_fn=2)
+        for output in model.graph.output:
+            output.name = output.name.replace("_RetainedState", "_X_RetainedState")
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model, kv_cache_prefix="X")
+
+        assert changed
+        assert [output.name for output in model.graph.output] == [
+            "past_key.0_X_RetainedState",
+            "past_value.0_X_RetainedState",
+        ]
+        assert list(model.graph.node[0].output) == [
+            "past_key.0_X_RetainedState",
+            "past_value.0_X_RetainedState",
+        ]
+
     def test_noop_when_no_dangling_retained_states(self):
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=2, scatter_count_per_fn=2)
 

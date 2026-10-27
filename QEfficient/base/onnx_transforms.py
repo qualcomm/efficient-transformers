@@ -51,7 +51,7 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
 from QEfficient.customop.onnxscript_utils import get_onnxscript_func
 from QEfficient.customop.quantization_ops import CastToUInt4, CastToUInt4Func
 from QEfficient.customop.rms_norm import CustomRMSNorm, CustomRMSNormFunc
-from QEfficient.utils import constants
+from QEfficient.utils import apply_kv_cache_prefix, constants
 from QEfficient.utils.constants import FILE_CHUNK_SIZE_DEFAULT, SIZE_THRESHOLD_DEFAULT
 
 logger = logging.getLogger(__name__)
@@ -308,15 +308,8 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     @staticmethod
     def _retained_state_name(state_kind: str, layer_idx: str, kv_cache_prefix: str | None = None) -> str:
         name = f"{state_kind}.{layer_idx}_RetainedState"
-        if kv_cache_prefix and state_kind in {
-            "past_key",
-            "past_value",
-            "compressed_kv",
-            "k_pe",
-            "conv_state",
-            "recurrent_state",
-        }:
-            name = f"{state_kind}.{layer_idx}_{kv_cache_prefix}_RetainedState"
+        if kv_cache_prefix:
+            return apply_kv_cache_prefix([name], kv_cache_prefix)[0]
         return name
 
     @classmethod
