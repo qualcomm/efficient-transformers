@@ -3130,6 +3130,56 @@ def test_qwen3_5_moe_partial_batch_state_update_preserves_inactive_rows():
 
 
 @pytest.mark.llm_model
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen3_5_prefill_from_position_zero_ignores_stale_gdn_state(model_type):
+    """A new request (prefill starting at position 0) must not depend on the GDN conv/recurrent state left in its
+    batch slot by the previous request. Continuous batching (vLLM) reuses slots without clearing retained state."""
+    config = _tiny_qwen_config(model_type)
+    config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
+    torch.manual_seed(0)
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(hf_model, kv_offload=True, continuous_batching=True)
+    seq_len = 4
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        batch_size=1,
+        prefill_seq_len=seq_len,
+    )["lang"]
+    inputs["input_ids"] = torch.randint(7, config.text_config.vocab_size, inputs["input_ids"].shape)
+    inputs["position_ids"] = torch.arange(seq_len).expand_as(inputs["position_ids"]).clone()
+    inputs["batch_index"] = torch.zeros_like(inputs["batch_index"])
+    clean_inputs = deepcopy(inputs)
+    for layer_state in clean_inputs["past_key_values"]:
+        for state in layer_state:
+            state.zero_()
+    stale_inputs = deepcopy(inputs)
+    for layer_state in stale_inputs["past_key_values"]:
+        for state in layer_state:
+            state.normal_()
+
+    qeff_model.transform(ctx_len=8, seq_len=seq_len, bs=1, prefill_only=True, prefill_seq_len=seq_len)
+    with torch.no_grad():
+        clean = qeff_model.lang_model.model(**clean_inputs)
+        stale = qeff_model.lang_model.model(**stale_inputs)
+
+    torch.testing.assert_close(stale[0], clean[0], msg=lambda msg: f"logits depend on stale GDN state: {msg}")
+    # Only the slot of this request (batch_index 0) is rewritten; the other slots keep their contents by design.
+    slot = torch.tensor([0])
+    for layer_idx, ((clean_conv, clean_recurrent), (stale_conv, stale_recurrent)) in enumerate(zip(clean[3], stale[3])):
+        torch.testing.assert_close(
+            stale_conv.index_select(0, slot),
+            clean_conv.index_select(0, slot),
+            msg=lambda msg, i=layer_idx: f"conv_state.{i}: {msg}",
+        )
+        torch.testing.assert_close(
+            stale_recurrent.index_select(0, slot),
+            clean_recurrent.index_select(0, slot),
+            msg=lambda msg, i=layer_idx: f"recurrent_state.{i}: {msg}",
+        )
+
+
+@pytest.mark.llm_model
 @pytest.mark.parametrize(("prefill_only", "seq_len"), [(True, 4), (False, 1)], ids=["prefill", "decode"])
 def test_qwen3_5_moe_full_state_export_has_no_retained_state_scatter(tmp_path, prefill_only, seq_len):
     config = _tiny_qwen3_5_moe_config()

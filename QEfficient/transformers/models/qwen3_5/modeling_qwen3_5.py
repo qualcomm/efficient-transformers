@@ -1033,7 +1033,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_state = conv_state_all
                 recurrent_state = recurrent_state_all
 
-            if batch_fold and position_ids is not None:
+            if position_ids is not None:
                 text_position_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
                 zero_cumsum = torch.cumsum((text_position_ids == 0).to(torch.int32), dim=1)[:, -1:]
                 conv_reset_mask = zero_cumsum.to(dtype=torch.bool, device=conv_state.device).reshape(
