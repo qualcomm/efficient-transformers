@@ -32,14 +32,6 @@ VISION_INPUTS = {
 }
 VISION_FP16_INPUTS = {"pixel_values", "image_masks"}
 VISION_OUTPUTS = ("vision_embeds", "deepstack_features")
-DECODE_MOE_QAIC_CONFIG = {
-    "moe_config": {
-        "flavour": "expert_parallel",
-        "cores_per_expert": 1,
-        "tree_reduce": False,
-        "expert_parallel_chunk_size": 256,
-    }
-}
 
 
 def parse_args():
@@ -57,12 +49,7 @@ def parse_args():
         help="Cores per QPC; the default allows all three QPCs to fit on one 16-core device.",
     )
     parser.add_argument("--prefill-num-devices", type=int, default=1)
-    parser.add_argument(
-        "--decode-num-devices",
-        type=int,
-        default=4,
-        help="Number of devices for decode expert parallelism.",
-    )
+    parser.add_argument("--decode-num-devices", type=int, default=1)
     parser.add_argument(
         "--num-layers",
         type=int,
@@ -154,7 +141,6 @@ def main():
         skip_vision=True,
         use_onnx_subfunctions=True,
         layerwise=False,
-        qaic_config=DECODE_MOE_QAIC_CONFIG,
     )
 
     print(f"Vision QPC: {vision_qpc['vision_qpc_path']}")
@@ -211,13 +197,7 @@ def main():
     prefill_session = QAICInferenceSession(prefill_qpc["lang_prefill_qpc_path"])
     decode_session = QAICInferenceSession(decode_qpc["lang_decode_qpc_path"])
     try:
-        # Keep all vision-only processor fields out of the language inputs,
-        # but pass only fields that are actual bindings in this vision QPC.
-        vision_inputs = {
-            name: value
-            for name, value in inputs.items()
-            if name in VISION_INPUTS and name in vision_session.binding_index_map
-        }
+        vision_inputs = {name: value for name, value in inputs.items() if name in VISION_INPUTS}
         vision_inputs.update(
             {name: vision_inputs[name].astype(np.float16) for name in VISION_FP16_INPUTS if name in vision_inputs}
         )
@@ -226,7 +206,7 @@ def main():
         vision_outputs = vision_session.run(vision_inputs)
         vision_session.deactivate()
 
-        lang_inputs = {name: value for name, value in inputs.items() if name not in VISION_INPUTS}
+        lang_inputs = {name: value for name, value in inputs.items() if name not in vision_inputs}
         if "position_ids" in inputs:
             lang_inputs["position_ids"] = inputs["position_ids"]
             lang_inputs.pop("attention_mask", None)

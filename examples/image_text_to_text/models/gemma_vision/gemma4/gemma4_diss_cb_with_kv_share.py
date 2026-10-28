@@ -49,14 +49,6 @@ DEFAULT_PREFILL_SEQ_LEN = 256
 DEFAULT_CTX_LEN = 4096
 DEFAULT_GENERATION_LEN = 200
 DEFAULT_FULL_BATCH_SIZE = 4
-DECODE_MOE_QAIC_CONFIG = {
-    "moe_config": {
-        "flavour": "expert_parallel",
-        "cores_per_expert": 1,
-        "tree_reduce": False,
-        "expert_parallel_chunk_size": 256,
-    }
-}
 
 ENABLE_FP16_CLIP = True
 STAGES = 4
@@ -145,7 +137,6 @@ def run(
         config=config,
         dtype="float32",
         trust_remote_code=True,
-        weight_free=True,
     )
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
     processor = AutoProcessor.from_pretrained(model_id)
@@ -211,7 +202,6 @@ def run(
         prefill_only=False,
         use_onnx_subfunctions=True,
         skip_vision=True,
-        qaic_config=DECODE_MOE_QAIC_CONFIG,
     )
 
     prefill_session = QAICInferenceSession(
@@ -275,15 +265,13 @@ def run(
         for k, v in inputs.items():
             inputs[k] = np.array(v)
 
-        vision_inputs = {
-            k: v for k, v in inputs.items() if k in VISION_INPUT_KEYS and k in vision_session.binding_index_map
-        }
+        vision_inputs = {k: v for k, v in inputs.items() if k in VISION_INPUT_KEYS}
         vision_inputs.update({k: vision_inputs[k].astype("float16") for k in VISION_FP16_KEYS if k in vision_inputs})
         vision_embeds = None
         if not skip_vision and vision_inputs:
             vision_embeds = vision_session.run(vision_inputs)["vision_embeds"]
 
-        lang_inputs = {k: v for k, v in inputs.items() if k not in VISION_INPUT_KEYS}
+        lang_inputs = {k: v for k, v in inputs.items() if k not in vision_inputs}
         if "position_ids" in inputs:
             lang_inputs["position_ids"] = inputs["position_ids"]
             lang_inputs.pop("attention_mask", None)
