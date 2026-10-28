@@ -2884,6 +2884,9 @@ def test_recurrent_state_dtype_override_preserves_mxint8_for_other_retained_stat
     )
 
     _validate_retained_state_dtype("float16", "recurrent_state_dtype")
+    with pytest.raises(ValueError, match="recurrent_state_dtype must be one of"):
+        _validate_retained_state_dtype("int4", "recurrent_state_dtype")
+
     assert (
         _resolve_retained_state_dtype(
             "recurrent_state.1_RetainedState",
@@ -2907,6 +2910,76 @@ def test_recurrent_state_dtype_override_preserves_mxint8_for_other_retained_stat
             )
             == "mxint8"
         )
+
+
+@pytest.mark.llm_model
+def test_dual_qpc_compile_applies_recurrent_state_dtype_to_custom_io(monkeypatch):
+    from QEfficient.transformers.models import modeling_auto
+    from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
+
+    captured = {}
+    model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
+    model.continuous_batching = True
+    model.ccl_enabled = False
+    model.comp_ctx_lengths_prefill = None
+    model.comp_ctx_lengths_decode = None
+    model.transform = lambda **kwargs: None
+    model.model = type(
+        "Model",
+        (),
+        {
+            "config": type("Config", (), {"torch_dtype": torch.float32, "model_type": "qwen3_5_moe"})(),
+            "get_output_names": lambda self, **kwargs: {
+                "vision": [],
+                "lang": [
+                    "past_key.0_RetainedState",
+                    "past_value.0_RetainedState",
+                    "conv_state.1_RetainedState",
+                    "recurrent_state.1_RetainedState",
+                ],
+            },
+            "get_specializations": lambda self, **kwargs: ({"vision": [], "lang": [{"seq_len": 1}]}, {}),
+        },
+    )()
+
+    def fake_compile(**kwargs):
+        captured.update(kwargs)
+        return "decode.qpc"
+
+    model.lang_model = type(
+        "LanguageModel",
+        (),
+        {"onnx_path": "language.onnx", "_compile": staticmethod(fake_compile)},
+    )()
+    monkeypatch.setattr(modeling_auto, "_filter_custom_io_for_onnx", lambda custom_io, onnx_path: custom_io)
+
+    model.compile(
+        prefill_seq_len=1,
+        ctx_len=16,
+        batch_size=1,
+        full_batch_size=4,
+        skip_vision=True,
+        lang_onnx_path="language.onnx",
+        mxint8_kv_cache=True,
+        recurrent_state_dtype="float16",
+    )
+
+    custom_io = captured["custom_io"]
+    assert custom_io["recurrent_state.1"] == "float16"
+    assert custom_io["recurrent_state.1_RetainedState"] == "float16"
+    for state_name in ("past_key.0", "past_value.0", "conv_state.1"):
+        assert custom_io[state_name] == "mxint8"
+        assert custom_io[f"{state_name}_RetainedState"] == "mxint8"
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen3_5_conv_state_layout_version_is_in_export_hash(model_type):
+    from QEfficient.transformers.models.modeling_auto import QWEN3_5_CONV_STATE_LAYOUT_VERSION
+
+    qeff_model = _tiny_qwen_qeff_model(model_type)
+
+    assert qeff_model.lang_model.hash_params["qwen3_5_conv_state_layout"] == QWEN3_5_CONV_STATE_LAYOUT_VERSION
 
 
 def test_qwen3_5_moe_get_submodules_for_export_keeps_decoder_layer_for_mixed_layer_types():
@@ -3157,6 +3230,58 @@ def test_qwen3_5_moe_partial_batch_state_update_preserves_inactive_rows():
         torch.testing.assert_close(
             updated_recurrent.index_select(0, inactive_rows),
             initial_recurrent.index_select(0, inactive_rows),
+            msg=lambda msg, layer_idx=layer_idx: f"recurrent_state.{layer_idx}: {msg}",
+        )
+
+
+@pytest.mark.llm_model
+def test_qwen3_5_moe_position_zero_resets_batched_recurrent_state_without_shape_change():
+    config = _tiny_qwen3_5_moe_config()
+    config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
+    config.text_config.linear_key_head_dim = 4
+    config.text_config.linear_value_head_dim = 4
+    config.text_config.linear_num_key_heads = 2
+    config.text_config.linear_num_value_heads = 4
+    torch.manual_seed(0)
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(
+        hf_model,
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        batch_size=2,
+        prefill_seq_len=1,
+    )["lang"]
+    inputs["input_ids"] = torch.tensor([[1], [2]], dtype=torch.int64)
+    inputs["position_ids"].fill_(3)
+    inputs["position_ids"][:, 0, :].zero_()
+    inputs["batch_index"] = torch.tensor([[1], [3]], dtype=torch.int64)
+    for layer_state in inputs["past_key_values"]:
+        for state in layer_state:
+            state.normal_()
+
+    changed_reset_state_inputs = deepcopy(inputs)
+    reset_physical_slot = inputs["batch_index"][0, 0]
+    for _, recurrent_state in changed_reset_state_inputs["past_key_values"]:
+        recurrent_state[reset_physical_slot].add_(100)
+
+    qeff_model.transform(ctx_len=8, seq_len=1, bs=2, prefill_only=False, prefill_seq_len=1)
+    with torch.no_grad():
+        outputs = qeff_model.lang_model.model(**deepcopy(inputs))
+        changed_outputs = qeff_model.lang_model.model(**deepcopy(changed_reset_state_inputs))
+
+    for layer_idx, ((_, recurrent_state), (_, changed_recurrent_state)) in enumerate(
+        zip(outputs[3], changed_outputs[3])
+    ):
+        expected_shape = inputs["past_key_values"][layer_idx][1].shape
+        assert recurrent_state.shape == expected_shape
+        assert changed_recurrent_state.shape == expected_shape
+        torch.testing.assert_close(
+            changed_recurrent_state,
+            recurrent_state,
             msg=lambda msg, layer_idx=layer_idx: f"recurrent_state.{layer_idx}: {msg}",
         )
 

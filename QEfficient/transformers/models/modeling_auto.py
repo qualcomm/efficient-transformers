@@ -118,6 +118,9 @@ CUSTOM_IO_DTYPE_MAP = {
     "float32": "float16",  # Since compiler doesn't support fp32
 }
 SUPPORTED_RETAINED_STATE_DTYPES = {"float16", "mxfp6", "mxint8"}
+# Retained-state layout is part of the exported model ABI. Bump this value
+# whenever Qwen3.5 changes the shape/order of its externally visible state.
+QWEN3_5_CONV_STATE_LAYOUT_VERSION = "channel_last_v1"
 
 
 def _validate_retained_state_dtype(dtype: str | None, argument_name: str) -> None:
@@ -1414,6 +1417,8 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         self.model = model.get_qeff_language_decoder()
         self.qaic_config = qaic_config
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
+        if getattr(model.config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}:
+            self.hash_params["qwen3_5_conv_state_layout"] = QWEN3_5_CONV_STATE_LAYOUT_VERSION
         self.continuous_batching = False
         if qaic_config and (mla_absorption := qaic_config.get("mla_absorption", None)):
             self.hash_params["mla_absorption"] = mla_absorption
