@@ -391,11 +391,12 @@ pipeline {
         }
 
         stage('HL API Tests') {
+            when { expression { params.RUN_HL_APIS } }
             parallel {
                 stage('Export & Compile') {
                     steps {
                         script {
-                            runImpactStage('export_compile', true, params.TEST_PROFILE) {
+                            runImpactStage('export_compile', params.RUN_HL_APIS, params.TEST_PROFILE) {
                                 timeout(time: params.TEST_PROFILE == 'full_layers_model' ? 0 : 60, unit: params.TEST_PROFILE == 'full_layers_model' ? 'HOURS' : 'MINUTES') {
                                     sh '''
                                     sudo docker exec -e QEFF_MODEL_TIER=${MODEL_TIER} -e TMPDIR=/efficient-transformers/.ci-tmp/export_compile ${BUILD_TAG} bash -c "
@@ -418,7 +419,7 @@ pipeline {
                 stage('QAIC LLM') {
                     steps {
                         script {
-                            runImpactStage('qaic_llm', true, params.TEST_PROFILE) {
+                            runImpactStage('qaic_llm', params.RUN_HL_APIS, params.TEST_PROFILE) {
                                 timeout(time: params.TEST_PROFILE == 'full_layers_model' ? 0 : 240, unit: params.TEST_PROFILE == 'full_layers_model' ? 'HOURS' : 'MINUTES') {
                                     sh '''
                                     sudo docker exec -e QEFF_MODEL_TIER=${MODEL_TIER} -e TMPDIR=/efficient-transformers/.ci-tmp/qaic_llm ${BUILD_TAG} bash -c "
