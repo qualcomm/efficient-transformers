@@ -963,6 +963,7 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
     dma_config,
 ):
     """Validate local Qwen3-MoE weight-free CB disagg KV handoff and HF fp32 token parity."""
+    use_onnx_subfunctions = dma_config.get("use_onnx_subfunctions", True)
     config = _build_qwen3_moe_parity_config(dtype="float32")
     hf_model = _load_qwen3_moe_parity_hf_model(config)
     checkpoint_dir = tmp_path / "qwen3_moe_fp32_checkpoint"
