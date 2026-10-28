@@ -644,7 +644,7 @@ GPTOSS_CFG = dict(
     intermediate_size=32,
     vocab_size=127,
     num_key_value_heads=2,
-    num_experts=4,
+    num_local_experts=4,
 )
 
 
@@ -963,7 +963,8 @@ def test_gptoss_expert_intermediate_block_size_parity(flavour):
     )
 
 
-def test_gemma4_text_moe_block_forward_parity():
+@pytest.mark.parametrize("flavour", ("simple_loop", "expert_parallel"))
+def test_gemma4_text_moe_block_forward_parity(flavour):
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
     from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm, Gemma4TextExperts, Gemma4TextRouter
 
