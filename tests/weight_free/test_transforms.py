@@ -63,6 +63,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     MoEFusedExpertSplitCheckpointTransform,
 )
 from QEfficient.exporter.weight_free.export import _materialize_lifted_attention_mask_zero_initializers
+from QEfficient.exporter.weight_free.export import _restore_embedded_initializers
 from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_free_ort_inputs
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
@@ -240,6 +241,18 @@ def _load_prepared_tensors(root):
         with safe_open(str(root / shard_name), framework="pt") as handle:
             loaded[key] = handle.get_tensor(key)
     return loaded
+
+
+def test_restore_embedded_initializers_serializes_bfloat16_buffer_bits():
+    buffer = torch.tensor([1.0, 0.5], dtype=torch.bfloat16)
+    initializer = SimpleNamespace(dtype=ir.DataType.BFLOAT16, shape=ir.Shape([2]))
+    onnx_program = SimpleNamespace(
+        model=SimpleNamespace(graph=SimpleNamespace(initializers={"buffer": initializer}))
+    )
+
+    _restore_embedded_initializers(onnx_program, {"buffer": buffer})
+
+    assert initializer.const_value.tobytes() == buffer.view(torch.int16).numpy().tobytes()
 
 
 def test_checkpoint_root_symlinked_shards(tmp_path, monkeypatch):

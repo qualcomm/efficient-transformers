@@ -19,7 +19,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
-DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
+DEFAULT_ARTIFACT_ROOT = "/local/mnt/workspace/abhishek/qeff_artifacts"
 PREFILL_PROMPT = "Hello, how are you?"
 GATE_PREFIX_OUTPUTS = (
     "mlp/gate/MatMul_output_0",
@@ -51,7 +51,7 @@ TARGETED_HEAD_OUTPUTS = (
     "/lm_head/MatMul_output_0",
 )
 HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
-MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16}
+MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
 
 
 def parse_device_group(value: str) -> list[int]:
