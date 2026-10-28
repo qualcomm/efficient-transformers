@@ -1838,17 +1838,38 @@ class QEffQwen3_5MoeVisionModel(Qwen3_5MoeVisionModel):
         )
         cu_seqlens = torch.cat([torch.zeros(1, dtype=cu_seqlens.dtype, device=cu_seqlens.device), cu_seqlens])
 
+        if bs == 1:
+            attention_mask = torch.zeros((), device=hidden_states.device, dtype=hidden_states.dtype)
+        else:
+            seq_len = hidden_states.shape[0]
+            rows = torch.arange(seq_len, device=hidden_states.device).view(1, -1)
+            cols = torch.arange(seq_len, device=hidden_states.device).view(-1, 1)
+            start = cu_seqlens[:-1].view(-1, 1, 1)
+            end = cu_seqlens[1:].view(-1, 1, 1)
+            row_mask = (rows >= start) & (rows < end)
+            col_mask = (cols >= start) & (cols < end)
+            attention_mask = ~(row_mask & col_mask).any(dim=0).unsqueeze(0)
+            attention_mask = torch.where(
+                attention_mask,
+                torch.tensor(MIN_MASKED_ATTENTION_VALUE, device=hidden_states.device, dtype=hidden_states.dtype),
+                torch.zeros((), device=hidden_states.device, dtype=hidden_states.dtype),
+            )
+
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
             )
         hidden_states = self.merger(hidden_states)
         return hidden_states
 
 
 class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
+    num_query_blocks = 44
+    num_key_value_blocks = 4
+
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -1862,6 +1883,7 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
@@ -1877,34 +1899,86 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
             sin = emb.sin()
         else:
             cos, sin = position_embeddings
-        cos = cos.to(device=q.device)
-        sin = sin.to(device=q.device)
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
-        attention_mask = torch.full(
-            [1, seq_length, seq_length], MIN_MASKED_ATTENTION_VALUE, device=q.device, dtype=q.dtype
-        )
-        seq_len = attention_mask.shape[-1]
-        rows = torch.arange(seq_len, device=q.device).view(1, -1)
-        cols = torch.arange(seq_len, device=q.device).view(-1, 1)
+        if attention_mask is None:
+            seq_len = q.shape[0]
+            rows = torch.arange(seq_len, device=q.device).view(1, -1)
+            cols = torch.arange(seq_len, device=q.device).view(-1, 1)
+            start = cu_seqlens[:-1].view(-1, 1, 1)
+            end = cu_seqlens[1:].view(-1, 1, 1)
+            row_mask = (rows >= start) & (rows < end)
+            col_mask = (cols >= start) & (cols < end)
+            attention_mask = ~(row_mask & col_mask).any(dim=0).unsqueeze(0)
+            attention_mask = torch.where(
+                attention_mask,
+                torch.tensor(MIN_MASKED_ATTENTION_VALUE, device=q.device, dtype=q.dtype),
+                torch.zeros((), device=q.device, dtype=q.dtype),
+            )
 
-        start = cu_seqlens[:-1].view(-1, 1, 1)
-        end = cu_seqlens[1:].view(-1, 1, 1)
-        row_mask = (rows >= start) & (rows < end)
-        col_mask = (cols >= start) & (cols < end)
-        allowed = (row_mask & col_mask).any(dim=0)
-        blocked_mask = torch.full((seq_len, seq_len), torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype)
-        final_mask = torch.where(allowed, torch.zeros_like(blocked_mask), blocked_mask)
-        attention_mask = final_mask.unsqueeze(0)
+        q, k, v = q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1)
+        sequence_length = q.shape[-2]
+        query_block_starts = [(-(-i * sequence_length) // self.num_query_blocks) for i in range(self.num_query_blocks)]
+        key_value_block_starts = [
+            (-(-i * sequence_length) // self.num_key_value_blocks) for i in range(self.num_key_value_blocks)
+        ]
+        output_blocks = []
 
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-        attn_weights = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(self.head_dim)
-        attn_weights = attn_weights + attention_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
-        attn_output = torch.matmul(attn_weights, v)
-        attn_output = attn_output.transpose(0, 1)
+        for query_block_index in range(self.num_query_blocks):
+            query_start = query_block_starts[query_block_index]
+            query_end = (
+                sequence_length
+                if query_block_index == self.num_query_blocks - 1
+                else query_block_starts[query_block_index + 1]
+            )
+            query_block = q[:, query_start:query_end, :]
+            query_block_length = query_end - query_start
+
+            running_max = torch.full(
+                (query_block.shape[0], query_block_length),
+                float(MIN_MASKED_ATTENTION_VALUE),
+                device=query_block.device,
+                dtype=query_block.dtype,
+            )
+            running_denominator = torch.zeros_like(running_max)
+            running_output = torch.zeros(
+                (query_block.shape[0], query_block_length, self.head_dim),
+                device=query_block.device,
+                dtype=query_block.dtype,
+            )
+
+            # Stream key/value blocks through an online Softmax so the complete
+            # [query_block, sequence_length] score tensor is never materialized.
+            for key_value_block_index in range(self.num_key_value_blocks):
+                key_value_start = key_value_block_starts[key_value_block_index]
+                key_value_end = (
+                    sequence_length
+                    if key_value_block_index == self.num_key_value_blocks - 1
+                    else key_value_block_starts[key_value_block_index + 1]
+                )
+                key_block = k[:, key_value_start:key_value_end, :]
+                value_block = v[:, key_value_start:key_value_end, :]
+                attention_scores = torch.matmul(query_block, key_block.transpose(1, 2)) / math.sqrt(self.head_dim)
+                if attention_mask.ndim > 0:
+                    attention_scores = (
+                        attention_scores + attention_mask[..., query_start:query_end, key_value_start:key_value_end]
+                    )
+                else:
+                    attention_scores = attention_scores + attention_mask
+
+                block_maximum = attention_scores.max(dim=-1).values
+                updated_maximum = torch.maximum(running_max, block_maximum)
+                rescale = torch.exp(running_max - updated_maximum)
+                block_exponential = torch.exp(attention_scores - updated_maximum.unsqueeze(-1))
+                running_output = running_output * rescale.unsqueeze(-1) + torch.matmul(
+                    block_exponential.to(value_block.dtype), value_block
+                )
+                running_denominator = running_denominator * rescale + block_exponential.sum(dim=-1)
+                running_max = updated_maximum
+
+            output_blocks.append((running_output / running_denominator.unsqueeze(-1)).to(query_block.dtype))
+
+        attn_output = torch.cat(output_blocks, dim=-2).transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
