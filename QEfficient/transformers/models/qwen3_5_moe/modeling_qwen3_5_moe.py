@@ -1025,11 +1025,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_ctx_indices = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                conv_state = ctx_gather_cb_3d(conv_state_all_flat, conv_batch_index, conv_ctx_indices)
-                if conv_state_grouped:
-                    conv_state = conv_state.reshape(
-                        conv_state.shape[0], conv_state_all.shape[1], conv_state_all.shape[2], conv_state_all.shape[3]
-                    )
+                conv_state = ctx_gather_cb_3d(conv_state_all, conv_batch_index, conv_ctx_indices)
 
                 recurrent_batch_index = state_batch_index.to(recurrent_state_all.device)
                 recurrent_ctx_indices = torch.arange(
@@ -1071,23 +1067,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_position_ids = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-<<<<<<< HEAD
-                scattered_conv = ctx_scatter_cb_3d(
-                    conv_state_all_flat, conv_batch_index, conv_position_ids, new_conv_state_flat
-                )
-                if conv_state_all.ndim == 4:
-                    scattered_conv = scattered_conv.reshape(
-                        conv_state_all.shape[0],
-                        conv_state_all.shape[1],
-                        conv_state_all.shape[2],
-                        conv_state_all.shape[3],
-                    )
-                updated_conv_state = scattered_conv
-=======
-                cache_params.conv_states[self.layer_idx] = CtxScatterFuncCB3D.apply(
+                updated_conv_state = ctx_scatter_cb_3d(
                     conv_state_all, conv_batch_index, conv_position_ids, new_conv_state
                 )
->>>>>>> 06ff162c (Optimize Qwen3.5 decode convolution state layout)
             else:
                 updated_conv_state = new_conv_state
             if not return_cache_states:
