@@ -101,8 +101,9 @@ def _restore_embedded_initializers(onnx_program, preserved_buffers: dict[str, to
     for name, tensor in preserved_buffers.items():
         initializer = onnx_program.model.graph.initializers.get(name)
         if initializer is not None:
+            serialized_tensor = tensor.contiguous().view(torch.int16) if tensor.dtype == torch.bfloat16 else tensor
             initializer.const_value = ir.Tensor(
-                tensor,
+                serialized_tensor,
                 dtype=initializer.dtype,
                 shape=initializer.shape,
                 name=name,

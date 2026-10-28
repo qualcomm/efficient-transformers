@@ -709,18 +709,27 @@ def test_deepseek_v4_prefill_uses_expert_parallel_moe_without_weight_gathers():
 
 
 @pytest.mark.llm_model
-def test_deepseek_v4_decode_compile_uses_all_fp16_retained_states(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("model_dtype", "onnx_dtype", "custom_io_dtype"),
+    [
+        (torch.float16, onnx.TensorProto.FLOAT16, "float16"),
+        (torch.bfloat16, onnx.TensorProto.BFLOAT16, "bfloat16"),
+    ],
+)
+def test_deepseek_v4_decode_compile_uses_model_dtype_for_retained_states(
+    tmp_path, monkeypatch, model_dtype, onnx_dtype, custom_io_dtype
+):
     config = _tiny_deepseek_v4_config()
-    config.torch_dtype = torch.float16
-    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).to(torch.float16).eval())
+    config.torch_dtype = model_dtype
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).to(model_dtype).eval())
 
     input_names = ["input_ids", "position_ids", "past_sliding_window_kv.0", "past_actual_compressed_kv.0"]
     output_names = ["logits"] + [f"{name}_RetainedState" for name in input_names[2:]]
     onnx_graph = onnx.helper.make_graph(
         nodes=[],
         name="deepseek_v4_compile_contract",
-        inputs=[onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT16, [1]) for name in input_names],
-        outputs=[onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT16, [1]) for name in output_names],
+        inputs=[onnx.helper.make_tensor_value_info(name, onnx_dtype, [1]) for name in input_names],
+        outputs=[onnx.helper.make_tensor_value_info(name, onnx_dtype, [1]) for name in output_names],
     )
     onnx_path = tmp_path / "deepseek_v4.onnx"
     onnx.save(onnx.helper.make_model(onnx_graph), onnx_path)
@@ -754,13 +763,13 @@ def test_deepseek_v4_decode_compile_uses_all_fp16_retained_states(tmp_path, monk
         }
     ]
     assert captured["custom_io"] == {
-        "past_sliding_window_kv.0": "float16",
-        "past_sliding_window_kv.0_RetainedState": "float16",
-        "past_actual_compressed_kv.0": "float16",
-        "past_actual_compressed_kv.0_RetainedState": "float16",
+        "past_sliding_window_kv.0": custom_io_dtype,
+        "past_sliding_window_kv.0_RetainedState": custom_io_dtype,
+        "past_actual_compressed_kv.0": custom_io_dtype,
+        "past_actual_compressed_kv.0_RetainedState": custom_io_dtype,
     }
 
-    with pytest.raises(ValueError, match="must remain in float16"):
+    with pytest.raises(ValueError, match="must remain floating-point"):
         qeff_model.compile(
             onnx_path=str(onnx_path),
             prefill_seq_len=1,
