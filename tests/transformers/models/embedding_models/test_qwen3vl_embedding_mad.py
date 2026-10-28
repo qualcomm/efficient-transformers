@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from transformers import AutoConfig, AutoProcessor
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
-from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.transformers.models.qwen3_vl._embedding_utils import (
     DEFAULT_MAD_MAX,
     EXAMPLE_DOCUMENTS,
@@ -24,6 +23,7 @@ from QEfficient.transformers.models.qwen3_vl._embedding_utils import (
     configure_embedding_model_config,
     resolve_model_source,
 )
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.test_utils import load_vlm_model
 from tests.utils.image_utils import load_test_image
 

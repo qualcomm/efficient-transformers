@@ -16,7 +16,6 @@ from transformers import AutoConfig, AutoProcessor
 
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
-from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.transformers.models.qwen3_vl._reranker_utils import (
     format_mm_content as _shared_format_mm_content,
 )
@@ -38,6 +37,7 @@ from QEfficient.transformers.models.qwen3_vl._reranker_utils import (
 from QEfficient.transformers.models.qwen3_vl._reranker_utils import (
     truncate_tokens_optimized as _shared_truncate_tokens_optimized,
 )
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.test_utils import load_vlm_model, set_num_layers_vlm
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../../configs/image_text_model_configs.json")

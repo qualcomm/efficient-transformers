@@ -14,6 +14,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor
 
 from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
+
 from .test_image_text_to_text_models import model_config_dict
 
 MODEL_NAME = "tiny-random/gemma-4-moe"

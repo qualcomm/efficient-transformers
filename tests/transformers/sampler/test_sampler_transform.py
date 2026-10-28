@@ -14,7 +14,7 @@ import torch
 from transformers import AutoConfig
 
 from QEfficient.generation.cloud_infer import QAICInferenceSession
-from QEfficient.utils.constants import Constants, DEFAULT_AIC_NUM_CORES
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES, Constants
 from QEfficient.utils.test_utils import (
     load_qeff_model_with_sampler,
 )
