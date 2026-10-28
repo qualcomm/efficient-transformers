@@ -488,6 +488,26 @@ class TestWeightFreeCheckpointTransforms:
         assert tuple(weights.up.shape) == (2, 4, 6)
         assert tuple(weights.down.shape) == (2, 6, 4)
 
+    def test_qwen3_5_original_weights_keep_source_parameter_names(self):
+        from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeExperts
+
+        experts = object.__new__(QEffQwen3_5MoeExperts)
+        torch.nn.Module.__init__(experts)
+        gate_up = torch.arange(2 * 8 * 3, dtype=torch.float32).reshape(2, 8, 3)
+        down = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+        experts.gate_up_proj = torch.nn.Parameter(gate_up)
+        experts.down_proj = torch.nn.Parameter(down)
+        experts.expert_dim = 4
+        experts.weights_transformed = False
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+
+        assert set(dict(experts.named_parameters())) == {"gate_up_proj", "down_proj"}
+        torch.testing.assert_close(weights.gate, gate_up[:, :4].transpose(-1, -2))
+        torch.testing.assert_close(weights.up, gate_up[:, 4:].transpose(-1, -2))
+        torch.testing.assert_close(weights.down, down.transpose(-1, -2))
+
     def test_gpt_oss_original_layout_splits_fused_source_weights_in_forward(self):
         from transformers import GptOssConfig
 
@@ -1909,6 +1929,38 @@ class TestWeightFreeExportHash:
         assert regular_hash != weight_free_hash
         assert "weight_free" not in regular_params
         assert weight_free_params["weight_free"] is True
+
+    def test_original_checkpoint_export_hash_differs_from_converted_checkpoint(self):
+        config = SimpleNamespace(to_diff_dict=lambda: {"model_type": "qwen3_5_moe"})
+        common_model = {
+            "model": SimpleNamespace(config=config),
+            "hash_params": {"pretrained_model_name_or_path": "tiny"},
+            "_use_onnx_subfunctions": False,
+            "_weight_free": True,
+        }
+        common_kwargs = {
+            "example_inputs": {"input_ids": torch.ones(1, 2, dtype=torch.int64)},
+            "output_names": ["logits"],
+            "dynamic_axes": {"input_ids": {0: "batch_size"}},
+            "dynamo": True,
+        }
+
+        converted_hash, converted_params = _generate_export_hash(
+            SimpleNamespace(**common_model, _use_original_checkpoint=False),
+            (),
+            dict(common_kwargs),
+            _fake_export,
+        )
+        original_hash, original_params = _generate_export_hash(
+            SimpleNamespace(**common_model, _use_original_checkpoint=True),
+            (),
+            dict(common_kwargs),
+            _fake_export,
+        )
+
+        assert converted_hash != original_hash
+        assert "use_original_checkpoint" not in converted_params
+        assert original_params["use_original_checkpoint"] is True
 
     def test_minimax_capture_batch_changes_export_hash(self):
         config = SimpleNamespace(
