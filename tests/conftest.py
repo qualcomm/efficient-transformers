@@ -22,6 +22,15 @@ if _xdist_worker and os.environ.get("QEFF_HOME") and not _two_phase_session:
     os.environ["QEFF_HOME"] = str(Path(os.environ["QEFF_HOME"]) / _xdist_worker)
     Path(os.environ["QEFF_HOME"]).mkdir(parents=True, exist_ok=True)
 
+# Keep weight-free prepared checkpoints inside the test-owned QEFF_HOME tree.
+# This prevents transformed checkpoints from being written into the HF cache and
+# lets the existing QEFF_HOME session cleanup remove them with the QPC artifacts.
+if "QEFF_WF_HOME" not in os.environ:
+    qeff_home_for_checkpoints = Path(os.environ.get("QEFF_HOME", "~/.cache/qeff_models")).expanduser()
+    os.environ["QEFF_WF_HOME"] = str(qeff_home_for_checkpoints / "weight_free_checkpoints")
+elif _xdist_worker and not _two_phase_session:
+    os.environ["QEFF_WF_HOME"] = str(Path(os.environ["QEFF_WF_HOME"]) / _xdist_worker)
+
 from QEfficient.utils.cache import QEFF_HOME  # noqa: E402
 from QEfficient.utils.device_utils import (  # noqa: E402
     get_qaic_mdp_device_groups,
@@ -220,7 +229,7 @@ def _qaic_device_for_xdist_worker():
 
     QEFF_QAIC_CARDS_PER_WORKER widens that slice for tests that load more than one
     QPC at a time. A dual-QPC (kv_offload=True) VLM builds a vision *and* a language
-    session, and each is compiled at the default num_cores=16 -- a whole card -- so
+    session, and each is compiled at the device-specific default core count -- a whole card -- so
     such a test needs two visible cards or the second qaicrt.Program() fails with
     "Failed to create program with Qpc Buffer". Width 1 (the default) is correct for
     single-QPC LLM tests; the multimodal execute phase sets 2, giving gw0 cards 0,1

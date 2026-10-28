@@ -16,6 +16,7 @@ from transformers import AutoConfig, AutoProcessor
 
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.transformers.models.qwen3_vl._reranker_utils import (
     format_mm_content as _shared_format_mm_content,
 )
@@ -300,7 +301,7 @@ def test_qwen3_vl_reranker_mad_parity(model_name):
         prefill_seq_len=max_prompt_len,
         ctx_len=model_cfg["ctx_len"],
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         mxfp6_matmul=False,
     )
 
