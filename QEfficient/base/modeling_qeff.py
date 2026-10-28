@@ -112,6 +112,7 @@ def _copy_onnx_external_data_files(source_onnx_path: Path, artifact_onnx_path: P
     those are resolved through ``AIC_EXTERNAL_DATA_ROOT``.
     """
     model = onnx.load(source_onnx_path, load_external_data=False)
+    copied_files = set()
     for tensor in onnx.external_data_helper._get_all_tensors(model):
         if tensor.data_location != onnx.TensorProto.EXTERNAL:
             continue
@@ -128,8 +129,12 @@ def _copy_onnx_external_data_files(source_onnx_path: Path, artifact_onnx_path: P
         if not source_path.is_file():
             raise FileNotFoundError(f"ONNX external data file not found at: {source_path}")
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        if source_path.resolve() != artifact_path.resolve():
+        source_path = source_path.resolve()
+        artifact_path = artifact_path.resolve()
+        copy_key = (source_path, artifact_path)
+        if source_path != artifact_path and copy_key not in copied_files:
             shutil.copy2(source_path, artifact_path)
+            copied_files.add(copy_key)
 
 
 def _weight_free_input_names(onnx_path: Path) -> set[str]:
