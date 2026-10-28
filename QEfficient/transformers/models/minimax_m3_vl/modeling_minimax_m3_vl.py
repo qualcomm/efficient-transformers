@@ -3470,6 +3470,86 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         )
         return out
 
+    def _msa_attention_gp_batched(
+        self,
+        query_states,
+        token_indices,
+        token_valid,
+        key_cache,
+        value_cache,
+        dp,
+        blocking_config,
+        position_ids,
+    ):
+        """Batched entry point for the retained MSA GP path.
+
+        The QEfficient cache contract already keeps the batch-local and DP
+        dimensions explicit; reuse the CP-aware implementation so callers can
+        select the batched implementation without changing that contract.
+        """
+        return self._baseline_attention_gp(
+            query_states,
+            token_indices,
+            token_valid,
+            key_cache,
+            value_cache,
+            dp=dp,
+            blocking_config=blocking_config,
+            position_ids=position_ids,
+        )
+
+    def _msa_indexer_attention_gp_unified(
+        self,
+        hidden_states,
+        query_states,
+        key_states,
+        value_states,
+        position_ids,
+        indexer_cos,
+        indexer_sin,
+        past_key_values,
+        blocking_config,
+    ):
+        """Unified MSA indexer + attention GP decode entry point.
+
+        This keeps selector output and compact-cache writes in one model
+        boundary, matching the layer benchmark's unified implementation while
+        retaining QEfficient's cache object and export interfaces.
+        """
+        if position_ids is None or hidden_states.shape[1] != 1:
+            raise ValueError("Unified MSA GP requires decode with position_ids.")
+        if blocking_config is None or getattr(blocking_config, "paged_attention", False):
+            raise ValueError("Unified MSA GP requires non-paged decode.")
+
+        token_indices, token_valid = self.indexer._select_blocks(
+            hidden_states,
+            position_ids,
+            past_key_values,
+            self.layer_idx,
+            indexer_cos,
+            indexer_sin,
+            blocking_config=blocking_config,
+            block_table=None,
+        )
+        cache_kwargs = {
+            "position_ids": position_ids,
+            "dp": getattr(blocking_config, "msa_attn_dp", 1) or 1,
+            "hkv": self.config.num_key_value_heads,
+            "cp": getattr(blocking_config, "msa_attn_cp", 1) or 1,
+        }
+        past_key_values.write_only_sparse(key_states, value_states, self.layer_idx, cache_kwargs)
+        layer = past_key_values.layers[self.layer_idx]
+        return self._baseline_attention_gp(
+            query_states,
+            token_indices,
+            token_valid,
+            layer.keys,
+            layer.values,
+            dp=cache_kwargs["dp"],
+            blocking_config=blocking_config,
+            position_ids=position_ids,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -3555,6 +3635,30 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 indexer_cos, indexer_sin = indexer_position_embeddings
             else:
                 indexer_cos, indexer_sin = cos, sin
+
+            qaic_config = getattr(self, "qaic_config", None) or {}
+            msa_impl = getattr(blocking_config, "msa_impl", None) or qaic_config.get("msa_impl")
+            if (
+                msa_impl == "msa_indexer_attention_GP_unified"
+                and not is_prefill
+                and not paged
+            ):
+                attn_output, _, _ = self._msa_indexer_attention_gp_unified(
+                    hidden_states,
+                    query_states,
+                    key_states,
+                    value_states,
+                    position_ids,
+                    indexer_cos,
+                    indexer_sin,
+                    past_key_values,
+                    blocking_config,
+                )
+                attn_output = attn_output.transpose(1, 2).reshape(
+                    *input_shape, self.config.num_attention_heads * self.head_dim
+                )
+                return self.o_proj(attn_output.to(dtype=self.o_proj.weight.dtype).contiguous()), None
+
             if is_prefill:
                 selector = (
                     self.indexer._select_blocks_prefill_par
@@ -3715,9 +3819,14 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 return self.o_proj(attn_output.to(dtype=self.o_proj.weight.dtype).contiguous()), None
             # Sparse decode gathers from the retained cache, so write the current token before either path.
             past_key_values.write_only_sparse(key_states, value_states, self.layer_idx, cache_kwargs)
-            if attn_dp > 1 or attn_cp > 1:
+            if attn_dp > 1 or attn_cp > 1 or msa_impl == "msa_attention_GP_batched":
                 layer = past_key_values.layers[self.layer_idx]
-                attn_output, key_cache, value_cache = self._baseline_attention_gp(
+                attention_impl = (
+                    self._msa_attention_gp_batched
+                    if msa_impl == "msa_attention_GP_batched"
+                    else self._baseline_attention_gp
+                )
+                attn_output, key_cache, value_cache = attention_impl(
                     query_states,
                     token_indices,
                     token_valid,

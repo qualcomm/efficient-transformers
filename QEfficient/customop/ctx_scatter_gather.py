@@ -1194,7 +1194,6 @@ class CtxGatherFuncBlockedKVDP(torch.autograd.Function):
         output = g.onnxscript_op(CtxGatherBlockedKVDP, data, ctx_indices)
         return _set_gather_output_type(output, data, ctx_indices)
 
-
 # @qeff_custom_op("com.qti.aisw.onnx", 1)
 @qeff_custom_op("com.qualcomm.cloud", 1)
 def CtxGatherPagedKVDP(data: onnxscript.FLOAT, block_ids: onnxscript.INT32) -> onnxscript.FLOAT:
@@ -1218,8 +1217,10 @@ def CtxGatherPagedKVDP(data: onnxscript.FLOAT, block_ids: onnxscript.INT32) -> o
         ops.Unsqueeze(ops.Cast(row_idx, to=7), [-1]),
         axis=2,
     )
+    # Transpose only the small index tensor so GatherND emits
+    # [row, page, token, D] directly; do not transpose the gathered payload.
+    indices = ops.Transpose(indices, perm=[1, 0, 2])
     pages = ops.GatherND(data, indices, batch_dims=0)
-    pages = ops.Transpose(pages, perm=[1, 0, 2, 3])
     return ops.Reshape(
         pages,
         ops.Concat(ops.Constant(value_ints=[1]), num_rows, ops.Mul(num_pages, page_size), head_dim, axis=0),
@@ -1237,13 +1238,13 @@ class CtxGatherFuncPagedKVDP(torch.autograd.Function):
     @staticmethod
     def forward(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids)
-        num_pages, rows = block_ids.shape
+        num_pages, rows = int(block_ids.shape[0]), int(block_ids.shape[1])
         _, data_rows, page_size, head_dim = data.shape
         if rows != data_rows:
             raise ValueError("Paged GQA gather block-id rows must match pool rows.")
-        row_idx = torch.arange(rows, device=data.device).view(1, rows)
-        pages = data[block_ids.long(), row_idx]
-        return pages.permute(1, 0, 2, 3).reshape(1, rows, num_pages * page_size, head_dim)
+        row_idx = torch.arange(rows, device=data.device).view(rows, 1)
+        pages = data[block_ids.transpose(0, 1).long(), row_idx]
+        return pages.reshape(1, rows, num_pages * page_size, head_dim)
 
     @staticmethod
     def setup_context(ctx, inputs, outputs):
@@ -1273,8 +1274,10 @@ def CtxGatherPagedKVHeads(data: onnxscript.FLOAT, block_ids: onnxscript.INT32) -
         ops.Unsqueeze(ops.Cast(head_idx, to=7), [-1]),
         axis=2,
     )
+    # Transpose only the index tensor; GatherND already returns
+    # [head, page, token, D].
+    indices = ops.Transpose(indices, perm=[1, 0, 2])
     pages = ops.GatherND(data, indices, batch_dims=0)
-    pages = ops.Transpose(pages, perm=[1, 0, 2, 3])
     return ops.Reshape(pages, ops.Concat(one, num_heads, ops.Mul(num_pages, page_size), head_dim, axis=0))
 
 
@@ -1284,12 +1287,12 @@ class CtxGatherFuncPagedKVHeads(torch.autograd.Function):
     @staticmethod
     def forward(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids)
-        num_pages, heads = block_ids.shape
+        num_pages, heads = int(block_ids.shape[0]), int(block_ids.shape[1])
         if heads != data.shape[1]:
             raise ValueError("Paged head gather IDs must match the cache head dimension.")
-        head_idx = torch.arange(heads, device=data.device).view(1, heads)
-        pages = data[block_ids.long(), head_idx]
-        return pages.permute(1, 0, 2, 3).reshape(1, heads, num_pages * data.shape[2], data.shape[3])
+        head_idx = torch.arange(heads, device=data.device).view(heads, 1)
+        pages = data[block_ids.transpose(0, 1).long(), head_idx]
+        return pages.reshape(1, heads, num_pages * data.shape[2], data.shape[3])
 
     @staticmethod
     def setup_context(ctx, inputs, outputs):
@@ -1307,7 +1310,6 @@ def CtxGatherBlockRangeKVDP(data: onnxscript.FLOAT, block_ids: onnxscript.INT32)
     # data: [B_local, rows, cache_blocks, block_size, D]
     # ids:  [B_local, rows, selected_blocks]
     return ops.GatherND(data, ops.Unsqueeze(block_ids, [-1]), batch_dims=2)
-
 
 class CtxGatherFuncBlockRangeKVDP(torch.autograd.Function):
     """Block-range gather for 5-D GP caches (cache laid out as blocks).

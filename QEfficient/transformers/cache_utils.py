@@ -2687,12 +2687,13 @@ class QEffMiniMaxSparseCache(QEffDynamicCache):
 
     @staticmethod
     def gather_paged_kv_dp(data, block_ids):
-        pages, rows = block_ids.shape
+        pages, rows = int(block_ids.shape[0]), int(block_ids.shape[1])
 
         def eager(data, block_ids):
             ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids).long()
-            out = data[ids, torch.arange(rows).view(1, rows)]
-            return out.permute(1, 0, 2, 3).reshape(1, rows, pages * data.shape[2], data.shape[3])
+            row_idx = torch.arange(rows, device=data.device).view(rows, 1)
+            out = data[ids.transpose(0, 1), row_idx]
+            return out.reshape(1, rows, pages * data.shape[2], data.shape[3])
 
         return QEffMiniMaxSparseCache._cache_call(ctx_gather_paged_kv_dp, (data, block_ids.to(torch.int32)), eager)
 
@@ -2738,21 +2739,23 @@ class QEffMiniMaxSparseCache(QEffDynamicCache):
     @staticmethod
     def gather_paged_kv_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         """Physical pages [P, H, page, D] at block_ids [pages, H] -> [1, H, pages*page, D]."""
-        pages, heads = block_ids.shape
+        pages, heads = int(block_ids.shape[0]), int(block_ids.shape[1])
 
         def eager(data, block_ids):
             valid = block_ids != torch.iinfo(torch.int32).max
             ids = torch.where(valid, block_ids, torch.zeros_like(block_ids)).long()
-            out = data[ids, torch.arange(heads).view(1, heads)]
+            head_idx = torch.arange(heads, device=data.device).view(heads, 1)
+            out = data[ids.transpose(0, 1), head_idx]
+            valid = valid.transpose(0, 1)
             out = torch.where(valid[..., None, None], out, torch.zeros_like(out))
-            return out.permute(1, 0, 2, 3).reshape(1, heads, pages * data.shape[2], data.shape[3])
+            return out.reshape(1, heads, pages * data.shape[2], data.shape[3])
 
         return QEffMiniMaxSparseCache._cache_call(ctx_gather_paged_kv_heads, (data, block_ids.to(torch.int32)), eager)
 
     @staticmethod
     def gather_paged_kv_batch_with_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         """block_ids [B, pages] shared by all heads -> [B, H, pages*page, D]."""
-        batch, num_pages = block_ids.shape
+        batch, num_pages = int(block_ids.shape[0]), int(block_ids.shape[1])
         num_heads = data.shape[1]
         outputs = []
         for batch_idx in range(batch):
@@ -2764,7 +2767,7 @@ class QEffMiniMaxSparseCache(QEffDynamicCache):
     def gather_paged_kv_selected_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         """block_ids [B, H, pages] -> [B, H, pages*page, D]."""
         outputs = []
-        for batch_idx in range(block_ids.shape[0]):
+        for batch_idx in range(int(block_ids.shape[0])):
             ids = block_ids[batch_idx].transpose(0, 1).contiguous().to(torch.int32)
             outputs.append(QEffMiniMaxSparseCache.gather_paged_kv_heads(data, ids))
         return torch.cat(outputs, dim=0)
