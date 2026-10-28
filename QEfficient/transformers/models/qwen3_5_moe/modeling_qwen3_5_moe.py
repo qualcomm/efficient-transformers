@@ -2067,9 +2067,7 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
 
         q, k, v = q.transpose(0, 1), k.transpose(0, 1), v.transpose(0, 1)
         sequence_length = q.shape[-2]
-        query_block_starts = [
-            (-(-i * sequence_length) // self.num_query_blocks) for i in range(self.num_query_blocks)
-        ]
+        query_block_starts = [(-(-i * sequence_length) // self.num_query_blocks) for i in range(self.num_query_blocks)]
         key_value_block_starts = [
             (-(-i * sequence_length) // self.num_key_value_blocks) for i in range(self.num_key_value_blocks)
         ]
@@ -2111,9 +2109,9 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
                 value_block = v[:, key_value_start:key_value_end, :]
                 attention_scores = torch.matmul(query_block, key_block.transpose(1, 2)) / math.sqrt(self.head_dim)
                 if attention_mask.ndim > 0:
-                    attention_scores = attention_scores + attention_mask[
-                        ..., query_start:query_end, key_value_start:key_value_end
-                    ]
+                    attention_scores = (
+                        attention_scores + attention_mask[..., query_start:query_end, key_value_start:key_value_end]
+                    )
                 else:
                     attention_scores = attention_scores + attention_mask
 
