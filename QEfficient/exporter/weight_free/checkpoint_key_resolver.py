@@ -82,6 +82,8 @@ def _moe_weight_aliases(name: str) -> List[str]:
     """Return equivalent checkpoint aliases for shared MoEWeights parameters."""
     aliases = []
     canonical = name
+    if ".moe_block.experts." in name:
+        aliases.append(name.replace(".moe_block.experts.", ".experts.", 1))
     for onnx_suffix, checkpoint_suffix in (
         (".moe_block.router.", ".router."),
         (".moe_block.pre_feedforward_layernorm.", ".pre_feedforward_layernorm_2."),

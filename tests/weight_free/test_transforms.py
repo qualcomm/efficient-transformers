@@ -296,6 +296,54 @@ class TestWeightFreeCheckpointTransforms:
         assert tuple(weights.up.shape) == (2, 4, 6)
         assert tuple(weights.down.shape) == (2, 6, 4)
 
+    @pytest.mark.parametrize("model_type", ["qwen3_vl_moe", "qwen3_5_moe"])
+    def test_qwen_vlm_moe_original_layout_exposes_source_parameter_names(self, model_type):
+        if model_type == "qwen3_vl_moe":
+            from transformers import Qwen3VLMoeTextConfig
+
+            from QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
+                QEffQwen3VLMoeTextExperts,
+            )
+
+            experts = QEffQwen3VLMoeTextExperts(
+                Qwen3VLMoeTextConfig(hidden_size=4, moe_intermediate_size=6, num_experts=2)
+            )
+        else:
+            from transformers import Qwen3_5MoeTextConfig
+
+            from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeExperts
+
+            experts = QEffQwen3_5MoeExperts(
+                Qwen3_5MoeTextConfig(
+                    hidden_size=4,
+                    moe_intermediate_size=6,
+                    num_experts=2,
+                    shared_expert_intermediate_size=6,
+                )
+            )
+
+        source_gate_up = experts.gate_up_proj.detach().clone()
+        source_down = experts.down_proj.detach().clone()
+        experts._qeff_use_original_checkpoint = True
+        weights = experts.transform_weights()
+        parameter_names = {name for name, _ in experts.named_parameters()}
+
+        expected_parameter_names = {"gate_up_proj", "down_proj"}
+        assert parameter_names == expected_parameter_names
+        if model_type == "qwen3_vl_moe":
+            assert tuple(experts.gate_up_proj.shape) == (2, 4, 12)
+            assert tuple(experts.down_proj.shape) == (2, 6, 4)
+        else:
+            assert tuple(experts.gate_up_proj.shape) == (2, 12, 4)
+            assert tuple(experts.down_proj.shape) == (2, 4, 6)
+        assert tuple(weights.gate.shape) == (2, 4, 6)
+        assert tuple(weights.up.shape) == (2, 4, 6)
+        assert tuple(weights.down.shape) == (2, 6, 4)
+        torch.testing.assert_close(weights.gate, source_gate_up[:, :6].transpose(-1, -2))
+        torch.testing.assert_close(weights.up, source_gate_up[:, 6:].transpose(-1, -2))
+        torch.testing.assert_close(weights.down, source_down.transpose(-1, -2))
+        assert experts._qeff_original_checkpoint_layout
+
     def test_gpt_oss_original_layout_splits_fused_source_weights_in_forward(self):
         from transformers import GptOssConfig
 
@@ -314,6 +362,40 @@ class TestWeightFreeCheckpointTransforms:
         torch.testing.assert_close(weights.up_bias, source["gate_up_proj_bias"][..., 1::2])
         torch.testing.assert_close(weights.down_bias, source["down_proj_bias"])
         assert set(dict(experts.named_parameters())) == set(source)
+
+    def test_gemma4_original_layout_preserves_fused_source_weights(self):
+        from transformers import Gemma4TextConfig
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
+
+        from QEfficient.transformers.models.gemma4.modeling_gemma4 import QEffGemma4TextMoeBlock
+
+        config = Gemma4TextConfig(
+            hidden_size=4,
+            num_experts=2,
+            moe_intermediate_size=6,
+            enable_moe_block=True,
+        )
+        experts = Gemma4TextExperts(config)
+        source_gate_up = experts.gate_up_proj.detach().clone()
+        source_down = experts.down_proj.detach().clone()
+        experts._qeff_use_original_checkpoint = True
+
+        block = QEffGemma4TextMoeBlock(
+            router=torch.nn.Identity(),
+            experts=experts,
+            pre_feedforward_layernorm=torch.nn.Identity(),
+            post_feedforward_layernorm=torch.nn.Identity(),
+        )
+        weights = block.transform_weights()
+
+        assert set(dict(experts.named_parameters())) == {"gate_up_proj", "down_proj"}
+        assert tuple(weights.gate.shape) == (2, 4, 6)
+        assert tuple(weights.up.shape) == (2, 4, 6)
+        assert tuple(weights.down.shape) == (2, 6, 4)
+        torch.testing.assert_close(weights.gate, source_gate_up[:, :6].transpose(-1, -2))
+        torch.testing.assert_close(weights.up, source_gate_up[:, 6:].transpose(-1, -2))
+        torch.testing.assert_close(weights.down, source_down.transpose(-1, -2))
+        assert block._qeff_original_checkpoint_layout
 
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"
@@ -1156,6 +1238,15 @@ class TestWeightFreeCheckpointTransforms:
             )
             == "model.embed_tokens.weight"
         )
+
+        assert (
+            find_checkpoint_key(
+                "model.layers.3.moe_block.experts.gate_up_proj",
+                {"model.layers.3.experts.gate_up_proj": "model.safetensors"},
+                backbone,
+            )
+            == "model.layers.3.experts.gate_up_proj"
+        )
         assert (
             find_checkpoint_key(
                 "language_model.embed_tokens.weight",
@@ -1487,6 +1578,46 @@ class TestWeightFreeExportHash:
         assert regular_hash != weight_free_hash
         assert "weight_free" not in regular_params
         assert weight_free_params["weight_free"] is True
+
+    def test_original_checkpoint_export_hash_differs_from_canonical(self):
+        config = SimpleNamespace(to_diff_dict=lambda: {"model_type": "qwen3_moe"})
+        canonical_model = SimpleNamespace(
+            model=SimpleNamespace(config=config),
+            hash_params={"pretrained_model_name_or_path": "tiny"},
+            _use_onnx_subfunctions=False,
+            _weight_free=True,
+            _use_original_checkpoint=False,
+        )
+        original_model = SimpleNamespace(
+            model=SimpleNamespace(config=config),
+            hash_params={"pretrained_model_name_or_path": "tiny"},
+            _use_onnx_subfunctions=False,
+            _weight_free=True,
+            _use_original_checkpoint=True,
+        )
+        common_kwargs = {
+            "example_inputs": {"input_ids": torch.ones(1, 2, dtype=torch.int64)},
+            "output_names": ["logits"],
+            "dynamic_axes": {"input_ids": {0: "batch_size"}},
+            "dynamo": True,
+        }
+
+        canonical_hash, canonical_params = _generate_export_hash(
+            canonical_model,
+            (),
+            dict(common_kwargs),
+            _fake_export,
+        )
+        original_hash, original_params = _generate_export_hash(
+            original_model,
+            (),
+            dict(common_kwargs),
+            _fake_export,
+        )
+
+        assert canonical_hash != original_hash
+        assert "use_original_checkpoint" not in canonical_params
+        assert original_params["use_original_checkpoint"] is True
 
 
 class TestRuntimeRequirements:

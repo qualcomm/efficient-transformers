@@ -1219,7 +1219,6 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
-        ExpertParallelPackingCheckpointTransform,
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
@@ -1365,7 +1364,6 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
-        ExpertParallelPackingCheckpointTransform,
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
@@ -3628,6 +3626,7 @@ class QEFFAutoModelForImageTextToText:
         qaic_config: dict | None = None,
         layerwise: bool = False,
         weight_free: bool = False,
+        use_original_checkpoint: bool = False,
         **kwargs,
     ):
         """
@@ -3647,6 +3646,9 @@ class QEFFAutoModelForImageTextToText:
         weight_free : bool, optional
             Build the model with meta tensors and load checkpoint weights during
             compilation. Weight-free VLM export requires dual-QPC mode.
+        use_original_checkpoint : bool, optional
+            If True, weight-free export references the source safetensors directly
+            instead of preparing a converted checkpoint. Requires ``weight_free=True``.
         **kwargs :
             Additional arguments passed to HuggingFace's ``from_pretrained``.
 
@@ -3673,6 +3675,8 @@ class QEFFAutoModelForImageTextToText:
         if weight_free:
             kv_offload = True
             validate_dynamo_export_requirements("weight_free=True")
+        if use_original_checkpoint and not weight_free:
+            raise ValueError("use_original_checkpoint=True requires weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
 
@@ -3718,6 +3722,7 @@ class QEFFAutoModelForImageTextToText:
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             qaic_config=qaic_config,
             weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
             **kwargs,
         )
         # Mark the wrapper so its compile() can default ``layerwise=True`` if

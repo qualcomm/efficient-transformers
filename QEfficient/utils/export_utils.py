@@ -605,6 +605,8 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     )
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
+    if getattr(qeff_model, "_use_original_checkpoint", False):
+        copy_of_hash_params["use_original_checkpoint"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
         copy_of_hash_params["onnx_subfunction_version"] = 4
     # Generate hash from relevant parameters
