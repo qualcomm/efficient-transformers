@@ -14,8 +14,8 @@ return the routed expert output ``[T, H]``:
 * ``moe_decode_bmm`` consumes ``(topk_indices [T, K], topk_weights [T, K])``.
 """
 
+from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import Callable, Iterable, Optional, Tuple, Union
 
 import torch
 
@@ -34,7 +34,7 @@ logger = QEFFLogger.get_logger("MODEL")
 class MoEFlavour(str, Enum):
     EXPERT_PARALLEL = "expert_parallel"
     # Backward-compatible alias for one transition period.
-    EXPERT_BLOCKED = "expert_parallel"
+    EXPERT_BLOCKED = "expert_parallel"  # noqa: PIE796
     SIMPLE_LOOP = "simple_loop"
     DECODE_BMM = "decode_bmm"
 
@@ -53,7 +53,7 @@ def densify_topk(topk_indices: torch.Tensor, topk_weights: torch.Tensor, num_exp
     return routing_weights
 
 
-def supports_moe_flavour(module, flavour: Union[MoEFlavour, str]) -> bool:
+def supports_moe_flavour(module, flavour: MoEFlavour | str) -> bool:
     """Return whether a module advertises a shared MoE flavour."""
     flavour = MoEFlavour(flavour)
     get_supported_moe_flavours = getattr(module, "get_supported_moe_flavours", None)
@@ -112,11 +112,11 @@ def cumsum_scatter_gather_update_expert_blocked(
     expert_out: torch.Tensor,
     expert_mlp: Callable,
     *,
-    b_g: Optional[torch.Tensor] = None,
-    b_u: Optional[torch.Tensor] = None,
-    b_d: Optional[torch.Tensor] = None,
+    b_g: torch.Tensor | None = None,
+    b_u: torch.Tensor | None = None,
+    b_d: torch.Tensor | None = None,
     num_packed_chunks: int = 1,
-    expert_intermediate_block_size: Optional[int] = None,
+    expert_intermediate_block_size: int | None = None,
 ) -> torch.Tensor:
     """Run one local expert slot over statically traced packed chunks.
 
@@ -192,10 +192,10 @@ def moe_expert_parallel(
     num_pipeline_stages: int,
     num_parallelized_experts: int,
     num_devices: int = 1,
-    experts_per_soc: Optional[int] = None,
+    experts_per_soc: int | None = None,
     tree_reduce: bool = False,
     num_packed_chunks: int = 1,
-    expert_intermediate_block_size: Optional[int] = None,
+    expert_intermediate_block_size: int | None = None,
 ) -> torch.Tensor:
     """Prefill expert-parallel flavour with branch-style expert reshaping."""
     T, H = x.shape
@@ -322,7 +322,7 @@ def select_moe_flavour(
     *,
     supported_flavours: Iterable[MoEFlavour],
     is_prefill: bool,
-    requested_flavour: Optional[Union[MoEFlavour, str]] = None,
+    requested_flavour: MoEFlavour | str | None = None,
 ) -> MoEFlavour:
     """Resolve the MoE forward flavour for a module.
 
@@ -356,7 +356,7 @@ def select_moe_flavour(
 def resolve_routing(
     routing,
     num_experts: int,
-) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
     """Normalize a router output into (dense_routing_weights, optional topk pair).
 
     Accepts either a dense ``[T, E]`` tensor or a ``(topk_indices, topk_weights)``

@@ -7,9 +7,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 import torch
 from transformers.cache_utils import Cache
@@ -56,7 +57,7 @@ class BlockingMode(str, Enum):
     PREFILL_ONLINE = "prefill_online"
 
     @classmethod
-    def resolve(cls, mode: Optional[str | "BlockingMode"]) -> "BlockingMode":
+    def resolve(cls, mode: str | BlockingMode | None) -> BlockingMode:
         if mode is None:
             return cls.NONE
         resolved_mode = cls(mode)
@@ -71,12 +72,12 @@ class BlockingMode(str, Enum):
     @classmethod
     def get_final_mode(
         cls,
-        blocking_config: "AttentionBlockingConfig",
+        blocking_config: AttentionBlockingConfig,
         *,
         prefill_only: bool = False,
         is_mla: bool = False,
-        mla_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> "BlockingMode":
+        mla_kwargs: dict[str, Any] | None = None,
+    ) -> BlockingMode:
         requested_mode = cls.resolve(blocking_config.mode)
         if is_mla:
             _mla_map = {cls.KV: cls.KV_MLA, cls.H: cls.H_MLA}
@@ -89,10 +90,10 @@ class BlockingMode(str, Enum):
     @classmethod
     def _validate_config(
         cls,
-        mode: "BlockingMode",
-        blocking_config: "AttentionBlockingConfig",
+        mode: BlockingMode,
+        blocking_config: AttentionBlockingConfig,
         prefill_only: bool = False,
-        mla_kwargs: Optional[Dict[str, Any]] = None,
+        mla_kwargs: dict[str, Any] | None = None,
     ) -> None:
         if mode.is_prefill and not prefill_only:
             raise ValueError(
@@ -102,7 +103,7 @@ class BlockingMode(str, Enum):
         if missing:
             raise ValueError(f"BlockingMode.{mode.name} requires {missing} to be set in AttentionBlockingConfig")
 
-        _REQUIRED_MLA_KWARGS: Dict["BlockingMode", list] = {
+        _REQUIRED_MLA_KWARGS: dict[BlockingMode, list] = {
             cls.KV_MLA: ["per_head_k_up_normal", "per_head_v_up", "mla_absorption"],
             cls.H_MLA: [
                 "q_a_proj_out",
@@ -128,22 +129,22 @@ class BlockingMode(str, Enum):
 @dataclass
 class AttentionBlockingConfig:
     mode: BlockingMode = BlockingMode.NONE
-    num_kv_blocks: Optional[int] = None
-    num_q_blocks: Optional[int] = None
-    head_block_size: Optional[int] = None
-    skip_kv: Optional[bool] = True
-    num_batch_blocks: Optional[int] = None
-    gdn_num_head_blocks: Optional[int] = None
-    headpar_split: Optional[int] = None
-    batch_fold: Optional[bool] = False
-    n_rep_chunk: Optional[int] = None
-    ctx_len: Optional[int] = None
-    kv_block_unroll: Optional[int] = 1
-    num_cores_per_device: Optional[int] = None
-    paged_attention: Optional[bool] = False
+    num_kv_blocks: int | None = None
+    num_q_blocks: int | None = None
+    head_block_size: int | None = None
+    skip_kv: bool | None = True
+    num_batch_blocks: int | None = None
+    gdn_num_head_blocks: int | None = None
+    headpar_split: int | None = None
+    batch_fold: bool | None = False
+    n_rep_chunk: int | None = None
+    ctx_len: int | None = None
+    kv_block_unroll: int | None = 1
+    num_cores_per_device: int | None = None
+    paged_attention: bool | None = False
 
 
-def get_gdn_num_head_blocks(blocking_config: Optional[AttentionBlockingConfig], batch_fold: bool) -> int:
+def get_gdn_num_head_blocks(blocking_config: AttentionBlockingConfig | None, batch_fold: bool) -> int:
     """Resolve the GDN head-block count for folded decode."""
     if not batch_fold or blocking_config is None:
         return 1
@@ -250,7 +251,7 @@ def recurrent_gdn_decode_forward(
 
 
 # Required AttentionBlockingConfig fields per blocking mode.
-BLOCKING_MODE_REQUIRED_PARAMS: Dict[BlockingMode, list] = {
+BLOCKING_MODE_REQUIRED_PARAMS: dict[BlockingMode, list] = {
     # decode
     BlockingMode.KV: ["num_kv_blocks"],
     BlockingMode.KV_BATCH_FOLD: ["num_kv_blocks"],
@@ -273,15 +274,15 @@ BLOCKING_MODE_REQUIRED_PARAMS: Dict[BlockingMode, list] = {
 }
 
 
-def supports_blocked_kv(past_key_value: Optional[Cache]) -> bool:
+def supports_blocked_kv(past_key_value: Cache | None) -> bool:
     return past_key_value is not None and hasattr(past_key_value, "read_only_blocked_kv")
 
 
-def supports_paged_attention_blocked_kv(past_key_value: Optional[Cache]) -> bool:
+def supports_paged_attention_blocked_kv(past_key_value: Cache | None) -> bool:
     return past_key_value is not None and hasattr(past_key_value, "read_only_paged_attention")
 
 
-_STRATEGIES: Dict[BlockingMode, Callable] = {
+_STRATEGIES: dict[BlockingMode, Callable] = {
     # decode
     BlockingMode.KV: blocked_kv_attention_forward,
     BlockingMode.KV_HEADPAR: blocked_kv_attention_forward_headpar_offline,
@@ -304,7 +305,7 @@ _STRATEGIES: Dict[BlockingMode, Callable] = {
 }
 
 
-def _get_sliding_window_len(past_key_value: Cache, layer_idx: Optional[int] = None) -> int:
+def _get_sliding_window_len(past_key_value: Cache, layer_idx: int | None = None) -> int:
     if hasattr(past_key_value, "sliding_window_len"):
         return past_key_value.sliding_window_len
     return past_key_value.get_sliding_window_len(layer_idx)
@@ -315,14 +316,14 @@ def past_key_value_update(
     module,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
+    attention_mask: torch.Tensor | None,
     past_key_value: Cache,
-    comp_ctx_lengths: Optional[torch.LongTensor] = None,
-    ccl_length: Optional[int] = None,
-    batch_index: Optional[torch.LongTensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    sliding_window: Optional[int] = None,
-    sliding_window_len: Optional[int] = None,
+    comp_ctx_lengths: torch.LongTensor | None = None,
+    ccl_length: int | None = None,
+    batch_index: torch.LongTensor | None = None,
+    position_ids: torch.LongTensor | None = None,
+    sliding_window: int | None = None,
+    sliding_window_len: int | None = None,
 ):
     if past_key_value is not None:
         cache_kwargs = {
@@ -349,26 +350,26 @@ def past_key_value_update(
 
 def generic_blocked_attention_interface(
     module,
-    query: Optional[torch.Tensor] = None,
-    key: Optional[torch.Tensor] = None,
-    value: Optional[torch.Tensor] = None,
-    attention_mask: Optional[torch.Tensor] = None,
-    scaling: Optional[float] = None,
-    layer_idx: Optional[int] = None,
-    past_key_value: Optional[Cache] = None,
-    blocking_config: Optional[AttentionBlockingConfig] = None,
-    comp_ctx_lengths: Optional[torch.LongTensor] = None,
-    batch_index: Optional[torch.LongTensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
-    block_table: Optional[torch.LongTensor] = None,
-    slot_id: Optional[torch.LongTensor] = None,
-    past_seen_tokens: Optional[int] = None,
-    non_blocked_forward: Optional[Callable] = None,
-    score_mod: Optional[Callable] = None,
-    position_bias: Optional[torch.Tensor] = None,
-    sinks: Optional[torch.Tensor] = None,
-    sliding_window: Optional[int] = None,
-    mla_kwargs: Optional[Dict[str, Any]] = None,
+    query: torch.Tensor | None = None,
+    key: torch.Tensor | None = None,
+    value: torch.Tensor | None = None,
+    attention_mask: torch.Tensor | None = None,
+    scaling: float | None = None,
+    layer_idx: int | None = None,
+    past_key_value: Cache | None = None,
+    blocking_config: AttentionBlockingConfig | None = None,
+    comp_ctx_lengths: torch.LongTensor | None = None,
+    batch_index: torch.LongTensor | None = None,
+    position_ids: torch.LongTensor | None = None,
+    block_table: torch.LongTensor | None = None,
+    slot_id: torch.LongTensor | None = None,
+    past_seen_tokens: int | None = None,
+    non_blocked_forward: Callable | None = None,
+    score_mod: Callable | None = None,
+    position_bias: torch.Tensor | None = None,
+    sinks: torch.Tensor | None = None,
+    sliding_window: int | None = None,
+    mla_kwargs: dict[str, Any] | None = None,
     is_mla: bool = False,
     prefill_only: bool = False,
     **kwargs,

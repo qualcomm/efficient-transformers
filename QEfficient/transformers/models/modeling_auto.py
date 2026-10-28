@@ -10,7 +10,6 @@ import os
 import warnings
 from pathlib import Path
 from time import perf_counter
-from typing import Optional
 
 import numpy as np
 import onnx
@@ -4082,7 +4081,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         """
         return self.model.config.__dict__
 
-    def handle_gpt_oss_env_variable_legacy_burden(self, prefill_seq_len: Optional[int] = None) -> int:
+    def handle_gpt_oss_env_variable_legacy_burden(self, prefill_seq_len: int | None = None) -> int:
         """Resolve export seq_len and populate hash_params from GPT-OSS blocking configuration.
 
         GPT-OSS prefill blocking is controlled by two parameters:
@@ -4353,6 +4352,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 if enable_chunking:
                     if self.model.config.model_type in {"qwen3_moe", "gpt_oss", "glm4_moe"}:
                         seq_len = max(prefill_seq_len or 0, constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
+                    if self.model.config.model_type == "gpt_oss":
+                        # Record NUM_FFN_BLOCKS in hash_params so the env-var fallback is hashed
+                        # even when enable_chunking=True (handle_gpt_oss_env_variable_legacy_burden
+                        # is unreachable in that branch and would otherwise leave the hash stale).
+                        if "NUM_FFN_BLOCKS" not in self.hash_params:
+                            env_val = os.environ.get("NUM_FFN_BLOCKS", None)
+                            if env_val is not None:
+                                logger.warning(
+                                    "NUM_FFN_BLOCKS environment variable is deprecated. "
+                                    "Pass num_ffn_blocks via qaic_config['moe_config']['num_ffn_blocks'] instead."
+                                )
+                                self.hash_params["NUM_FFN_BLOCKS"] = int(env_val)
+                            else:
+                                self.hash_params["NUM_FFN_BLOCKS"] = None
 
                 elif self.model.config.model_type == "gpt_oss":
                     seq_len = self.handle_gpt_oss_env_variable_legacy_burden(prefill_seq_len)

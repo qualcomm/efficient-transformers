@@ -16,8 +16,8 @@ token axis at ``dim=-2`` and therefore serves all three flavours unchanged:
     simple loop    : x [T, H]   (single-expert 2-D weights)
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -39,9 +39,9 @@ def silu_glu_mlp(
     W_g: torch.Tensor,
     W_u: torch.Tensor,
     W_d: torch.Tensor,
-    b_g: Optional[torch.Tensor] = None,
-    b_u: Optional[torch.Tensor] = None,
-    b_d: Optional[torch.Tensor] = None,
+    b_g: torch.Tensor | None = None,
+    b_u: torch.Tensor | None = None,
+    b_d: torch.Tensor | None = None,
     *,
     act_fn: Callable = F.silu,
 ) -> torch.Tensor:
@@ -58,7 +58,7 @@ def gptoss_clamped_glu_mlp(
     W_d: torch.Tensor,
     b_g: torch.Tensor,
     b_u: torch.Tensor,
-    b_d: Optional[torch.Tensor],
+    b_d: torch.Tensor | None,
     *,
     limit: float,
     alpha: float,
@@ -85,8 +85,8 @@ def gptoss_clamped_glu_mlp(
 def gptoss_clamp(
     x: torch.Tensor,
     *,
-    min_value: Optional[float] = None,
-    max_value: Optional[float] = None,
+    min_value: float | None = None,
+    max_value: float | None = None,
 ) -> torch.Tensor:
     """Clamp without exporting ONNX ``Clip`` nodes.
 

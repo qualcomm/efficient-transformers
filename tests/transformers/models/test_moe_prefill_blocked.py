@@ -9,8 +9,8 @@ from collections import Counter
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from QEfficient import QEFFAutoModelForCausalLM
@@ -29,22 +29,22 @@ from QEfficient.transformers.moe import MoEFlavour, QEffMoEBlockMixin, build_can
 
 MODEL_KWARGS = {"attn_implementation": "eager"}
 
-GLM4_MOE_CFG = dict(
-    max_position_embeddings=1024,
-    num_hidden_layers=2,
-    num_attention_heads=4,
-    hidden_size=64,
-    intermediate_size=128,
-    moe_intermediate_size=32,
-    vocab_size=127,
-    num_key_value_heads=2,
-    n_routed_experts=4,
-    num_experts_per_tok=2,
-    first_k_dense_replace=0,
-    n_group=1,
-    topk_group=1,
-    head_dim=16,
-)
+GLM4_MOE_CFG = {
+    "max_position_embeddings": 1024,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "moe_intermediate_size": 32,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+    "n_routed_experts": 4,
+    "num_experts_per_tok": 2,
+    "first_k_dense_replace": 0,
+    "n_group": 1,
+    "topk_group": 1,
+    "head_dim": 16,
+}
 
 
 MOE_BLOCK_SEQ_LEN = 8
@@ -54,15 +54,15 @@ MOE_BLOCK_EXPERT_INTERMEDIATE_SIZE = 16
 MOE_BLOCK_NUM_EXPERTS = 4
 MOE_BLOCK_TOP_K = 2
 
-MOE_BLOCK_BASE_CFG = dict(
-    max_position_embeddings=64,
-    num_hidden_layers=1,
-    num_attention_heads=2,
-    hidden_size=MOE_BLOCK_HIDDEN_SIZE,
-    intermediate_size=MOE_BLOCK_INTERMEDIATE_SIZE,
-    vocab_size=127,
-    num_key_value_heads=2,
-)
+MOE_BLOCK_BASE_CFG = {
+    "max_position_embeddings": 64,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "hidden_size": MOE_BLOCK_HIDDEN_SIZE,
+    "intermediate_size": MOE_BLOCK_INTERMEDIATE_SIZE,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+}
 
 
 def _first_module_by_class_name(model: nn.Module, class_name: str) -> nn.Module:
@@ -627,25 +627,25 @@ def test_glm4_moe_kv_blocking_transform_and_prefill_export(tmp_path):
 # ── Qwen3MOE ──────────────────────────────────────────────────────────────────
 
 
-QWEN3_MOE_CFG = dict(
-    max_position_embeddings=256,
-    num_hidden_layers=2,
-    num_attention_heads=4,
-    hidden_size=128,
-    intermediate_size=512,
-    vocab_size=127,
-    num_key_value_heads=2,
-)
-GPTOSS_CFG = dict(
-    max_position_embeddings=256,
-    num_hidden_layers=2,
-    num_attention_heads=2,
-    hidden_size=32,
-    intermediate_size=32,
-    vocab_size=127,
-    num_key_value_heads=2,
-    num_local_experts=4,
-)
+QWEN3_MOE_CFG = {
+    "max_position_embeddings": 256,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "hidden_size": 128,
+    "intermediate_size": 512,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+}
+GPTOSS_CFG = {
+    "max_position_embeddings": 256,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "hidden_size": 32,
+    "intermediate_size": 32,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+    "num_local_experts": 4,
+}
 
 
 # ── Qwen3MOE ──────────────────────────────────────────────────────────────────

@@ -5,8 +5,8 @@
 #
 # -----------------------------------------------------------------------------
 import os
+from collections.abc import Callable
 from functools import partial
-from typing import Callable, Optional, Type, Union
 
 import torch
 from torch import nn
@@ -45,6 +45,7 @@ from QEfficient.transformers.moe import (
     QEffMoEBlockMixin,
     build_canonical_expert_weights,
     delete_module_attrs,
+    gptoss_clamp,
     gptoss_clamped_glu_mlp,
     resolve_routing,
     unpack_moe_weights_from_expert_parallel,
@@ -55,9 +56,7 @@ from QEfficient.utils.logging_utils import QEFFLogger
 logger = QEFFLogger.get_logger("MODEL")
 
 
-def override_gptoss_prefill_chunking(
-    config, prefill_only: Optional[bool], enable_chunking: Optional[bool]
-) -> Optional[bool]:
+def override_gptoss_prefill_chunking(config, prefill_only: bool | None, enable_chunking: bool | None) -> bool | None:
     if prefill_only is True and enable_chunking is False and getattr(config, "model_type", None) == "gpt_oss":
         logger.warning(
             "For gpt_oss, chunking is always enabled for prefill-only mode; overriding enable_chunking=True."
@@ -190,8 +189,8 @@ class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
                     up = xb @ W_u
                     if b_u is not None:
                         up = up + b_u
-                    gate = gate.clamp(min=_fp16_min, max=limit)
-                    up = up.clamp(min=-limit, max=limit)
+                    gate = gptoss_clamp(gate, min_value=_fp16_min, max_value=limit)
+                    up = gptoss_clamp(up, min_value=-limit, max_value=limit)
                     glu = gate * torch.sigmoid(gate * alpha)
                     intermediate = (up + 1) * glu
                     down = intermediate @ W_d
@@ -206,8 +205,8 @@ class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
                         up_s = xb @ W_u[:, i_start:i_end]
                         if b_u is not None:
                             up_s = up_s + b_u[i_start:i_end]
-                        gate_s = gate_s.clamp(min=_fp16_min, max=limit)
-                        up_s = up_s.clamp(min=-limit, max=limit)
+                        gate_s = gptoss_clamp(gate_s, min_value=_fp16_min, max_value=limit)
+                        up_s = gptoss_clamp(up_s, min_value=-limit, max_value=limit)
                         glu_s = gate_s * torch.sigmoid(gate_s * alpha)
                         intermediate_s = (up_s + 1) * glu_s
                         down = down + intermediate_s @ W_d[i_start:i_end, :]
@@ -283,7 +282,7 @@ def eager_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
+    attention_mask: torch.Tensor | None,
     scaling: float,
     dropout: float = 0.0,
     **kwargs,
@@ -319,7 +318,7 @@ def opt_eager_attention_forward_blocked(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
+    attention_mask: torch.Tensor | None,
     scaling: float,
     **kwargs,
 ):
@@ -327,14 +326,12 @@ def opt_eager_attention_forward_blocked(
     value_states = repeat_kv(value, module.num_key_value_groups)
 
     BS, NH, CL, DH = query.shape
-    target_blocks = int(os.environ.get("NUM_Q_BLOCKS", 1))
+    target_blocks = int(os.environ.get("NUM_Q_BLOCKS", "1"))
     block_positions = []
     for j in range(target_blocks):
         block_positions.append(j * (CL // target_blocks))
-    block_count = 0
     outs = []
     for block_idx in range(target_blocks):
-        block_count += 1
         qi = block_positions[block_idx]
         # Calculate block size (last block should be handled with remainder)
 
@@ -400,16 +397,16 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        position_ids: Optional[torch.LongTensor] = None,
-        block_table: Optional[torch.LongTensor] = None,
-        slot_id: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        comp_ctx_lengths: Optional[torch.LongTensor] = None,
-        batch_index: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        cos_cached: Optional[torch.Tensor] = None,
-        sin_cached: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None,
+        position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        comp_ctx_lengths: torch.LongTensor | None = None,
+        batch_index: torch.LongTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        cos_cached: torch.Tensor | None = None,
+        sin_cached: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
@@ -464,16 +461,20 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             sliding_window=self.sliding_window,
+            sinks=self.sinks,
             s_aux=self.sinks,  # diff with Llama
             layer_idx=self.layer_idx,
             blocking_config=blocking_config,
             position_ids=position_ids,
             past_key_value=past_key_values,
             batch_index=batch_index,
-            prefill_only=True,
+            prefill_only=blocking_mode.is_prefill,
             # KV cache already written above via sliding_window_update_chunked /
-            # full_cache_update_chunked; skip the duplicate write inside the interface.
-            skip_kv_write=True,
+            # full_cache_update_chunked for prefill-only modes; skip the duplicate
+            # write inside the interface. Non-prefill modes (e.g. bhqkv) must not
+            # have their write_only call skipped — they need it to populate the
+            # blocked KV cache for decode.
+            skip_kv_write=blocking_mode.is_prefill,
             **kwargs,
         )
 
@@ -489,16 +490,16 @@ class QEffPrefillOnlyGptOssAttention(GptOssAttention):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        position_ids: Optional[torch.LongTensor] = None,
-        block_table: Optional[torch.LongTensor] = None,
-        slot_id: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        comp_ctx_lengths: Optional[torch.LongTensor] = None,
-        batch_index: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        cos_cached: Optional[torch.Tensor] = None,
-        sin_cached: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None,
+        position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        comp_ctx_lengths: torch.LongTensor | None = None,
+        batch_index: torch.LongTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        cos_cached: torch.Tensor | None = None,
+        sin_cached: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
@@ -566,16 +567,16 @@ class QEffGptOssAttention(GptOssAttention):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        position_ids: Optional[torch.LongTensor] = None,
-        block_table: Optional[torch.LongTensor] = None,
-        slot_id: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        comp_ctx_lengths: Optional[torch.LongTensor] = None,
-        batch_index: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        cos_cached: Optional[torch.Tensor] = None,
-        sin_cached: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None,
+        position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        comp_ctx_lengths: torch.LongTensor | None = None,
+        batch_index: torch.LongTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        cos_cached: torch.Tensor | None = None,
+        sin_cached: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
@@ -657,17 +658,17 @@ class QEffGptOssDecoderLayer(GptOssDecoderLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        block_table: Optional[torch.LongTensor] = None,
-        slot_id: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        comp_ctx_lengths: Optional[torch.LongTensor] = None,
-        batch_index: Optional[torch.LongTensor] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
+        past_key_value: Cache | None = None,
+        comp_ctx_lengths: torch.LongTensor | None = None,
+        batch_index: torch.LongTensor | None = None,
+        output_attentions: bool | None = False,
+        use_cache: bool | None = False,
+        cache_position: torch.LongTensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,  # necessary, but kept here for BC
         sin_cached=None,
         cos_cached=None,
         **kwargs: Unpack[TransformersKwargs],
@@ -675,7 +676,7 @@ class QEffGptOssDecoderLayer(GptOssDecoderLayer):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, _present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -715,19 +716,19 @@ class QEffPrefillOnlyGptOssModel(GptOssModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        block_table: Optional[torch.LongTensor] = None,
-        slot_id: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        batch_index: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        batch_index: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        return_dict: bool | None = None,
+        output_hidden_states: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeModelOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -831,20 +832,20 @@ class QEffGptOssModel(GptOssModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        block_table: Optional[torch.LongTensor] = None,
-        slot_id: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        comp_ctx_lengths: Optional[torch.LongTensor] = None,
-        batch_index: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        comp_ctx_lengths: torch.LongTensor | None = None,
+        batch_index: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        return_dict: bool | None = None,
+        output_hidden_states: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeModelOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -940,7 +941,7 @@ class QEffGptOssModel(GptOssModel):
 
 
 class QEffGptOssForCausalLM(GptOssForCausalLM):
-    def get_submodules_for_export(self) -> Type[nn.Module]:
+    def get_submodules_for_export(self) -> type[nn.Module]:
         """
         Return the set of class used as the repeated layer across the model for subfunction extraction.
 
@@ -952,23 +953,23 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        block_table: Optional[torch.LongTensor] = None,
-        slot_id: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        comp_ctx_lengths: Optional[torch.LongTensor] = None,
-        batch_index: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: Union[int, torch.Tensor] = 0,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        block_table: torch.LongTensor | None = None,
+        slot_id: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        comp_ctx_lengths: torch.LongTensor | None = None,
+        batch_index: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        output_router_logits: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
+        logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeCausalLMOutputWithPast:
         r"""
@@ -1041,7 +1042,7 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
             router_logits=outputs.router_logits,
         )
 
-    def get_pkv_dynamic_axes(self, retain_full_kv: Optional[bool] = False, continuous_batching: Optional[bool] = False):
+    def get_pkv_dynamic_axes(self, retain_full_kv: bool | None = False, continuous_batching: bool | None = False):
         pkv_dynamic_axes = []
         for layer_type in self.config.layer_types:
             if layer_type == "sliding_attention" and not retain_full_kv:
