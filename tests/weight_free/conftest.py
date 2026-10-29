@@ -36,6 +36,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "weight_free: mark a test as part of the weight-free export test suite")
     config.addinivalue_line("markers", "weight_free_export: CPU-only weight-free export smoke and parity tests")
     config.addinivalue_line("markers", "weight_free_blocking: weight-free CausalLM blocking parity tests")
+    config.addinivalue_line("markers", "qaic_mdp: four-device user-tiled QAIC test requiring fresh worker lifecycle")
 
 
 def pytest_collection_modifyitems(config, items):

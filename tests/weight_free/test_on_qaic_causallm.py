@@ -45,6 +45,7 @@ from ._helpers import (
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
     exported_onnx_path,
+    is_weight_free_mdp_blocking_case,
     load_causal_lm_config,
     load_hf_model,
     load_tokenizer,
@@ -95,6 +96,14 @@ def test_runtime_device_ids_respect_qaic_visibility(
         monkeypatch.setenv("QAIC_VISIBLE_DEVICES", visible_devices)
 
     assert _runtime_device_ids(discovered_device_ids) == expected_device_ids
+
+
+@pytest.mark.cpu_only
+def test_mdp_blocking_cases_are_marked_for_fresh_qaic_workers():
+    for case in WEIGHT_FREE_BLOCKING_QAIC_CASES:
+        blocking_key = case.id.rsplit("-", maxsplit=1)[-1]
+        marker_names = {mark.name for mark in case.marks}
+        assert ("qaic_mdp" in marker_names) is is_weight_free_mdp_blocking_case(blocking_key)
 
 
 @pytest.mark.weight_free

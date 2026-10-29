@@ -162,7 +162,7 @@ pipeline {
         )
         string(
             name: 'WEIGHT_FREE_QAIC_DEVICE_GROUPS',
-            defaultValue: '0,1,2,3;4,5,6,7;8,9,10,11;12,13,14,15',
+            defaultValue: '0,1,2,3;4,5,6,7;8,9,10,11',
             description: 'Exclusive four-device QAIC groups per weight-free worker, separated by semicolons'
         )
     }
@@ -173,7 +173,7 @@ pipeline {
         CI_IMPACT_MODE = 'full'
         CI_SELECTIVE_LAYER_FILTER = noopMarkerFilter()
         CI_QAIC_WORKERS = '3'
-        DISAGG_QAIC_WORKERS = '4'
+        DISAGG_QAIC_WORKERS = '3'
         MM_COMPILE_N = "${params.MM_COMPILE_WORKERS}"
         MM_EXEC_N = qaicDeviceGroupCount(params.MM_QAIC_DEVICE_GROUPS)
         WEIGHT_FREE_EXEC_N = qaicDeviceGroupCount(params.WEIGHT_FREE_QAIC_DEVICE_GROUPS)
@@ -667,15 +667,35 @@ pipeline {
                     runImpactStage('weight_free_qaic', params.RUN_WEIGHT_FREE_QAIC, params.TEST_PROFILE) {
                         timeout(time: 360, unit: 'MINUTES') {
                             sh '''
-                            sudo docker exec -e QEFF_MODEL_TIER=${MODEL_TIER} -e TMPDIR=/efficient-transformers/.ci-tmp/weight_free_qaic -e QEFF_QAIC_DEVICE_GROUPS="${WEIGHT_FREE_QAIC_DEVICE_GROUPS}" -e QEFF_QAIC_DEVICES_PER_WORKER=4 ${BUILD_TAG} bash -c "
+                            exec 9>/tmp/qeff-qaic-weight-free.lock
+                            flock -w 10800 9
+                            sudo docker exec -e QEFF_MODEL_TIER="${MODEL_TIER}" -e TMPDIR=/efficient-transformers/.ci-tmp/weight_free_qaic -e QEFF_QAIC_DEVICE_GROUPS="${WEIGHT_FREE_QAIC_DEVICE_GROUPS}" -e QEFF_QAIC_DEVICES_PER_WORKER=4 -e WEIGHT_FREE_EXEC_N="${WEIGHT_FREE_EXEC_N}" -e IMPACT_TEST_FILTER="${IMPACT_TEST_FILTER}" -e CI_SELECTIVE_LAYER_FILTER="${CI_SELECTIVE_LAYER_FILTER}" ${BUILD_TAG} bash -c '
                             cd /efficient-transformers && . preflight_qeff/bin/activate && pip install -r examples/dynamo/causal_lm/requirements.txt &&
                             mkdir -p /efficient-transformers/weight_free_qaic && mkdir -p /efficient-transformers/Qeff_logs && export QEFF_LOG_PATH=/efficient-transformers/Qeff_logs &&
                             export TOKENIZERS_PARALLELISM=false && export QEFF_ISOLATE_QAIC_WORKERS=1 && export QEFF_HOME=/efficient-transformers/weight_free_qaic &&
                             export HF_HUB_CACHE=/huggingface_hub && export HF_HUB_ENABLE_HF_TRANSFER=1 &&
-                            # Run the disaggregated subset in fresh workers after the main weight-free suite releases its QAIC contexts.
-                            python -m pytest tests/weight_free -m '(on_qaic) and (not disagg_dma) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --dist loadgroup -n ${WEIGHT_FREE_EXEC_N} -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_qaic.xml --durations=10 &&
-                            python -m pytest tests/weight_free/test_disaggregated.py -m '(on_qaic) and (disagg_dma) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --dist loadgroup -n ${WEIGHT_FREE_EXEC_N} -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_disagg_qaic.xml --durations=10 &&
-                            deactivate"
+                            python -m pytest tests/weight_free -m "(on_qaic) and (not disagg_dma) and (not qaic_mdp) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n "$WEIGHT_FREE_EXEC_N" -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_main_qaic.xml --durations=10 &&
+                            python -m pytest tests/weight_free -m "(on_qaic) and (qaic_mdp) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --collect-only -q -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic | { grep "::" || true; } > .ci-weight-free-mdp-collected.txt &&
+                            mapfile -t SELECTED_TESTS < .ci-weight-free-mdp-collected.txt &&
+                            if [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+                              cp tests/tests_log_weight_free_main_qaic.xml tests/tests_log_weight_free_qaic.xml
+                            else
+                              rm -f tests/tests_log_weight_free_mdp_batch_*.xml &&
+                              batch=0 &&
+                              for ((start=0; start<${#SELECTED_TESTS[@]}; start+=WEIGHT_FREE_EXEC_N)); do
+                                BATCH_TESTS=("${SELECTED_TESTS[@]:start:WEIGHT_FREE_EXEC_N}") &&
+                                batch_workers=${#BATCH_TESTS[@]} &&
+                                echo "Running weight-free MDP batch $batch with $batch_workers fresh workers" &&
+                                python -m pytest "${BATCH_TESTS[@]}" --dist loadgroup -n "$batch_workers" --junitxml="tests/tests_log_weight_free_mdp_batch_${batch}.xml" --durations=10 || exit_status=$? &&
+                                if [ "${exit_status:-0}" -ne 0 ]; then break; fi &&
+                                batch=$((batch + 1))
+                              done &&
+                              junitparser merge tests/tests_log_weight_free_main_qaic.xml tests/tests_log_weight_free_mdp_batch_*.xml tests/tests_log_weight_free_qaic.xml &&
+                              if [ "${exit_status:-0}" -ne 0 ]; then exit "$exit_status"; fi
+                            fi &&
+                            python -m pytest tests/weight_free/test_disaggregated.py -m "(on_qaic) and (disagg_dma) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n "$WEIGHT_FREE_EXEC_N" -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_disagg_qaic.xml --durations=10 &&
+                            deactivate
+                            '
                             '''
                         }
                     }
