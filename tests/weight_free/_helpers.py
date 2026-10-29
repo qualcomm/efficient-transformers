@@ -145,14 +145,6 @@ _BLOCKING_SUPPORTED_TYPES = {
     "starcoder2",
 }
 
-_MDP_BLOCKING_KEYS = frozenset({"h", "hq", "hkv"})
-
-
-def is_weight_free_mdp_blocking_case(blocking_key: str) -> bool:
-    """Return whether a blocking mode compiles a four-device user-tiled QPC."""
-    return blocking_key in _MDP_BLOCKING_KEYS
-
-
 WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS = {
     model_type: WEIGHT_FREE_CAUSAL_LM_MODEL_IDS[model_type] for model_type in _BLOCKING_SUPPORTED_TYPES
 }
@@ -162,19 +154,12 @@ def _is_weight_free_blocking_qaic_case_supported(model_type: str, blocking_key: 
     return not (model_type == "mixtral" and blocking_key == "h")
 
 
-def _blocking_qaic_marks(model_type: str, blocking_key: str) -> list:
-    marks = [pytest.mark.xdist_group(name=f"qaic-runtime-{model_type}")]
-    if is_weight_free_mdp_blocking_case(blocking_key):
-        marks.append(pytest.mark.qaic_mdp)
-    return marks
-
-
 WEIGHT_FREE_BLOCKING_QAIC_CASES = [
     pytest.param(
         model_type,
         model_id,
         blocking_key,
-        marks=_blocking_qaic_marks(model_type, blocking_key),
+        marks=pytest.mark.xdist_group(name=f"qaic-runtime-{model_type}"),
         id=f"{model_type}-{blocking_key}",
     )
     for model_type, model_id in sorted(WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS.items())
