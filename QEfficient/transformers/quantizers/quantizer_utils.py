@@ -463,9 +463,9 @@ def blockwise_dequantize(
 
     if rows % block_m != 0 or cols % block_n != 0:
         raise ValueError(f"Matrix dimensions ({rows}, {cols}) must be divisible by block sizes ({block_m}, {block_n}).")
-    quantized = quantized.to(scales.dtype)
+    quantized = quantized.to(torch.float32)
     reshaped = quantized.reshape(-1, rows // block_m, block_m, cols // block_n, block_n)
-    expanded_scales = scales.reshape(-1, rows // block_m, cols // block_n)
+    expanded_scales = scales.to(torch.float32).reshape(-1, rows // block_m, cols // block_n)
     expanded_scales = expanded_scales.unsqueeze(-1).unsqueeze(2)
     dequantized = reshaped * expanded_scales
 

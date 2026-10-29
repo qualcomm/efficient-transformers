@@ -832,9 +832,11 @@ def CompressedAttn(
         batch_dims=1,
     )
     gathered = ops.Reshape(gathered, ops.Concat(batch_size, sequence_length, top_k, head_dim, axis=0))
+    gathered = ops.Where(ops.Unsqueeze(valid, [-1]), gathered, ops.Constant(value_float=0.0))
     scores = ops.Mul(ops.Einsum(query, gathered, equation="bshd,bskd->bshk"), scale)
     scores = ops.Where(ops.Unsqueeze(valid, [2]), scores, masked_logit)
     probabilities = ops.Softmax(scores, axis=-1)
+    probabilities = ops.Where(ops.Unsqueeze(valid, [2]), probabilities, ops.Constant(value_float=0.0))
     return ops.Einsum(probabilities, gathered, equation="bshk,bskd->bshd")
 
 
@@ -856,9 +858,11 @@ class CompressedAttnFunc(torch.autograd.Function):
         gathered = kv_cache[batch_idx, topk_indices.reshape(batch_size, -1).to(torch.long)].reshape(
             batch_size, sequence_length, top_k, kv_cache.shape[-1]
         )
+        gathered = torch.where(valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
         scores = torch.matmul(query.float(), gathered.transpose(-1, -2).float()) * scale
         scores = torch.where(valid.unsqueeze(2), scores, masked_logit)
-        return torch.matmul(torch.softmax(scores, dim=-1).to(gathered.dtype), gathered)
+        probabilities = torch.where(valid.unsqueeze(2), torch.softmax(scores, dim=-1), torch.zeros_like(scores))
+        return torch.matmul(probabilities.to(gathered.dtype), gathered)
 
     @staticmethod
     def setup_context(ctx, inputs, outputs):
