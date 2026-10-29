@@ -1860,6 +1860,23 @@ class OptimizedMoEExportConfigTransform(PytorchTransform):
                 module.tree_reduce = tree_reduce
                 module.expert_parallel_num_packed_chunks = num_packed_chunks
                 module.expert_blocking_packed_chunk_size = expert_parallel_chunk_size
+            expert_intermediate_block_size = moe_config.get("expert_intermediate_block_size", None)
+            if expert_intermediate_block_size is not None:
+                expert_intermediate_block_size = int(expert_intermediate_block_size)
+                if expert_intermediate_block_size <= 0:
+                    raise ValueError(
+                        f"moe_config['expert_intermediate_block_size'] must be a positive integer, "
+                        f"got {expert_intermediate_block_size}"
+                    )
+            module.expert_intermediate_block_size = expert_intermediate_block_size
+            num_ffn_blocks = moe_config.get("num_ffn_blocks", None)
+            if num_ffn_blocks is not None:
+                num_ffn_blocks = int(num_ffn_blocks)
+                if num_ffn_blocks <= 0:
+                    raise ValueError(
+                        f"moe_config['num_ffn_blocks'] must be a positive integer, got {num_ffn_blocks}"
+                    )
+            module.expert_num_ffn_blocks = num_ffn_blocks
             transformed = True
 
         if uses_expert_parallel and compile_num_tokens % expert_parallel_chunk_size != 0:
@@ -1885,6 +1902,9 @@ class OptimizedMoEExportConfigTransform(PytorchTransform):
 
         if transformed and hash_params is not None:
             hash_params["moe_prefill_flavour"] = (flavour or MoEFlavour.DECODE_BMM).value
+            num_ffn_blocks_cfg = moe_config.get("num_ffn_blocks", None)
+            if num_ffn_blocks_cfg is not None:
+                hash_params["num_ffn_blocks"] = int(num_ffn_blocks_cfg)
             if flavour is MoEFlavour.EXPERT_PARALLEL and layout is not None:
                 total_avl_cores, num_pipeline_stages, num_parallelized_experts, _ = layout
                 hash_params["moe_prefill_total_avl_cores"] = total_avl_cores
