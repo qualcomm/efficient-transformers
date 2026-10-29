@@ -30,7 +30,6 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
 )
 
 from QEfficient.customop import (
-    CompressedAttnFunc,
     CtxGather1DFunc,
     V4CtxScatter1DFunc,
     ctx_gather_blocked_kv,
@@ -1299,8 +1298,13 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         full_blocks = (hidden_states.shape[1] - lead) // ratio
 
         if lead > 0:
-            pooled_kv = torch.cat((kv_state[:, :ratio, :head_dim], kv_state[:, ratio:, head_dim:]), dim=1)
-            pooled_score = torch.cat((score_state[:, :ratio, :head_dim], score_state[:, ratio:, head_dim:]), dim=1)
+            prior_kv = kv_state[:, :ratio, :head_dim]
+            prior_score = score_state[:, :ratio, :head_dim]
+            if pos0 < ratio:
+                prior_kv = torch.zeros_like(prior_kv)
+                prior_score = torch.full_like(prior_score, float("-inf"))
+            pooled_kv = torch.cat((prior_kv, kv_state[:, ratio:, head_dim:]), dim=1)
+            pooled_score = torch.cat((prior_score, score_state[:, ratio:, head_dim:]), dim=1)
             compressed = (pooled_kv * pooled_score.softmax(dim=1).to(pooled_kv.dtype)).sum(dim=1, keepdim=True)
             compressed = norm(compressed.to(hidden_states.dtype))
             block_start = (pos0 // ratio) * ratio
@@ -1327,8 +1331,16 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 torch.arange(ratio, device=hidden_states.device).view(1, 1, -1).expand(batch_size, full_blocks, -1)
             )
             block_score = gate_proj(block_hidden).float() + F.embedding(block_slots, position_bias)
-            pooled_kv = torch.cat((block_kv[..., :head_dim], block_kv[..., head_dim:]), dim=2)
-            pooled_score = torch.cat((block_score[..., :head_dim], block_score[..., head_dim:]), dim=2)
+            pooled_kv = block_kv.new_zeros((batch_size, full_blocks, 2 * ratio, head_dim))
+            pooled_score = block_score.new_full((batch_size, full_blocks, 2 * ratio, head_dim), float("-inf"))
+            pooled_kv[:, :, ratio:] = block_kv[..., head_dim:]
+            pooled_score[:, :, ratio:] = block_score[..., head_dim:]
+            if full_blocks > 1:
+                pooled_kv[:, 1:, :ratio] = block_kv[:, :-1, :, :head_dim]
+                pooled_score[:, 1:, :ratio] = block_score[:, :-1, :, :head_dim]
+            if pos0 >= ratio:
+                pooled_kv[:, 0, :ratio] = kv_state[:, :ratio, :head_dim]
+                pooled_score[:, 0, :ratio] = score_state[:, :ratio, :head_dim]
             compressed = norm(
                 (pooled_kv * pooled_score.softmax(dim=2).to(pooled_kv.dtype)).sum(dim=2).to(hidden_states.dtype)
             )
@@ -1514,39 +1526,28 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             local_scores = torch.einsum("bhsd,btd->bhst", query_chunk.float(), local_states.float()) * self.scaling
             local_masked_logit = local_scores[:, :, :1, :1].sum() * 0.0 - 3.0e4
             local_scores = torch.where(local_valid.unsqueeze(1), local_scores, local_masked_logit)
-            sinks = self.sinks.view(1, self.num_heads, 1, 1).float()
-            stable_max = torch.maximum(local_scores.max(dim=-1, keepdim=True).values, sinks)
-            local_probs = torch.exp(local_scores - stable_max)
-            local_probs = local_probs / (local_probs.sum(dim=-1, keepdim=True) + torch.exp(sinks - stable_max))
-            local_output = torch.einsum("bhst,btd->bhsd", local_probs, local_states.float()).to(local_states.dtype)
-            local_output = self._csa_prefill_rotate(
-                local_output.transpose(1, 2), cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
-            ).transpose(1, 2)
 
-            compressed_parts = []
-            scale = query_chunk[:, :1, :1, :1].sum() * 0.0 + self.scaling
-            masked_logit = scale * 0.0 - 3.0e4
-            for sub_start in range(0, chunk_length, gather_sub_block_size):
-                sub_end = min(sub_start + gather_sub_block_size, chunk_length)
-                selected_sub = selected[:, sub_start:sub_end]
-                valid_sub = selected_valid[:, sub_start:sub_end]
-                compressed_output = CompressedAttnFunc.apply(
-                    compressed_kv_cache,
-                    selected_sub.to(torch.int32),
-                    valid_sub,
-                    query_chunk[:, :, sub_start:sub_end].transpose(1, 2),
-                    scale,
-                    masked_logit,
-                ).transpose(1, 2)
-                compressed_output = self._csa_prefill_rotate(
-                    compressed_output.transpose(1, 2),
-                    cos[:, start + sub_start : start + sub_end],
-                    sin[:, start + sub_start : start + sub_end],
-                    inverse=True,
-                    sequence_major=True,
-                ).transpose(1, 2)
-                compressed_parts.append(compressed_output)
-            chunk_outputs.append(local_output + torch.cat(compressed_parts, dim=2))
+            safe_selected = torch.where(selected_valid, selected, torch.zeros_like(selected)).to(torch.long)
+            selected_kv = torch.gather(
+                compressed_kv_cache.unsqueeze(1).expand(-1, chunk_length, -1, -1),
+                2,
+                safe_selected.unsqueeze(-1).expand(-1, -1, -1, compressed_kv_cache.shape[-1]),
+            )
+            compressed_scores = torch.einsum("bhsd,bskd->bhsk", query_chunk.float(), selected_kv.float()) * self.scaling
+            compressed_scores = torch.where(selected_valid.unsqueeze(1), compressed_scores, local_masked_logit)
+
+            sinks = self.sinks.view(1, self.num_heads, 1, 1).expand(batch_size, -1, chunk_length, -1).float()
+            combined_scores = torch.cat((local_scores, sinks, compressed_scores), dim=-1)
+            combined_probs = F.softmax(combined_scores, dim=-1, dtype=torch.float32)
+            local_probs, _, compressed_probs = combined_probs.split(
+                (local_scores.shape[-1], 1, compressed_scores.shape[-1]), dim=-1
+            )
+            attention_output = torch.einsum("bhst,btd->bhsd", local_probs, local_states.float())
+            attention_output = attention_output + torch.einsum("bhsk,bskd->bhsd", compressed_probs, selected_kv.float())
+            attention_output = self._csa_prefill_rotate(
+                attention_output.transpose(1, 2), cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
+            ).transpose(1, 2)
+            chunk_outputs.append(attention_output.to(hidden_states.dtype))
 
         cache_layer.local_kv_cache = local_kv_cache
         cache_layer.compressed_kv_cache = compressed_kv_cache
@@ -1738,12 +1739,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 tile_max = compressed_scores.amax(dim=-1)
                 next_max = torch.maximum(running_max, tile_max)
                 previous_scale = torch.exp(running_max - next_max)
-                tile_scale = torch.exp(tile_max - next_max)
                 exp_scores = torch.exp(compressed_scores - next_max.unsqueeze(-1))
                 running_output = running_output * previous_scale.unsqueeze(-1) + torch.einsum(
                     "bshk,bkd->bshd", exp_scores, gathered.float()
-                ) * tile_scale.unsqueeze(-1)
-                running_sum = running_sum * previous_scale + exp_scores.sum(dim=-1) * tile_scale
+                )
+                running_sum = running_sum * previous_scale + exp_scores.sum(dim=-1)
                 running_max = next_max
             compressed_output = (running_output / running_sum.unsqueeze(-1).clamp(min=1.0e-9)).to(hidden_states.dtype)
             compressed_output = self._csa_prefill_rotate(
