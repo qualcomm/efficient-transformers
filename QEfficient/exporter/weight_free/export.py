@@ -19,6 +19,10 @@ from QEfficient.exporter.weight_free.checkpoint_key_resolver import promote_init
 from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path, save_weight_spec
 from QEfficient.utils import load_json
 from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
+from QEfficient.utils.hardware_utils import (
+    get_default_weight_free_dtype,
+    validate_weight_free_target_dtype,
+)
 from QEfficient.utils.logging_utils import QEFFLogger
 from QEfficient.utils.torch_patches import dynamo_invoke_subgraph_fallback_env, preserve_subfunction_source_lines
 
@@ -62,8 +66,11 @@ def _resolve_weight_free_target_dtype(qeff_model) -> torch.dtype:
         for attr in ("dtype", "torch_dtype"):
             dtype = getattr(config, attr, None)
             if isinstance(dtype, torch.dtype):
+                validate_weight_free_target_dtype(dtype)
                 return dtype
-    return torch.float32
+    target_dtype = getattr(torch, get_default_weight_free_dtype())
+    validate_weight_free_target_dtype(target_dtype)
+    return target_dtype
 
 
 def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):

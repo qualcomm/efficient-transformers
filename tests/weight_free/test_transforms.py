@@ -918,6 +918,55 @@ class TestWeightFreeCheckpointTransforms:
         _write_safetensors_checkpoint(tmp_path, {"a": torch.ones(3, 5), "b": torch.ones(7)})
         assert _safetensors_shapes(str(tmp_path / "model.safetensors")) == {"a": [3, 5], "b": [7]}
 
+    @staticmethod
+    def _weight_graph(source_dtype, target_dtype):
+        weight = ir.Value(name="weight", shape=[2, 2], type=ir.TensorType(target_dtype))
+        hidden = ir.Value(name="hidden", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+        output = ir.Value(name="output", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+        matmul = ir.Node(
+            domain="",
+            op_type="MatMul",
+            inputs=[weight, hidden],
+            outputs=[output],
+            name="matmul",
+            version=17,
+        )
+        graph = ir.Graph(
+            inputs=[hidden],
+            outputs=[output],
+            nodes=[matmul],
+            initializers=[weight],
+            opset_imports={"": 17},
+        )
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _promote_initializer
+
+        _promote_initializer(SimpleNamespace(graph=graph), "weight", weight, source_dtype)
+        return graph
+
+    def test_original_bfloat16_weight_casts_to_fp16_graph_dtype(self):
+        graph = self._weight_graph(ir.DataType.BFLOAT16, ir.DataType.FLOAT16)
+
+        assert [(value.name, value.dtype) for value in graph.inputs] == [
+            ("hidden", ir.DataType.FLOAT),
+            ("weight", ir.DataType.BFLOAT16),
+        ]
+        assert [node.op_type for node in graph] == ["Cast", "MatMul"]
+        cast, matmul = list(graph)
+        assert cast.attributes["to"].value == int(ir.DataType.FLOAT16)
+        assert matmul.inputs[0].name == cast.outputs[0].name
+        assert not graph.initializers
+
+    def test_original_bfloat16_weight_has_no_cast_for_bfloat16_graph_dtype(self):
+        graph = self._weight_graph(ir.DataType.BFLOAT16, ir.DataType.BFLOAT16)
+
+        assert [(value.name, value.dtype) for value in graph.inputs] == [
+            ("hidden", ir.DataType.FLOAT),
+            ("weight", ir.DataType.BFLOAT16),
+        ]
+        assert [node.op_type for node in graph] == ["MatMul"]
+        assert list(graph)[0].inputs[0].name == "weight"
+        assert not graph.initializers
+
     def test_scheduler_waits_for_staged_dependency(self, tmp_path):
         execution_order = []
 

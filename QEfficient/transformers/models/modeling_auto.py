@@ -105,6 +105,10 @@ from QEfficient.utils import (
 )
 from QEfficient.utils.check_ccl_specializations import process_ccl_specializations
 from QEfficient.utils.export_utils import export_from_compile
+from QEfficient.utils.hardware_utils import (
+    get_default_weight_free_dtype,
+    validate_weight_free_target_dtype,
+)
 from QEfficient.utils.logging_utils import QEFFLogger, log_from_pretrained_call, log_generate_call
 from QEfficient.utils.runtime_requirements import validate_dynamo_export_requirements
 from QEfficient.utils.sampler_utils import get_sampling_inputs_and_outputs
@@ -181,7 +185,12 @@ def _disable_unsupported_weight_free(kwargs: dict, qeff_auto_class_name: str) ->
     )
 
 
-def _resolve_torch_dtype(kwargs: dict) -> None:
+def _resolve_torch_dtype(
+    kwargs: dict,
+    *,
+    weight_free: bool = False,
+    use_original_checkpoint: bool = False,
+) -> None:
     """
     Resolve torch_dtype in kwargs before calling from_pretrained.
 
@@ -190,14 +199,19 @@ def _resolve_torch_dtype(kwargs: dict) -> None:
     * If the caller already set torch_dtype to something other than
       bfloat16 (e.g. float16 or float32), leave it untouched.
     * If torch_dtype is bfloat16 **and** the target HW is ai100
-      (the default), leave it as bfloat16 so export/compile still run in
-      bfloat16, but warn that on-device generation is expected to fail
-      because the ai100 runtime does not support bfloat16.
+      (the default), leave it as bfloat16 for the regular path and warn that
+      on-device generation is expected to fail.  For original-checkpoint
+      weight-free export, select float16 so the graph contains the explicit
+      BF16-to-FP16 conversion required by AI100.
     * If torch_dtype is bfloat16 and the target HW is ai200,
       leave it as-is (ai200 supports bfloat16).
-    * If torch_dtype is not set at all and the target HW is ai100 (the
-      default), default to float32 so that models whose config.json
-      declares bfloat16 are not silently loaded in bfloat16.
+    * If weight-free loading is enabled and torch_dtype is not set, default to
+      float16 on ai100 and bfloat16 on ai200.
+    * Otherwise, if torch_dtype is not set and the target HW is ai100 (the
+      default), use float32 so models whose config.json declares bfloat16 are
+      not silently loaded in bfloat16.  Original-checkpoint weight-free export
+      is covered by the weight-free rule above so BF16 source tensors can be
+      represented as explicit BF16-to-FP16 casts on ai100.
 
     Transformers v5 renamed the ``torch_dtype`` argument to ``dtype``. To keep
     backward compatibility for callers (and examples) that pass either name,
@@ -210,16 +224,28 @@ def _resolve_torch_dtype(kwargs: dict) -> None:
     if kwargs.get("torch_dtype", None) is None and kwargs.get("dtype", None) is not None:
         kwargs["torch_dtype"] = kwargs["dtype"]
     current_dtype = kwargs.get("torch_dtype", None)
+    if weight_free:
+        validate_weight_free_target_dtype(current_dtype, aic_hw_version)
 
-    if aic_hw_version != "ai200":
+    if current_dtype is None and (weight_free or use_original_checkpoint):
+        kwargs["torch_dtype"] = getattr(torch, get_default_weight_free_dtype(aic_hw_version))
+    elif aic_hw_version != "ai200":
         if current_dtype is None:
             kwargs["torch_dtype"] = torch.float32
         elif current_dtype == torch.bfloat16:
-            logger.warning(
-                "torch_dtype=bfloat16 is not supported on %s. Export and compilation will proceed in "
-                "bfloat16, but on-device generation is expected to fail.",
-                aic_hw_version,
-            )
+            if use_original_checkpoint:
+                kwargs["torch_dtype"] = torch.float16
+                logger.info(
+                    "Original-checkpoint weight-free export on %s uses float16 graph weights so BF16 "
+                    "safetensors are converted by explicit ONNX Cast nodes.",
+                    aic_hw_version,
+                )
+            else:
+                logger.warning(
+                    "torch_dtype=bfloat16 is not supported on %s. Export and compilation will proceed in "
+                    "bfloat16, but on-device generation is expected to fail.",
+                    aic_hw_version,
+                )
 
     # Keep the v5 alias in sync so HF from_pretrained and config see one dtype.
     if "dtype" in kwargs:
@@ -626,7 +652,10 @@ class QEFFAutoModel(QEFFTransformersBase):
 
         kwargs.update({"attn_implementation": "eager", "low_cpu_mem_usage": False})
 
-        _resolve_torch_dtype(kwargs)
+        _resolve_torch_dtype(
+            kwargs,
+            weight_free=weight_free,
+        )
         if weight_free:
             # Weight-free mode: build the model on the meta device so no
             # checkpoint weights are ever materialized here. The real weights
@@ -3698,7 +3727,11 @@ class QEFFAutoModelForImageTextToText:
             }
         )
 
-        _resolve_torch_dtype(kwargs)
+        _resolve_torch_dtype(
+            kwargs,
+            weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
+        )
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs)
         if layerwise:
@@ -4032,7 +4065,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             }
         )
 
-        _resolve_torch_dtype(kwargs)
+        _resolve_torch_dtype(
+            kwargs,
+            weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
+        )
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs)
         if layerwise:
