@@ -455,6 +455,45 @@ def test_deepseek_v4_csa_prefill_rotates_indexer_queries_per_chunk():
     assert torch.isfinite(output.logits).all()
 
 
+def test_deepseek_v4_csa_prefill_matches_token_decode():
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["compressed_sparse_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.sliding_window = 8
+
+    decode_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    prefill_config = deepcopy(config)
+    prefill_config.qeff_csa_prefill_only = True
+    prefill_config.qeff_csa_prefill_q_block_size = 8
+    prefill_config.qeff_csa_prefill_attn_gather_sub_qc = 4
+    prefill_config.qeff_csa_prefill_indexer_kv_block_size = 2
+    prefill_config.qeff_csa_prefill_indexer_topk_per_block = 1
+    prefill_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(prefill_config).eval()).model.eval()
+    prefill_model.load_state_dict(decode_model.state_dict())
+
+    input_ids = torch.randint(0, config.vocab_size, (1, 8))
+    decode_cache = decode_model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=32)
+    with torch.no_grad():
+        for position in range(input_ids.shape[1]):
+            decode_output = decode_model(
+                input_ids=input_ids[:, position : position + 1],
+                position_ids=torch.tensor([[position]]),
+                past_key_values=decode_cache,
+                use_cache=True,
+            )
+            decode_cache = decode_output.past_key_values
+
+        prefill_output = prefill_model(
+            input_ids=input_ids,
+            position_ids=torch.arange(input_ids.shape[1]).unsqueeze(0),
+            past_key_values=prefill_model.get_dummy_pkv_cache(prefill_config, batch_size=1, ctx_len=32),
+            use_cache=True,
+        )
+
+    torch.testing.assert_close(prefill_output.logits, decode_output.logits, atol=2e-4, rtol=2e-4)
+
+
 def test_deepseek_v4_csa_prefill_indexer_global_selection_is_exact():
     config = _tiny_deepseek_v4_config()
     config.qeff_csa_prefill_indexer_kv_block_size = 2
