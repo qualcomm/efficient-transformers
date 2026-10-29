@@ -133,6 +133,96 @@ def test_dflash_transforms_run_before_spd_and_sampler(monkeypatch, qaic_config, 
     assert applied == expected_order
 
 
+def test_dflash2_target_transform_sets_shared_dflash_chunk_metadata():
+    from QEfficient.transformers.models.pytorch_transforms import DFlash2TLMTransform
+
+    model = make_tiny_qwen3()
+    transformed, applied = DFlash2TLMTransform.apply(
+        model,
+        {"target_layer_ids": [1], "dflash_block_size": 8},
+    )
+
+    assert applied is True
+    assert transformed.model.target_layer_ids == [1]
+    assert transformed.model.dflash_chunk_size == 8
+
+
+def test_dflash2_state_dict_remap_and_export_submodule():
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import (
+        DFlash2DecoderLayer,
+        DFlash2ForCausalLM,
+        remap_dflash2_state_dict,
+    )
+
+    remapped = remap_dflash2_state_dict(
+        {
+            "layers.0.input_layernorm.weight": torch.ones(4),
+            "candidate_selector.predecessor_codebook": torch.ones(8, 2),
+            "fc.weight": torch.ones(4, 4),
+        }
+    )
+
+    assert "model.layers.0.input_layernorm.weight" in remapped
+    assert "model.candidate_selector.predecessor_codebook.weight" in remapped
+    assert "fc.weight" not in remapped
+    assert DFlash2ForCausalLM.__new__(DFlash2ForCausalLM).get_submodules_for_export() == {DFlash2DecoderLayer}
+
+
+def test_dflash2_dlm_transform_scales_fp16_residual_stream():
+    from transformers import Qwen3Config
+
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+    from QEfficient.transformers.models.pytorch_transforms import DFlash2DLMTransform
+
+    config = Qwen3Config(
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=128,
+        vocab_size=VOCAB_SIZE,
+        max_position_embeddings=CTX_LEN,
+        head_dim=32,
+        layer_types=["sliding_attention", "sliding_attention"],
+        dflash_config={
+            "block_size": 4,
+            "conv_group_size": 16,
+            "conv_kernel_size": 2,
+            "mask_token_id": VOCAB_SIZE - 1,
+            "selector_rank": 8,
+            "selector_top_k": 1,
+        },
+    )
+    model = DFlash2ForCausalLM(config)
+    epsilon = model.model.norm.variance_epsilon
+    finish_weights = [
+        layer.attention_conv.kernel_projection.weight[layer.attention_conv.kernel_size * layer.attention_conv.groups :]
+        .detach()
+        .clone()
+        for layer in model.model.layers
+    ]
+
+    transformed, applied = DFlash2DLMTransform.apply(
+        model,
+        {"dflash_dlm": True, "dflash_residual_scale": 4.0},
+    )
+
+    assert applied is True
+    assert transformed.model.residual_scale == 4.0
+    assert transformed.model.layers[0].scale_input_residual is True
+    assert transformed.model.layers[1].scale_input_residual is False
+    assert transformed.model.layers[0].input_layernorm.variance_epsilon == epsilon
+    assert transformed.model.layers[0].post_attention_layernorm.variance_epsilon == epsilon / 16
+    assert transformed.model.layers[1].input_layernorm.variance_epsilon == epsilon / 16
+    assert transformed.model.norm.variance_epsilon == epsilon / 16
+    for layer, original_finish_weight in zip(transformed.model.layers, finish_weights):
+        finish_offset = layer.attention_conv.kernel_size * layer.attention_conv.groups
+        assert torch.equal(
+            layer.attention_conv.kernel_projection.weight[finish_offset:],
+            original_finish_weight / 4,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests: draft (DLM) side -- DFlashTransform + DFlashDLMTransform
 # ---------------------------------------------------------------------------

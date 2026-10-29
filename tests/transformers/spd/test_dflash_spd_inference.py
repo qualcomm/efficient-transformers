@@ -67,6 +67,7 @@ class _FakeTokenizer:
 class _FakeTLMSession:
     def __init__(self):
         self.run_count = 0
+        self.input_names = []
 
     def set_buffers(self, _buffers):
         pass
@@ -92,6 +93,19 @@ class _FakeDLMSession:
         token_ids = np.array([5, 6, 7, 8])
         logits[0, np.arange(BLOCK_SIZE), token_ids] = 1
         return {"logits": logits}
+
+
+class _FakeCommitTLMSession(_FakeTLMSession):
+    def __init__(self):
+        super().__init__()
+        self.input_names = ["cache_commit"]
+        self.cache_commits = []
+        self.position_history = []
+
+    def run(self, inputs):
+        self.cache_commits.append(int(inputs["cache_commit"][0]))
+        self.position_history.append(inputs["position_ids"].copy())
+        return super().run(inputs)
 
 
 class _FakeGemmaTLMSession:
@@ -157,6 +171,36 @@ def test_dflash_acceptance_rate_uses_accepted_tokens():
     assert metrics.acceptance_rate() == 2.0
 
 
+def test_dflash2_host_selector_rescores_top_k_chain():
+    from examples.performance.dflash.utils import HostSelector
+
+    predecessor = np.zeros((VOCAB_SIZE, 2), dtype=np.float32)
+    successor = np.zeros_like(predecessor)
+    predecessor[[0, 2], 0] = 1.0
+    successor[2, 0] = 2.0
+    selector = HostSelector(predecessor, successor, top_k=2)
+
+    logits = np.zeros((1, BLOCK_SIZE, VOCAB_SIZE), dtype=np.float32)
+    logits[:, :, 1] = 5.0
+    logits[:, :, 2] = 4.5
+    outputs = {
+        "logits": logits,
+        "selector_hidden": np.ones((1, BLOCK_SIZE, 2), dtype=np.float32),
+    }
+
+    selected = selector(outputs, np.array([0], dtype=np.int64))
+
+    assert selected.tolist() == [[1, 2, 2, 2]]
+    with pytest.raises(ValueError, match="selector_hidden rank"):
+        selector(
+            {
+                "logits": logits,
+                "selector_hidden": np.ones((1, BLOCK_SIZE, 3), dtype=np.float32),
+            },
+            np.array([0], dtype=np.int64),
+        )
+
+
 def test_dflash_generation_len_caps_partial_block():
     metrics = run_spd_inference_single(
         prompt_text="hi",
@@ -178,6 +222,35 @@ def test_dflash_generation_len_caps_partial_block():
     assert metrics.total_generated_tokens == 1
     assert metrics.total_accepted_tokens == 1
     assert metrics.num_total_iters == 1
+
+
+def test_dflash2_text_path_uses_selector_and_qwen35_commit_replay():
+    tlm_session = _FakeCommitTLMSession()
+    selector_calls = []
+
+    def selector(outputs, anchor_ids):
+        selector_calls.append((sorted(outputs), anchor_ids.copy()))
+        return outputs["logits"].argmax(axis=-1)
+
+    run_spd_inference_single(
+        prompt_text="hi",
+        tokenizer=_FakeTokenizer(),
+        dlm_session=_FakeDLMSession(),
+        tlm_session=tlm_session,
+        mask_token_id=MASK_TOKEN_ID,
+        vocab_size=VOCAB_SIZE,
+        prompt_chunk_size=PROMPT_CHUNK_SIZE,
+        ctx_len=CTX_LEN,
+        block_size=BLOCK_SIZE,
+        max_iterations=1,
+        hidden_size=HIDDEN_SIZE,
+        generation_len=1,
+        draft_selector=selector,
+    )
+
+    assert len(selector_calls) == 1
+    assert tlm_session.cache_commits == [1, 0, 1]
+    assert np.all(tlm_session.position_history[-1][:, 2:] == -1)
 
 
 def test_dflash_rejects_padded_prompt_longer_than_context():

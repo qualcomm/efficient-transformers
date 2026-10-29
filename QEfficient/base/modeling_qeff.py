@@ -1382,6 +1382,18 @@ class QEFFBaseModel(ABC):
         if not onnx_path.is_file():
             raise FileNotFoundError(f"ONNX file not found at: {onnx_path}")
 
+        if isinstance(compiler_options.get("node_precision_info"), bool):
+            if not compiler_options["node_precision_info"]:
+                compiler_options.pop("node_precision_info")
+            elif hasattr(getattr(self, "model", None), "generate_npi_file"):
+                compiler_options["node_precision_info"] = self.model.generate_npi_file(onnx_path)
+            else:
+                logger.warning(
+                    f"node_precision_info=True but {type(getattr(self, 'model', None)).__name__} "
+                    "does not provide generate_npi_file(); dropping the option."
+                )
+                compiler_options.pop("node_precision_info")
+
         if enable_qnn:
             if artifacts:
                 raise NotImplementedError("`artifacts` is not supported by the QNN compilation path.")

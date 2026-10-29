@@ -8,7 +8,10 @@
 import argparse
 import json
 import os
+from dataclasses import dataclass
+from pathlib import Path
 
+import numpy as np
 import torch
 from datasets import Features, Sequence, Value, load_dataset
 from huggingface_hub import hf_hub_download
@@ -16,11 +19,12 @@ from safetensors import safe_open
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 
-from QEfficient import QEFFAutoModelForImageTextToText
+from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import (
     QAICInferenceSession,
     is_retained_state_name,
 )
+from QEfficient.utils.checkpoint_utils import load_checkpoint_weights
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
@@ -33,6 +37,7 @@ MODEL_MAP = {
     "gemma-4-31B-it": ("google/gemma-4-31B-it", "z-lab/gemma-4-31B-it-DFlash"),
     "Qwen3-4B": ("Qwen/Qwen3-4B", "z-lab/Qwen3-4B-DFlash-b16"),
     "Qwen3-8B": ("Qwen/Qwen3-8B", "z-lab/Qwen3-8B-DFlash-b16"),
+    "Qwen3.8-27B": ("Qwen/Qwen3.8-27B", "z-lab/Qwen3.8-27B-DFlash2"),
     "Llama-3.1-8B-Instruct": ("meta-llama/Llama-3.1-8B-Instruct", "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat"),
     "Qwen3-VL-32B-Instruct": (
         "Qwen/Qwen3-VL-32B-Instruct",
@@ -52,6 +57,100 @@ def _build_aliases(model_map):
 
 
 MODEL_ALIASES = _build_aliases(MODEL_MAP)
+
+
+@dataclass(frozen=True)
+class DFlash2Meta:
+    block_size: int
+    mask_token_id: int
+    hidden_size: int
+    vocab_size: int
+    selector_rank: int
+    selector_top_k: int
+
+
+def _dflash2_config_value(config, name, default=None):
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    if isinstance(dflash_config, dict) and name in dflash_config:
+        return dflash_config[name]
+    return getattr(config, name, default)
+
+
+def read_dflash2_meta(model_id: str, token: str | None) -> DFlash2Meta:
+    config = AutoConfig.from_pretrained(model_id, token=token, trust_remote_code=True)
+    mask_token_id = _dflash2_config_value(config, "mask_token_id")
+    if mask_token_id is None:
+        raise ValueError(f"{model_id!r} has no DFlash2 mask_token_id")
+    return DFlash2Meta(
+        block_size=int(_dflash2_config_value(config, "block_size", 16)),
+        mask_token_id=int(mask_token_id),
+        hidden_size=int(config.hidden_size),
+        vocab_size=int(config.vocab_size),
+        selector_rank=int(_dflash2_config_value(config, "selector_rank", 0)),
+        selector_top_k=int(_dflash2_config_value(config, "selector_top_k", 1)),
+    )
+
+
+class HostSelector:
+    """Run DFlash2's serial bigram top-k selector on the host."""
+
+    def __init__(self, predecessor: np.ndarray, successor: np.ndarray, top_k: int):
+        if predecessor.shape != successor.shape:
+            raise ValueError(
+                f"Selector codebook shape mismatch: predecessor={predecessor.shape}, successor={successor.shape}"
+            )
+        if top_k < 1:
+            raise ValueError(f"selector_top_k must be at least 1, got {top_k}")
+        self.predecessor = np.ascontiguousarray(predecessor, dtype=np.float32)
+        self.successor = np.ascontiguousarray(successor, dtype=np.float32)
+        self.top_k = int(top_k)
+        self.vocab_size, self.rank = self.predecessor.shape
+
+    @classmethod
+    def from_checkpoint(cls, model_id: str, top_k: int):
+        keys = {
+            "candidate_selector.predecessor_codebook",
+            "candidate_selector.successor_codebook",
+        }
+        weights = load_checkpoint_weights(model_id, keys)
+        missing = keys - set(weights)
+        if missing:
+            raise ValueError(f"Missing DFlash2 selector weights: {sorted(missing)}")
+        return cls(
+            weights["candidate_selector.predecessor_codebook"].float().numpy(),
+            weights["candidate_selector.successor_codebook"].float().numpy(),
+            top_k,
+        )
+
+    def __call__(self, outputs: dict[str, np.ndarray], anchor_ids: np.ndarray) -> np.ndarray:
+        logits = np.asarray(outputs["logits"], dtype=np.float32)
+        projected = np.asarray(outputs["selector_hidden"], dtype=np.float32)
+        if logits.ndim != 3 or projected.ndim != 3:
+            raise ValueError(f"Expected 3D logits and selector_hidden, got {logits.shape} and {projected.shape}")
+        if projected.shape[:2] != logits.shape[:2]:
+            raise ValueError(
+                f"Selector sequence shape mismatch: logits={logits.shape[:2]}, selector_hidden={projected.shape[:2]}"
+            )
+        if projected.shape[-1] != self.rank:
+            raise ValueError(f"selector_hidden rank {projected.shape[-1]} does not match codebook rank {self.rank}")
+        if logits.shape[-1] != self.vocab_size:
+            raise ValueError(f"Logits vocab size {logits.shape[-1]} does not match codebook size {self.vocab_size}")
+
+        tokens = logits.argmax(axis=-1).astype(np.int64)
+        if self.top_k <= 1:
+            return tokens
+
+        k = min(self.top_k, logits.shape[-1])
+        candidates = np.argpartition(-logits, k - 1, axis=-1)[..., :k]
+        unary = np.take_along_axis(logits, candidates, axis=-1)
+        for batch_idx, anchor in enumerate(np.asarray(anchor_ids).reshape(-1)):
+            predecessor = int(anchor)
+            for position in range(1, logits.shape[1]):
+                query = self.predecessor[predecessor] * projected[batch_idx, position]
+                scores = unary[batch_idx, position] + self.successor[candidates[batch_idx, position]] @ query
+                predecessor = int(candidates[batch_idx, position, int(scores.argmax())])
+                tokens[batch_idx, position] = predecessor
+        return tokens
 
 
 def load_spd_sessions(tlm_qpc: str, dlm_qpc: str, tlm_devices: list[int], dlm_devices: list[int]):
@@ -730,3 +829,310 @@ def reformat_jsonl_by_category(questions: list) -> list:
         category = q.get("category", "")
         q["turns"][0] = format_prompt(q["turns"][0], category)
     return questions
+
+
+# DFlash-2 compile helpers. Keep the example front end responsible only for CLI
+# parsing/session execution, matching the compile helpers above for DFlash-1.
+def _dflash2_value(config, name: str, default=None):
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    if isinstance(dflash_config, dict) and name in dflash_config:
+        return dflash_config[name]
+    return getattr(config, name, default)
+
+
+def inspect_dflash2_draft(
+    draft_model: str,
+    hf_token: str | None = None,
+    local_files_only: bool = False,
+) -> int:
+    """Validate a DFlash-2 draft config and its dynamic-convolution/selector shapes."""
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+    config = AutoConfig.from_pretrained(
+        draft_model,
+        token=hf_token,
+        local_files_only=local_files_only,
+        trust_remote_code=True,
+    )
+    architectures = list(getattr(config, "architectures", None) or [])
+    if "DFlash2DraftModel" not in architectures:
+        raise RuntimeError(f"{draft_model!r} is not a DFlash-2 draft checkpoint: architectures={architectures}")
+
+    hidden_size = int(config.hidden_size)
+    kernel_size = int(_dflash2_value(config, "conv_kernel_size"))
+    group_size = int(_dflash2_value(config, "conv_group_size"))
+    block_size = int(_dflash2_value(config, "block_size", 16))
+    selector_rank = int(_dflash2_value(config, "selector_rank"))
+    selector_top_k = int(_dflash2_value(config, "selector_top_k"))
+    if hidden_size % group_size:
+        raise RuntimeError(f"hidden_size={hidden_size} is not divisible by conv_group_size={group_size}")
+    groups = hidden_size // group_size
+
+    with torch.device("meta"):
+        model = DFlash2ForCausalLM(config)
+    conv = model.model.layers[0].attention_conv
+    expected = {
+        "attention_conv.base_kernel": (2, kernel_size, hidden_size),
+        "attention_conv.kernel_projection.weight": (2 * kernel_size * groups, hidden_size),
+        "candidate_selector.hidden_projection.weight": (selector_rank, hidden_size),
+    }
+    actual = {
+        "attention_conv.base_kernel": tuple(conv.base_kernel.shape),
+        "attention_conv.kernel_projection.weight": tuple(conv.kernel_projection.weight.shape),
+        "candidate_selector.hidden_projection.weight": tuple(
+            model.model.candidate_selector.hidden_projection.weight.shape
+        ),
+    }
+    failed = [name for name, shape in expected.items() if actual[name] != shape]
+    if failed:
+        raise RuntimeError(f"DFlash-2 shape checks failed: {failed}")
+
+    print("[ok] DFlash-2 config and meta-model checks passed")
+    print(f"[info] hidden_size={hidden_size} block_size={block_size}")
+    print(f"[info] conv_kernel_size={kernel_size} conv_group_size={group_size} groups={groups}")
+    print(f"[info] selector_rank={selector_rank} selector_top_k={selector_top_k}")
+    return block_size
+
+
+def _resolve_dflash2_draft_dir(
+    draft_model: str,
+    hf_token: str | None,
+    local_files_only: bool,
+) -> Path:
+    path = Path(draft_model)
+    if path.is_dir():
+        return path
+    from huggingface_hub import snapshot_download
+
+    return Path(
+        snapshot_download(
+            draft_model,
+            allow_patterns=["config.json"],
+            token=hf_token,
+            local_files_only=local_files_only,
+        )
+    )
+
+
+def read_dflash2_compile_meta(
+    draft_model: str,
+    hf_token: str | None = None,
+    local_files_only: bool = False,
+) -> dict:
+    config_path = _resolve_dflash2_draft_dir(draft_model, hf_token, local_files_only) / "config.json"
+    if not config_path.exists():
+        raise RuntimeError(f"no config.json found for draft {draft_model!r}")
+    draft_config = json.loads(config_path.read_text())
+    dflash_config = draft_config.get("dflash_config") or {}
+    target_layer_ids = dflash_config.get("target_layer_ids", draft_config.get("target_layer_ids"))
+    if not target_layer_ids:
+        raise RuntimeError(f"{draft_model!r} has no dflash_config.target_layer_ids")
+    return {
+        "target_layer_ids": list(target_layer_ids),
+        "block_size": int(dflash_config.get("block_size", draft_config.get("block_size", 16))),
+        "hidden_size": int(draft_config["hidden_size"]),
+        "num_target_layers": draft_config.get("num_target_layers"),
+        "selector_top_k": int(dflash_config.get("selector_top_k", 1)),
+    }
+
+
+def validate_dflash2_tlm_pair(
+    tlm_model: str,
+    draft_meta: dict,
+    hf_token: str | None = None,
+    local_files_only: bool = False,
+) -> AutoConfig:
+    """Fail before loading target weights when a DFlash-2 draft/target pair is incompatible."""
+    config = AutoConfig.from_pretrained(
+        tlm_model,
+        token=hf_token,
+        local_files_only=local_files_only,
+        trust_remote_code=True,
+    )
+    text_config = getattr(config, "text_config", config)
+    hidden_size = int(text_config.hidden_size)
+    num_layers = int(text_config.num_hidden_layers)
+    if hidden_size != draft_meta["hidden_size"]:
+        raise RuntimeError(f"hidden_size mismatch: TLM={hidden_size} draft={draft_meta['hidden_size']}")
+    if draft_meta["num_target_layers"] is not None and int(draft_meta["num_target_layers"]) != num_layers:
+        raise RuntimeError(
+            f"layer-count mismatch: TLM has {num_layers}, draft expects {draft_meta['num_target_layers']}"
+        )
+    invalid = [layer_id for layer_id in draft_meta["target_layer_ids"] if not 0 <= layer_id < num_layers]
+    if invalid:
+        raise RuntimeError(f"target_layer_ids {invalid} out of range for a {num_layers}-layer TLM")
+    print("[ok] TLM/draft pairing checks passed")
+    print(f"[info] target_layer_ids={draft_meta['target_layer_ids']} block_size={draft_meta['block_size']}")
+    return config
+
+
+def compile_dflash2_dlm_qpc(
+    tlm_model: str,
+    draft_model: str,
+    *,
+    ctx_len: int,
+    num_cores: int,
+    num_devices: int,
+    block_size: int | None = None,
+    compile_dir: str | None = None,
+    mxfp6_matmul: bool = True,
+    mxint8_kv_cache: bool = True,
+    mos: int = 1,
+    emit_selector_hidden: bool = True,
+    residual_scale: float = 4.0,
+    node_precision_info: bool = True,
+    hf_token: str | None = None,
+    local_files_only: bool = False,
+    check_only: bool = False,
+) -> str | None:
+    """Load, validate, and compile a DFlash-2 draft QPC."""
+    config_block_size = inspect_dflash2_draft(draft_model, hf_token, local_files_only)
+    block_size = block_size or config_block_size
+    if check_only:
+        return None
+
+    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+        draft_model,
+        torch_dtype=torch.float32,
+        token=hf_token,
+        qaic_config={
+            "dflash_dlm": True,
+            "dflash_tlm_repo": tlm_model,
+            "dflash_emit_selector_hidden": emit_selector_hidden,
+            "dflash_residual_scale": residual_scale,
+        },
+        local_files_only=local_files_only,
+    )
+    if qeff_model.model.__class__.__name__ != "DFlash2ForCausalLM":
+        raise RuntimeError(f"Expected DFlash2ForCausalLM, got {qeff_model.model.__class__.__name__}")
+    if emit_selector_hidden and not getattr(qeff_model.model, "emit_selector_hidden", False):
+        raise RuntimeError("selector_hidden was requested but the DFlash-2 transform did not enable it")
+
+    qpc = qeff_model.compile(
+        compile_dir=compile_dir,
+        prefill_seq_len=block_size,
+        ctx_len=ctx_len,
+        num_cores=num_cores,
+        num_devices=num_devices,
+        dflash_block_size=block_size,
+        mxfp6_matmul=mxfp6_matmul,
+        mxint8_kv_cache=mxint8_kv_cache,
+        mos=mos,
+        prefill_only=True,
+        node_precision_info=node_precision_info,
+        use_onnx_subfunctions=False,
+    )
+    logger.info(f"[compile_dflash2_dlm] qpc={qpc}")
+    return str(qpc)
+
+
+def compile_dflash2_tlm_qpc(
+    tlm_model: str,
+    draft_model: str,
+    *,
+    target_auto_class: str = "causal_lm",
+    prefill_seq_len: int,
+    ctx_len: int,
+    num_cores: int,
+    num_devices: int,
+    block_size: int | None = None,
+    compile_dir: str | None = None,
+    mxfp6_matmul: bool = True,
+    mxint8_kv_cache: bool = True,
+    kv_offload: bool = True,
+    lang_only: bool = True,
+    image_size: int = 56,
+    target_layer_offset: int = 0,
+    target_absmax: float = 128.0,
+    mos: int = 1,
+    node_precision_info: bool = True,
+    hf_token: str | None = None,
+    local_files_only: bool = False,
+    check_only: bool = False,
+) -> str | None:
+    """Load, validate, and compile a DFlash-2 target QPC."""
+    draft_meta = read_dflash2_compile_meta(draft_model, hf_token, local_files_only)
+    tlm_config = validate_dflash2_tlm_pair(tlm_model, draft_meta, hf_token, local_files_only)
+    block_size = block_size or draft_meta["block_size"]
+    if check_only:
+        return None
+
+    qaic_config = {
+        "dflash2_checkpoint": draft_model,
+        "dflash_target_absmax": target_absmax,
+    }
+    if target_layer_offset:
+        num_layers = int(getattr(tlm_config, "text_config", tlm_config).num_hidden_layers)
+        shifted = [layer_id + target_layer_offset for layer_id in draft_meta["target_layer_ids"]]
+        invalid = [layer_id for layer_id in shifted if not 0 <= layer_id < num_layers]
+        if invalid:
+            raise RuntimeError(f"target layer offset produces out-of-range ids: {invalid}")
+        qaic_config["target_layer_ids"] = shifted
+
+    if target_auto_class == "image_text_to_text":
+        qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
+            tlm_model,
+            dtype="float32",
+            attn_implementation="eager",
+            kv_offload=kv_offload,
+            config=tlm_config,
+            token=hf_token,
+            qaic_config=qaic_config,
+            local_files_only=local_files_only,
+        )
+    elif target_auto_class == "causal_lm":
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            tlm_model,
+            dtype="float32",
+            token=hf_token,
+            qaic_config=qaic_config,
+            local_files_only=local_files_only,
+        )
+    else:
+        raise ValueError(f"Unsupported target_auto_class: {target_auto_class}")
+
+    if not getattr(qeff_model, "dflash_tlm", False):
+        raise RuntimeError("DFlash-2 TLM transform did not activate")
+    inner = qeff_model.model
+    model_body = inner.model if hasattr(inner, "model") else inner
+    text_model = model_body.language_model if hasattr(model_body, "language_model") else model_body
+    target_layer_ids = getattr(text_model, "target_layer_ids", None)
+    if not target_layer_ids:
+        raise RuntimeError("DFlash-2 target_layer_ids are missing after model load")
+    expected_in = len(target_layer_ids) * int(text_model.config.hidden_size)
+    if text_model.fc.in_features != expected_in:
+        raise RuntimeError(f"fc.in_features={text_model.fc.in_features}, expected {expected_in}")
+
+    compile_kwargs = {
+        "compile_dir": compile_dir,
+        "batch_size": 1,
+        "prefill_seq_len": prefill_seq_len,
+        "ctx_len": ctx_len,
+        "num_cores": num_cores,
+        "num_devices": num_devices,
+        "mxfp6_matmul": mxfp6_matmul,
+        "mxint8_kv_cache": mxint8_kv_cache,
+        "mos": mos,
+        "node_precision_info": node_precision_info,
+        "dflash_block_size": block_size,
+    }
+    if target_auto_class == "image_text_to_text":
+        compile_kwargs.update(
+            height=image_size,
+            width=image_size,
+            use_onnx_subfunctions=False,
+            split_model_io=True,
+        )
+        if kv_offload and lang_only:
+            compile_kwargs["skip_vision"] = True
+    qpc = qeff_model.compile(**compile_kwargs)
+
+    if hasattr(inner, "get_output_names"):
+        output_names = inner.get_output_names(kv_offload=(target_auto_class == "image_text_to_text" and kv_offload))
+        lang_outputs = output_names["lang"] if isinstance(output_names, dict) else output_names
+        if not {"hidden_states", "target_hidden_states"}.intersection(lang_outputs):
+            raise RuntimeError(f"DFlash-2 hidden-state output is missing: {lang_outputs}")
+    logger.info(f"[compile_dflash2_tlm] qpc={qpc}")
+    if isinstance(qpc, dict):
+        return str(qpc.get("lang_prefill_qpc_path") or qpc["lang_qpc_path"])
+    return str(qpc)

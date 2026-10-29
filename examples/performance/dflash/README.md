@@ -1,6 +1,6 @@
 # DFlash SPD Examples
 
-Two entry points wrap the SPD (speculative-decoding) compile + run pipeline for
+Two entry points wrap the DFlash and DFlash-2 SPD (speculative-decoding) compile + run pipeline for
 **text-only** language models and **vision-language (VLM, multimodal)** models. Each
 resolves/compiles the QPCs (or reuses pre-built ones), then runs SPD inference on a
 single prompt in-process via `QEfficient.generation.dflash_generation`. The three model adapters share the same internal `_run_spd_core` flow.
@@ -8,7 +8,7 @@ single prompt in-process via `QEfficient.generation.dflash_generation`. The thre
 | | front-end (`--model_name`, builds QPCs) | runs via |
 |---|---|---|
 | text — single prompt | `basic_inference_text.py` | `dflash_generation.run_spd_inference_single` |
-| vision — single prompt/image | `basic_inference_vision.py` | `run_spd_inference_gemma4` or `run_spd_inference_qwen3_vl` |
+| vision — single prompt/image | `basic_inference_vision.py` | text, Gemma4, or Qwen3-VL generation adapter |
 
 ---
 
@@ -137,6 +137,30 @@ python basic_inference_vision.py --model_name gemma-4-31B-it \
 | `--image_url` | — | image URL for `--image` |
 | `--image_prompt` | — | prompt text for `--image` |
 | `--height` / `--width` | `354` / `536` | qwen3-vl only — compiled vision-encoder input resolution |
+| `--dflash-method` | `dflash` | select `dflash` or `dflash-2` |
+
+## DFlash-2
+
+`basic_inference_vision.py --dflash-method dflash-2` compiles missing TLM and DLM QPCs automatically.
+The host-side top-k candidate selector is disabled by default, so draft tokens use
+per-position logits argmax (`top_k_selector=False`).
+
+```bash
+python examples/performance/dflash/basic_inference_vision.py \
+    --dflash-method dflash-2 \
+    --model_name Qwen3.8-27B \
+    --tlm_devices 34,35,36,37 \
+    --dlm_devices 38,39,40,41 \
+    --tlm_cores 16 \
+    --no-top-k-selector \
+    --prompt "Write a Python function that returns the nth Fibonacci number."
+```
+
+Pass `--tlm_qpc` and `--dlm_qpc` to reuse compiled QPCs, or
+`--target-model` and `--draft-model` to override the model pair. To enable the
+DFlash-2 bigram selector, pass `--top-k-selector`; that mode requires a DLM QPC
+compiled with the `selector_hidden` output. DLM retained KV-cache I/O defaults
+to MXINT8 for throughput; pass `--no-dlm-mxint8-kv-cache` to compile it as FP16.
 
 ## Adding a new model
 

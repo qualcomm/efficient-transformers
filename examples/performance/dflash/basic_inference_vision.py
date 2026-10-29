@@ -12,6 +12,7 @@ import os
 import sys
 import time
 
+import numpy as np
 import requests
 from PIL import Image
 from rich.console import Console
@@ -19,12 +20,16 @@ from rich.markup import escape
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 from utils import (
     MODEL_MAP,
+    HostSelector,
+    compile_dflash2_dlm_qpc,
+    compile_dflash2_tlm_qpc,
     compile_gemma_vlm_dlm_qpc,
     compile_gemma_vlm_qpcs,
     compile_qwen3vl_vlm_dlm_qpc,
     compile_qwen3vl_vlm_qpcs,
     get_spd_prompt_chunk_size,
     load_spd_sessions,
+    read_dflash2_meta,
     resolve_model_name,
     validate_spd_decode_specialization,
 )
@@ -35,6 +40,7 @@ from QEfficient.generation.dflash_generation import (
     build_inputs_gemma4,
     run_spd_inference_gemma4,
     run_spd_inference_qwen3_vl,
+    run_spd_inference_single,
     run_vision_encoder_gemma4,
 )
 from QEfficient.utils.logging_utils import QEFFLogger
@@ -55,15 +61,32 @@ def parse_device_list(value):
     return [int(device) for device in value.split(",") if device.strip()]
 
 
+def parse_dflash_method(value):
+    normalized = value.lower().replace("_", "-")
+    if normalized == "dflash":
+        return "dflash"
+    if normalized in {"dflash2", "dflash-2"}:
+        return "dflash-2"
+    raise argparse.ArgumentTypeError("--dflash-method must be dflash or dflash-2")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--dflash-method",
+        type=parse_dflash_method,
+        default="dflash",
+        metavar="{dflash,dflash-2}",
+        help="DFlash draft technique to compile and run (dflash2 is accepted as an alias).",
+    )
     parser.add_argument(
         "--model_name",
         default="gemma-4-31B-it",
         type=resolve_model_name,
         help=f"VLM name or full HF repo path. Supported: {', '.join(MODEL_MAP.keys())}",
     )
-    parser.add_argument("--tlm_hf_path", default=None)
+    parser.add_argument("--tlm_hf_path", "--target-model", dest="tlm_hf_path", default=None)
+    parser.add_argument("--dlm_hf_path", "--draft-model", dest="dlm_hf_path", default=None)
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--image", action="store_true")
     parser.add_argument("--image_url", default=None)
@@ -90,6 +113,19 @@ def parse_args():
     parser.add_argument("--height", type=int, default=None)
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--precision", choices=["fp16", "fp6"], default="fp6", help="Model precision")
+    parser.add_argument("--compile-only", action="store_true")
+    parser.add_argument(
+        "--top-k-selector",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use the DFlash-2 host-side top-k candidate selector.",
+    )
+    parser.add_argument(
+        "--dlm-mxint8-kv-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use MXINT8 retained KV-cache I/O for the DFlash-2 draft.",
+    )
     return parser.parse_args()
 
 
@@ -108,6 +144,95 @@ def _resolve_batch_size(batch_size):
 def _get_mask_token_id(config):
     dflash_config = getattr(config, "dflash_config", None) or config.to_dict().get("dflash_config", {})
     return dflash_config["mask_token_id"] if isinstance(dflash_config, dict) else dflash_config.mask_token_id
+
+
+def _dflash2_target_auto_class(config):
+    architectures = getattr(config, "architectures", None) or []
+    if config.model_type in {"qwen3_5", "qwen3_5_moe", "qwen3_vl"} or any(
+        "ConditionalGeneration" in architecture for architecture in architectures
+    ):
+        return "image_text_to_text"
+    return "causal_lm"
+
+
+def _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size):
+    if args.image:
+        raise ValueError("The selected DFlash-2 model pair is text-only; omit --image.")
+
+    meta = read_dflash2_meta(dlm_repo, args.hf_token)
+    tlm_qpc = args.tlm_qpc or compile_dflash2_tlm_qpc(
+        tlm_repo,
+        dlm_repo,
+        target_auto_class=_dflash2_target_auto_class(tlm_config),
+        prefill_seq_len=args.prefill_seq_len,
+        ctx_len=args.ctx_len,
+        num_cores=args.tlm_cores,
+        num_devices=len(args.tlm_devices),
+        block_size=meta.block_size,
+        mxfp6_matmul=args.precision == "fp6",
+        mxint8_kv_cache=True,
+        kv_offload=True,
+        lang_only=True,
+        mos=1,
+        node_precision_info=True,
+        hf_token=args.hf_token,
+    )
+    dlm_qpc = args.dlm_qpc or compile_dflash2_dlm_qpc(
+        tlm_repo,
+        dlm_repo,
+        ctx_len=args.ctx_len,
+        num_cores=args.dlm_cores,
+        num_devices=len(args.dlm_devices),
+        block_size=meta.block_size,
+        mxfp6_matmul=args.precision == "fp6",
+        mxint8_kv_cache=args.dlm_mxint8_kv_cache,
+        mos=1,
+        emit_selector_hidden=args.top_k_selector and meta.selector_top_k > 1,
+        node_precision_info=True,
+        hf_token=args.hf_token,
+    )
+    if args.compile_only:
+        print({"tlm_qpc": tlm_qpc, "dlm_qpc": dlm_qpc})
+        return None, None, None
+
+    logger.info(f"TLM qpc: {tlm_qpc}")
+    logger.info(f"DLM qpc: {dlm_qpc}")
+    tokenizer = AutoTokenizer.from_pretrained(tlm_repo, token=args.hf_token, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    dlm_session, tlm_session = load_spd_sessions(tlm_qpc, dlm_qpc, args.tlm_devices, args.dlm_devices)
+    prompt_chunk_size = get_spd_prompt_chunk_size(tlm_session)
+    validate_spd_decode_specialization(tlm_session, meta.block_size)
+
+    selector = None
+    if args.top_k_selector and meta.selector_top_k > 1:
+        if "selector_hidden" not in dlm_session.output_names:
+            raise ValueError("The DFlash-2 DLM QPC must expose selector_hidden for --top-k-selector.")
+        selector = HostSelector.from_checkpoint(dlm_repo, meta.selector_top_k)
+        dlm_session.set_buffers(
+            {"selector_hidden": np.zeros((batch_size, meta.block_size, meta.selector_rank), dtype=np.float32)}
+        )
+
+    messages = [{"role": "user", "content": args.prompt}]
+    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    metrics = run_spd_inference_single(
+        prompt_text=prompt_text,
+        tokenizer=tokenizer,
+        dlm_session=dlm_session,
+        tlm_session=tlm_session,
+        mask_token_id=meta.mask_token_id,
+        vocab_size=meta.vocab_size,
+        prompt_chunk_size=prompt_chunk_size,
+        ctx_len=args.ctx_len,
+        block_size=meta.block_size,
+        max_iterations=args.iteration,
+        hidden_size=meta.hidden_size,
+        generation_len=args.generation_len,
+        batch_size=batch_size,
+        draft_selector=selector,
+    )
+    return metrics, {"vision_encode_time_s": None}, tokenizer
 
 
 def _run_gemma(
@@ -236,18 +361,48 @@ def _run_qwen3_vl(
     return metrics, {"vision_encode_time_s": metrics.vision_prefill_time if args.image else None}
 
 
+def _print_results(tokenizer, metrics, output_extra):
+    output_parts = ["Output: "]
+    for token_id, source in zip(metrics.generated_ids, metrics.generated_sources):
+        text = escape(tokenizer.decode([token_id], skip_special_tokens=True))
+        output_parts.append(f"[blue]{text}[/blue]" if source == "dlm" else f"[white]{text}[/white]")
+    console.print("".join(output_parts))
+
+    width = 46
+    print("\n" + "=" * width)
+    print("  SPD Inference — Metrics")
+    print("=" * width)
+    print(f"  {'Acceptance Rate (tok/iter)':<30} {metrics.acceptance_rate():>6.2f}")
+    print(f"  {'DLM Throughput  (tok/s)':<30} {metrics.dlm_tok_rate():>6.1f}")
+    print(f"  {'TLM Throughput  (tok/s)':<30} {metrics.tlm_tok_rate():>6.1f}")
+    print(f"  {'SPD Decode Speed (tok/s)':<30} {metrics.spd_tok_rate():>6.1f}")
+    print(f"  {'Generated tokens':<30} {metrics.total_generated_tokens:>6}")
+    print(f"  {'Iterations':<30} {metrics.num_total_iters:>6}")
+    print(f"  {'Prefill time (s)':<30} {metrics.total_prefill_time:>6.3f}")
+    if output_extra["vision_encode_time_s"] is not None:
+        print(f"  {'Vision Encode (s)':<30} {output_extra['vision_encode_time_s']:>6.3f}")
+    print("=" * width + "\n")
+
+
 def main():
     args = parse_args()
     batch_size = _resolve_batch_size(args.batch_size)
     if not args.image and not args.prompt:
         raise ValueError("Provide --prompt for text mode, or --image for image mode.")
 
-    tlm_repo_default, dlm_repo = MODEL_MAP[args.model_name]
+    tlm_repo_default, dlm_repo_default = MODEL_MAP[args.model_name]
     tlm_repo = args.tlm_hf_path or tlm_repo_default
+    dlm_repo = args.dlm_hf_path or dlm_repo_default
     if tlm_repo is None:
         raise ValueError(f"No default TLM HF path for '{args.model_name}'. Pass --tlm_hf_path.")
 
     tlm_config = AutoConfig.from_pretrained(tlm_repo, trust_remote_code=True, token=args.hf_token)
+    if args.dflash_method == "dflash-2":
+        metrics, output_extra, tokenizer = _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size)
+        if not args.compile_only:
+            _print_results(tokenizer, metrics, output_extra)
+        return
+
     is_qwen3vl = tlm_config.model_type == "qwen3_vl"
 
     if args.tlm_qpc and args.vision_qpc:
@@ -324,26 +479,7 @@ def main():
             batch_size,
         )
 
-    output_parts = ["Output: "]
-    for token_id, source in zip(metrics.generated_ids, metrics.generated_sources):
-        text = escape(tokenizer.decode([token_id], skip_special_tokens=True))
-        output_parts.append(f"[blue]{text}[/blue]" if source == "dlm" else f"[white]{text}[/white]")
-    console.print("".join(output_parts))
-
-    width = 46
-    print("\n" + "=" * width)
-    print("  SPD Inference — Metrics")
-    print("=" * width)
-    print(f"  {'Acceptance Rate (tok/iter)':<30} {metrics.acceptance_rate():>6.2f}")
-    print(f"  {'DLM Throughput  (tok/s)':<30} {metrics.dlm_tok_rate():>6.1f}")
-    print(f"  {'TLM Throughput  (tok/s)':<30} {metrics.tlm_tok_rate():>6.1f}")
-    print(f"  {'SPD Decode Speed (tok/s)':<30} {metrics.spd_tok_rate():>6.1f}")
-    print(f"  {'Generated tokens':<30} {metrics.total_generated_tokens:>6}")
-    print(f"  {'Iterations':<30} {metrics.num_total_iters:>6}")
-    print(f"  {'Prefill time (s)':<30} {metrics.total_prefill_time:>6.3f}")
-    if output_extra["vision_encode_time_s"] is not None:
-        print(f"  {'Vision Encode (s)':<30} {output_extra['vision_encode_time_s']:>6.3f}")
-    print("=" * width + "\n")
+    _print_results(tokenizer, metrics, output_extra)
 
 
 if __name__ == "__main__":

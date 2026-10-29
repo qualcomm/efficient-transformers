@@ -1235,6 +1235,163 @@ class SamplerTransform:
         return model, transformed
 
 
+class DFlash2DLMTransform:
+    """Prepare a native DFlash2 draft and load its shared vocabulary weights."""
+
+    @classmethod
+    def apply(cls, model: nn.Module, qaic_config: dict | None = None, **kwargs) -> tuple[nn.Module, bool]:
+        if not (qaic_config and qaic_config.get("dflash_dlm", False)):
+            return model, False
+
+        inner = model.model
+        residual_scale = float(qaic_config.get("dflash_residual_scale", 4.0))
+        if residual_scale < 1.0:
+            raise ValueError("dflash_residual_scale must be >= 1")
+        inner.residual_scale = residual_scale
+        if residual_scale > 1.0:
+            # The checkpoint uses BF16.  Carrying the unnormalised residual stream at 1/S and
+            # each residual branch at 1/S avoids FP16 overflow.  RMSNorm(x/S, eps/S^2) is exactly
+            # RMSNorm(x, eps), so adjust only norms that consume the scaled stream.  Layer 0's
+            # input norm still consumes the original embedding and keeps its original epsilon.
+            epsilon_scale = residual_scale * residual_scale
+            for layer_index, layer in enumerate(inner.layers):
+                layer.residual_scale = residual_scale
+                layer.scale_input_residual = layer_index == 0
+                # Scale the finish half of each dynamic convolution in its weights.  This makes
+                # the branch output 1/S directly and avoids ten runtime Div nodes over full
+                # hidden-state tensors in the five-layer draft.
+                for conv in (layer.attention_conv, layer.mlp_conv):
+                    finish_offset = conv.kernel_size * conv.groups
+                    with torch.no_grad():
+                        conv.base_kernel[1].div_(residual_scale)
+                        conv.kernel_projection.weight[finish_offset:].div_(residual_scale)
+                if layer_index > 0:
+                    layer.input_layernorm.variance_epsilon /= epsilon_scale
+                layer.post_attention_layernorm.variance_epsilon /= epsilon_scale
+            inner.norm.variance_epsilon /= epsilon_scale
+
+        selector = getattr(inner, "candidate_selector", None)
+        emit_selector_hidden = bool(qaic_config.get("dflash_emit_selector_hidden", False))
+        if selector is not None and getattr(selector, "top_k", 0) <= 1:
+            delattr(inner, "candidate_selector")
+            selector = None
+            emit_selector_hidden = False
+        if emit_selector_hidden:
+            if selector is None:
+                raise ValueError("dflash_emit_selector_hidden requires a live DFlash2 candidate selector")
+            for name in ("predecessor_codebook", "successor_codebook"):
+                if hasattr(selector, name):
+                    delattr(selector, name)
+        model.emit_selector_hidden = emit_selector_hidden
+
+        tlm_repo = qaic_config.get("dflash_tlm_repo")
+        if not tlm_repo:
+            return model, True
+        weights = load_checkpoint_weights(
+            tlm_repo,
+            {
+                "lm_head.weight",
+                "lm_head.bias",
+                "model.embed_tokens.weight",
+                "model.language_model.embed_tokens.weight",
+            },
+        )
+        embed_weight = weights.get("model.embed_tokens.weight", weights.get("model.language_model.embed_tokens.weight"))
+        lm_head_weight = weights.get("lm_head.weight", embed_weight)
+        if embed_weight is None or lm_head_weight is None:
+            warnings.warn(f"DFlash2DLMTransform: shared embedding/lm_head weights not found in {tlm_repo!r}")
+            return model, True
+
+        with torch.no_grad():
+            inner.embed_tokens.weight.copy_(embed_weight.to(inner.embed_tokens.weight))
+            model.lm_head.weight.copy_(lm_head_weight.to(model.lm_head.weight))
+            if weights.get("lm_head.bias") is not None and model.lm_head.bias is not None:
+                model.lm_head.bias.copy_(weights["lm_head.bias"].to(model.lm_head.bias))
+        return model, True
+
+
+class DFlash2TLMTransform:
+    """Attach the DFlash2 target-hidden projection to a text or multimodal target model."""
+
+    @classmethod
+    def apply(cls, model: nn.Module, qaic_config: dict | None = None, **kwargs) -> tuple[nn.Module, bool]:
+        if not qaic_config:
+            return model, False
+        checkpoint = qaic_config.get("dflash2_checkpoint")
+        target_layer_ids = qaic_config.get("target_layer_ids")
+        if not checkpoint and not target_layer_ids:
+            return model, False
+
+        draft_block_size = qaic_config.get("dflash_block_size")
+        target_ids_from_checkpoint = bool(checkpoint and not target_layer_ids)
+        if checkpoint and not target_layer_ids:
+            from transformers import AutoConfig
+
+            draft_config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True)
+            dflash_config = getattr(draft_config, "dflash_config", None) or {}
+            target_layer_ids = (
+                dflash_config.get("target_layer_ids")
+                if isinstance(dflash_config, dict)
+                else getattr(dflash_config, "target_layer_ids", None)
+            )
+            target_layer_ids = target_layer_ids or getattr(draft_config, "target_layer_ids", None)
+            if not target_layer_ids:
+                raise ValueError(f"{checkpoint!r} has no dflash_config.target_layer_ids")
+            draft_block_size = (
+                dflash_config.get("block_size")
+                if isinstance(dflash_config, dict)
+                else getattr(dflash_config, "block_size", None)
+            ) or getattr(draft_config, "block_size", draft_block_size)
+        target_layer_ids = list(target_layer_ids)
+        if target_ids_from_checkpoint:
+            # This checkpoint family is validated with the IDs as written. Keep
+            # an explicit override for A/B testing the upstream hidden_states[i+1]
+            # convention without changing established checkpoint semantics.
+            offset = int(qaic_config.get("dflash2_target_layer_offset", 0))
+            target_layer_ids = [layer_id + offset for layer_id in target_layer_ids]
+
+        text_model = model.model.language_model if hasattr(model.model, "language_model") else model.model
+        reference_weight = text_model.get_input_embeddings().weight
+        hidden_size = text_model.config.hidden_size
+        fc = nn.Linear(
+            len(target_layer_ids) * hidden_size,
+            hidden_size,
+            bias=False,
+            device=reference_weight.device,
+            dtype=reference_weight.dtype,
+        )
+
+        norm_kind = str(qaic_config.get("dflash_hidden_norm", "standard")).lower()
+        if norm_kind not in {"standard", "zero_centered"}:
+            raise ValueError("dflash_hidden_norm must be 'standard' or 'zero_centered'")
+        norm_cls = GemmaCustomRMSNormAIC if norm_kind == "zero_centered" else CustomRMSNormAIC
+        hidden_norm = norm_cls(hidden_size, eps=getattr(text_model.config, "rms_norm_eps", 1e-6)).to(
+            device=reference_weight.device, dtype=reference_weight.dtype
+        )
+
+        if checkpoint:
+            weights = load_checkpoint_weights(checkpoint, {"fc.weight", "hidden_norm.weight"})
+            if "fc.weight" not in weights or "hidden_norm.weight" not in weights:
+                raise ValueError(f"DFlash2 projection weights were not found in {checkpoint!r}")
+            with torch.no_grad():
+                fc.weight.copy_(weights["fc.weight"].to(fc.weight))
+                hidden_norm.weight.copy_(weights["hidden_norm.weight"].to(hidden_norm.weight))
+
+        with torch.no_grad():
+            max_row_norm = fc.weight.float().norm(dim=1).max().item()
+            target_absmax = float(qaic_config.get("dflash_target_absmax", _DFLASH_TARGET_ABSMAX))
+            scale = max((fc.in_features**0.5) * max_row_norm / target_absmax, 1.0)
+            fc.weight.div_(scale)
+
+        text_model.target_layer_ids = target_layer_ids
+        text_model.fc = fc
+        text_model.hidden_norm = hidden_norm
+        if draft_block_size is not None:
+            text_model.dflash_chunk_size = int(draft_block_size)
+        model.target_layer_ids = target_layer_ids
+        return model, True
+
+
 class DFlashTransform(ModuleMappingTransform):
     """Replace QEff Qwen3 modules with DFlash variants when dflash_dlm is set."""
 

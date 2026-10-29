@@ -68,6 +68,8 @@ from QEfficient.transformers.modeling_utils import (
 from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import override_gptoss_prefill_chunking
 from QEfficient.transformers.models.pytorch_transforms import (
     CustomOpsTransform,
+    DFlash2DLMTransform,
+    DFlash2TLMTransform,
     DFlashDLMTransform,
     DFlashTLMTransform,
     DFlashTransform,
@@ -1611,10 +1613,15 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         self.input_shapes, self.output_names = None, None
 
         # DFlash TLM: attach fc/hidden_norm and enable target-layer hidden-state collect.
-        self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
+        self.dflash_tlm = bool(
+            qaic_config and (qaic_config.get("dflash2_checkpoint") or qaic_config.get("target_layer_ids"))
+        )
         if self.dflash_tlm:
             qaic_config.setdefault("pretrained_model_name_or_path", kwargs.get("pretrained_model_name_or_path"))
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            if qaic_config.get("dflash2_checkpoint"):
+                self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+            else:
+                self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
 
         # ---Sampling---
         # Note: SamplerTransform should be applied after all other transforms
@@ -3734,6 +3741,22 @@ MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP = {
 }
 
 
+def _peek_architectures(pretrained_model_name_or_path, kwargs: dict) -> list[str]:
+    """Read checkpoint architecture metadata without loading its weights."""
+    try:
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path,
+            trust_remote_code=kwargs.get("trust_remote_code", False),
+            token=kwargs.get("token"),
+            revision=kwargs.get("revision"),
+        )
+        return list(getattr(config, "architectures", None) or [])
+    except Exception:
+        return []
+
+
 class QEFFAutoModelForCausalLM(QEFFBaseModel):
     """
     QEfficient class for Causal Language Models from the HuggingFace hub (e.g., GPT-2, Llama).
@@ -3884,12 +3907,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         # DFlash changes the model structure and output contract, so apply it before
         # the generic speculative-decoding and sampler transforms wrap model.forward.
         self.dflash_dlm = bool(qaic_config and qaic_config.get("dflash_dlm", False))
-        self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
+        self.dflash_tlm = bool(
+            qaic_config and (qaic_config.get("dflash2_checkpoint") or qaic_config.get("target_layer_ids"))
+        )
         if self.dflash_dlm:
-            self.model, _ = DFlashTransform.apply(self.model, qaic_config)
-            self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
+            if self.model.__class__.__name__ == "DFlash2ForCausalLM":
+                self.model, _ = DFlash2DLMTransform.apply(self.model, qaic_config)
+            else:
+                self.model, _ = DFlashTransform.apply(self.model, qaic_config)
+                self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
         if self.dflash_tlm:
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            if qaic_config.get("dflash2_checkpoint"):
+                self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+            else:
+                self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
 
         self.model, transformed = SpDTransform.apply(self.model, qaic_config=qaic_config, **kwargs)
         self.is_tlm = transformed
@@ -4039,6 +4070,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             # checkpoint weights are ever materialized here. The real weights
             # are supplied later at export time via pretrained_model_name_or_path.
             model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
+        elif "DFlash2DraftModel" in _peek_architectures(pretrained_model_name_or_path, kwargs):
+            from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+            model = DFlash2ForCausalLM.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         else:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         if qaic_config is not None:
@@ -4282,6 +4317,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     aic_num_cores=num_cores,
                 )
 
+        if getattr(self, "dflash_dlm", None) and prefill_seq_len is not None:
+            seq_len = min(seq_len, prefill_seq_len)
+
+        if getattr(self, "dflash_tlm", None) and any(
+            layer_type == "linear_attention" for layer_type in getattr(self.model.config, "layer_types", ())
+        ):
+            text_model = getattr(self.model, "model", None)
+            chunk_size = int(getattr(text_model, "dflash_chunk_size", seq_len))
+            seq_len = min(seq_len, chunk_size)
+
         supports_paged_attention = False
         # increase seq_len if using a larger number of blocks and set PagedAttention params if required
         if self.hash_params.get("blocking_kwargs", None):
@@ -4378,6 +4423,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
             dynamic_axes["target_hidden"] = {0: "batch_size", 1: "seq_len"}
             dynamic_axes["position_ids_target"] = {0: "batch_size", 1: "seq_len"}
+        elif getattr(self, "dflash_tlm", None) and any(
+            layer_type == "linear_attention" for layer_type in getattr(self.model.config, "layer_types", ())
+        ):
+            example_inputs["cache_commit"] = torch.ones(1, dtype=torch.int64)
 
         if self.ccl_enabled:
             example_inputs["comp_ctx_lengths"] = torch.randint(0, 127, (seq_len,), dtype=torch.int64)
@@ -4584,8 +4633,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             output_names = apply_kv_cache_prefix(output_names, kv_cache_prefix)
             self.hash_params["kv_cache_prefix"] = kv_cache_prefix
 
+        if getattr(self, "dflash_dlm", None) and getattr(self.model, "emit_selector_hidden", False):
+            output_names.append("selector_hidden")
+            dynamic_axes["selector_hidden"] = {0: "batch_size", 1: "seq_len"}
         if getattr(self, "dflash_tlm", None):
             output_names.append("hidden_states")
+            dynamic_axes["hidden_states"] = {0: "batch_size", 1: "seq_len"}
 
         if QEFFBaseModel._layerwise_active:
             return self._export_layerwise(

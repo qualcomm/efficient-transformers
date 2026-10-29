@@ -1617,6 +1617,57 @@ class QEffSlidingWindowCache:
             legacy_cache += ((self.key_cache[layer_idx], self.value_cache[layer_idx]),)
         return legacy_cache
 
+    def write_only(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Seed K/V state without gathering it or advancing logical cache time."""
+        cache_kwargs = cache_kwargs or {}
+        if len(self.key_cache) <= layer_idx:
+            self.key_cache.append(key_states)
+            self.value_cache.append(value_states)
+            return key_states, value_states
+
+        position_ids = cache_kwargs.get("position_ids")
+        if position_ids is None:
+            raise ValueError("QEffSlidingWindowCache.write_only requires position_ids")
+        layer_types = getattr(self.config, "layer_types", None)
+        is_sliding_layer = cache_kwargs.get("is_sliding")
+        if is_sliding_layer is None and layer_types is not None and layer_idx < len(layer_types):
+            is_sliding_layer = layer_types[layer_idx] == "sliding_attention"
+        batch_index = cache_kwargs.get("batch_index")
+
+        if is_sliding_layer:
+            sliding_window_len = self.key_cache[layer_idx].shape[2]
+            kv_position_ids = torch.where(
+                position_ids == -1,
+                position_ids,
+                _remainder_with_symbolic_divisor(position_ids, sliding_window_len),
+            )
+        else:
+            kv_position_ids = position_ids
+
+        if batch_index is not None:
+            if torch.onnx.is_in_onnx_export() or torch._dynamo.is_compiling():
+                invalid_scatter_index = torch.iinfo(torch.int32).max
+                scatter_position_ids = torch.where(kv_position_ids < 0, invalid_scatter_index, kv_position_ids)
+            else:
+                scatter_position_ids = kv_position_ids
+            self.key_cache[layer_idx] = ctx_scatter_cb(
+                self.key_cache[layer_idx], batch_index, scatter_position_ids, key_states
+            )
+            self.value_cache[layer_idx] = ctx_scatter_cb(
+                self.value_cache[layer_idx], batch_index, scatter_position_ids, value_states
+            )
+        else:
+            self.key_cache[layer_idx] = ctx_scatter(self.key_cache[layer_idx], kv_position_ids, key_states)
+            self.value_cache[layer_idx] = ctx_scatter(self.value_cache[layer_idx], kv_position_ids, value_states)
+
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+
     def update(
         self,
         key_states: torch.Tensor,
