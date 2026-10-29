@@ -78,10 +78,12 @@ def export_via_dynamo(
     export_kwargs: dict,
 ) -> ExportResult:
     """Export via torch.export (dynamo=True) with custom op translation."""
+    from QEfficient.base.modeling_qeff import _build_blocked_translation_table
     from QEfficient.utils.export_utils import build_dynamo_export_kwargs, reorder_inputs_by_signature
 
     example_inputs, dynamic_shapes = reorder_inputs_by_signature(qeff_model.model, example_inputs, dynamic_shapes)
     export_kwargs = build_dynamo_export_kwargs(export_kwargs)
+    export_kwargs["custom_translation_table"].update(_build_blocked_translation_table(qeff_model.model))
 
     with dynamo_invoke_subgraph_fallback_env(), preserve_subfunction_source_lines():
         onnx_program = torch.onnx.export(
@@ -119,12 +121,14 @@ def export_via_weightfree(
     export_via_dynamo and avoids a redundant convert_dynamic_axes_to_dynamic_shapes
     call.
     """
+    from QEfficient.base.modeling_qeff import _build_blocked_translation_table
     from QEfficient.base.onnx_transforms import SplitTensorsTransform
     from QEfficient.exporter.weight_free.export import export_weight_free_onnx
     from QEfficient.utils.export_utils import build_dynamo_export_kwargs, reorder_inputs_by_signature
 
     example_inputs, dynamic_shapes = reorder_inputs_by_signature(qeff_model.model, example_inputs, dynamic_shapes)
     wf_export_kwargs = build_dynamo_export_kwargs(export_kwargs)
+    wf_export_kwargs["custom_translation_table"].update(_build_blocked_translation_table(qeff_model.model))
 
     _, updated_onnx_transform_kwargs = export_weight_free_onnx(
         qeff_model=qeff_model,

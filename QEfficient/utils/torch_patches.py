@@ -321,8 +321,6 @@ def apply_torch_patches():
             ts_utils._model_to_graph = _model_to_graph_patched
         if hasattr(ts_utils, "_get_module_attributes"):
             ts_utils._get_module_attributes = _get_module_attributes
-        if hasattr(ts_utils, "_model_to_graph"):
-            ts_utils._model_to_graph = _model_to_graph_patched
 
     # Patch _C scope-attribute tracker to filter out IValue-incompatible types
     if _original_track_scope_attrs is not None:
@@ -348,8 +346,6 @@ def undo_torch_patches():
             ts_utils._model_to_graph = _original_ts_model_to_graph
         if _original_ts_get_module_attributes:
             ts_utils._get_module_attributes = _original_ts_get_module_attributes
-        if _original_ts_model_to_graph:
-            ts_utils._model_to_graph = _original_ts_model_to_graph
 
     if _original_track_scope_attrs is not None:
         _C._jit_pass_onnx_track_scope_attributes = _original_track_scope_attrs

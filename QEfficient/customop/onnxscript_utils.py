@@ -62,8 +62,8 @@ def qeff_custom_op(domain: str, version: int):
 
 
 def get_dynamo_onnxscript_func(onnxscript_func):
-    """Return the dynamo/opset18 variant attached by ``qeff_custom_op``."""
-    return getattr(onnxscript_func, _DYNAMO_FUNC_ATTR)
+    """Return the dynamo variant attached by ``qeff_custom_op`` when present."""
+    return getattr(onnxscript_func, _DYNAMO_FUNC_ATTR, onnxscript_func)
 
 
 def get_onnxscript_func(onnxscript_func, onnx_export_opset: int):

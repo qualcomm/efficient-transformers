@@ -453,6 +453,10 @@ class ModelConfig:
     QUANTIZED_MODELS = {
         "neuralmagic/Qwen2-0.5B-Instruct-FP8",
         "neuralmagic/Llama-3.2-3B-Instruct-FP8",
+        "neuralmagic/Llama-3.2-3B-Instruct-FP8-dynamic",
+        "RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic",
+        "Qwen/Qwen3-0.6B-FP8",
+        "Qwen/Qwen3-VL-2B-Instruct-FP8",
         "TheBloke/Llama-2-7B-GPTQ",
         "TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
     }
@@ -497,6 +501,8 @@ class ModelConfig:
         "Qwen/Qwen3-VL-2B-Instruct",
         "Qwen/Qwen3-VL-Reranker-2B",
         "Qwen/Qwen3-VL-Reranker-8B",
+        "Qwen/Qwen3.5-0.8B",
+        "Qwen/Qwen3.5-35B-A3B",
         "tiny-random/qwen3.5",
         "tiny-random/qwen3.5-moe",
         "tiny-random/gemma-4-dense",

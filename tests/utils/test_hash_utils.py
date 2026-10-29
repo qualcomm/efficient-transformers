@@ -9,7 +9,9 @@ import json
 import random
 
 import pytest
+import torch
 
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.utils.constants import HASH_HEXDIGEST_STR_LEN
 from QEfficient.utils.hash_utils import hash_dict_params, json_serializable, to_hashable
 
@@ -45,6 +47,14 @@ def test_json_serializable():
     # Test with an unsupported type
     with pytest.raises(TypeError):
         json_serializable({1, 2, 3, {4, 5}})
+
+
+def test_json_serializable_supports_dataclass_and_torch_dtype():
+    blocking_config = AttentionBlockingConfig()
+
+    assert isinstance(json_serializable(blocking_config), dict)
+    assert to_hashable({"blocking_kwargs": blocking_config})
+    assert json_serializable(torch.bfloat16) == "torch.bfloat16"
 
 
 def test_to_hashable():

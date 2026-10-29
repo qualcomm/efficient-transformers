@@ -21,6 +21,7 @@ Language model inference.
 | Example | Description | Script |
 |---------|-------------|--------|
 | Basic Inference | Simple text generation | [text_generation/basic_inference.py](text_generation/basic_inference.py) |
+| FP8 ONNX Export | Export and verify retained FP8 weights | [text_generation/fp8_onnx_export.py](text_generation/fp8_onnx_export.py) |
 | GGUF Models | GGUF format support | [text_generation/gguf_models.py](text_generation/gguf_models.py) |
 | MoE Models | Mixture of Experts | [text_generation/moe_inference.py](text_generation/moe_inference.py) |
 | Continuous Batching | Dynamic batching | [text_generation/continuous_batching.py](text_generation/continuous_batching.py) |

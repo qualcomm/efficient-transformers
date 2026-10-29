@@ -98,7 +98,7 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
                 raise NotImplementedError(
                     f"Weight-free export is not implemented for quantization type '{quant_type}'. Supported: mxfp4"
                 )
-            init_kwargs = {k: v for k, v in quant_config.items() if k != "quant_method"}
+            init_kwargs = dict(quant_config)
             quant_config = config_cls(**init_kwargs)
         else:
             quant_method = getattr(quant_config, "quant_method", None) or getattr(quant_config, "quant_type", None)
@@ -112,7 +112,7 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
         quantizer = quantizer_cls(quant_config)
         # Run inside init_empty_weights so newly created quantized layer buffers stay on
         # the meta device and are treated as weight-spec entries, not embedded constants.
-        with init_empty_weights():
+        with init_empty_weights(include_buffers=True):
             quantizer._process_model_before_weight_loading(qeff_model.model)
     else:
         qeff_model.model = qeff_model.model.to(dtype=target_dtype)
@@ -272,6 +272,12 @@ def export_weight_free_onnx(
     """
     target_dtype = _resolve_weight_free_target_dtype(qeff_model)
     meta_qeff_model = _run_quantizer_for_wf(qeff_model, target_dtype)
+
+    from QEfficient.base.modeling_qeff import _build_blocked_translation_table
+
+    export_kwargs.setdefault("custom_translation_table", {}).update(
+        _build_blocked_translation_table(meta_qeff_model.model)
+    )
 
     # export_wrapper (the @export_wrapper decorator on _export) already ran
     # _setup_onnx_subfunctions on this same object before calling into this
