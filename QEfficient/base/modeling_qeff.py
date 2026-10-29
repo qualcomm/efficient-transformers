@@ -1523,9 +1523,9 @@ class QEFFBaseModel(ABC):
         }
         compile_hash = hash_dict_params(compile_hash_params)
 
-        compile_dir = qpc_path.with_name(qpc_path.name + "-" + compile_hash)
-        qpc_path = compile_dir / "qpc"
         if not artifacts:
+            compile_dir = qpc_path.with_name(qpc_path.name + "-" + compile_hash)
+            qpc_path = compile_dir / "qpc"
             if (qpc_path / "programqpc.bin").is_file():
                 self.qpc_path = qpc_path
                 self.compile_artifacts_path = compile_dir
