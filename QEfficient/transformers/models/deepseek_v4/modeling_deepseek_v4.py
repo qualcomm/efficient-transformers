@@ -1224,7 +1224,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         if indexer_mode == "blockwise" and topk_per_tile < 1:
             raise ValueError("CSA prefill indexer top-k per tile must be positive.")
 
-        causal_threshold = torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype)
+        causal_threshold = torch.div(position_ids + 1, compression_rate, rounding_mode="floor")
         causal_threshold = causal_threshold.unsqueeze(-1)
         if indexer_mode == "blockwise":
             num_tiles = (capacity + tile_size - 1) // tile_size
@@ -1240,7 +1240,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             tile_scores = torch.einsum("bshd,btd->bsht", q_index.float(), tile_cache.float()).relu()
             tile_scores = (tile_scores * index_weights.unsqueeze(-1)).sum(dim=2)
             tile_indices = torch.arange(tile_start, tile_end, device=indexer_kv_cache.device).view(1, 1, -1)
-            tile_scores = tile_scores.masked_fill(tile_indices >= causal_threshold, -3.0e4)
+            tile_scores = tile_scores.masked_fill(tile_indices >= causal_threshold, float("-inf"))
 
             if indexer_mode == "global":
                 score_parts.append(tile_scores)

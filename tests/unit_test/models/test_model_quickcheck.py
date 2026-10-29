@@ -80,6 +80,7 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Cache,
     QEffDeepseekV4UnweightedRMSNorm,
 )
+from QEfficient.customop.ctx_scatter_gather import CompressedAttnFunc
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
@@ -530,6 +531,37 @@ def test_deepseek_v4_csa_prefill_indexer_global_selection_is_exact():
 
     torch.testing.assert_close(selected, torch.tensor([[[3, 1], [3, 1]]]))
     assert valid.all()
+
+
+def test_deepseek_v4_csa_prefill_indexer_admits_completed_entry_at_boundary():
+    config = _tiny_deepseek_v4_config()
+    attention = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.layers[0].self_attn
+    q_index = torch.ones((1, 1, 1, 1))
+    index_weights = torch.ones((1, 1, 1))
+    position_ids = torch.tensor([[3]])
+    indexer_kv_cache = torch.tensor([[[1.0], [2.0], [3.0], [4.0]]])
+
+    selected, valid = attention._csa_prefill_select_indexer_slots(
+        q_index,
+        index_weights,
+        position_ids,
+        indexer_kv_cache,
+        index_topk=2,
+        compression_rate=2,
+    )
+
+    torch.testing.assert_close(selected, torch.tensor([[[1, 0]]]))
+    assert valid.all()
+
+
+def test_compressed_attn_all_invalid_row_returns_zero():
+    kv_cache = torch.tensor([[[1.0], [2.0]]])
+    topk_indices = torch.tensor([[[0, 1]]], dtype=torch.int32)
+    valid = torch.zeros((1, 1, 2), dtype=torch.bool)
+    query = torch.ones((1, 1, 1, 1))
+    output = CompressedAttnFunc.apply(kv_cache, topk_indices, valid, query, torch.tensor(1.0), torch.tensor(-3.0e4))
+
+    torch.testing.assert_close(output, torch.zeros_like(output))
 
 
 def test_deepseek_v4_hca_prefill_preserves_rank_four_compressed_cache():
