@@ -117,6 +117,29 @@ CUSTOM_IO_DTYPE_MAP = {
     torch.float32: "float16",  # Since compiler doesn't support fp32
     "float32": "float16",  # Since compiler doesn't support fp32
 }
+SUPPORTED_RETAINED_STATE_DTYPES = {"float16", "mxfp6", "mxint8"}
+# Retained-state layout is part of the exported model ABI. Bump this value
+# whenever Qwen3.5 changes the shape/order of its externally visible state.
+QWEN3_5_CONV_STATE_LAYOUT_VERSION = "channel_last_v1"
+
+
+def _validate_retained_state_dtype(dtype: str | None, argument_name: str) -> None:
+    if dtype is not None and dtype not in SUPPORTED_RETAINED_STATE_DTYPES:
+        raise ValueError(f"{argument_name} must be one of {sorted(SUPPORTED_RETAINED_STATE_DTYPES)}, got {dtype!r}")
+
+
+def _resolve_retained_state_dtype(
+    output_name: str,
+    *,
+    model_dtype: str,
+    kv_cache_dtype: str,
+    recurrent_state_dtype: str | None = None,
+) -> str:
+    if "vision_embeds" in output_name or "deepstack_features" in output_name:
+        return model_dtype
+    if recurrent_state_dtype is not None and "recurrent_state." in output_name:
+        return recurrent_state_dtype
+    return kv_cache_dtype
 
 
 def _should_convert_to_fp16(target_dtype: "torch.dtype", compiler_options: dict) -> bool:
@@ -1373,6 +1396,8 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         self.model = model.get_qeff_language_decoder()
         self.qaic_config = qaic_config
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
+        if getattr(model.config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}:
+            self.hash_params["qwen3_5_conv_state_layout"] = QWEN3_5_CONV_STATE_LAYOUT_VERSION
         self.continuous_batching = False
         if qaic_config and (mla_absorption := qaic_config.get("mla_absorption", None)):
             self.hash_params["mla_absorption"] = mla_absorption
@@ -2011,6 +2036,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         num_cores: int = 16,  # FIXME: Make this mandatory arg
         mxfp6_matmul: bool = False,
         mxint8_kv_cache: bool = False,
+        recurrent_state_dtype: str | None = None,
         skip_vision: bool | None = False,
         skip_lang: bool | None = False,
         use_onnx_subfunctions: bool = False,
@@ -2058,6 +2084,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             Use MXFP6 compression for weights in the language model. Default is False.
         mxint8_kv_cache : bool, optional
             Use MXINT8 compression for KV cache. Default is False.
+        recurrent_state_dtype : str, optional
+            Override the precision of ``recurrent_state.*`` retained-state inputs and outputs.
+            This allows KV and convolution states to remain MXINT8 while recurrent states use FP16.
         num_speculative_tokens : int, optional
             Not supported for this model; must be None.
         skip_vision : bool, optional
@@ -2197,6 +2226,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             )
 
         # Apply compile-dependent transforms like blocking transform
+        _validate_retained_state_dtype(recurrent_state_dtype, "recurrent_state_dtype")
+
         moe_batch_size = (
             full_batch_size if self.continuous_batching and not prefill_only and prefill_seq_len == 1 else batch_size
         )
@@ -2319,10 +2350,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             custom_io_lang = {}
             for output_name in output_names["lang"]:
                 if output_name.endswith("_RetainedState"):
-                    dtype = (
-                        CUSTOM_IO_DTYPE_MAP[target_dtype]
-                        if ("vision_embeds" in output_name or "deepstack_features" in output_name)
-                        else kv_cache_dtype
+                    dtype = _resolve_retained_state_dtype(
+                        output_name,
+                        model_dtype=CUSTOM_IO_DTYPE_MAP[target_dtype],
+                        kv_cache_dtype=kv_cache_dtype,
+                        recurrent_state_dtype=recurrent_state_dtype,
                     )
                     _add_retained_state_custom_io(
                         custom_io_lang,
