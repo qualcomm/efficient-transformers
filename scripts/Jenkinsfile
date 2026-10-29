@@ -675,7 +675,8 @@ pipeline {
                             export TOKENIZERS_PARALLELISM=false && export QEFF_ISOLATE_QAIC_WORKERS=1 && export QEFF_HOME=/efficient-transformers/weight_free_qaic &&
                             export HF_HUB_CACHE=/huggingface_hub && export HF_HUB_ENABLE_HF_TRANSFER=1 &&
                             python -m pytest tests/weight_free -m "(on_qaic) and (not disagg_dma) and (not qaic_mdp) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n "$WEIGHT_FREE_EXEC_N" -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_main_qaic.xml --durations=10 &&
-                            python -m pytest tests/weight_free -m "(on_qaic) and (qaic_mdp) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --collect-only -q -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic | { grep "::" || true; } > .ci-weight-free-mdp-collected.txt &&
+                            set -o pipefail &&
+                            python -m pytest tests/weight_free -m "(on_qaic) and (qaic_mdp) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" -o addopts="" --collect-only -q -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic | { grep "::" || true; } > .ci-weight-free-mdp-collected.txt &&
                             mapfile -t SELECTED_TESTS < .ci-weight-free-mdp-collected.txt &&
                             if [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
                               cp tests/tests_log_weight_free_main_qaic.xml tests/tests_log_weight_free_qaic.xml
@@ -693,7 +694,25 @@ pipeline {
                               junitparser merge tests/tests_log_weight_free_main_qaic.xml tests/tests_log_weight_free_mdp_batch_*.xml tests/tests_log_weight_free_qaic.xml &&
                               if [ "${exit_status:-0}" -ne 0 ]; then exit "$exit_status"; fi
                             fi &&
-                            python -m pytest tests/weight_free/test_disaggregated.py -m "(on_qaic) and (disagg_dma) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n "$WEIGHT_FREE_EXEC_N" -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_disagg_qaic.xml --durations=10 &&
+                            python -m pytest tests/weight_free/test_disaggregated.py -m "(on_qaic) and (disagg_dma) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" -o addopts="" --collect-only -q -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic | { grep "::" || true; } > .ci-weight-free-disagg-collected.txt &&
+                            mapfile -t SELECTED_TESTS < .ci-weight-free-disagg-collected.txt &&
+                            if [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+                              echo "<?xml version=\"1.0\" encoding=\"utf-8\"?><testsuites></testsuites>" > tests/tests_log_weight_free_disagg_qaic.xml
+                            else
+                              rm -f tests/tests_log_weight_free_disagg_batch_*.xml &&
+                              batch=0 &&
+                              # Keep one test per worker process so QAIC contexts are released between tests.
+                              for ((start=0; start<${#SELECTED_TESTS[@]}; start+=WEIGHT_FREE_EXEC_N)); do
+                                BATCH_TESTS=("${SELECTED_TESTS[@]:start:WEIGHT_FREE_EXEC_N}") &&
+                                batch_workers=${#BATCH_TESTS[@]} &&
+                                echo "Running weight-free disaggregated batch $batch with $batch_workers fresh workers" &&
+                                python -m pytest "${BATCH_TESTS[@]}" --dist loadgroup -n "$batch_workers" --junitxml="tests/tests_log_weight_free_disagg_batch_${batch}.xml" --durations=10 || exit_status=$? &&
+                                if [ "${exit_status:-0}" -ne 0 ]; then break; fi &&
+                                batch=$((batch + 1))
+                              done &&
+                              junitparser merge tests/tests_log_weight_free_disagg_batch_*.xml tests/tests_log_weight_free_disagg_qaic.xml &&
+                              if [ "${exit_status:-0}" -ne 0 ]; then exit "$exit_status"; fi
+                            fi &&
                             deactivate
                             '
                             '''
