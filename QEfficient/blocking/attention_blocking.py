@@ -371,6 +371,7 @@ def generic_blocked_attention_interface(
     mla_kwargs: Optional[Dict[str, Any]] = None,
     is_mla: bool = False,
     prefill_only: bool = False,
+    skip_kv: Optional[bool] = None,
     **kwargs,
 ):
     blocking_mode = BlockingMode.resolve(blocking_config.mode)
@@ -486,7 +487,7 @@ def generic_blocked_attention_interface(
         configured_split=blocking_config.headpar_split,
         ctx_len=blocking_config.ctx_len,
         kv_block_unroll=blocking_config.kv_block_unroll,
-        skip_kv=blocking_config.skip_kv or False,
+        skip_kv=(blocking_config.skip_kv or False) if skip_kv is None else skip_kv,
         paged_attention=blocking_config.paged_attention,
         # prefill-specific
         n_rep_chunk=blocking_config.n_rep_chunk,

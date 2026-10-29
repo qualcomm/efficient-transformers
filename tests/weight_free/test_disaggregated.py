@@ -35,6 +35,7 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES,
     WEIGHT_FREE_VLM_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
@@ -102,6 +103,13 @@ def _build_disagg_decode_blocking_qaic_config(blocking_key: str) -> dict:
     return qaic_config
 
 
+def _build_disagg_prefill_blocking_qaic_config(blocking_key: str, ctx_len: int = CTX_LEN) -> dict:
+    qaic_config = dict(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES[blocking_key])
+    qaic_config["ctx_len"] = ctx_len
+    qaic_config["moe_config"] = {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}
+    return qaic_config
+
+
 def _assert_disagg_blocking_artifact(
     onnx_path: Path,
     qeff_model: QEFFAutoModelForCausalLM,
@@ -114,7 +122,12 @@ def _assert_disagg_blocking_artifact(
     assert blocking_config.mode == BlockingMode(qaic_config["blocking_mode"])
     if use_onnx_subfunctions:
         assert_has_subfunctions(onnx_path, qeff_model)
-    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key, continuous_batching=True)
+    assert_blocked_kv_ops_for_mode(
+        onnx_path,
+        qeff_model,
+        blocking_key,
+        continuous_batching=True,
+    )
 
 
 PREFILL_NUM_DEVICES = 2
@@ -1139,7 +1152,7 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
             ctx_len=GPT_OSS_PARITY_CTX_LEN,
             full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
             num_cores=GPT_OSS_PARITY_NUM_CORES,
-            qaic_config={"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}},
+            qaic_config=_build_disagg_prefill_blocking_qaic_config("prefill_online", ctx_len=GPT_OSS_PARITY_CTX_LEN),
             num_devices=dma_config["prefill_num_devices"],
             mdp_num_partitions=dma_config["stages"],
             split_retained_state_io=True,
@@ -1154,6 +1167,13 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
             use_onnx_subfunctions=use_onnx_subfunctions,
         )
         compiled_onnx_paths["prefill"] = _assert_onnx_path(qeff_model.onnx_path, "prefill")
+        _assert_disagg_blocking_artifact(
+            compiled_onnx_paths["prefill"],
+            qeff_model,
+            "prefill_online",
+            _build_disagg_prefill_blocking_qaic_config("prefill_online", ctx_len=GPT_OSS_PARITY_CTX_LEN),
+            use_onnx_subfunctions,
+        )
         print(f"Weight-free disagg CB ONNX paths: {compiled_onnx_paths}")
 
         prefill_session = QAICInferenceSession(

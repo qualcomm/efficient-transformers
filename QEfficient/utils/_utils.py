@@ -12,7 +12,7 @@ import os
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import requests
 import torch
@@ -141,6 +141,37 @@ def align_kv_input_names_to_retained_outputs(input_names, output_names):
         match = next((t for t in retained_targets if t == name or t.startswith(name + "_")), None)
         aligned.append(match if match is not None else name)
     return aligned
+
+
+def resolve_retained_state_output(
+    source_outputs: Mapping[str, Any],
+    logical_name: str,
+) -> Optional[Tuple[str, Any]]:
+    """Resolve a retained-state output back to the input name it updates.
+
+    Compile options such as ``kv_cache_prefix`` can turn a logical cache state
+    like ``past_key.0`` into a device binding named
+    ``past_key.0_vllmKvCache_RetainedState``. Subfunction export may also expose
+    the temporary ``_InternalRetainedState`` suffix. Runtime loops should feed
+    the returned target name into the next invocation rather than assuming the
+    unsuffixed logical input name.
+    """
+    matches = {}
+    for output_name, value in source_outputs.items():
+        basename = output_name.rsplit("/", 1)[-1]
+        if not (basename == f"{logical_name}{_RETAINED_STATE_SUFFIX}" or basename.startswith(f"{logical_name}_")):
+            continue
+        for suffix in (_INTERNAL_RETAINED_STATE_SUFFIX, _RETAINED_STATE_SUFFIX):
+            if basename.endswith(suffix):
+                matches.setdefault(basename[: -len(suffix)], value)
+                break
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        available = sorted(name for name in source_outputs if name.rsplit("/", 1)[-1].startswith(logical_name))
+        raise KeyError(f"Expected one retained-state output for {logical_name!r}, found {available}")
+    return next(iter(matches.items()))
 
 
 class LRUCache:

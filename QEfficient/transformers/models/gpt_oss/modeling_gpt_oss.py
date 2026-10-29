@@ -683,29 +683,45 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                 )
 
         if use_blocking:
-            attention_interface = generic_blocked_attention_interface
+            blocked_attention_mask = None if blocking_mode == BlockingMode.PREFILL_ONLINE else attention_mask
+            attn_output, attn_weights = generic_blocked_attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                blocked_attention_mask,
+                scaling=self.scaling,
+                layer_idx=self.layer_idx,
+                blocking_config=blocking_config,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                batch_index=batch_index,
+                sinks=self.sinks,
+                prefill_only=blocking_mode.is_prefill,
+                **kwargs,
+            )
         else:
             attention_interface: Callable = eager_attention_forward
 
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-            s_aux=self.sinks,  # diff with Llama
-            layer_idx=self.layer_idx,
-            blocking_config=blocking_config,
-            position_ids=position_ids,
-            past_key_value=past_key_values,
-            batch_index=batch_index,
-            prefill_only=blocking_mode.is_prefill,
-            sinks=self.sinks,
-            **kwargs,
-        )
+            attn_output, attn_weights = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+                s_aux=self.sinks,  # diff with Llama
+                layer_idx=self.layer_idx,
+                blocking_config=blocking_config,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                batch_index=batch_index,
+                prefill_only=blocking_mode.is_prefill,
+                sinks=self.sinks,
+                **kwargs,
+            )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -739,50 +755,72 @@ class QEffPrefillOnlyGptOssAttention(GptOssAttention):
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos_cached, sin_cached)
 
-        if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {
-                "sin": sin_cached,
-                "cos": cos_cached,
-                "batch_index": batch_index,
-                "position_ids": position_ids,
-                "config": self.config,
-                "is_sliding": self.sliding_window is not None,
-                "sliding_window": past_key_values.get_sliding_window_len(),
-            }
-            if self.sliding_window is not None:
-                sliding_window_len = past_key_values.get_sliding_window_len()
-                short_read_idx = torch.arange(
-                    past_key_values.layers[self.layer_idx].keys.shape[2], device=position_ids.device
-                )
-                read_idx = short_read_idx + torch.where(
-                    position_ids.max() > sliding_window_len - 1, position_ids.max() - sliding_window_len + 1, 0
-                )
-                # This is a trick to export with seq_len<sliding_window_len
-                read_idx = torch.where(read_idx > position_ids.max(), 0, read_idx)
-                k_cache = key_states[:, :, read_idx, :]
-                v_cache = value_states[:, :, read_idx, :]
-            else:
-                k_cache, v_cache = key_states, value_states
-
-            _, _ = past_key_values.write_only(k_cache, v_cache, self.layer_idx, cache_kwargs)
-
-        if os.environ.get("ENABLE_OPT_SWA", "0") == "1":
-            attention_interface: Callable = opt_eager_attention_forward_blocked
+        blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
+        use_blocking = blocking_config is not None and blocking_config.mode.is_prefill and (self.sliding_window is None)
+        if use_blocking:
+            attn_output, attn_weights = generic_blocked_attention_interface(
+                module=self,
+                query=query_states,
+                key=key_states,
+                value=value_states,
+                attention_mask=attention_mask,
+                scaling=self.scaling,
+                layer_idx=self.layer_idx,
+                past_key_value=past_key_values,
+                blocking_config=blocking_config,
+                comp_ctx_lengths=comp_ctx_lengths,
+                batch_index=batch_index,
+                position_ids=position_ids,
+                sliding_window=self.sliding_window,
+                sinks=self.sinks,
+                prefill_only=True,
+                **kwargs,
+            )
         else:
-            attention_interface: Callable = eager_attention_forward
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-            s_aux=self.sinks,  # diff with Llama
-            **kwargs,
-        )
+            if past_key_values is not None:
+                # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                cache_kwargs = {
+                    "sin": sin_cached,
+                    "cos": cos_cached,
+                    "batch_index": batch_index,
+                    "position_ids": position_ids,
+                    "config": self.config,
+                    "is_sliding": self.sliding_window is not None,
+                    "sliding_window": past_key_values.get_sliding_window_len(),
+                }
+                if self.sliding_window is not None:
+                    sliding_window_len = past_key_values.get_sliding_window_len()
+                    short_read_idx = torch.arange(
+                        past_key_values.layers[self.layer_idx].keys.shape[2], device=position_ids.device
+                    )
+                    read_idx = short_read_idx + torch.where(
+                        position_ids.max() > sliding_window_len - 1, position_ids.max() - sliding_window_len + 1, 0
+                    )
+                    # This is a trick to export with seq_len<sliding_window_len
+                    read_idx = torch.where(read_idx > position_ids.max(), 0, read_idx)
+                    k_cache = key_states[:, :, read_idx, :]
+                    v_cache = value_states[:, :, read_idx, :]
+                else:
+                    k_cache, v_cache = key_states, value_states
+
+                _, _ = past_key_values.write_only(k_cache, v_cache, self.layer_idx, cache_kwargs)
+
+            if os.environ.get("ENABLE_OPT_SWA", "0") == "1":
+                attention_interface: Callable = opt_eager_attention_forward_blocked
+            else:
+                attention_interface: Callable = eager_attention_forward
+            attn_output, attn_weights = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+                s_aux=self.sinks,  # diff with Llama
+                **kwargs,
+            )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
