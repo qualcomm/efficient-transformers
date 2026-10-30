@@ -298,7 +298,7 @@ pipeline {
                             . preflight_qeff/bin/activate &&
                             pip install --upgrade pip setuptools &&
                             pip install uv==0.11.16 &&
-                            uv pip install --index-strategy unsafe-first-match --extra-index-url https://download.pytorch.org/whl/cpu '.[test]' junitparser pytest-xdist librosa==0.10.2 soundfile==0.13.1 timm==1.0.14 torchvision==0.22.0+cpu einops==0.8.1 onnx_ir &&
+                            uv pip install --index-strategy unsafe-first-match --extra-index-url https://download.pytorch.org/whl/cpu '.[test]' junitparser pytest-xdist librosa==0.10.2 soundfile==0.13.1 timm==1.0.14 einops==0.8.1 onnx_ir &&
                             uv pip install --no-deps qwen-vl-utils==0.0.14"
                         '''
                     }
