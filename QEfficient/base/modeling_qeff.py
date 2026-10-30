@@ -31,6 +31,7 @@ from QEfficient.base.onnx_transforms import (
     SplitTensorsTransform,
 )
 from QEfficient.base.pytorch_transforms import PytorchTransform
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.blocking.blocking_configurator import (
     build_gated_delta_config_for_transform,
     build_transformer_blocking_config_for_transform,
@@ -1261,6 +1262,7 @@ class QEFFBaseModel(ABC):
             self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=AttentionBlockingConfig())
             self.hash_params.pop("blocking_kwargs", None)
         if qaic_config is not None:
             self.hash_params["qaic_config"] = qaic_config

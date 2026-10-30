@@ -123,6 +123,50 @@ def _make_tiny_gpt_oss():
     return GptOssForCausalLM(cfg).eval()
 
 
+def _make_tiny_gemma4():
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
+
+    cfg = Gemma4TextConfig(
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        hidden_size=128,
+        intermediate_size=256,
+        head_dim=32,
+        global_head_dim=32,
+        num_global_key_value_heads=2,
+        vocab_size=VOCAB_SIZE,
+        max_position_embeddings=CTX_LEN,
+        sliding_window=32,
+        layer_types=["sliding_attention", "full_attention"],
+        pad_token_id=0,
+    )
+    return Gemma4ForCausalLM(cfg).eval()
+
+
+def _make_tiny_qwen3_5_moe():
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
+
+    cfg = Qwen3_5MoeTextConfig(
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        hidden_size=128,
+        head_dim=32,
+        moe_intermediate_size=64,
+        shared_expert_intermediate_size=128,
+        num_experts=4,
+        num_experts_per_tok=2,
+        vocab_size=VOCAB_SIZE,
+        max_position_embeddings=CTX_LEN,
+        layer_types=["full_attention", "full_attention"],
+        pad_token_id=0,
+    )
+    return Qwen3_5MoeForCausalLM(cfg).eval()
+
+
 def _make_tiny_qwen3_vl_moe_text():
     from transformers import AutoConfig
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextModel
@@ -196,12 +240,20 @@ def _make_past_key_values(config, batch_size: int, ctx_len: int):
     n_layers = _config_num_layers(config)
     n_kv_heads = _config_kv_heads(config)
     head_dim = _config_head_dim(config)
+    layer_types = getattr(config, "layer_types", None)
+    sliding_window = getattr(config, "sliding_window", None)
+
+    def layer_cache_len(layer_idx: int) -> int:
+        if layer_types is not None and layer_types[layer_idx] == "sliding_attention" and sliding_window is not None:
+            return min(ctx_len, sliding_window)
+        return ctx_len
+
     return tuple(
         (
-            torch.zeros(batch_size, n_kv_heads, ctx_len, head_dim, dtype=torch.float32),
-            torch.zeros(batch_size, n_kv_heads, ctx_len, head_dim, dtype=torch.float32),
+            torch.zeros(batch_size, n_kv_heads, layer_cache_len(layer_idx), head_dim, dtype=torch.float32),
+            torch.zeros(batch_size, n_kv_heads, layer_cache_len(layer_idx), head_dim, dtype=torch.float32),
         )
-        for _ in range(n_layers)
+        for layer_idx in range(n_layers)
     )
 
 
@@ -308,6 +360,34 @@ def _qaic_config(mode: str, **kwargs) -> dict:
     return {"blocking_mode": mode, **kwargs}
 
 
+def _prefill_dispatch_cases(model_label: str, make_model: Callable[[], nn.Module]) -> list[DispatchCase]:
+    return [
+        DispatchCase(
+            model_label,
+            make_model,
+            _qaic_config("prefill_q", num_q_blocks=NUM_Q_BLOCKS),
+            BlockingMode.PREFILL_Q,
+            prefill_only=True,
+        ),
+        DispatchCase(
+            model_label,
+            make_model,
+            _qaic_config("prefill_kv", num_kv_blocks=NUM_KV_BLOCKS, headpar_split=HEADPAR_SPLIT),
+            BlockingMode.PREFILL_KV,
+            prefill_only=True,
+        ),
+        DispatchCase(
+            model_label,
+            make_model,
+            _qaic_config(
+                "prefill_qkv", num_q_blocks=NUM_Q_BLOCKS, num_kv_blocks=NUM_KV_BLOCKS, headpar_split=HEADPAR_SPLIT
+            ),
+            BlockingMode.PREFILL_QKV,
+            prefill_only=True,
+        ),
+    ]
+
+
 DISPATCH_CASES = [
     DispatchCase("llama", _make_tiny_llama, _qaic_config("kv", num_kv_blocks=NUM_KV_BLOCKS), BlockingMode.KV),
     DispatchCase("llama", _make_tiny_llama, _qaic_config("h", head_block_size=HEAD_BLOCK_SIZE), BlockingMode.H),
@@ -379,29 +459,10 @@ DISPATCH_CASES = [
         _qaic_config("hqkv", head_block_size=HEAD_BLOCK_SIZE, num_q_blocks=NUM_Q_BLOCKS, num_kv_blocks=NUM_KV_BLOCKS),
         BlockingMode.HQKV,
     ),
-    DispatchCase(
-        "qwen3_vl_moe_text",
-        _make_tiny_qwen3_vl_moe_text,
-        _qaic_config("prefill_q", num_q_blocks=NUM_Q_BLOCKS),
-        BlockingMode.PREFILL_Q,
-        prefill_only=True,
-    ),
-    DispatchCase(
-        "qwen3_vl_moe_text",
-        _make_tiny_qwen3_vl_moe_text,
-        _qaic_config("prefill_kv", num_kv_blocks=NUM_KV_BLOCKS, headpar_split=HEADPAR_SPLIT),
-        BlockingMode.PREFILL_KV,
-        prefill_only=True,
-    ),
-    DispatchCase(
-        "qwen3_vl_moe_text",
-        _make_tiny_qwen3_vl_moe_text,
-        _qaic_config(
-            "prefill_qkv", num_q_blocks=NUM_Q_BLOCKS, num_kv_blocks=NUM_KV_BLOCKS, headpar_split=HEADPAR_SPLIT
-        ),
-        BlockingMode.PREFILL_QKV,
-        prefill_only=True,
-    ),
+    *_prefill_dispatch_cases("gpt_oss", _make_tiny_gpt_oss),
+    *_prefill_dispatch_cases("gemma4", _make_tiny_gemma4),
+    *_prefill_dispatch_cases("qwen3_5_moe", _make_tiny_qwen3_5_moe),
+    *_prefill_dispatch_cases("qwen3_vl_moe_text", _make_tiny_qwen3_vl_moe_text),
     DispatchCase(
         "qwen3_vl_moe_text",
         _make_tiny_qwen3_vl_moe_text,

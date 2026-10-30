@@ -430,7 +430,15 @@ def generic_blocked_attention_interface(
                         "sliding_window": _get_sliding_window_len(past_key_value, module.layer_idx),
                     }
                 )
-            past_key_value.write_only(key, value, module.layer_idx, cache_kwargs)
+            cache_key, cache_value = past_key_value.write_only(key, value, module.layer_idx, cache_kwargs)
+
+            # Offline prefill uses the current K/V tensors for attention, so the
+            # cache writes otherwise have no data dependency on the layer output.
+            # Keep both writes live during Dynamo export: nested ONNX functions
+            # must expose the updated retained states to the prefill QPC.
+            if torch._dynamo.is_compiling():
+                cache_dependency = cache_key.reshape(-1)[0] - cache_value.reshape(-1)[0]
+                query = query + cache_dependency.to(dtype=query.dtype) * 0
         elif past_key_value is not None:
             mode = blocking_config.mode
             use_kv_blocked = (

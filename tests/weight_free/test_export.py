@@ -19,19 +19,26 @@ CPU-only. No QAIC hardware required.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import onnx
 import onnxruntime
 import pytest
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs, resolve_weight_spec_path
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
+from QEfficient.transformers.models.modeling_auto import (
+    QEFFAutoModel,
+    QEFFAutoModelForCausalLM,
+    QEFFAutoModelForImageTextToText,
+)
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
+from QEfficient.utils.test_utils import load_vlm_model_from_config
 
 from ._helpers import (
     BATCH_SIZE,
@@ -41,6 +48,7 @@ from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
     WEIGHT_FREE_EMBEDDING_MODEL_PARAMS,
+    WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
     assert_no_int64_kv_cache_inputs,
@@ -66,6 +74,54 @@ _BLOCKING_GATHER_EXPORT_MODE_CASES = {
     "hkv": {"blocking_mode": "hkv", "head_block_size": 2, "num_kv_blocks": 2},
     "hqkv": {"blocking_mode": "hqkv", "head_block_size": 2, "num_kv_blocks": 2, "num_q_blocks": 2},
 }
+
+_PREFILL_BLOCKING_EXPORT_MODEL_CASES = (
+    ("gpt_oss", "tiny-random/gpt-oss-mxfp4", False),
+    ("gemma4", "tiny-random/gemma-4-dense", True),
+    ("qwen3_5_moe", "tiny-random/qwen3.5-moe", True),
+    ("qwen3_vl_moe", "tiny-random/qwen3-vl-moe", True),
+)
+
+
+def _load_prefill_blocking_config(model_id: str, is_vlm: bool):
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    text_config = config.text_config if is_vlm else config
+    text_config.num_hidden_layers = 2
+    if getattr(config, "model_type", None) in {"gemma4", "qwen3_5_moe"}:
+        text_config.layer_types = ["full_attention"] * text_config.num_hidden_layers
+    return config
+
+
+def _build_prefill_blocking_model(
+    model_type: str,
+    model_id: str,
+    is_vlm: bool,
+    qaic_config: dict,
+    tmp_export_dir,
+):
+    config = _load_prefill_blocking_config(model_id, is_vlm)
+    if is_vlm:
+        for nested_config in (config, getattr(config, "text_config", None), getattr(config, "vision_config", None)):
+            if nested_config is not None:
+                nested_config.dtype = torch.float32
+                nested_config.torch_dtype = torch.float32
+        checkpoint_dir = tmp_export_dir / f"{model_type}_prefill_blocking_checkpoint"
+        torch.manual_seed(42)
+        load_vlm_model_from_config(config).save_pretrained(checkpoint_dir, safe_serialization=True)
+        qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
+            str(checkpoint_dir),
+            kv_offload=True,
+            weight_free=True,
+            qaic_config=qaic_config,
+        )
+        return qeff_model
+
+    return QEFFAutoModelForCausalLM.from_pretrained(
+        model_id,
+        config=config,
+        weight_free=True,
+        qaic_config=qaic_config,
+    )
 
 
 @pytest.mark.weight_free
@@ -245,6 +301,65 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
         f"Functions present: {[fn.name for fn in onnx_model.functions]}"
     )
 
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_export
+@pytest.mark.weight_free_blocking
+@pytest.mark.parametrize("blocking_key", list(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES))
+@pytest.mark.parametrize(
+    ("model_type", "model_id", "is_vlm"),
+    _PREFILL_BLOCKING_EXPORT_MODEL_CASES,
+    ids=[model_type for model_type, _, _ in _PREFILL_BLOCKING_EXPORT_MODEL_CASES],
+)
+def test_weight_free_prefill_blocking_export_gather_ops(
+    model_type,
+    model_id,
+    is_vlm,
+    blocking_key,
+    tmp_export_dir,
+):
+    """Weight-free prefill-only export uses each requested offline blocking mode."""
+    qaic_config = {**WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES[blocking_key], "ctx_len": 16}
+    try:
+        qeff_model = _build_prefill_blocking_model(
+            model_type,
+            model_id,
+            is_vlm,
+            qaic_config,
+            tmp_export_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        skip_on_model_fetch_error(exc, model_id)
+
+    export_dir = tmp_export_dir / f"wf_{model_type}_{blocking_key}_prefill_export"
+    export_kwargs = {
+        "prefill_only": True,
+        "enable_chunking": True,
+        "prefill_seq_len": 8,
+        "ctx_len": 16,
+        "qaic_config": qaic_config,
+        "use_onnx_subfunctions": False,
+        "offload_pt_weights": False,
+    }
+    if is_vlm:
+        qeff_model.transform(
+            ctx_len=16,
+            seq_len=8,
+            qaic_config=qaic_config,
+            prefill_only=True,
+            prefill_seq_len=8,
+        )
+        onnx_path = Path(qeff_model.export(export_dir, skip_vision=True, **export_kwargs)[1])
+        qeff_model = qeff_model.lang_model
+    else:
+        onnx_path = exported_onnx_path(qeff_model.export(export_dir, **export_kwargs))
+
+    expected_mode = BlockingMode(qaic_config["blocking_mode"])
+    blocking_config = qeff_model.hash_params.get("blocking_kwargs")
+    assert blocking_config is not None
+    assert blocking_config.mode == expected_mode
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
 

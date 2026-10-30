@@ -130,6 +130,17 @@ WEIGHT_FREE_BLOCKING_MODE_CASES = {
     "kv_headpar": {"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "headpar_split": 2},
 }
 
+WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES = {
+    "prefill_q": {"blocking_mode": "prefill_q", "num_q_blocks": 2},
+    "prefill_kv": {"blocking_mode": "prefill_kv", "num_kv_blocks": 2, "headpar_split": 1},
+    "prefill_qkv": {
+        "blocking_mode": "prefill_qkv",
+        "num_kv_blocks": 2,
+        "num_q_blocks": 2,
+        "headpar_split": 1,
+    },
+}
+
 _BLOCKING_SUPPORTED_TYPES = {
     "glm4_moe",
     "gpt_oss",
@@ -356,7 +367,8 @@ def assert_blocked_kv_ops_for_mode(
     *,
     continuous_batching: bool = False,
 ) -> None:
-    """Assert stable blocked-KV custom op markers for KV-bearing blocking modes."""
+    """Assert stable blocked-KV custom op markers for each blocking mode."""
+    offline_prefill_modes = {"prefill_kv", "prefill_qkv"}
     marker_modes = {
         "kv": {"CtxGatherBlockedKV"},
         "qkv": {"CtxGatherBlockedKV"},
@@ -387,6 +399,17 @@ def assert_blocked_kv_ops_for_mode(
         for node in fn.node
     ]
     op_counts = Counter(node.op_type for node in list(model.graph.node) + function_nodes)
+    if blocking_key in offline_prefill_modes:
+        supported_read_ops = {"CtxGather", "CtxGatherBlockedKV"}
+        found_read_ops = sorted(op_name for op_name in supported_read_ops if op_counts[op_name])
+        assert found_read_ops, (
+            f"Expected an offline blocked-KV read op for mode {blocking_key!r} in {onnx_path.name}. "
+            f"Expected one of {sorted(supported_read_ops)}; ops present: {dict(op_counts)}"
+        )
+        assert op_counts["CtxScatter"], (
+            f"Expected CtxScatter for mode {blocking_key!r} in {onnx_path.name}; ops present: {dict(op_counts)}"
+        )
+        return
     missing_ops = sorted(op_name for op_name in expected_ops if not op_counts[op_name])
     assert not missing_ops, (
         f"Expected blocked KV custom op marker(s) {sorted(expected_ops)} for mode {blocking_key!r} "

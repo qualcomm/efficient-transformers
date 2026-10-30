@@ -659,7 +659,7 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
         )
         use_decode_blocking = use_blocking and not blocking_mode.is_prefill
 
-        if past_key_values is not None and not use_decode_blocking:
+        if past_key_values is not None and not use_decode_blocking and not (use_blocking and blocking_mode.is_prefill):
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {
                 "sin": sin_cached,

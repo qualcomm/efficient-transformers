@@ -2646,6 +2646,39 @@ class _BlockedPrefillCache:
     def read_only_blocked_V(self, start_index, end_index, layer_idx, cache_kwargs):
         return self.value[:, :, start_index:end_index, :]
 
+    def read_only(self, layer_idx, cache_kwargs):
+        return self.key, self.value
+
+
+def test_blocked_prefill_q_uses_cached_kv_for_later_prompt_chunks():
+    from QEfficient.blocking.blocked_attention_forwards import blocked_q_attention_forward_prefill
+
+    batch_size, num_query_heads, num_kv_groups, head_dim = 1, 4, 2, 4
+    ctx_len, sequence_length = 8, 2
+    module = SimpleNamespace(num_key_value_groups=num_kv_groups)
+    query = torch.ones(batch_size, num_query_heads, sequence_length, head_dim)
+    key = torch.zeros(batch_size, num_query_heads // num_kv_groups, sequence_length, head_dim)
+    value = torch.zeros_like(key)
+    cache = _BlockedPrefillCache(batch_size, num_query_heads // num_kv_groups, ctx_len, head_dim)
+    cache.key[:, :, :4, :] = 1
+    cache.value[:, :, :4, :] = 1
+    position_ids = torch.tensor([[4, 5]], dtype=torch.long)
+
+    output, _ = blocked_q_attention_forward_prefill(
+        module=module,
+        query=query,
+        key=key,
+        value=value,
+        attention_mask=None,
+        scaling=1.0,
+        num_q_blocks=1,
+        cache_kwargs={"position_ids": position_ids},
+        past_key_value=cache,
+        layer_idx=0,
+    )
+
+    assert torch.count_nonzero(output) > 0
+
 
 @pytest.mark.parametrize("n_rep_chunk", [None, 1, 2])
 def test_blocked_prefill_qkv_accepts_n_rep_chunk(n_rep_chunk):
@@ -2714,6 +2747,103 @@ def test_blocked_prefill_qkv_chunks_queries_by_seq_len(monkeypatch):
     )
 
     assert chunk_lengths == [1, 1]
+
+
+@pytest.mark.parametrize(
+    "attention_forward",
+    [
+        "blocked_kv_attention_forward_prefill_headpar_offline",
+        "blocked_qkv_attention_forward_prefill_headpar_offline",
+    ],
+)
+def test_blocked_prefill_headpar_uses_provided_attention_mask(monkeypatch, attention_forward):
+    from QEfficient.blocking import blocked_attention_forwards as blocked
+
+    def unexpected_causal_mask(*args, **kwargs):
+        raise AssertionError("provided attention mask should be used")
+
+    monkeypatch.setattr(blocked, "_create_causal_mask", unexpected_causal_mask)
+
+    batch_size, sequence_length, head_dim, ctx_len = 1, 2, 4, 4
+    num_query_heads, num_kv_groups = 4, 2
+    module = SimpleNamespace(num_key_value_groups=num_kv_groups, head_dim=head_dim)
+    query = torch.ones(batch_size, num_query_heads, sequence_length, head_dim)
+    cache = _BlockedPrefillCache(batch_size, num_query_heads // num_kv_groups, ctx_len, head_dim)
+    attention_mask = torch.zeros(batch_size, 1, sequence_length, sequence_length, dtype=torch.bool)
+
+    common_kwargs = {
+        "module": module,
+        "query": query,
+        "key": None,
+        "value": None,
+        "attention_mask": attention_mask,
+        "scaling": 1.0,
+        "cache_kwargs": {"position_ids": torch.zeros(batch_size, sequence_length, dtype=torch.long)},
+        "layer_idx": 0,
+        "past_key_value": cache,
+        "ctx_len": ctx_len,
+        "configured_split": 1,
+    }
+    if attention_forward == "blocked_kv_attention_forward_prefill_headpar_offline":
+        output, attention_weights = getattr(blocked, attention_forward)(num_kv_blocks=1, **common_kwargs)
+    else:
+        output, attention_weights = getattr(blocked, attention_forward)(
+            num_q_blocks=1, num_kv_blocks=1, **common_kwargs
+        )
+
+    assert output.shape == (batch_size, sequence_length, num_query_heads, head_dim)
+    assert attention_weights is None
+
+
+@pytest.mark.parametrize(
+    "attention_forward",
+    [
+        "blocked_kv_attention_forward_prefill_headpar_offline",
+        "blocked_qkv_attention_forward_prefill_headpar_offline",
+    ],
+)
+def test_blocked_prefill_headpar_ignores_fully_masked_rows_in_partial_kv_block(attention_forward):
+    from QEfficient.blocking import blocked_attention_forwards as blocked
+
+    batch_size, sequence_length, head_dim, ctx_len = 1, 6, 3, 8
+    num_query_heads, num_kv_groups = 4, 2
+    torch.manual_seed(42)
+    module = SimpleNamespace(num_key_value_groups=num_kv_groups, head_dim=head_dim)
+    query = torch.randn(batch_size, num_query_heads, sequence_length, head_dim)
+    cache = _BlockedPrefillCache(batch_size, num_query_heads // num_kv_groups, ctx_len, head_dim)
+    cache.key.normal_()
+    cache.value.normal_()
+    position_ids = torch.arange(sequence_length, dtype=torch.long).unsqueeze(0)
+    attention_mask = torch.arange(ctx_len).view(1, 1, 1, -1) > position_ids.view(1, 1, -1, 1)
+
+    key_states = blocked.repeat_kv(cache.key, num_kv_groups)
+    value_states = blocked.repeat_kv(cache.value, num_kv_groups)
+    reference_weights = torch.matmul(query, key_states.transpose(2, 3))
+    reference = torch.matmul(
+        torch.softmax(reference_weights.masked_fill(attention_mask, float("-inf")), dim=-1), value_states
+    ).transpose(1, 2)
+
+    common_kwargs = {
+        "module": module,
+        "query": query,
+        "key": None,
+        "value": None,
+        "attention_mask": attention_mask,
+        "scaling": 1.0,
+        "cache_kwargs": {"position_ids": position_ids},
+        "layer_idx": 0,
+        "past_key_value": cache,
+        "ctx_len": ctx_len,
+        "configured_split": 1,
+        "num_kv_blocks": 2,
+        "skip_kv": True,
+    }
+    if attention_forward == "blocked_kv_attention_forward_prefill_headpar_offline":
+        output, _ = getattr(blocked, attention_forward)(**common_kwargs)
+    else:
+        output, _ = getattr(blocked, attention_forward)(num_q_blocks=2, **common_kwargs)
+
+    torch.testing.assert_close(output, reference, atol=1e-5, rtol=1e-5)
 
 
 @pytest.mark.parametrize(
@@ -3368,6 +3498,46 @@ def test_qwen3_vl_moe_dummy_inputs_use_weight_free_batch_size(weight_free, expec
     assert inputs["lang"]["input_ids"].shape[0] == expected_batch_size
     assert inputs["lang"]["vision_embeds"].shape[0] == expected_batch_size
     assert inputs["lang"]["deepstack_features"].shape[1] == expected_batch_size
+
+
+def test_gemma4_dummy_inputs_preserve_effective_sequence_length_for_kv_cache():
+    from QEfficient.utils import constants
+    from QEfficient.transformers.models.gemma4.modeling_gemma4 import QEffGemma4ForConditionalGeneration
+
+    model = QEffGemma4ForConditionalGeneration.__new__(QEffGemma4ForConditionalGeneration)
+    text_config = SimpleNamespace(
+        layer_types=["full_attention"],
+        num_key_value_heads=2,
+        head_dim=4,
+        hidden_size=8,
+        dtype=torch.float32,
+    )
+    model.config = SimpleNamespace(
+        dtype=torch.float32,
+        image_token_id=1,
+        vision_config=SimpleNamespace(patch_size=2),
+    )
+    model.model = SimpleNamespace(language_model=SimpleNamespace(config=text_config))
+    model._get_vision_max_patches = MagicMock(return_value=36)
+    model._get_mm_tokens_per_image = MagicMock(return_value=4)
+
+    prefill_inputs = model.get_dummy_inputs(
+        kv_offload=True,
+        batch_size=1,
+        prefill_seq_len=3,
+        ctx_len=8,
+    )["lang"]
+    decode_inputs = model.get_dummy_inputs(
+        kv_offload=True,
+        batch_size=1,
+        prefill_seq_len=1,
+        ctx_len=8,
+    )["lang"]
+
+    assert prefill_inputs["input_ids"].shape == (1, 3)
+    assert prefill_inputs["past_key_values"][0][0].shape == (1, 2, 3, 4)
+    assert decode_inputs["input_ids"].shape == (1, constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
+    assert decode_inputs["past_key_values"][0][0].shape == (1, 2, constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN, 4)
 
 
 def test_qwen3_5_moe_get_specializations_strips_vision_symbols_for_comp_ctx_variants():

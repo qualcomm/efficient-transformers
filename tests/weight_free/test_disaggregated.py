@@ -35,6 +35,7 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES,
     WEIGHT_FREE_VLM_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
@@ -1075,13 +1076,17 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
 @pytest.mark.llm_model
 @pytest.mark.disagg_dma
 @pytest.mark.parametrize("dma_config", [GPT_OSS_PARITY_DMA_CONFIG])
-def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
+@pytest.mark.parametrize("blocking_key", WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES)
+@pytest.mark.parametrize("weight_free", [True, False], ids=["weight-free", "legacy"])
+def test_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
     manual_cleanup,
     tmp_path,
     tmp_export_dir,
     dma_config,
+    blocking_key,
+    weight_free,
 ):
-    """Validate weight-free CB disagg KV handoff and token parity against HF fp32."""
+    """Validate offline-blocked GPT-OSS prefill KV handoff and token parity against HF fp32."""
     torch.manual_seed(42)
 
     model_id = dma_config["model_id"]
@@ -1104,7 +1109,7 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
         str(checkpoint_dir),
         config=config,
         trust_remote_code=True,
-        weight_free=True,
+        weight_free=weight_free,
         continuous_batching=True,
     )
 
@@ -1112,7 +1117,7 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
     compiled_onnx_paths = {}
     try:
         decode_qpc_path = qeff_model.compile(
-            compile_dir=_compile_dir(tmp_export_dir, "gpt_oss_wf_cb_decode_parity"),
+            compile_dir=_compile_dir(tmp_export_dir, f"gpt_oss_{'wf' if weight_free else 'legacy'}_cb_decode_parity"),
             prefill_seq_len=1,
             ctx_len=GPT_OSS_PARITY_CTX_LEN,
             full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
@@ -1127,16 +1132,24 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
             split_retained_state_io=True,
             retain_full_kv=True,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            dynamo=weight_free,
         )
         compiled_onnx_paths["decode"] = _assert_onnx_path(qeff_model.onnx_path, "decode")
 
+        prefill_qaic_config = {
+            **WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES[blocking_key],
+            "ctx_len": GPT_OSS_PARITY_CTX_LEN,
+            "moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE},
+        }
         prefill_qpc_path = qeff_model.compile(
-            compile_dir=_compile_dir(tmp_export_dir, "gpt_oss_wf_cb_prefill_parity"),
+            compile_dir=_compile_dir(
+                tmp_export_dir, f"gpt_oss_{'wf' if weight_free else 'legacy'}_{blocking_key}_prefill_parity"
+            ),
             prefill_seq_len=PREFILL_SEQ_LEN,
             ctx_len=GPT_OSS_PARITY_CTX_LEN,
             full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
             num_cores=GPT_OSS_PARITY_NUM_CORES,
-            qaic_config={"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}},
+            qaic_config=prefill_qaic_config,
             num_devices=dma_config["prefill_num_devices"],
             mdp_num_partitions=dma_config["stages"],
             split_retained_state_io=True,
@@ -1149,9 +1162,10 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
             enable_chunking=True,
             retain_full_kv=True,
             use_onnx_subfunctions=use_onnx_subfunctions,
+            dynamo=weight_free,
         )
         compiled_onnx_paths["prefill"] = _assert_onnx_path(qeff_model.onnx_path, "prefill")
-        print(f"Weight-free disagg CB ONNX paths: {compiled_onnx_paths}")
+        print(f"{'Weight-free' if weight_free else 'Legacy'} disagg CB ONNX paths: {compiled_onnx_paths}")
 
         prefill_session = QAICInferenceSession(
             prefill_qpc_path,

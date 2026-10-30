@@ -44,12 +44,23 @@ def _normalize_int(value: Optional[torch.Tensor | int]) -> int:
     return int(value) if value is not None else 0
 
 
+def _expand_attention_mask_to_context(attention_mask: torch.Tensor, ctx_len: int) -> torch.Tensor:
+    """Extend a prompt-length mask to the cache context, masking unavailable keys."""
+    key_indices = torch.arange(ctx_len, device=attention_mask.device)
+    source_indices = key_indices.clamp(max=attention_mask.shape[-1] - 1)
+    expanded_mask = attention_mask.index_select(-1, source_indices)
+    unavailable_keys = key_indices >= attention_mask.shape[-1]
+    return expanded_mask | unavailable_keys.view(1, 1, 1, -1)
+
+
 def update_running_softmax(
     current_max: torch.Tensor,
     attn_weights_block: torch.Tensor,
     current_denominator: torch.Tensor,
     output: torch.Tensor,
-    v_block: torch.Tensor,
+    v_block: Optional[torch.Tensor],
+    *,
+    attention_mask: Optional[torch.Tensor] = None,
     skip_kv: bool = False,
     skip_future: Optional[torch.Tensor] = None,
 ):
@@ -59,6 +70,8 @@ def update_running_softmax(
     delta_max = prev_max - current_max_updated
 
     current_exp = torch.exp(attn_weights_block - current_max_updated.unsqueeze(-1))
+    if attention_mask is not None:
+        current_exp = torch.where(attention_mask, torch.zeros_like(current_exp), current_exp)
 
     # update running denominator
     prev_denominator = current_denominator
@@ -321,12 +334,18 @@ def blocked_kv_attention_forward(
             attn_weights_block = torch.where(mask_block, masked_tensor, attn_weights_block)
 
         current_max, current_denominator, output = update_running_softmax(
-            current_max, attn_weights_block, current_denominator, output, v_block_states, skip_kv, skip_future
+            current_max,
+            attn_weights_block,
+            current_denominator,
+            output,
+            v_block_states,
+            skip_kv=skip_kv,
+            skip_future=skip_future,
         )
 
     # If present, apply Attention Sinks, needed for GPT-OSS
     if sinks is not None:
-        _, _, output = update_running_softmax(current_max, sinks, current_denominator, output, None)
+        _, _, output = update_running_softmax(current_max, sinks, current_denominator, output, v_block=None)
 
     attn_output = output.transpose(1, 2).contiguous()
     attn_weights = None
@@ -698,6 +717,8 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
         n_rep_chunk = num_kv_groups
     ql_chunk = -(-seq_len // num_q_blocks)
     position_ids = cache_kwargs.get("position_ids")
+    if attention_mask is not None:
+        attention_mask = _expand_attention_mask_to_context(attention_mask, ctx_len)
 
     query_folded = query.reshape(batch_size, num_kv_heads, num_kv_groups, seq_len, head_dim)
 
@@ -766,12 +787,15 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
             split_causal_masks = []
             for s in range(split):
                 s_start = start_index + s * split_block_len
-                mask_s = _create_causal_mask(
-                    position_ids=pos_sub,
-                    target_length=s_start + split_block_len,
-                    sliding_window=sliding_window,
-                    start_index=s_start,
-                )
+                if attention_mask is None:
+                    mask_s = _create_causal_mask(
+                        position_ids=pos_sub,
+                        target_length=s_start + split_block_len,
+                        sliding_window=sliding_window,
+                        start_index=s_start,
+                    )
+                else:
+                    mask_s = attention_mask[:, :, t_start:t_end, s_start : s_start + split_block_len]
                 # mask_s: [B, 1, Q, split_block_len]
                 split_causal_masks.append(mask_s)
             causal_mask_block = (
@@ -796,6 +820,7 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
                     acc["s_acc"],
                     acc["o_acc"],
                     V_4d,
+                    attention_mask=causal_rc,
                     skip_kv=True,
                     skip_future=skip_split.unsqueeze(-1),
                 )
@@ -980,6 +1005,8 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
 
     position_ids = cache_kwargs.get("position_ids")
     kv_block_size = -(-ctx_len // num_kv_blocks)
+    if attention_mask is not None:
+        attention_mask = _expand_attention_mask_to_context(attention_mask, ctx_len)
 
     # ── Q 6D: [B, Hkv, split, n_rep, QL, D_abs] ─────────────────────────────
     q_fold = query.reshape(B, Hkv, n_rep, QL, D_abs)
@@ -1023,12 +1050,15 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
         split_causal_masks = []
         for s in range(split):
             s_start = start_index + s * T_h
-            mask_s = _create_causal_mask(
-                position_ids=position_ids,
-                target_length=s_start + T_h,
-                sliding_window=sliding_window,
-                start_index=s_start,
-            )
+            if attention_mask is None:
+                mask_s = _create_causal_mask(
+                    position_ids=position_ids,
+                    target_length=s_start + T_h,
+                    sliding_window=sliding_window,
+                    start_index=s_start,
+                )
+            else:
+                mask_s = attention_mask[:, :, :, s_start : s_start + T_h]
             split_causal_masks.append(mask_s.unsqueeze(2))  # [B, 1, 1, QL, T_h]
         causal_mask = torch.stack(split_causal_masks, dim=2)  # [B, 1, split, 1, QL, T_h]
 
@@ -1054,6 +1084,7 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
 
             m_c = attn_c.max(dim=-1).values  # [B, Hkv, split, chunk, QL]
             exp_c = torch.exp(attn_c - m_c.unsqueeze(-1))
+            exp_c = torch.where(causal_mask, torch.zeros_like(exp_c), exp_c)
 
             if skip_kv and (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
                 m_c = torch.where(skip_future, torch.full_like(m_c, float(MIN_MASKED_ATTENTION_VALUE)), m_c)
@@ -1080,19 +1111,31 @@ def blocked_kv_attention_forward_prefill_headpar_offline(
         out_buf.append(out_blk)
 
     # ── Stage 1: merge across KV blocks ──────────────────────────────────────
-    max_stk = torch.stack(max_buf)  # [nkvb, B, Hkv, split, n_rep, QL]
-    sum_stk = torch.stack(sum_buf)
-    out_stk = torch.stack(out_buf)  # [nkvb, B, Hkv, split, n_rep, QL, kv_lora_rank]
-    m1 = max_stk.max(dim=0).values
-    w1 = torch.exp(max_stk - m1.unsqueeze(0))
-    s1 = (w1 * sum_stk).sum(dim=0)
-    o1 = (w1.unsqueeze(-1) * out_stk).sum(dim=0)
+    m1 = max_buf[0]
+    s1 = sum_buf[0]
+    o1 = out_buf[0]
+    for m_blk, sum_blk, out_blk in zip(max_buf[1:], sum_buf[1:], out_buf[1:]):
+        merged_max = torch.maximum(m1, m_blk)
+        prior_scale = torch.exp(m1 - merged_max)
+        block_scale = torch.exp(m_blk - merged_max)
+        s1 = prior_scale * s1 + block_scale * sum_blk
+        o1 = prior_scale.unsqueeze(-1) * o1 + block_scale.unsqueeze(-1) * out_blk
+        m1 = merged_max
 
     # ── Stage 2: merge across splits ─────────────────────────────────────────
-    m2 = m1.max(dim=2).values  # [B, Hkv, n_rep, QL]
-    w2 = torch.exp(m1 - m2.unsqueeze(2))
-    s2 = (w2 * s1).sum(dim=2)
-    o2 = (w2.unsqueeze(-1) * o1).sum(dim=2)
+    m2 = m1[:, :, 0]
+    s2 = s1[:, :, 0]
+    o2 = o1[:, :, 0]
+    for split_idx in range(1, split):
+        split_max = m1[:, :, split_idx]
+        split_sum = s1[:, :, split_idx]
+        split_out = o1[:, :, split_idx]
+        merged_max = torch.maximum(m2, split_max)
+        prior_scale = torch.exp(m2 - merged_max)
+        split_scale = torch.exp(split_max - merged_max)
+        s2 = prior_scale * s2 + split_scale * split_sum
+        o2 = prior_scale.unsqueeze(-1) * o2 + split_scale.unsqueeze(-1) * split_out
+        m2 = merged_max
 
     if sinks is not None:
         # sinks: [NQH] → per-head logit, same for all query positions
@@ -1135,8 +1178,12 @@ def blocked_q_attention_forward_prefill(
     """
     batch_size, num_heads, q_len, _ = query.shape
     num_q_blocks = max(1, _normalize_int(num_q_blocks))
-    key_states, value_states = _get_kv_states(module, key, value)
     position_ids = cache_kwargs.get("position_ids")
+    past_key_value = kwargs.get("past_key_value")
+    layer_idx = kwargs.get("layer_idx")
+    if past_key_value is not None and layer_idx is not None:
+        key, value = past_key_value.read_only(layer_idx, cache_kwargs)
+    key_states, value_states = _get_kv_states(module, key, value)
 
     if hasattr(module, "config"):
         mask_dtype = module.config.dtype
@@ -1159,12 +1206,15 @@ def blocked_q_attention_forward_prefill(
         if position_bias is not None:
             attn_weights = attn_weights + position_bias
 
-        causal_mask = _create_causal_mask(
-            position_ids=position_ids_block,
-            target_length=key_states.shape[2],
-            sliding_window=sliding_window,
-            start_index=0,
-        )
+        if attention_mask is None or attention_mask.shape[-1] < key_states.shape[2]:
+            causal_mask = _create_causal_mask(
+                position_ids=position_ids_block,
+                target_length=key_states.shape[2],
+                sliding_window=sliding_window,
+                start_index=0,
+            )
+        else:
+            causal_mask = attention_mask[:, :, q_start : q_start + q_len_block, : key_states.shape[2]]
         masked_tensor = torch.full_like(attn_weights, MIN_MASKED_ATTENTION_VALUE, dtype=mask_dtype, device=query.device)
         attn_weights = torch.where(causal_mask, masked_tensor, attn_weights)
 
@@ -1345,15 +1395,15 @@ def blocked_qkv_attention_forward(
                 current_denominator,
                 output_blocks,
                 v_block_states,
-                skip_kv,
-                skip_future,
+                skip_kv=skip_kv,
+                skip_future=skip_future,
             )
 
         # If present, apply Attention Sinks, needed for GPT-OSS
         if sinks is not None:
             sinks_block = sinks[:, :, q_start : q_start + q_len_block, :]
             _, _, output_blocks = update_running_softmax(
-                current_max, sinks_block, current_denominator, output_blocks, None
+                current_max, sinks_block, current_denominator, output_blocks, v_block=None
             )
         q_output_blocks.append(output_blocks)
         q_attn_blocks.append(attn_weights_block)
@@ -1531,13 +1581,19 @@ def blocked_hqkv_attention_forward(
                     attn_weights_block = torch.where(mask_block_g, masked_tensor, attn_weights_block)
 
                 current_max, current_denominator, output_blocks = update_running_softmax(
-                    current_max, attn_weights_block, current_denominator, output_blocks, v_g, skip_kv, skip_future
+                    current_max,
+                    attn_weights_block,
+                    current_denominator,
+                    output_blocks,
+                    v_g,
+                    skip_kv=skip_kv,
+                    skip_future=skip_future,
                 )
             # If present, apply Attention Sinks, needed for GPT-OSS
             if sinks is not None:
                 sinks_block = sinks[:, h_start:h_end, q_start : q_start + q_len_block, :]
                 _, _, output_blocks = update_running_softmax(
-                    current_max, sinks_block, current_denominator, output_blocks, None
+                    current_max, sinks_block, current_denominator, output_blocks, v_block=None
                 )
             q_output_blocks.append(output_blocks)
             q_attn_blocks.append(attn_weights_block)
@@ -1743,7 +1799,13 @@ def blocked_bhqkv_attention_forward(
                         attn_weights_block = torch.where(mask_block_g, masked_tensor, attn_weights_block)
 
                     current_max, current_denominator, output_blocks = update_running_softmax(
-                        current_max, attn_weights_block, current_denominator, output_blocks, v_g, skip_kv, skip_future
+                        current_max,
+                        attn_weights_block,
+                        current_denominator,
+                        output_blocks,
+                        v_g,
+                        skip_kv=skip_kv,
+                        skip_future=skip_future,
                     )
                 # If present, apply Attention Sinks, needed for GPT-OSS
                 if sinks is not None:
@@ -1754,7 +1816,7 @@ def blocked_bhqkv_attention_forward(
                         :,
                     ]
                     _, _, output_blocks = update_running_softmax(
-                        current_max, sinks_block, current_denominator, output_blocks, None
+                        current_max, sinks_block, current_denominator, output_blocks, v_block=None
                     )
                 batch_output_blocks.append(output_blocks)
                 batch_attn_blocks.append(attn_weights_block)
@@ -2026,8 +2088,8 @@ def blocked_kv_mla_attention_forward(
                 current_denominator,
                 output,
                 compressed_kv_block,
-                skip_kv,
-                skip_future,
+                skip_kv=skip_kv,
+                skip_future=skip_future,
             )  # [1, 64, q_len, kv_block_size] X [1, 1, kv_block_size, 512] -> [1, 64, q_len, 512]
         else:
             knope = torch.matmul(compressed_kv_block, per_head_k_up_normal)
@@ -2049,8 +2111,8 @@ def blocked_kv_mla_attention_forward(
                 current_denominator,
                 output,
                 compressed_kv_block,
-                skip_kv,
-                skip_future,
+                skip_kv=skip_kv,
+                skip_future=skip_future,
             )
 
     attn_output = torch.matmul(output, per_head_v_up)
