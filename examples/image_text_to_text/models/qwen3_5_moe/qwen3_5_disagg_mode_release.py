@@ -102,8 +102,8 @@ config = AutoConfig.from_pretrained(model_id)
 print(f"Recurrent-state retained I/O dtype: {RECURRENT_STATE_DTYPE}")
 
 # For faster execution user can run with lesser layers, For Testing Purpose Only
-# config.vision_config.depth = 5
-# config.text_config.num_hidden_layers = 8
+config.vision_config.depth = 5
+config.text_config.num_hidden_layers = 8
 config.torch_dtype = "float16"
 layer_types = list(getattr(config.text_config, "layer_types", []))
 if len(layer_types) < config.text_config.num_hidden_layers:
@@ -158,10 +158,10 @@ PREFILL_SEQ_LEN = 512
 # The GDN prefill mini-chunk follows the prefill/CPL by default. This is passed
 # explicitly because the shared compile API does not infer model-specific options.
 gdn_chunk_size = PREFILL_SEQ_LEN
-CTX_LEN = 16 * 1024
-BATCH_SIZE = 256  # Per-slot prefill batch size
+CTX_LEN = 14 * 1024
+BATCH_SIZE = 512  # Per-slot prefill batch size
 BS = BATCH_SIZE
-FULL_BATCH_SIZE = 256  # Total concurrent CB slots
+FULL_BATCH_SIZE = 512  # Total concurrent CB slots
 
 # Online-prefill KV blocking (matches GQA_Benchmark_Merged/qwen3_35b_a3b_online_prefill.sh:
 # NUM_KV_BLOCKS=8, IMPLS=online, Q_BLOCK_SIZE=256 -> num_q_blocks=ceil(1024/256)=4,
@@ -258,8 +258,7 @@ else:
             ctx_len=CTX_LEN,
             height=354,
             width=536,
-            num_cores=4,
-            aic_hw_version="ai200",
+            num_cores=16,
             num_devices=1,
             mxfp6_matmul=True,
             mxint8_kv_cache=True,
@@ -311,8 +310,7 @@ else:
             ctx_len=CTX_LEN,
             height=354,
             width=536,
-            num_cores=4,
-            aic_hw_version="ai200",
+            num_cores=16,
             num_devices=DECODE_NUM_DEVICES,
             mxfp6_matmul=True,
             mxint8_kv_cache=True,
@@ -323,8 +321,8 @@ else:
             user_tiled=True,
             prefill_only=False,
             skip_vision=True,
-            use_onnx_subfunctions=False,
-            stats_level=50,
+            use_onnx_subfunctions=True,
+            stats_level=70,
             ddr_stats=True,
             aic_pmu_recipe="KernelUtil",
             aic_perf_metrics=True,
