@@ -252,6 +252,51 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
 @pytest.mark.weight_free_export
 @pytest.mark.parametrize(
     "model_type,model_id",
+    [("gpt_oss", WEIGHT_FREE_CAUSAL_LM_MODEL_IDS["gpt_oss"])],
+    ids=["gpt_oss"],
+)
+def test_weight_free_dynamo_export_with_kv_cache_prefix(model_type, model_id, tmp_export_dir):
+    """Regression for dangling prefixed retained-state outputs in Dynamo exports.
+
+    This is a CPU-only graph-structure check.  It reproduces the weight-free
+    GPT-OSS export used by vLLM disaggregated serving without requiring QAIC.
+    """
+    try:
+        config = load_causal_lm_config(model_id)
+        config.num_hidden_layers = 2
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
+    except Exception as exc:
+        skip_on_model_fetch_error(exc, model_id)
+
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            tmp_export_dir,
+            dynamo=True,
+            use_onnx_subfunctions=True,
+            kv_cache_prefix="vllmKvCache",
+            offload_pt_weights=False,
+        )
+    )
+    model = onnx.load(str(onnx_path), load_external_data=False)
+
+    # A graph output must be returned by a graph node or a declared function
+    # output.  Before the fix, the prefixed retained-state outputs were present
+    # in graph.output but the decoder call nodes had no corresponding outputs.
+    graph_node_outputs = {name for node in model.graph.node for name in node.output if name}
+    function_outputs = {name for function in model.functions for name in function.output if name}
+    produced_names = graph_node_outputs | function_outputs
+    missing_outputs = [output.name for output in model.graph.output if output.name not in produced_names]
+    assert not missing_outputs, f"{model_type}: graph outputs without producers: {missing_outputs}"
+
+    kv_inputs = [value.name for value in model.graph.input if value.name.startswith(("past_key.", "past_value."))]
+    assert kv_inputs, f"Expected {model_type} KV-cache graph inputs"
+    assert all("_vllmKvCache" in name for name in kv_inputs), f"Unprefixed KV graph inputs: {kv_inputs}"
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_export
+@pytest.mark.parametrize(
+    "model_type,model_id",
     sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.items()),
     ids=sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS),
 )
