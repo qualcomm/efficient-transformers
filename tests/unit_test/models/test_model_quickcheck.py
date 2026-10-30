@@ -2824,12 +2824,13 @@ def test_layerwise_supported_guard_rejects_unrelated_model():
         _layerwise.assert_layerwise_supported(config)
 
 
-def test_resolve_torch_dtype_normalizes_dtype_alias(caplog):
+def test_resolve_torch_dtype_normalizes_dtype_alias(caplog, monkeypatch):
     """transformers-v5 ``dtype`` alias must be honored and kept in sync with ``torch_dtype``.
 
     Regression guard: passing ``dtype=float16`` used to be ignored, leaving the
     model forced to float32 - breaking the Qwen3.5 float16 export path.
     """
+    from QEfficient.transformers.models import modeling_auto
     from QEfficient.transformers.models.modeling_auto import _resolve_torch_dtype
 
     # float16 supplied via the v5 alias must survive and populate torch_dtype.
@@ -2858,6 +2859,40 @@ def test_resolve_torch_dtype_normalizes_dtype_alias(caplog):
     kwargs = {}
     _resolve_torch_dtype(kwargs)
     assert kwargs["torch_dtype"] == torch.float32
+
+    kwargs = {}
+    _resolve_torch_dtype(kwargs, weight_free=True)
+    assert kwargs["torch_dtype"] == torch.float16
+
+    monkeypatch.setattr(modeling_auto.constants, "DEFAULT_AIC_HW_VERSION", "ai200")
+    kwargs = {}
+    _resolve_torch_dtype(kwargs, weight_free=True)
+    assert kwargs["torch_dtype"] == torch.bfloat16
+
+    kwargs = {"torch_dtype": torch.float16}
+    _resolve_torch_dtype(kwargs, weight_free=True)
+    assert kwargs["torch_dtype"] == torch.float16
+
+    monkeypatch.setattr(modeling_auto.constants, "DEFAULT_AIC_HW_VERSION", "ai100")
+
+    # Original-checkpoint weight-free export needs FP16 graph consumers on AI100.
+    # The source BF16 tensor remains the external input and the exporter emits
+    # the BF16-to-FP16 Cast node explicitly.
+    kwargs = {}
+    _resolve_torch_dtype(kwargs, use_original_checkpoint=True)
+    assert kwargs["torch_dtype"] == torch.float16
+
+    kwargs = {"torch_dtype": torch.bfloat16}
+    with pytest.raises(ValueError, match="compilation will fail"):
+        _resolve_torch_dtype(kwargs, weight_free=True, use_original_checkpoint=True)
+
+    from QEfficient.utils.hardware_utils import get_default_weight_free_dtype, validate_weight_free_target_dtype
+
+    assert get_default_weight_free_dtype("ai100") == "float16"
+    assert get_default_weight_free_dtype("ai200") == "bfloat16"
+    with pytest.raises(ValueError, match="AI100"):
+        validate_weight_free_target_dtype(torch.bfloat16, "ai100")
+    validate_weight_free_target_dtype(torch.float16, "ai200")
 
 
 def test_qwen3_5_moe_gated_norm_preserves_float16():

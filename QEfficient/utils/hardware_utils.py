@@ -119,3 +119,19 @@ def get_default_num_cores(aic_hw_version: str | None = None) -> int:
 def get_default_vtcm_size_threshold(aic_hw_version: str | None = None) -> float:
     """Return the default VTCM size threshold (bytes) for the given (or detected) hardware version."""
     return AicHwDefaultsResolver().get_vtcm_size_threshold(aic_hw_version or get_default_aic_hw_version())
+
+
+def get_default_weight_free_dtype(aic_hw_version: str | None = None) -> str:
+    """Return the default weight-free graph dtype for the selected AIC generation."""
+    return "bfloat16" if (aic_hw_version or get_default_aic_hw_version()) == "ai200" else "float16"
+
+
+def validate_weight_free_target_dtype(target_dtype, aic_hw_version: str | None = None) -> None:
+    """Reject weight-free dtypes that the selected AIC generation cannot compile."""
+    hw_version = aic_hw_version or get_default_aic_hw_version()
+    dtype_name = str(target_dtype).removeprefix("torch.")
+    if hw_version != "ai200" and dtype_name == "bfloat16":
+        raise ValueError(
+            "weight-free target_dtype=torch.bfloat16 is not supported on AI100. "
+            "Use target_dtype=torch.float16 instead; BF16 export may succeed but compilation will fail."
+        )

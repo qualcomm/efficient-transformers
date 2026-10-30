@@ -340,6 +340,28 @@ class QEffGemma4CustomRMSNormAIC(nn.Module):
         return custom_rms_norm_func(hidden_states, weight, self.eps)
 
 
+class _QEffGemma4OriginalWeights:
+    def __init__(self, gate, up, down):
+        self.gate = gate
+        self.up = up
+        self.down = down
+        self.gate_bias = None
+        self.up_bias = None
+        self.down_bias = None
+
+    @property
+    def num_experts(self) -> int:
+        return self.gate.shape[0]
+
+    @property
+    def hidden_size(self) -> int:
+        return self.gate.shape[1]
+
+    @property
+    def intermediate_size(self) -> int:
+        return self.gate.shape[2]
+
+
 class QEffGemma4TextMoeBlock(QEffMoEBlockMixin, nn.Module):
     supported_moe_flavours = (
         MoEFlavour.SIMPLE_LOOP,
@@ -364,6 +386,11 @@ class QEffGemma4TextMoeBlock(QEffMoEBlockMixin, nn.Module):
     def transform_weights(self) -> MoEWeights:
         if getattr(self, "weights_transformed", False):
             return self.moe_weights
+        if getattr(self.experts, "_qeff_use_original_checkpoint", False):
+            self._qeff_original_checkpoint_layout = True
+            self.weights_transformed = True
+            self.moe_weights = self.original_moe_weights()
+            return self.moe_weights
         self.moe_weights = build_canonical_expert_weights(
             gate_up=self.experts.gate_up_proj,
             down=self.experts.down_proj,
@@ -376,6 +403,15 @@ class QEffGemma4TextMoeBlock(QEffMoEBlockMixin, nn.Module):
         delete_module_attrs(self.experts, "gate_up_proj", "down_proj")
         self.weights_transformed = True
         return self.moe_weights
+
+    def original_moe_weights(self) -> _QEffGemma4OriginalWeights:
+        expert_dim = self.experts.gate_up_proj.shape[1] // 2
+        gate_up_proj = self.experts.gate_up_proj
+        return _QEffGemma4OriginalWeights(
+            gate=gate_up_proj[:, :expert_dim].transpose(-1, -2),
+            up=gate_up_proj[:, expert_dim:].transpose(-1, -2),
+            down=self.experts.down_proj.transpose(-1, -2),
+        )
 
     @property
     def moe_profile(self) -> MoEProfile:

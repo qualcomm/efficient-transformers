@@ -125,7 +125,8 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
             quantized_weights = QuantizedMoEWeights.from_module(self)
             num_experts = quantized_weights.num_experts
         else:
-            weights = self.moe_weights
+            weights_for_forward = getattr(self, "_moe_weights_for_forward", None)
+            weights = weights_for_forward() if callable(weights_for_forward) else self.moe_weights
             num_experts = weights.num_experts
             profile = self.moe_profile
             if callable(profile):
@@ -142,11 +143,12 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
 
         dense, _ = resolve_routing(routing, num_experts)
         if flavour is MoEFlavour.EXPERT_PARALLEL:
+            packed_weights = not quantized_experts and weights.gate.ndim == 4
             num_pipeline_stages = getattr(self, "num_pipeline_stages", None) or (
-                1 if quantized_experts else weights.gate.shape[1]
+                weights.gate.shape[1] if packed_weights else 1
             )
             num_parallelized_experts = getattr(self, "num_parallelized_experts", None) or (
-                num_experts if quantized_experts else weights.gate.shape[0]
+                weights.gate.shape[0] if packed_weights else num_experts
             )
             num_packed_chunks = self.expert_parallel_num_packed_chunks
             if quantized_experts:
@@ -177,6 +179,9 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
 
     def moe_dispatch(self, x: torch.Tensor, routing) -> torch.Tensor:
         return self.execute_moe_flavour(x, routing)
+
+    def _moe_weights_for_forward(self):
+        return self.moe_weights
 
     def forward(self, hidden_states: torch.Tensor):
         B, S, H = hidden_states.shape

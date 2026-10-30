@@ -19,6 +19,10 @@ from QEfficient.exporter.weight_free.checkpoint_key_resolver import promote_init
 from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path, save_weight_spec
 from QEfficient.utils import load_json
 from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
+from QEfficient.utils.hardware_utils import (
+    get_default_weight_free_dtype,
+    validate_weight_free_target_dtype,
+)
 from QEfficient.utils.logging_utils import QEFFLogger
 from QEfficient.utils.torch_patches import dynamo_invoke_subgraph_fallback_env, preserve_subfunction_source_lines
 
@@ -62,8 +66,11 @@ def _resolve_weight_free_target_dtype(qeff_model) -> torch.dtype:
         for attr in ("dtype", "torch_dtype"):
             dtype = getattr(config, attr, None)
             if isinstance(dtype, torch.dtype):
+                validate_weight_free_target_dtype(dtype)
                 return dtype
-    return torch.float32
+    target_dtype = getattr(torch, get_default_weight_free_dtype())
+    validate_weight_free_target_dtype(target_dtype)
+    return target_dtype
 
 
 def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
@@ -143,29 +150,18 @@ def _prepared_checkpoint_hash(
     model_ref: str,
     target_dtype: torch.dtype,
     active_group_transform_id: str,
-    moe_prefill_flavour: str,
-    moe_prefill_num_pipeline_stages: int | None = None,
-    moe_prefill_num_parallelized_experts: int | None = None,
     plan_payload: dict | None = None,
 ) -> str:
     """Return a 12-char content-addressable hash for the prepared checkpoint.
 
-    Encodes what was done to the weights so that different model flavours
-    (dense vs MoE, decode vs expert_parallel, different P/E values) always
-    hash to different prepared directories and never overwrite each other.
-
-    Two expert_parallel exports of the same model and dtype but with
-    different P or E/P values produce differently-packed tensors; including
-    num_pipeline_stages and num_parallelized_experts ensures they land in
-    separate prepared directories.
+    The plan fingerprint describes exactly what is written, so it is the only
+    weight-layout input. MoE export flavour, P and E/P are deliberately absent:
+    every flavour reads the same canonical tensors.
     """
     content = {
         "model_ref": model_ref,
         "target_dtype": str(target_dtype),
         "active_group": active_group_transform_id,
-        "moe_flavour": moe_prefill_flavour,
-        "moe_num_pipeline_stages": str(moe_prefill_num_pipeline_stages),
-        "moe_num_parallelized_experts": str(moe_prefill_num_parallelized_experts),
         "plan": plan_payload or {},
     }
     return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:12]
@@ -205,15 +201,10 @@ def _prepare_checkpoint_for_weight_free_export(
         config=getattr(qeff_model.model, "config", None),
         hash_params=hash_params,
     )
-    moe_prefill_flavour = hash_params.get("moe_prefill_flavour", "none")
-
     prepared_hash = _prepared_checkpoint_hash(
         model_ref=model_ref,
         target_dtype=target_dtype,
         active_group_transform_id=active_group_id,
-        moe_prefill_flavour=moe_prefill_flavour,
-        moe_prefill_num_pipeline_stages=hash_params.get("moe_prefill_num_pipeline_stages"),
-        moe_prefill_num_parallelized_experts=hash_params.get("moe_prefill_num_parallelized_experts"),
         plan_payload=plan.fingerprint_payload(),
     )
     prepared_name = source_dir.name + f"-qeff-prepared-{prepared_hash}"
@@ -304,7 +295,13 @@ def export_weight_free_onnx(
         raise RuntimeError("torch.onnx.export returned None for weight-free dynamo export")
 
     prep_start = time.perf_counter()
-    prepared_model_ref = _prepare_checkpoint_for_weight_free_export(meta_qeff_model, model_ref, target_dtype)
+    if meta_qeff_model._use_original_checkpoint:
+        from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
+
+        prepared_model_ref = str(resolve_checkpoint_dir(model_ref))
+        logger.info("Using original checkpoint directly for weight-free export: %s", prepared_model_ref)
+    else:
+        prepared_model_ref = _prepare_checkpoint_for_weight_free_export(meta_qeff_model, model_ref, target_dtype)
     prep_duration_seconds = time.perf_counter() - prep_start
     logger.info(
         "Weight-free checkpoint preparation completed in %.2fs: %s",

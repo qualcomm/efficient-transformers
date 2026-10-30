@@ -684,10 +684,7 @@ class CheckpointTransformPipeline:
         weight_map = read_weight_map(src)
         hash_params = hash_params or {}
 
-        from QEfficient.exporter.weight_free.checkpoint_transforms import (
-            DtypeConversionCheckpointTransform,
-            ExpertParallelPackingCheckpointTransform,
-        )
+        from QEfficient.exporter.weight_free.checkpoint_transforms import DtypeConversionCheckpointTransform
 
         context = CheckpointPlanningContext(
             weight_map=weight_map,
@@ -716,10 +713,7 @@ class CheckpointTransformPipeline:
 
         seen_transforms = set()
         for transform in self.transforms:
-            if transform in seen_transforms or transform in (
-                ExpertParallelPackingCheckpointTransform,
-                DtypeConversionCheckpointTransform,
-            ):
+            if transform in seen_transforms or transform is DtypeConversionCheckpointTransform:
                 continue
             seen_transforms.add(transform)
             transform_id = getattr(transform, "TRANSFORM_ID", None)
@@ -734,7 +728,6 @@ class CheckpointTransformPipeline:
             ):
                 transform.plan_tasks(context)
 
-        ExpertParallelPackingCheckpointTransform.plan_tasks(context)
         DtypeConversionCheckpointTransform.plan_tasks(context)
 
         if len(context.active_layout_ids) > 1:

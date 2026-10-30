@@ -74,8 +74,10 @@ from QEfficient.transformers.moe import (
     MoEFlavour,
     MoEProfile,
     QEffMoEBlockMixin,
+    moe_expert_parallel,
     moe_simple_loop,
     pack_moe_weights_for_expert_parallel,
+    silu_glu_mlp,
 )
 from QEfficient.transformers.moe.weights import MoEWeights
 from QEfficient.utils.config_utils import calculate_num_replicate_kv_heads
@@ -1355,6 +1357,60 @@ def test_moe_simple_loop_prescale_matches_manual_expert_input_scaling():
     torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize(
+    ("num_pipeline_stages", "num_parallelized_experts"),
+    [(2, 4), (4, 2), (8, 1), (1, 8)],
+)
+@pytest.mark.parametrize("with_bias", [False, True], ids=["no-bias", "bias"])
+def test_moe_expert_parallel_canonical_weights_match_packed(num_pipeline_stages, num_parallelized_experts, with_bias):
+    """Slicing canonical weights per slot equals the legacy packed layout."""
+    torch.manual_seed(0)
+    num_experts, tokens, hidden, inter = num_pipeline_stages * num_parallelized_experts, 6, 4, 3
+    canonical = MoEWeights(
+        gate=torch.randn(num_experts, hidden, inter),
+        up=torch.randn(num_experts, hidden, inter),
+        down=torch.randn(num_experts, inter, hidden),
+        gate_bias=torch.randn(num_experts, inter) if with_bias else None,
+        up_bias=torch.randn(num_experts, inter) if with_bias else None,
+        down_bias=torch.randn(num_experts, hidden) if with_bias else None,
+    )
+    packed = pack_moe_weights_for_expert_parallel(
+        canonical,
+        num_pipeline_stages=num_pipeline_stages,
+        num_parallelized_experts=num_parallelized_experts,
+    )
+    x = torch.randn(tokens, hidden)
+    routing = torch.rand(tokens, num_experts) * (torch.rand(tokens, num_experts) > 0.5)
+
+    def expert_mlp(x, W_g, W_u, W_d, b_g=None, b_u=None, b_d=None):
+        if b_g is None:
+            return silu_glu_mlp(x, W_g, W_u, W_d)
+        gate = (x @ W_g) + b_g.unsqueeze(-2)
+        up = (x @ W_u) + b_u.unsqueeze(-2)
+        return ((up * torch.nn.functional.silu(gate)) @ W_d) + b_d.unsqueeze(-2)
+
+    profile = MoEProfile(expert_mlp=expert_mlp, has_bias=with_bias)
+    kwargs = {"num_pipeline_stages": num_pipeline_stages, "num_parallelized_experts": num_parallelized_experts}
+
+    from_canonical = moe_expert_parallel(x, routing, canonical, profile, **kwargs)
+    from_packed = moe_expert_parallel(x, routing, packed, profile, **kwargs)
+
+    torch.testing.assert_close(from_canonical, from_packed, rtol=0, atol=0)
+
+
+def test_moe_expert_parallel_rejects_expert_count_mismatch():
+    weights = MoEWeights(gate=torch.ones(6, 4, 3), up=torch.ones(6, 4, 3), down=torch.ones(6, 3, 4))
+    with pytest.raises(ValueError, match="num_pipeline_stages \\* num_parallelized_experts"):
+        moe_expert_parallel(
+            torch.ones(2, 4),
+            torch.ones(2, 6),
+            weights,
+            MoEProfile(expert_mlp=silu_glu_mlp),
+            num_pipeline_stages=4,
+            num_parallelized_experts=2,
+        )
+
+
 @pytest.mark.transforms
 class TestSplitOptimizedMoETransform:
     def test_moe_block_mixin_requires_explicit_supported_flavours(self):
@@ -1816,8 +1872,8 @@ class TestSplitOptimizedMoETransform:
         assert transformed
         assert model.block.transform_count == 1
         assert model.block.moe_weights is not None
-        assert model.block.moe_weights.gate.shape == (2, 1, 4, 8)
-        assert model.block.moe_weights.down.shape == (2, 1, 8, 4)
+        assert model.block.moe_weights.gate.shape == (2, 4, 8)
+        assert model.block.moe_weights.down.shape == (2, 8, 4)
         assert model.block.moe_weights.num_experts == 2
         assert model.block._moe_flavour is MoEFlavour.EXPERT_PARALLEL
         assert hash_params["moe_prefill_num_packed_chunks"] == 2
@@ -1864,7 +1920,7 @@ class TestSplitOptimizedMoETransform:
 
         assert model.block.transform_count == 1
         assert model.block.moe_weights is first_weights
-        assert model.block.moe_weights.gate.shape == (2, 1, 4, 8)
+        assert model.block.moe_weights.gate.shape == (2, 4, 8)
 
     @pytest.mark.parametrize(
         "qaic_config",
@@ -1969,12 +2025,10 @@ class TestSplitOptimizedMoETransform:
         }
         assert third_hash_params == {"moe_prefill_flavour": "simple_loop"}
 
-    def test_expert_parallel_transform_replaces_nested_moe_weight_aliases(self):
-        model = _DummyNestedOptimizedMoEModel()
-
+    def test_expert_parallel_transform_keeps_canonical_weights(self):
+        model = _DummyOptimizedMoEModel()
         OptimizedMoEWeightsTransform.apply(model)
-        old_weights = model.block.moe_weights
-        assert model.block.experts.moe_weights is old_weights
+        canonical = model.block.moe_weights
         OptimizedMoEExportConfigTransform.apply(
             model,
             prefill_only=True,
@@ -1982,30 +2036,39 @@ class TestSplitOptimizedMoETransform:
             qaic_config={"moe_config": {"flavour": "expert_parallel", "expert_parallel_chunk_size": 16}},
             prefill_seq_len=32,
         )
+
+        _, transformed = OptimizedMoEExpertParallelWeightsTransform.apply(model)
+
+        assert not transformed
+        assert model.block.moe_weights is canonical
+        assert model.block.moe_weights.gate.shape == (2, 4, 8)
+
+    def test_expert_parallel_transform_restores_packed_nested_aliases_to_canonical(self):
+        model = _DummyNestedOptimizedMoEModel()
+        OptimizedMoEWeightsTransform.apply(model)
+        canonical = model.block.moe_weights
+        packed = pack_moe_weights_for_expert_parallel(canonical, num_pipeline_stages=1, num_parallelized_experts=2)
+        pytorch_transforms._replace_moe_weight_aliases(model, canonical, packed)
+        assert model.block.experts.moe_weights is packed
+
         _, transformed = OptimizedMoEExpertParallelWeightsTransform.apply(model)
 
         assert transformed
         assert model.block.moe_weights is model.block.experts.moe_weights
-        assert model.block.moe_weights is not old_weights
-        assert model.block.moe_weights.gate.shape == (2, 1, 4, 8)
+        assert model.block.moe_weights is not packed
+        assert model.block.moe_weights.gate.shape == (2, 4, 8)
         for name in ("gate", "up", "down"):
-            packed_param = getattr(model.block.moe_weights, name)
-            old_param = getattr(old_weights, name)
-            assert isinstance(packed_param, nn.Parameter)
-            assert packed_param.requires_grad is False
-            assert packed_param.data_ptr() != old_param.data_ptr()
-        assert old_weights.gate.shape == (2, 4, 8)
+            restored = getattr(model.block.moe_weights, name)
+            assert isinstance(restored, nn.Parameter)
+            assert restored.requires_grad is False
+            torch.testing.assert_close(restored, getattr(canonical, name))
 
     def test_expert_parallel_transform_collects_after_replacing_weights(self, monkeypatch):
-        model = _DummyOptimizedMoEModel()
+        model = _DummyNestedOptimizedMoEModel()
         OptimizedMoEWeightsTransform.apply(model)
-        OptimizedMoEExportConfigTransform.apply(
-            model,
-            prefill_only=True,
-            num_cores=2,
-            qaic_config={"moe_config": {"flavour": "expert_parallel", "expert_parallel_chunk_size": 16}},
-            prefill_seq_len=32,
-        )
+        canonical = model.block.moe_weights
+        packed = pack_moe_weights_for_expert_parallel(canonical, num_pipeline_stages=1, num_parallelized_experts=2)
+        pytorch_transforms._replace_moe_weight_aliases(model, canonical, packed)
         collect_calls = []
         monkeypatch.setattr(pytorch_transforms.gc, "collect", lambda: collect_calls.append(None))
 

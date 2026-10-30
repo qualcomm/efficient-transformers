@@ -50,6 +50,7 @@ from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
     QEFFAutoModelForCTC,
+    QEFFAutoModelForImageTextToText,
     QEFFAutoModelForSequenceClassification,
     QEFFAutoModelForSpeechSeq2Seq,
     _QEffAutoModelForImageTextToTextDualQPC,
@@ -279,6 +280,13 @@ class TestQEFFTransformersBase:
 
         assert qeff_model._weight_free is True
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
+
+    def test_vlm_original_checkpoint_requires_weight_free(self):
+        with pytest.raises(ValueError, match="use_original_checkpoint=True requires weight_free=True"):
+            QEFFAutoModelForImageTextToText.from_pretrained(
+                "dummy-model",
+                use_original_checkpoint=True,
+            )
 
     def test_embedding_direct_init_preserves_weight_free(self):
         """Embedding models retain weight-free mode for Dynamo export."""

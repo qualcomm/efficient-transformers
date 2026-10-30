@@ -56,6 +56,12 @@ def parse_args():
         default=None,
         help="Optionally truncate the text model to this many layers for a lightweight run.",
     )
+    parser.add_argument(
+        "--use-original-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Reference the source safetensors directly instead of creating a prepared checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -84,6 +90,7 @@ def main():
         kv_offload=True,
         config=config,
         weight_free=True,
+        use_original_checkpoint=args.use_original_checkpoint,
     )
     num_hidden_layers = qeff_model.model.config.text_config.num_hidden_layers
     processor = AutoProcessor.from_pretrained(args.model_id)
