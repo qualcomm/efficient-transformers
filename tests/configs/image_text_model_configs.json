@@ -199,7 +199,6 @@
     },
     {
       "model_name": "Qwen/Qwen2.5-VL-3B-Instruct",
-      "known_dummy_runtime_parity_issue": "Greedy token parity is fp16-marginal on device: the random-init one-layer model has near-degenerate decode logits, so fp16 rounding on QAIC can flip the argmax relative to the HF fp32 reference.",
       "model_type": "qwen2_5_vl",
       "supports_blocking": true,
       "batch_size": 1,
@@ -217,7 +216,7 @@
         "Can you describe the image in detail?",
         "What are the objects in the image?"
       ],
-      "full_batch_size": 2,
+      "full_batch_size": 4,
       "additional_params": {
         "hidden_size": 2048,
         "text_config": {
