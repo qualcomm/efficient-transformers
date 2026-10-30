@@ -99,7 +99,7 @@ from transformers.models.whisper.modeling_whisper import (
 from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTransform
 from QEfficient.customop import CustomRMSNormAIC
 from QEfficient.proxy.pytorch_transform import QeffProxyModuleTransform
-from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
+from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE, SUPPORTED_RETAINED_STATE_DTYPES
 from QEfficient.utils.logging_utils import QEFFLogger
 
 if TYPE_CHECKING:
@@ -216,6 +216,28 @@ DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH = {"gemma3", "gemma3_text", "gemma4_text", 
 
 # This is for supporting different modelling classes specially written for prefill-only model
 SPECIALIZED_DISAGG_SERVING_MODEL_ARCH = {"gpt_oss", "qwen3_moe", "glm4_moe", "kimi_k2", "kimi_k25", "gemma4"}
+
+
+def _validate_retained_state_dtype(dtype: str | None, argument_name: str) -> None:
+    if dtype is not None and dtype not in SUPPORTED_RETAINED_STATE_DTYPES:
+        raise ValueError(
+            f"{argument_name} must be one of {sorted(SUPPORTED_RETAINED_STATE_DTYPES)}, got {dtype!r}"
+        )
+
+
+def _resolve_retained_state_dtype(
+    output_name: str,
+    *,
+    model_dtype: str,
+    kv_cache_dtype: str,
+    recurrent_state_dtype: str | None = None,
+) -> str:
+    if "vision_embeds" in output_name or "deepstack_features" in output_name:
+        return model_dtype
+    if recurrent_state_dtype is not None and "recurrent_state." in output_name:
+        return recurrent_state_dtype
+    return kv_cache_dtype
+
 
 # This is for supporting dynamic prefill sequence length for prefill_only model
 DYNAMIC_PREFILL_SEQ_LEN_SUPPORTED_MODEL_ARCH = {"gemma4"}

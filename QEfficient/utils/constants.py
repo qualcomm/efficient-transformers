@@ -114,6 +114,11 @@ ONNX_DYNAMO_EXPORT_OPSET = 18
 ONNX_EXPORT_OPSET = ONNX_LEGACY_EXPORT_OPSET
 FILE_CHUNK_SIZE_DEFAULT = 10 * 2**30  # 10 GB
 SIZE_THRESHOLD_DEFAULT = 1024
+SUPPORTED_RETAINED_STATE_DTYPES = {"float16", "mxfp6", "mxint8"}
+
+# Retained-state layout is part of the exported model ABI. Bump this value
+# whenever Qwen3.5 changes the shape/order of its externally visible state.
+QWEN3_5_CONV_STATE_LAYOUT_VERSION = "channel_last_v1"
 
 
 def get_onnx_export_opset(dynamo: bool = False) -> int:

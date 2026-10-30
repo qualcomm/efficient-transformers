@@ -53,6 +53,12 @@ def _parse_args():
         type=int,
         default=int(os.environ.get("QEFF_DECODE_NUM_DEVICES", "4")),
     )
+    parser.add_argument(
+        "--recurrent-state-dtype",
+        choices=("float16", "mxfp6", "mxint8"),
+        default=os.environ.get("QEFF_RECURRENT_STATE_DTYPE", "float16"),
+        help="Retained recurrent-state precision for both prefill and decode QPCs.",
+    )
     return parser.parse_args()
 
 
@@ -91,7 +97,9 @@ def _timed_call(timings, key, method):
 args = _parse_args()
 model_id = args.model_id
 DECODE_NUM_DEVICES = args.decode_num_devices
+RECURRENT_STATE_DTYPE = args.recurrent_state_dtype
 config = AutoConfig.from_pretrained(model_id)
+print(f"Recurrent-state retained I/O dtype: {RECURRENT_STATE_DTYPE}")
 
 # For faster execution user can run with lesser layers, For Testing Purpose Only
 config.vision_config.depth = 5
@@ -254,6 +262,7 @@ else:
             num_devices=1,
             mxfp6_matmul=True,
             mxint8_kv_cache=True,
+            recurrent_state_dtype=RECURRENT_STATE_DTYPE,
             retain_full_kv=True,
             split_model_io=True,  # This should be used for disagg serving via VLLM
             # mos=1,
@@ -305,6 +314,7 @@ else:
             num_devices=DECODE_NUM_DEVICES,
             mxfp6_matmul=True,
             mxint8_kv_cache=True,
+            recurrent_state_dtype=RECURRENT_STATE_DTYPE,
             retain_full_kv=True,
             split_model_io=True,  # This should be used for disagg serving via VLLM
             aic_enable_depth_first=False,
