@@ -1153,6 +1153,11 @@ class SpDTransform:
         QEffQwen2ForCausalLM,
         QEffQwen3ForCausalLM,
     }
+    # Target-only architectures whose own forward already accepts `num_logits_to_keep`
+    _native_num_logits_to_keep_mapping = {
+        QEffGptOssForCausalLM,
+        QEffMixtralForCausalLM,
+    }
 
     @classmethod
     def apply(cls, model: nn.Module, qaic_config: dict | None = None, **kwargs) -> tuple[nn.Module, bool]:
@@ -1166,7 +1171,13 @@ class SpDTransform:
             raise ValueError(
                 f"Speculative model type {speculative_model_type} is not supported. we currently only support {supported_spd_model_types}"
             )
-        elif (model_class := model.__class__) in cls._module_mapping:
+        elif (model_class := model.__class__) in cls._native_num_logits_to_keep_mapping:
+            if speculative_model_type != SPD_TARGET:
+                raise NotImplementedError(
+                    f"model class {model_class} only supports speculative_model_type='{SPD_TARGET}'."
+                )
+            transformed = True
+        elif model_class in cls._module_mapping:
             model.forward = MethodType(tlm_forward, model)
             if speculative_model_type != SPD_TARGET:
                 # build and attach draft mlp

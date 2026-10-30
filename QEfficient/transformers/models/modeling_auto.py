@@ -4744,6 +4744,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 prefill_seq_len=(num_speculative_tokens + 1) if self.is_tlm else 1,
                 ctx_len=ctx_len,
             )[1]
+            if self.is_tlm:
+                # Model-provided decode specs assume single-token decode; TLM decode verifies K+1 tokens.
+                spec["seq_len"] = decode_seq_len
         else:
             spec = {
                 "batch_size": full_batch_size if self.continuous_batching else batch_size,
