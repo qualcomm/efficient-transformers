@@ -302,9 +302,22 @@ def _proxy_logits_width(model) -> Optional[int]:
     raise AttributeError("Proxy model configuration does not expose its hidden size.")
 
 
-def _slice_vlm_prefill_inputs(lang_inputs: Mapping[str, np.ndarray], prefill_seq_len: int) -> Dict[str, np.ndarray]:
+_VLM_PREFILL_HOST_INPUT_NAMES = {
+    "input_ids",
+    "position_ids",
+    "mm_token_type_ids",
+    "token_type_ids",
+    "cross_attention_mask",
+    "image_idx",
+    "batch_index",
+}
+
+
+def _slice_vlm_prefill_inputs(lang_inputs: Mapping[str, object], prefill_seq_len: int) -> Dict[str, np.ndarray]:
     host_inputs = {}
     for name, value in lang_inputs.items():
+        if name not in _VLM_PREFILL_HOST_INPUT_NAMES:
+            continue
         value = np.asarray(value)
         if name in {"input_ids", "position_ids", "mm_token_type_ids", "token_type_ids"}:
             host_inputs[name] = value[..., :prefill_seq_len]
