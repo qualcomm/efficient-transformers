@@ -50,6 +50,9 @@ from ._helpers import (
 )
 
 BLOCKING_PARITY_PROMPT = "Hello world"
+# Use one parity length across every model and blocking mode. The shared context
+# leaves room for 8 generated tokens, so longer GPT-OSS contexts use that same count.
+PARITY_GEN_TOKENS = min(10, CTX_LEN - PROMPT_LEN)
 HEAD_BLOCKING_NUM_DEVICES = 4
 
 
@@ -319,10 +322,16 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     from QEfficient.utils.run_utils import ApiRunner
 
     use_onnx_subfunctions = True
-    # GPT-OSS combined HQ, HQKV, BHQKV modes need the same 32-token context used to resolve
-    # cache/block-boundary mismatch.
-    ctx_len = 32 if model_type == "gpt_oss" and blocking_key in {"hq", "hqkv", "bhqkv"} else CTX_LEN
+    # GPT-OSS HQ needs a longer context than HQKV/BHQKV for its cache/block layout.
+    if model_type == "gpt_oss" and blocking_key == "hq":
+        ctx_len = 64
+    elif model_type == "gpt_oss" and blocking_key in {"hqkv", "bhqkv"}:
+        ctx_len = 32
+    else:
+        ctx_len = CTX_LEN
     qaic_config = {**WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key], "ctx_len": ctx_len}
+    gen_len = PARITY_GEN_TOKENS
+    hf_ctx_len = PROMPT_LEN + gen_len
     prompts = [BLOCKING_PARITY_PROMPT]
 
     try:
@@ -337,7 +346,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         config=model_hf.config,
         prompt=prompts,
         prompt_len=PROMPT_LEN,
-        ctx_len=ctx_len,
+        ctx_len=hf_ctx_len,
         full_batch_size=None,
     )
     hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
@@ -389,7 +398,6 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     assert qaic_output is not None, "Blocked weight-free QAIC generate returned None"
     assert hasattr(qaic_output, "generated_ids") and qaic_output.generated_ids is not None
 
-    gen_len = ctx_len - PROMPT_LEN
     qaic_tokens = qaic_output.generated_ids[0].flatten()[:gen_len]
     qaic_text = getattr(qaic_output, "generated_texts", None)
     print("Blocked weight-free QAIC output:")
