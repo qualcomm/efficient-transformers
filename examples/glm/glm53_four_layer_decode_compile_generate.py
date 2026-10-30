@@ -675,7 +675,7 @@ def main() -> None:
         tokenizer,
         prompts=[prompt] * args.batch_size,
         generation_len=generation_len,
-        device_id=args.device_id,
+        device_ids=args.device_id,
     )
     qeff_generated = tokens_from_qeff_output(exec_info)
     print(json.dumps({"event": "qeff_generate_done", "shape": list(qeff_generated.shape)}), flush=True)
