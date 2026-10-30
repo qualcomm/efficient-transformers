@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import reprlib
+import sys
 import threading
 import warnings
 from contextlib import contextmanager
@@ -33,6 +34,7 @@ class LoggerConfig:
 
     log_path_env: str = "QEFF_LOG_PATH"
     log_level_env: str = "QEFF_LOG_LEVEL"
+    log_to_console_env: str = "QEFF_LOG_TO_CONSOLE"
     default_log_dir: str = os.path.expanduser("~/.cache/qefficient_logs")
     default_level: str = "INFO"
     max_bytes: int = 5 * 1024 * 1024
@@ -71,6 +73,26 @@ class JSONNamespaceFormatter(logging.Formatter):
             if value is not None:
                 log_record[field] = value
         return json.dumps(log_record, default=str)
+
+
+class DynamicStderrHandler(logging.StreamHandler):
+    """Stream handler that writes to the current stderr."""
+
+    def __init__(self):
+        super().__init__(stream=None)
+
+    def emit(self, record):
+        self.stream = sys.stderr
+        super().emit(record)
+
+    def flush(self):
+        self.stream = sys.stderr
+        super().flush()
+
+
+def _is_env_enabled(name: str) -> bool:
+    """Return true for common environment-variable opt-in values."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class QEFFLoggerAdapter(logging.LoggerAdapter):
@@ -281,13 +303,19 @@ def log_from_pretrained_call(func):
         model_name = arguments.get("pretrained_model_name_or_path", "unknown")
         if QEFFLogger.is_api_logging_suppressed():
             return func(cls, *args, **kwargs)
-        QEFFLogger.start_run(str(model_name))
+        started_run = False
+        if not QEFFLogger.has_active_run():
+            QEFFLogger.start_run(str(model_name))
+            started_run = True
+        if not started_run:
+            return func(cls, *args, **kwargs)
         log_api_arguments("from_pretrained", cls.__name__, arguments)
         try:
             result = func(cls, *args, **kwargs)
         except Exception as exc:
             QEFFLogger.log_api_failure("from_pretrained", cls.__name__, exc)
-            QEFFLogger.finish_run()
+            if started_run:
+                QEFFLogger.finish_run()
             raise
         else:
             QEFFLogger.log_event(
@@ -310,6 +338,7 @@ class QEFFLogger:
     Project-wide behavior:
       - A single log level is enforced using env `QEFF_LOG_LEVEL` (default = INFO).
       - Log path resolved with priority: explicit arg > env `QEFF_LOG_PATH` > default dir + timestamp.
+      - Console logging is enabled only when `QEFF_LOG_TO_CONSOLE` is truthy.
     """
 
     _instance: Optional[logging.Logger] = None
@@ -415,20 +444,6 @@ class QEFFLogger:
             handler.close()
             logger.removeHandler(handler)
 
-        try:
-            if self.log_path is None:
-                raise OSError("log path resolution failed")
-            handler: logging.Handler = RotatingFileHandler(
-                self.log_path,
-                maxBytes=LoggerConfig.max_bytes,
-                backupCount=LoggerConfig.backup_count,
-                delay=True,
-            )
-        except Exception as exc:
-            QEFFLogger._logfile = None
-            self._warn_file_logging_fallback(exc)
-            handler = logging.StreamHandler()
-
         class RunContextFilter(logging.Filter):
             def filter(self, record):
                 state = QEFFLogger._get_run_state()
@@ -437,9 +452,30 @@ class QEFFLogger:
                     record.model = state.model
                 return True
 
-        handler.addFilter(RunContextFilter())
-        handler.setFormatter(JSONNamespaceFormatter())
-        logger.addHandler(handler)
+        formatter = JSONNamespaceFormatter()
+        run_context_filter = RunContextFilter()
+
+        def add_handler(handler: logging.Handler) -> None:
+            handler.addFilter(run_context_filter)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
+        try:
+            if self.log_path is None:
+                raise OSError("log path resolution failed")
+            file_handler: logging.Handler = RotatingFileHandler(
+                self.log_path,
+                maxBytes=LoggerConfig.max_bytes,
+                backupCount=LoggerConfig.backup_count,
+                delay=True,
+            )
+            add_handler(file_handler)
+        except Exception as exc:
+            QEFFLogger._logfile = None
+            self._warn_file_logging_fallback(exc)
+
+        if QEFFLogger._logfile is None or _is_env_enabled(LoggerConfig.log_to_console_env):
+            add_handler(DynamicStderrHandler())
 
         return logger
 
@@ -640,7 +676,9 @@ class QEFFLogger:
             )
 
     @classmethod
-    def _append_final_table(cls, state: RunState, table: Optional[str] = None) -> bool:
+    def _append_final_table(
+        cls, state: RunState, table: Optional[str] = None, *, print_to_console: bool = True
+    ) -> bool:
         """Append one human-readable timing summary to the active log file."""
         with cls._run_lock:
             if state.table_written or cls._instance is None:
@@ -656,6 +694,8 @@ class QEFFLogger:
                 handle.write(f"\n===== QEfficient Timing Summary: {state.model} =====\n")
                 handle.write(table)
                 handle.write("\n\n")
+            if print_to_console and _is_env_enabled(LoggerConfig.log_to_console_env):
+                print(f"\n===== QEfficient Timing Summary: {state.model} =====\n{table}\n", file=sys.stderr, flush=True)
             state.table_written = True
             return True
 
@@ -695,7 +735,7 @@ class QEFFLogger:
         state = cls._get_run_state()
         if state is not None:
             try:
-                cls._append_final_table(state, table)
+                cls._append_final_table(state, table, print_to_console=False)
             except Exception:
                 logging.getLogger(__name__).debug("Unable to write QEfficient timing summary", exc_info=True)
         print("\n" + table)

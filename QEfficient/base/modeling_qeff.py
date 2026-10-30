@@ -454,12 +454,7 @@ class QEFFBaseModel(ABC):
         if not any_transformed:
             warnings.warn(f"No transforms applied to model: {self.model_name}. It may be an unsupported model!")
         else:
-            QEFFLogger.log_event(
-                "milestone",
-                "INFRA",
-                f"Applied PyTorch transforms to model: {self.model_name}.",
-                milestone=QEFFLogger.MILESTONE_LOAD_COMPLETE,
-            )
+            logger.info(f"Applied PyTorch transforms to model: {self.model_name}.")
 
     def _normalize_torch_dtype(self):
         """
