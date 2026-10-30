@@ -65,6 +65,22 @@ logger = QEFFLogger.get_logger("MODEL")
 QWEN3_VL_ROPE_CACHE_EXPORT_CAP = 76800
 
 
+def _complete_batch_index_permutation(batch_index: torch.Tensor) -> torch.Tensor:
+    """Replace invalid rows with the unused physical batch slots."""
+    slots = batch_index.reshape(-1).long()
+    physical_slots = torch.arange(slots.shape[0], dtype=slots.dtype, device=slots.device)
+    valid = (slots >= 0) & (slots < slots.shape[0])
+    used = ((slots.unsqueeze(1) == physical_slots.unsqueeze(0)) & valid.unsqueeze(1)).sum(dim=0) > 0
+    unused = ~used
+    unused_rank = unused.to(slots.dtype).cumsum(dim=0) - 1
+    invalid_rank = (~valid).to(slots.dtype).cumsum(dim=0) - 1
+    replacements = (
+        (unused.unsqueeze(0) & (invalid_rank.unsqueeze(1) == unused_rank.unsqueeze(0))).to(slots.dtype)
+        * physical_slots.unsqueeze(0)
+    ).sum(dim=1)
+    return torch.where(valid, slots, replacements).reshape_as(batch_index)
+
+
 def _batch_index_scatter(tensor: torch.Tensor, batch_index: torch.Tensor, batch_dim: int = 0) -> torch.Tensor:
     """Place logical request rows into their physical batch slots."""
     batch_first = tensor if batch_dim == 0 else tensor.transpose(0, batch_dim)
@@ -892,6 +908,7 @@ class QEffQwen3VLDecoderWrapper(nn.Module):
         first_layer_window = not layerwise or QEffQwen3VLMoeTextModel._start == 0
 
         if batch_fold_cb:
+            batch_index = _complete_batch_index_permutation(batch_index)
             # Folded cache kernels operate on contiguous physical rows; keep the
             # logical-to-physical mapping at the graph boundary.
             if first_layer_window:
