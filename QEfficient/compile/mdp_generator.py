@@ -164,7 +164,6 @@ def precheck_and_autofix_mdp_partition_order(
     mdp_json: Dict[str, Any],
     max_rounds: int = 8,
     protected_nodes: Optional[Set[str]] = None,
-    drop_alias_prone: bool = True,
 ) -> int:
     """Best-effort pre-check: scan all violation pairs and auto-fix before compile."""
     removed_total = 0
@@ -173,8 +172,6 @@ def precheck_and_autofix_mdp_partition_order(
     for _ in range(max_rounds):
         violations = _find_mdp_partition_order_violations(onnx_path=onnx_path, mdp_json=mdp_json)
         if not violations:
-            if not drop_alias_prone:
-                break
             alias_removed = _drop_alias_prone_top_level_nodes(
                 onnx_path=onnx_path,
                 mdp_json=mdp_json,

@@ -2255,6 +2255,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             kv_cache_batch_size=kv_cache_batch_size,
             full_batch_size=full_batch_size,
             vision_batch_size=vision_batch_size,
+            enable_chunking=enable_chunking,
             **compiler_options,
         )
 

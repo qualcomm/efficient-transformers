@@ -1468,7 +1468,9 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         # Preserve the legacy shape when callers do not request a separate vision batch.
         vision_batch_size = batch_size if vision_batch_size is None else vision_batch_size
         prefill_seq_len = prefill_seq_len if prefill_seq_len else 32
-        prefill_seq_len = max(prefill_seq_len, prefill_seq_len + self._get_mm_tokens_per_image())
+        enable_chunking = compiler_options.pop("enable_chunking", False)
+        if not enable_chunking:
+            prefill_seq_len = max(prefill_seq_len, prefill_seq_len + self._get_mm_tokens_per_image())
         ctx_len = ctx_len if ctx_len else constants.INTERN_CTX_LEN
         max_patches = self._get_vision_max_patches()
         user_vision_size = compiler_options.pop("vision_size", None)
