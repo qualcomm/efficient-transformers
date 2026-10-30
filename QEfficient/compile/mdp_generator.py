@@ -646,13 +646,13 @@ def generate_disagg_mdp_intersection_config(
     num_partitions: int,
     num_layers: int,
     num_cores: int = 16,
+    qaic_config: dict | None = None,
 ) -> Dict[str, Any]:
     """Generate an MDP config by intersecting the QEff MDP with the compiler dump.
 
-    The QEff MDP (derived from the ONNX graph) is always a superset of the
-    compiler dump: every node the compiler actually processes appears in the
-    QEff MDP, but the QEff MDP also contains nodes the compiler optimises away
-    (constant-folded, etc.).  The intersection keeps only nodes that survive
+    The QEff MDP (derived from the ONNX graph) contains nodes the compiler
+    optimises away (constant-folded, etc.). For DFlash, compiler-unrolled scan
+    bodies inherit their parent loop's partition. The intersection keeps nodes that survive
     into the compiler IR, while preserving the **QEff MDP node order and
     partition assignment** as the authoritative source of truth, except for
     scoped aliases whose partition is aligned with the compiler dump when the
@@ -725,6 +725,60 @@ def generate_disagg_mdp_intersection_config(
 
     logger.info(f"Compiler dump: {len(compiler_nodes)} unique node names")
 
+    if qaic_config and qaic_config.get("target_layer_ids"):
+        model = onnx.load(onnx_path, load_external_data=False)
+        partition_bounds = _layer_partition_bounds(num_layers, num_partitions)
+        node_partitions = {
+            name: index for index, part in enumerate(qeff_mdp["partitions"]) for name in part["nodeList"]
+        }
+        producers = {value: node.name for node in model.graph.node for value in node.output}
+        # State reset and commit nodes sit outside the decoder-layer scopes.
+        for node in model.graph.node:
+            if node.name not in node_partitions:
+                continue
+            state_partitions = {
+                bisect.bisect_right(partition_bounds, int(match[1]))
+                for value in (*node.input, *node.output)
+                if (match := re.fullmatch(r"(?:conv_state|recurrent_state)\.(\d+)(?:_.*)?", value))
+            }
+            if len(state_partitions) > 1:
+                raise ValueError(f"DFlash state node {node.name!r} spans multiple pipeline stages.")
+            if state_partitions:
+                node_partitions[node.name] = state_partitions.pop()
+        for node in reversed(model.graph.node):
+            if node.name not in node_partitions:
+                continue
+            for value in node.input:
+                producer = producers.get(value)
+                if producer in node_partitions and node_partitions[producer] > node_partitions[node.name]:
+                    if _get_layer_num(producer) is not None:
+                        raise ValueError(f"DFlash state placement would move decoder-layer node {producer!r}.")
+                    node_partitions[producer] = node_partitions[node.name]
+        for index, part in enumerate(qeff_mdp["partitions"]):
+            part["nodeList"] = [name for name, owner in node_partitions.items() if owner == index]
+
+        # Keep each scan iteration in ONNX dependency order within its owning stage.
+        loop_nodes = {}
+        for node in model.graph.node:
+            if node.op_type != "Loop":
+                continue
+            body_order = {
+                child.name: index
+                for attr in node.attribute
+                if attr.type == onnx.AttributeProto.GRAPH
+                for index, child in enumerate(attr.g.node)
+            }
+            unrolled = sorted(
+                (int(match[2]), body_order[match[1]], name)
+                for part in dump.get("partitions", [])
+                for name in part.get("nodeList", [])
+                if (match := re.fullmatch(r"(.+)_unroll(\d+)", name)) and match[1] in body_order
+            )
+            if unrolled and node.name not in compiler_nodes:
+                loop_nodes[node.name] = [name for _, _, name in unrolled]
+        for part in qeff_mdp["partitions"]:
+            part["nodeList"] = [child for name in part["nodeList"] for child in loop_nodes.get(name, [name])]
+
     qeff_total = sum(len(p["nodeList"]) for p in qeff_mdp["partitions"])
     logger.info(f"QEff MDP (superset): {qeff_total} nodes across {num_partitions} partitions")
 
@@ -783,6 +837,7 @@ def generate_disagg_mdp_config(
     mdp_compiler_dump_path: Optional[str],
     num_cores: int,
     num_layers: int,
+    qaic_config: dict | None = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     """Dispatch to the appropriate disaggregated MDP generator and persist the result.
 
@@ -831,6 +886,7 @@ def generate_disagg_mdp_config(
             num_partitions=mdp_num_partitions,
             num_layers=num_layers,
             num_cores=num_cores,
+            qaic_config=qaic_config,
         )
 
     # Every intersection node was observed in the compiler dump and must remain assigned.

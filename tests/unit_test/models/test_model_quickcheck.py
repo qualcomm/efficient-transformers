@@ -861,6 +861,488 @@ def _ort_qwen_logits(onnx_path: Path, qeff_model, inputs):
     return outputs["logits"].astype(np.float32)
 
 
+@pytest.mark.parametrize("model_name,block_size", [("gpt-oss-20b", 8), ("gpt-oss-120b", 10)])
+@pytest.mark.parametrize("disagg_tlm", [False, True])
+def test_gpt_oss_dflash_compile_contract(monkeypatch, tmp_path, model_name, block_size, disagg_tlm):
+    from examples.performance.dflash import utils
+
+    model = MagicMock()
+    model.compile.return_value = tmp_path / "qpc"
+    load_model = MagicMock(return_value=model)
+    monkeypatch.setattr(QEFFAutoModelForCausalLM, "from_pretrained", load_model)
+    monkeypatch.setattr(utils.AutoConfig, "from_pretrained", lambda *a, **kw: GptOssConfig())
+    monkeypatch.setattr(utils, "read_dlm_meta", lambda *a: ({}, [1, 3], block_size))
+    tlm_repo, dlm_repo = utils.MODEL_MAP[utils.resolve_model_name(f"openai/{model_name}")]
+    result = utils.compile_tlm_qpc(
+        tlm_repo, dlm_repo, prefill_seq_len=128, ctx_len=4096, num_cores=8, num_devices=4, disagg_tlm=disagg_tlm
+    )
+    if disagg_tlm:
+        assert set(result) == {"prefill", "decode"}
+        assert model.compile.call_count == 2
+        assert all(len(call.kwargs["specializations"]) == 1 for call in model.compile.call_args_list)
+        assert all(call.kwargs["offload_pt_weights"] is False for call in model.compile.call_args_list)
+        assert all(call.kwargs["split_retained_state_io"] is True for call in model.compile.call_args_list)
+    else:
+        assert model.compile.call_count == 1
+    specs = []
+    for call in model.compile.call_args_list:
+        options = call.kwargs
+        assert options["qaic_config"] == load_model.call_args.kwargs["qaic_config"]
+        assert "moe_config" not in options["qaic_config"]
+        assert options["prefill_only"] and options["enable_chunking"]
+        assert options["mxint8_kv_cache"] and options["mxfp6_matmul"]
+        specs.extend(options["specializations"])
+    assert [(s["seq_len"], s["num_logits_to_keep"]) for s in specs] == [
+        (128, 1),
+        (block_size, block_size),
+    ]
+
+
+@pytest.mark.parametrize("prefill_length", [16, 128])
+def test_dflash_split_tlm_phase_selection(prefill_length):
+    from examples.performance.dflash.utils import _compile_tlm_phases
+
+    specs = [{"seq_len": prefill_length, "num_logits_to_keep": 1}, {"seq_len": 16, "num_logits_to_keep": 16}]
+    model = MagicMock()
+    model.compile.side_effect = ["prefill.qpc", "decode.qpc"]
+    options = {"prefill_only": True, "specializations": specs}
+    assert _compile_tlm_phases(model, options, True) == {"prefill": "prefill.qpc", "decode": "decode.qpc"}
+    assert options == {"prefill_only": True, "specializations": specs}
+    for call, spec in zip(model.compile.call_args_list, specs):
+        assert call.kwargs == {
+            "prefill_only": True,
+            "specializations": [spec],
+            "split_retained_state_io": True,
+            "offload_pt_weights": False,
+        }
+
+
+def test_dflash_split_tlm_handoff_includes_hybrid_state():
+    from types import SimpleNamespace
+
+    from QEfficient.generation.dflash_tlm_handoff import DFlashTlmHandoff
+
+    names = ["past_key.3", "past_value.3", "conv_state.0", "recurrent_state.0"]
+    shapes = [(1, 2, 32, 8), (1, 2, 32, 8), (1, 8, 4), (1, 8, 8)]
+    bindings = [SimpleNamespace(dims=shape, type=1, size=int(np.prod(shape)) * 4) for shape in shapes]
+    source = SimpleNamespace(output_names=[name + "_RetainedState" for name in names], bindings=bindings)
+    source.binding_index_map = {name: index for index, name in enumerate(source.output_names)}
+    target = SimpleNamespace(input_names=names, bindings=bindings, aic_to_np_dtype_mapping={1: np.dtype(np.float32)})
+    target.binding_index_map = {name: index for index, name in enumerate(names)}
+    handoff = DFlashTlmHandoff(source, target)
+    outputs = {
+        name: np.full(buffer.shape, index + 1, dtype=np.float32)
+        for index, (name, buffer) in enumerate(handoff.outputs.items())
+    }
+    handoff.capture(outputs)
+    for name, buffer in handoff.inputs.items():
+        np.testing.assert_array_equal(buffer, outputs[name + "_RetainedState"])
+        assert buffer is handoff.outputs[name + "_RetainedState"]
+    source.output_names.pop()
+    with pytest.raises(ValueError, match="matching retained-state"):
+        DFlashTlmHandoff(source, target)
+
+
+@pytest.mark.parametrize("prefill_length", [16, 128])
+@pytest.mark.parametrize("block_size", [8, 16])
+def test_dflash_split_tlm_qwen_moe_compile(monkeypatch, prefill_length, block_size):
+    from examples.performance.dflash import utils
+    from QEfficient.transformers.models import modeling_auto
+    from tests.unit_test.transforms.test_dflash_transform import make_tiny_qwen3_5_vlm
+
+    model = QEFFAutoModelForImageTextToText(
+        make_tiny_qwen3_5_vlm(moe=True), kv_offload=True, qaic_config={"target_layer_ids": [1, 3]}
+    )
+    compile_mock = MagicMock(return_value="test.qpc")
+    monkeypatch.setattr(model.lang_model, "_compile", compile_mock)
+    vision_compile = MagicMock(return_value="vision.qpc")
+    monkeypatch.setattr(model.vision_model, "_compile", vision_compile)
+    monkeypatch.setattr(model, "export", MagicMock())
+    monkeypatch.setattr(modeling_auto, "_filter_custom_io_for_onnx", lambda custom_io, onnx_path: custom_io)
+    monkeypatch.setattr(QEFFAutoModelForImageTextToText, "from_pretrained", lambda *a, **kw: model)
+    monkeypatch.setattr(utils.AutoConfig, "from_pretrained", lambda *a, **kw: model.model.config)
+    text_model = model.lang_model.model.language_model
+    state_dict = {
+        "fc.weight": text_model.fc.weight.detach().clone(),
+        "hidden_norm.weight": text_model.hidden_norm.weight,
+    }
+    monkeypatch.setattr(utils, "read_dlm_meta", lambda *a: (state_dict, [0, 2], block_size))
+    lang_qpcs, vision_qpc = utils.compile_qwen3vl_vlm_qpcs(
+        "tiny-qwen3.5-moe",
+        "tiny-dflash",
+        num_cores=4,
+        num_devices=1,
+        prefill_seq_len=prefill_length,
+        ctx_len=256,
+        height=32,
+        width=32,
+        disagg_tlm=True,
+    )
+    assert lang_qpcs == {"prefill": "test.qpc", "decode": "test.qpc"}
+    assert vision_qpc == "vision.qpc"
+    assert compile_mock.call_count == 2
+    for call, (length, num_logits) in zip(compile_mock.call_args_list, [(prefill_length, 1), (block_size, block_size)]):
+        specs = call.kwargs["specializations"]
+        assert len(specs) == 1
+        assert specs[0]["num_logits_to_keep"] == num_logits
+        assert specs[0]["seq_len"] == length
+        assert "vision_size" in specs[0]
+        assert call.kwargs["split_retained_state_io"] is True
+    for call in vision_compile.call_args_list:
+        assert "grid_height" in call.kwargs["specializations"][0]
+        assert "num_logits_to_keep" not in call.kwargs["specializations"][0]
+
+
+@pytest.mark.parametrize(
+    "mode,continuous_batching", [("baseline", False), ("standalone", False), ("target", False), ("target", True)]
+)
+@pytest.mark.parametrize("prefill_length", [8, 16])
+def test_gpt_oss_dflash_expert_parallel_contract(tmp_path, mode, prefill_length, continuous_batching):
+    from QEfficient.transformers.moe import MoEFlavour
+
+    torch.manual_seed(37)
+    config = GptOssConfig(
+        vocab_size=127,
+        hidden_size=32,
+        intermediate_size=32,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        sliding_window=16,
+        max_position_embeddings=128,
+    )
+    hf_model = AutoModelForCausalLM.from_config(config, attn_implementation="eager").eval()
+    dflash = mode != "baseline"
+    qaic_config = {"target_layer_ids": [1, 3]} if dflash else {}
+    if mode == "target":
+        qaic_config["speculative_model_type"] = "target"
+    qeff = QEFFAutoModelForCausalLM(
+        deepcopy(hf_model), qaic_config=qaic_config, continuous_batching=continuous_batching
+    )
+    qeff.transform(
+        ctx_len=64,
+        seq_len=prefill_length,
+        bs=1,
+        num_devices=1,
+        num_cores=4,
+        qaic_config=qaic_config,
+        prefill_only=True,
+        enable_chunking=True,
+        prefill_seq_len=prefill_length,
+    )
+    assert all(layer.mlp._moe_flavour == MoEFlavour.EXPERT_PARALLEL for layer in qeff.model.model.layers)
+    path = qeff.export(
+        tmp_path / "gpt-oss-dflash",
+        prefill_only=True,
+        enable_chunking=True,
+        prefill_seq_len=prefill_length,
+        offload_pt_weights=False,
+    )
+    graph = onnx.load(_exported_onnx_path(path), load_external_data=False).graph
+    assert ("num_logits_to_keep" in [value.name for value in graph.input]) == dflash
+    if dflash:
+        assert qeff.hash_params["dflash_hidden_norm"] == "custom_rms_norm_v1"
+        assert any(node.op_type == "CustomRMSNorm" and "hidden_states" in node.output for node in graph.node)
+    else:
+        assert "dflash_hidden_norm" not in qeff.hash_params
+    cache = _qwen_causal_inputs(config, seq_len=8, ctx_len=64)["past_key_values"]
+    if continuous_batching:
+        cache = tuple(tuple(value.repeat(3, 1, 1, 1) for value in layer) for layer in cache)
+    committed = torch.randint(1, config.vocab_size, (1, 13))
+
+    def run(ids, start, valid, keep):
+        nonlocal cache
+        positions = torch.arange(start, start + ids.shape[1]).unsqueeze(0)
+        positions[:, valid:] = -1
+        inputs = {"input_ids": ids, "position_ids": positions, "past_key_values": cache}
+        if continuous_batching:
+            inputs["batch_index"] = torch.tensor([[2]])
+        if dflash:
+            inputs["num_logits_to_keep"] = torch.arange(keep).view(keep, 1)
+        with torch.no_grad():
+            outputs = qeff.model(**inputs)
+        cache = outputs.past_key_values
+        assert outputs.logits.shape[1] == (keep if dflash else 1)
+        if dflash:
+            assert outputs.hidden_states.shape == (1, ids.shape[1], config.hidden_size)
+        return outputs
+
+    for start in range(0, committed.shape[1], prefill_length):
+        chunk = committed[:, start : start + prefill_length]
+        actual = run(torch.nn.functional.pad(chunk, (0, prefill_length - chunk.shape[1])), start, chunk.shape[1], 1)
+        if dflash:
+            with torch.no_grad():
+                expected = hf_model(
+                    input_ids=committed[:, : start + chunk.shape[1]], use_cache=False, output_hidden_states=True
+                )
+                features = qeff.model.model.hidden_norm(
+                    qeff.model.model.fc(torch.cat([expected.hidden_states[i][:, start:] for i in [1, 3]], dim=-1))
+                )
+            torch.testing.assert_close(actual.hidden_states[:, : chunk.shape[1]], features, atol=3e-4, rtol=3e-4)
+    for accepted in (2, 0, 7):
+        candidates = torch.randint(1, config.vocab_size, (1, 8))
+        actual = run(candidates, committed.shape[1], 8, 8)
+        with torch.no_grad():
+            expected = hf_model(
+                input_ids=torch.cat((committed, candidates), dim=1), use_cache=False, output_hidden_states=True
+            )
+            logits = expected.logits[:, -8:] if dflash else expected.logits[:, -1:]
+            if mode == "standalone":
+                logits = logits.argmax(-1).to(torch.int32)
+            torch.testing.assert_close(actual.logits, logits, atol=3e-4, rtol=3e-4)
+            if dflash:
+                features = qeff.model.model.hidden_norm(
+                    qeff.model.model.fc(torch.cat([expected.hidden_states[i][:, -8:] for i in [1, 3]], dim=-1))
+                )
+                torch.testing.assert_close(actual.hidden_states, features, atol=3e-4, rtol=3e-4)
+        committed = torch.cat((committed, candidates[:, : accepted + 1]), dim=1)
+
+
+def test_gpt_oss_dflash_ctx_gather_dynamic_length(tmp_path, monkeypatch):
+    from QEfficient.transformers import cache_utils
+    from QEfficient.transformers.cache_utils import QEffGPTOSSDynamicLayer
+
+    # Isolate gather shape propagation from hardware scatter operations.
+    monkeypatch.setattr(cache_utils, "ctx_scatter", lambda data, *args: data)
+
+    class GatherWindow(torch.nn.Module):
+        def forward(self, data, updates, positions):
+            layer = QEffGPTOSSDynamicLayer.from_tensors(data, data, is_sliding=True)
+            gathered, values = layer.sliding_window_update_chunked(
+                updates,
+                updates,
+                {
+                    "position_ids": positions,
+                    "sliding_window": 16,
+                    "dflash": True,
+                },
+            )
+            return gathered.reshape(updates.shape[0], -1, gathered.shape[2] * data.shape[3]), values
+
+    data = torch.randn(2, 2, 64, 8)
+    updates = torch.randn(2, 2, 8, 8)
+    positions = torch.tensor([[4], [24]]) + torch.arange(8)
+    path = tmp_path / "gather-window.onnx"
+    model = GatherWindow()
+    torch.onnx.export(
+        model,
+        (data, updates, positions),
+        path,
+        input_names=["data", "updates", "positions"],
+        output_names=["gathered", "values"],
+        dynamic_axes={
+            "updates": {2: "seq_len"},
+            "positions": {1: "seq_len"},
+            "gathered": {2: "window_features"},
+            "values": {2: "window_len"},
+        },
+        opset_version=17,
+        dynamo=False,
+    )
+    session = _ort_session(path)
+    for length in (8, 16, 32):
+        updates = torch.randn(2, 2, length, 8)
+        positions = torch.tensor([[4], [24]]) + torch.arange(length)
+        expected = model(data, updates, positions)
+        feeds = {"data": data.numpy(), "updates": updates.numpy(), "positions": positions.numpy()}
+        actual = session.run(None, {item.name: feeds[item.name] for item in session.get_inputs()})
+        for result, reference in zip(actual, expected):
+            np.testing.assert_array_equal(result, reference.numpy())
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen3_5_without_dflash_hf_qeff_ort_parity(tmp_path, model_type):
+    _assert_qwen_hf_qeff_ort_parity(model_type, tmp_path)
+
+
+@pytest.mark.parametrize("output_hidden_states", [False, True])
+@pytest.mark.parametrize("explicit_cache_position", [False, True])
+def test_qwen3_5_moe_without_dflash_preserves_forward_path(monkeypatch, output_hidden_states, explicit_cache_position):
+    from QEfficient.transformers.models.qwen3_5_moe import modeling_qwen3_5_moe as modeling
+    from tests.unit_test.transforms.test_dflash_transform import make_tiny_qwen3_5_vlm
+
+    qeff = QEFFAutoModelForImageTextToText(make_tiny_qwen3_5_vlm(moe=True), kv_offload=True)
+    model = qeff.lang_model.model.language_model
+    inputs = qeff.model.get_dummy_inputs(kv_offload=True)["lang"]
+    conv_update = modeling.qeff_torch_causal_conv1d_update
+    conv_calls = []
+
+    def baseline_conv_update(*args, **kwargs):
+        assert kwargs.get("dflash", False) is False
+        conv_calls.append(True)
+        return conv_update(*args, **kwargs)
+
+    def unexpected_dflash(*args, **kwargs):
+        raise AssertionError("Non-DFlash forward must not use DFlash operations")
+
+    monkeypatch.setattr(modeling, "qeff_torch_causal_conv1d_update", baseline_conv_update)
+    monkeypatch.setattr(modeling, "compute_dflash_target_hidden_states", unexpected_dflash)
+    monkeypatch.setattr(modeling, "dflash_chunk_gated_delta_scan", unexpected_dflash)
+    monkeypatch.setattr(modeling.QEffQwen3_5MoeGatedDeltaNet, "_dflash_triangular_inverse", unexpected_dflash)
+    with torch.no_grad():
+        output = model(
+            input_ids=inputs["input_ids"],
+            position_ids=inputs["position_ids"],
+            past_key_values=inputs["past_key_values"],
+            attention_mask=torch.ones_like(inputs["input_ids"]),
+            cache_position=torch.arange(inputs["input_ids"].shape[1]) if explicit_cache_position else None,
+            output_hidden_states=output_hidden_states,
+            use_cache=True,
+        )
+
+    assert len(conv_calls) == model.config.layer_types.count("linear_attention")
+    assert output.hidden_states is None
+    assert "cache_commit" not in inputs
+    assert "hidden_states" not in qeff.model.get_output_names(kv_offload=True)["lang"]
+    assert "hidden_states" not in qeff.model.get_onnx_dynamic_axes(kv_offload=True)["lang"]
+
+
+def test_dflash_mixed_window_ort_parity(tmp_path):
+    """One draft graph must retain per-layer masks as positions cross the local window."""
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    torch.manual_seed(27)
+    config = Qwen3Config(
+        hidden_size=32,
+        intermediate_size=64,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        num_hidden_layers=2,
+        vocab_size=64,
+        max_position_embeddings=8192,
+        use_sliding_window=True,
+        sliding_window=2048,
+        layer_types=["sliding_attention", "full_attention"],
+    )
+    qeff = QEFFAutoModelForCausalLM(Qwen3ForCausalLM(config).eval(), qaic_config={"dflash_dlm": True})
+    onnx_path = _exported_onnx_path(qeff.export(tmp_path / "dflash-window", offload_pt_weights=False))
+    session = _ort_session(onnx_path)
+    session_inputs = [item.name for item in session.get_inputs()]
+    session_outputs = [item.name for item in session.get_outputs()]
+    cache = tuple((torch.randn(1, 1, 8192, 16), torch.randn(1, 1, 8192, 16)) for _ in range(2))
+    previous = {}
+    for start, valid in [(16, 16), (2032, 16), (2047, 15), (2048, 1), (2064, 16), (4096, 16)]:
+        target_positions = torch.arange(start - valid, start - valid + 16).unsqueeze(0)
+        target_positions[:, valid:] = -1
+        inputs = {
+            "input_ids": torch.randint(0, 64, (1, 16)),
+            "target_hidden": torch.randn(1, 16, 32),
+            "position_ids": torch.arange(start, start + 16).unsqueeze(0),
+            "position_ids_target": target_positions,
+            "past_key_values": cache,
+        }
+        feed = {
+            name: value.copy() for name, value in _flatten_qwen_ort_inputs(inputs, session_inputs, qeff.model).items()
+        }
+        for name in session_inputs:
+            if name + "_RetainedState" in previous:
+                feed[name] = previous[name + "_RetainedState"]
+        with torch.no_grad():
+            expected = qeff.model(**inputs)
+        actual = dict(zip(session_outputs, session.run(session_outputs, feed)))
+        np.testing.assert_allclose(actual["logits"], expected.logits.numpy(), atol=3e-4, rtol=3e-4)
+        cache = expected.past_key_values
+        for layer_idx, layer_cache in enumerate(cache):
+            for name, tensor in zip((f"past_key.{layer_idx}", f"past_value.{layer_idx}"), layer_cache):
+                np.testing.assert_allclose(actual[name + "_RetainedState"], tensor.numpy(), atol=3e-4, rtol=3e-4)
+        previous = actual
+
+
+@pytest.mark.parametrize(
+    "moe,prefill_length,verification_length,dflash_chunk_size",
+    [
+        (False, 8, 16, 64),
+        (False, 64, 16, 64),
+        (False, 8, 64, 64),
+        (False, 64, 64, 64),
+        (False, 8, 16, 16),
+        (False, 16, 16, 16),
+        (False, 128, 16, 16),
+        (False, 256, 16, 16),
+        (True, 16, 16, 16),
+        (True, 128, 16, 16),
+        (True, 128, 8, 8),
+    ],
+)
+@pytest.mark.parametrize("matrix_solve", [False, True])
+def test_qwen3_5_dflash_ort_recurrent_commit(
+    tmp_path, prefill_length, verification_length, dflash_chunk_size, matrix_solve, moe
+):
+    from tests.unit_test.transforms.test_dflash_transform import make_tiny_qwen3_5_vlm
+
+    torch.manual_seed(11)
+    model = make_tiny_qwen3_5_vlm(moe=moe)
+    ctx_len = max(256, prefill_length + verification_length)
+    model.config.text_config.max_position_embeddings = ctx_len
+    qeff = QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config={"target_layer_ids": [1, 3]})
+    qeff.lang_model.model.language_model.dflash_chunk_size = dflash_chunk_size
+    for layer in qeff.lang_model.model.language_model.layers:
+        if layer.layer_type == "linear_attention":
+            layer.linear_attn.dflash_matrix_solve = matrix_solve
+    inputs, output_names, dynamic_axes = _qwen_export_io(qeff, prefill_seq_len=8)
+    inputs["num_logits_to_keep"] = torch.zeros(1, 1, dtype=torch.int64)
+    dynamic_axes["num_logits_to_keep"] = {0: "num_logits_to_keep"}
+    dynamic_axes["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}
+    for i, kind in enumerate(qeff.model.config.text_config.layer_types):
+        if kind == "full_attention":
+            inputs["past_key_values"][i] = [
+                tensor.new_zeros((tensor.shape[0], tensor.shape[1], ctx_len, tensor.shape[3]))
+                for tensor in inputs["past_key_values"][i]
+            ]
+    qeff.lang_model.export(
+        inputs=deepcopy(inputs),
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        export_dir=tmp_path / "qwen35-dflash",
+        offload_pt_weights=False,
+    )
+    session = _ort_session(Path(qeff.lang_model.onnx_path))
+    session_inputs = [item.name for item in session.get_inputs()]
+    assert "cache_commit" in session_inputs
+    decoder = qeff.lang_model.model
+    cache = deepcopy(inputs["past_key_values"])
+    batch_size = inputs["input_ids"].shape[0]
+    actual = {}
+    prompt_length = prefill_length - 3
+    verified_tokens = min(verification_length, 16)
+    # Keep one exported graph across different sequence lengths and acceptance lengths.
+    for start, length, valid, commit in [
+        (0, prefill_length, prompt_length, 1),
+        (prompt_length, verification_length, verified_tokens, 0),
+        (prompt_length, verification_length, 2, 1),
+        (prompt_length + 2, verification_length, verified_tokens, 0),
+        (prompt_length + 2, verification_length, 1, 1),
+        (prompt_length + 3, verification_length, verified_tokens, 0),
+    ]:
+        token = (10 + start) % model.config.text_config.vocab_size
+        inputs["input_ids"] = torch.full((batch_size, length), token, dtype=torch.int64)
+        positions = torch.arange(start, start + length).view(1, 1, -1).repeat(4, batch_size, 1)
+        positions[:, :, valid:] = -1
+        inputs["position_ids"] = positions
+        inputs["cache_commit"] = torch.tensor([commit])
+        num_logits = 1 if start == 0 else length
+        inputs["num_logits_to_keep"] = torch.zeros(num_logits, 1, dtype=torch.int64)
+        inputs["past_key_values"] = cache
+        feed = {name: value.copy() for name, value in _flatten_qwen_ort_inputs(inputs, session_inputs, decoder).items()}
+        if start:
+            for name in session_inputs:
+                if name + "_RetainedState" in actual:
+                    feed[name] = actual[name + "_RetainedState"]
+        with torch.no_grad():
+            predicted, _vision, _image_idx, hidden, cache = decoder(**inputs)
+        actual = dict(zip(output_names, session.run(output_names, feed)))
+        np.testing.assert_array_equal(actual["logits"][:, :valid], predicted.numpy()[:, :valid])
+        np.testing.assert_allclose(actual["hidden_states"][:, :valid], hidden.numpy()[:, :valid], atol=3e-4, rtol=3e-4)
+        for layer_idx, layer_state in enumerate(cache):
+            if qeff.model.config.text_config.layer_types[layer_idx] == "linear_attention":
+                for name, expected in zip(decoder.get_onnx_past_key_value_names(layer_idx), layer_state):
+                    np.testing.assert_allclose(actual[name + "_RetainedState"], expected.numpy(), atol=3e-4, rtol=3e-4)
+
+
 def _export_qwen_decoder_onnx(qeff_model, inputs, tmp_path, *, model_type: str, prefill_only: bool, layerwise: bool):
     export_dir = (
         tmp_path / f"{model_type}-{'layerwise' if layerwise else 'default'}-{'prefill' if prefill_only else 'decode'}"
@@ -2896,12 +3378,16 @@ def test_qwen3_5_moe_get_submodules_for_export_keeps_decoder_layer_for_mixed_lay
     assert wrapper.get_submodules_for_export() == {QEffQwen3_5MoeDecoderLayer}
 
 
-def test_qwen3_5_moe_get_specializations_supports_multi_resolution():
+@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
+def test_qwen3_5_get_specializations_supports_multi_resolution(moe):
     from types import SimpleNamespace
 
+    from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5ForConditionalGeneration
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeForConditionalGeneration
 
-    model = QEffQwen3_5MoeForConditionalGeneration.__new__(QEffQwen3_5MoeForConditionalGeneration)
+    model_cls = QEffQwen3_5MoeForConditionalGeneration if moe else QEffQwen3_5ForConditionalGeneration
+    model = model_cls.__new__(model_cls)
+    model.model = SimpleNamespace(language_model=None)
     model.config = SimpleNamespace(
         vision_config=SimpleNamespace(patch_size=16, temporal_patch_size=1),
         text_config=SimpleNamespace(num_hidden_layers=0, layer_types=[]),
@@ -2926,22 +3412,28 @@ def test_qwen3_5_moe_get_specializations_supports_multi_resolution():
     assert all(spec["vision_batch_size"] == 1 for spec in lang_specs)
 
 
-def test_qwen3_5_moe_get_specializations_accepts_qeff_logger_adapter():
+@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
+def test_qwen3_5_get_specializations_accepts_qeff_logger_adapter(moe):
     """Ensure constrained vision-size logging works with a LoggerAdapter."""
     from types import SimpleNamespace
 
+    from QEfficient.transformers.models.qwen3_5 import modeling_qwen3_5
+    from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5ForConditionalGeneration
     from QEfficient.transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
         QEffQwen3_5MoeForConditionalGeneration,
     )
 
-    model = QEffQwen3_5MoeForConditionalGeneration.__new__(QEffQwen3_5MoeForConditionalGeneration)
+    model_cls = QEffQwen3_5MoeForConditionalGeneration if moe else QEffQwen3_5ForConditionalGeneration
+    model = model_cls.__new__(model_cls)
+    model.model = SimpleNamespace(language_model=None)
     model.config = SimpleNamespace(
         vision_config=SimpleNamespace(patch_size=16, temporal_patch_size=1),
         text_config=SimpleNamespace(num_hidden_layers=1, layer_types=[]),
     )
 
-    assert isinstance(modeling_qwen3_5_moe.logger, logging.LoggerAdapter)
+    model_module = modeling_qwen3_5_moe if moe else modeling_qwen3_5
+    assert isinstance(model_module.logger, logging.LoggerAdapter)
     specs, _ = model.get_specializations(
         batch_size=1,
         prefill_seq_len=512,
@@ -2957,12 +3449,16 @@ def test_qwen3_5_moe_get_specializations_accepts_qeff_logger_adapter():
     assert specs["lang"][0]["vision_size"] == 1
 
 
-def test_qwen3_5_moe_get_specializations_decouples_vision_batch_size():
+@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
+def test_qwen3_5_get_specializations_decouples_vision_batch_size(moe):
     from types import SimpleNamespace
 
+    from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5ForConditionalGeneration
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeForConditionalGeneration
 
-    model = QEffQwen3_5MoeForConditionalGeneration.__new__(QEffQwen3_5MoeForConditionalGeneration)
+    model_cls = QEffQwen3_5MoeForConditionalGeneration if moe else QEffQwen3_5ForConditionalGeneration
+    model = model_cls.__new__(model_cls)
+    model.model = SimpleNamespace(language_model=None)
     model.config = SimpleNamespace(
         vision_config=SimpleNamespace(patch_size=16, temporal_patch_size=1),
         text_config=SimpleNamespace(num_hidden_layers=0, layer_types=[]),
@@ -3229,6 +3725,7 @@ def test_gdn_full_state_update_rejects_unsafe_compile_modes(
 
     model = _QEffAutoModelForImageTextToTextDualQPC.__new__(_QEffAutoModelForImageTextToTextDualQPC)
     model.model = _tiny_qwen_qeff_model(model_type).model
+    model.dflash_tlm = False
 
     with pytest.raises(ValueError, match="gdn_full_state_update"):
         model.compile(
@@ -3259,6 +3756,7 @@ def test_qwen3_5_moe_gdn_full_state_update_accepts_full_batch_compile_modes(
 
     model = _QEffAutoModelForImageTextToTextDualQPC.__new__(_QEffAutoModelForImageTextToTextDualQPC)
     model.model = _tiny_qwen_qeff_model("qwen3_5_moe").model
+    model.dflash_tlm = False
     model._run_layerwise_compile = MagicMock(return_value="qpc_paths")
 
     assert (
@@ -3484,6 +3982,45 @@ def test_qwen3_5_moe_conv_decode_slice_keeps_prefill_gather_path():
 
     torch.testing.assert_close(output, expected_output.to(hidden_states.dtype))
     torch.testing.assert_close(state, expected_state)
+
+
+@pytest.mark.parametrize("dflash", [None, False, True])
+@pytest.mark.parametrize("grouped_state", [False, True])
+@pytest.mark.parametrize("valid_tokens", [0, 1, 2, 3, 4])
+def test_qwen3_5_moe_conv_history_dflash_guard(dflash, grouped_state, valid_tokens):
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        qeff_torch_causal_conv1d_update,
+    )
+
+    flat_state = torch.arange(24, dtype=torch.float32).reshape(1, 6, 4)
+    state = flat_state.reshape(1, 2, 3, 4) if grouped_state else flat_state
+    hidden = 100 + torch.arange(6 * 16, dtype=torch.float32).reshape(1, 6, 16)
+    positions = torch.full((4, 1, 16), -1, dtype=torch.int64)
+    positions[..., :valid_tokens] = torch.arange(40, 40 + valid_tokens)
+    kwargs = {} if dflash is None else {"dflash": dflash}
+    _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions, **kwargs)
+
+    if dflash:
+        expected = torch.cat([flat_state, hidden[..., :valid_tokens]], dim=-1)[..., -4:]
+    else:
+        # Preserve the original baseline ordering, including its tied cached keys.
+        zeros = flat_state[:, 0, :].to(positions.dtype) * 0
+        order = torch.argsort(torch.cat([zeros, positions[0]], dim=1), dim=1)
+        expected = torch.gather(torch.cat([flat_state, hidden], dim=-1), 2, order[:, None, -4:].expand(-1, 6, -1))
+    torch.testing.assert_close(actual, expected.reshape_as(state), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("valid_tokens", [0, 1, 2, 3, 4])
+def test_qwen3_5_conv_replay_preserves_history_order(valid_tokens):
+    from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import qeff_torch_causal_conv1d_update
+
+    state = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
+    hidden = 100 + torch.arange(6 * 64, dtype=torch.float32).reshape(1, 6, 64)
+    positions = torch.full((4, 1, 64), -1, dtype=torch.int64)
+    positions[..., :valid_tokens] = torch.arange(40, 40 + valid_tokens)
+    _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions)
+    expected = torch.cat([state.reshape(1, 6, 4), hidden[..., :valid_tokens]], dim=-1)[..., -4:]
+    torch.testing.assert_close(actual, expected.reshape_as(state), rtol=0, atol=0)
 
 
 def test_qwen3_5_conv_decode_slice_matches_gather_reference():

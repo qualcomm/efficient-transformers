@@ -35,6 +35,7 @@ from QEfficient.blocking.attention_blocking import (
 from QEfficient.transformers.cache_utils import QEffDynamicCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.transformers.spd.dflash import compute_dflash_target_hidden_states
+from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 
 
@@ -410,6 +411,7 @@ class QEffQwen3ForCausalLM(Qwen3ForCausalLM):
         use_cache: bool | None = None,
         output_hidden_states: bool | None = None,
         cache_position: torch.LongTensor | None = None,
+        num_logits_to_keep: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast:
@@ -441,6 +443,8 @@ class QEffQwen3ForCausalLM(Qwen3ForCausalLM):
         if getattr(self.model, "target_layer_ids", None):
             target_hidden = outputs.hidden_states
             hidden_states = outputs.last_hidden_state
+            if num_logits_to_keep is not None:
+                hidden_states = filter_hidden_states(hidden_states, position_ids, num_logits_to_keep)
             logits = self.lm_head(hidden_states).float()
             predicted_token_ids = logits.argmax(dim=-1).to(torch.int32)
             return CausalLMOutputWithPast(

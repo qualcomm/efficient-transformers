@@ -1501,6 +1501,7 @@ class QEFFBaseModel(ABC):
                 mdp_compiler_dump_path=mdp_compiler_dump_path,
                 num_cores=num_cores,
                 num_layers=num_layers,
+                qaic_config=getattr(self.model, "qaic_config", None),
             )
             command.append(f"-mdp-load-partition-config={mdp_ts_json_path}")
         elif mdp_ts_num_devices > 1 and not compiler_options.get("mdp_dump_partition_config", None):
