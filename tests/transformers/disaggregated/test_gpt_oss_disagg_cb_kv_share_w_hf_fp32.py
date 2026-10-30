@@ -29,6 +29,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.transformers.disaggregated._disagg_dma_config import disagg_dma_configs
 from tests.transformers.disaggregated._disagg_ort_test_utils import (
     get_next_token_ids as _get_next_token_ids,
@@ -46,7 +47,7 @@ TEXT_PROMPTS = [
     "What is the capital of France?",
 ]
 
-NUM_CORES = 16
+NUM_CORES = DEFAULT_AIC_NUM_CORES
 MOE_PREFILL_PACKED_CHUNK_SIZE = 16
 
 

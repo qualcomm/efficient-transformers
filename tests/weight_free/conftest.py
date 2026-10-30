@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.device_utils import get_available_device_id
 
 
@@ -78,5 +79,5 @@ def skip_if_no_qaic_device(request):
         test_name = getattr(request.node, "originalname", request.node.name.split("[", 1)[0])
         if test_name == "test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics":
             return
-        if get_available_device_id() is None:
+        if get_available_device_id(min_nsp=DEFAULT_AIC_NUM_CORES) is None:
             pytest.skip("No available QAIC device")

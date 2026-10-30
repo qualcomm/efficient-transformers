@@ -66,8 +66,23 @@ VLM_PREFILL_SEQ_LEN = 64
 VLM_CTX_LEN = 512
 VLM_IMAGE_HEIGHT = 354
 VLM_IMAGE_WIDTH = 536
-VLM_NUM_CORES = 4
+VLM_NUM_CORES = constants.DEFAULT_AIC_NUM_CORES
 VLM_PROMPT = "Describe this image."
+
+
+def _build_moe_prefill_qaic_config() -> dict:
+    return {
+        "moe_config": {
+            "flavour": "expert_parallel",
+            "cores_per_expert": 1,
+            "tree_reduce": False,
+            "expert_parallel_chunk_size": 256,
+        }
+    }
+
+
+def _build_moe_decode_qaic_config() -> dict:
+    return {"moe_config": {"flavour": "decode_bmm"}}
 
 
 def _build_vlm_test_checkpoint(model_type: str, checkpoint_dir: Path, model_id: str | None = None):
@@ -684,7 +699,7 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
     common_compile_kwargs = {
         "ctx_len": model_config["ctx_len"],
         "num_devices": 1,
-        "num_cores": 16,
+        "num_cores": constants.DEFAULT_AIC_NUM_CORES,
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }
@@ -832,7 +847,7 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
         "prefill_seq_len": model_config.get("prompt_len"),
         "ctx_len": model_config.get("ctx_len"),
         "num_devices": 1,
-        "num_cores": 16,
+        "num_cores": constants.DEFAULT_AIC_NUM_CORES,
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }
@@ -849,6 +864,18 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
         )
     )
     if model_type in {"qwen3_5", "qwen3_5_moe"}:
+        prefill_compile_kwargs = dict(compile_kwargs)
+        decode_compile_kwargs = {**compile_kwargs, "prefill_seq_len": 1}
+        decode_ep_compile_kwargs = None
+        if model_type == "qwen3_5_moe":
+            prefill_compile_kwargs["qaic_config"] = _build_moe_prefill_qaic_config()
+            decode_compile_kwargs["qaic_config"] = _build_moe_decode_qaic_config()
+            decode_ep_compile_kwargs = {
+                **compile_kwargs,
+                "prefill_seq_len": 1,
+                "qaic_config": _build_moe_prefill_qaic_config(),
+            }
+
         vision_qpc = qeff_model.compile(
             **compile_kwargs,
             aic_enable_depth_first=False,
@@ -857,7 +884,7 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
             skip_vision=False,
         )
         prefill_qpc = qeff_model.compile(
-            **compile_kwargs,
+            **prefill_compile_kwargs,
             retain_full_kv=True,
             split_model_io=True,
             aic_enable_depth_first=False,
@@ -865,7 +892,9 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
             enable_chunking=True,
             skip_vision=True,
         )
-        decode_compile_kwargs = {**compile_kwargs, "prefill_seq_len": 1}
+        if model_type == "qwen3_5_moe":
+            assert qeff_model.lang_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
+            assert qeff_model.lang_model.hash_params.get("moe_prefill_expert_parallel_chunk_size") == 256
         decode_qpc = qeff_model.compile(
             **decode_compile_kwargs,
             retain_full_kv=True,
@@ -874,6 +903,8 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
             prefill_only=False,
             skip_vision=True,
         )
+        if model_type == "qwen3_5_moe":
+            assert qeff_model.lang_model.hash_params.get("moe_prefill_flavour") == "decode_bmm"
         qaic_tokens = _run_qwen35_three_qpc(
             qeff_model,
             qeff_inputs,
@@ -885,6 +916,27 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
             list(qeff_model.model.config.text_config.layer_types),
             VLM_GENERATION_LEN,
         )[0]
+        if model_type == "qwen3_5_moe":
+            decode_ep_qpc = qeff_model.compile(
+                **decode_ep_compile_kwargs,
+                retain_full_kv=True,
+                split_model_io=True,
+                aic_enable_depth_first=True,
+                prefill_only=False,
+                skip_vision=True,
+            )
+            assert qeff_model.lang_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
+            qaic_ep_tokens = _run_qwen35_three_qpc(
+                qeff_model,
+                qeff_inputs,
+                {
+                    "vision_qpc_path": vision_qpc["vision_qpc_path"],
+                    "lang_prefill_qpc_path": prefill_qpc["lang_prefill_qpc_path"],
+                    "lang_decode_qpc_path": decode_ep_qpc["lang_decode_qpc_path"],
+                },
+                list(qeff_model.model.config.text_config.layer_types),
+                VLM_GENERATION_LEN,
+            )[0]
     else:
         qeff_model.compile(**compile_kwargs)
         qaic_output = qeff_model.generate(
@@ -899,3 +951,8 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
         f"Weight-free multi-specialization HF/QAIC parity failed for {model_type}: "
         f"HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
     )
+    if model_type == "qwen3_5_moe":
+        assert np.array_equal(hf_tokens[:VLM_GENERATION_LEN], qaic_ep_tokens), (
+            f"Weight-free multi-specialization decode EP parity failed for {model_type}: "
+            f"HF={hf_tokens.tolist()}, QAIC={qaic_ep_tokens.tolist()}"
+        )

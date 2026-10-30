@@ -23,6 +23,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageText
 
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.transformers.disaggregated._disagg_dma_config import disagg_dma_configs
 
 MODEL_NAME = "tiny-random/qwen3-vl-moe"
@@ -364,7 +365,7 @@ def test_qwen3_vl_moe_disagg_kv_share_qaic_vs_hf_fp32(manual_cleanup, dma_config
             ctx_len=CTX_LEN,
             height=image.height,
             width=image.width,
-            num_cores=16,
+            num_cores=DEFAULT_AIC_NUM_CORES,
             num_devices=dma_config["vision_num_devices"],
             mos=1,
             aic_enable_depth_first=True,
@@ -383,7 +384,7 @@ def test_qwen3_vl_moe_disagg_kv_share_qaic_vs_hf_fp32(manual_cleanup, dma_config
             ctx_len=CTX_LEN,
             height=image.height,
             width=image.width,
-            num_cores=16,
+            num_cores=DEFAULT_AIC_NUM_CORES,
             num_devices=dma_config["decode_num_devices"],
             retain_full_kv=True,
             split_retained_state_io=True,
@@ -405,7 +406,7 @@ def test_qwen3_vl_moe_disagg_kv_share_qaic_vs_hf_fp32(manual_cleanup, dma_config
             ctx_len=CTX_LEN,
             height=image.height,
             width=image.width,
-            num_cores=16,
+            num_cores=DEFAULT_AIC_NUM_CORES,
             num_devices=dma_config["prefill_num_devices"],
             retain_full_kv=True,
             mxfp6_matmul=False,

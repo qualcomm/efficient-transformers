@@ -32,6 +32,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
@@ -64,7 +65,7 @@ VLM_PREFILL_SEQ_LEN = 64
 VLM_CTX_LEN = 512
 VLM_IMAGE_HEIGHT = 354
 VLM_IMAGE_WIDTH = 536
-VLM_NUM_CORES = 16
+VLM_NUM_CORES = DEFAULT_AIC_NUM_CORES
 VLM_NUM_DEVICES = 1
 MDP_NUM_PARTITIONS = 2
 VLM_GENERATION_LEN = 2
@@ -102,6 +103,21 @@ def _build_disagg_decode_blocking_qaic_config(blocking_key: str) -> dict:
     return qaic_config
 
 
+def _build_moe_prefill_qaic_config() -> dict:
+    return {
+        "moe_config": {
+            "flavour": "expert_parallel",
+            "cores_per_expert": 1,
+            "tree_reduce": False,
+            "expert_parallel_chunk_size": 256,
+        }
+    }
+
+
+def _build_moe_decode_qaic_config() -> dict:
+    return {"moe_config": {"flavour": "decode_bmm"}}
+
+
 def _assert_disagg_blocking_artifact(
     onnx_path: Path,
     qeff_model: QEFFAutoModelForCausalLM,
@@ -121,7 +137,7 @@ PREFILL_NUM_DEVICES = 2
 GPT_OSS_PARITY_CTX_LEN = 256
 GPT_OSS_PARITY_GENERATION_LEN = 40
 GPT_OSS_PARITY_FULL_BATCH_SIZE = 2
-GPT_OSS_PARITY_NUM_CORES = 16
+GPT_OSS_PARITY_NUM_CORES = DEFAULT_AIC_NUM_CORES
 GPT_OSS_PARITY_NUM_HIDDEN_LAYERS = 2
 GPT_OSS_PARITY_PROMPTS = [
     "Explain quantum computing in simple terms.",
@@ -140,7 +156,7 @@ GPT_OSS_PARITY_DMA_CONFIG = pytest.param(
 QWEN3_MOE_PARITY_CTX_LEN = 256
 QWEN3_MOE_PARITY_GENERATION_LEN = 40
 QWEN3_MOE_PARITY_FULL_BATCH_SIZE = 1
-QWEN3_MOE_PARITY_NUM_CORES = 4
+QWEN3_MOE_PARITY_NUM_CORES = DEFAULT_AIC_NUM_CORES
 QWEN3_MOE_PARITY_PROMPT_IDS = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int64)
 QWEN3_MOE_PARITY_DMA_CONFIG = pytest.param(
     {
@@ -594,10 +610,11 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
-    moe_config = {"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}}
+    prefill_moe_config = _build_moe_prefill_qaic_config()
+    decode_moe_config = _build_moe_decode_qaic_config()
     common = {
         "ctx_len": CTX_LEN,
-        "num_cores": 4,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
         "use_onnx_subfunctions": True,
@@ -608,8 +625,10 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
     decode_qpc = qeff_model.compile(
         compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_decode"),
         prefill_seq_len=1,
+        qaic_config=decode_moe_config,
         **common,
     )
+    assert qeff_model.hash_params.get("moe_prefill_flavour") == "decode_bmm"
     prefill_qpc = qeff_model.compile(
         compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_prefill_mdp"),
         prefill_seq_len=PREFILL_SEQ_LEN,
@@ -617,9 +636,11 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
         enable_chunking=True,
         num_devices=PREFILL_NUM_DEVICES,
         mdp_num_partitions=MDP_NUM_PARTITIONS,
-        qaic_config=moe_config,
+        qaic_config=prefill_moe_config,
         **common,
     )
+    assert qeff_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
+    assert qeff_model.hash_params.get("moe_prefill_expert_parallel_chunk_size") == 256
 
     assert decode_qpc
     assert prefill_qpc
@@ -660,6 +681,8 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
         "split_model_io": True,
         "use_onnx_subfunctions": True,
     }
+    prefill_moe_config = _build_moe_prefill_qaic_config()
+    decode_moe_config = _build_moe_decode_qaic_config()
     config_model_type = getattr(qeff_model.model.config, "model_type", None)
     if config_model_type == "gemma4":
         common.pop("height")
@@ -682,25 +705,42 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
             enable_chunking=True,
             retain_full_kv=True,
             skip_vision=True,
+            qaic_config=prefill_moe_config,
             **common,
         )
+        assert qeff_model.lang_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
+        assert qeff_model.lang_model.hash_params.get("moe_prefill_expert_parallel_chunk_size") == 256
         compiled_onnx_paths["prefill"] = _assert_onnx_path(qeff_model.lang_model.onnx_path, "prefill")
 
         decode_qpcs = qeff_model.compile(
             compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_decode"),
             prefill_seq_len=1,
             skip_vision=True,
+            qaic_config=decode_moe_config,
             **common,
         )
+        assert qeff_model.lang_model.hash_params.get("moe_prefill_flavour") == "decode_bmm"
         compiled_onnx_paths["decode"] = _assert_onnx_path(qeff_model.lang_model.onnx_path, "decode")
 
-        assert len(set(compiled_onnx_paths.values())) == 3
+        decode_ep_qpcs = qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_decode_ep"),
+            prefill_seq_len=1,
+            skip_vision=True,
+            qaic_config=prefill_moe_config,
+            **common,
+        )
+        assert qeff_model.lang_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
+        compiled_onnx_paths["decode_ep"] = _assert_onnx_path(qeff_model.lang_model.onnx_path, "decode EP")
+
+        assert len(set(compiled_onnx_paths.values())) == 4
         vision_qpc_path = vision_qpcs.get("vision_qpc_path")
         prefill_qpc_path = prefill_qpcs.get("lang_prefill_qpc_path")
         decode_qpc_path = decode_qpcs.get("lang_decode_qpc_path")
+        decode_ep_qpc_path = decode_ep_qpcs.get("lang_decode_qpc_path")
         assert vision_qpc_path
         assert prefill_qpc_path
         assert decode_qpc_path
+        assert decode_ep_qpc_path
 
         vision_session = QAICInferenceSession(vision_qpc_path)
         prefill_session = QAICInferenceSession(prefill_qpc_path)
@@ -714,6 +754,23 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
             prefill_session,
             decode_session,
         )
+
+        for session in sessions:
+            session.deactivate()
+        sessions.clear()
+
+        vision_ep_session = QAICInferenceSession(vision_qpc_path)
+        prefill_ep_session = QAICInferenceSession(prefill_qpc_path)
+        decode_ep_session = QAICInferenceSession(decode_ep_qpc_path)
+        sessions.extend([vision_ep_session, prefill_ep_session, decode_ep_session])
+        qaic_ep_tokens = _run_vlm_disaggregated_generation(
+            qeff_model,
+            processor,
+            processor_inputs,
+            vision_ep_session,
+            prefill_ep_session,
+            decode_ep_session,
+        )
     finally:
         for session in sessions:
             session.deactivate()
@@ -722,6 +779,11 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
     assert qaic_tokens.shape == hf_tokens.shape == (1, VLM_GENERATION_LEN)
     assert np.array_equal(qaic_tokens, hf_tokens), (
         f"Weight-free disaggregated VLM tokens do not match HF: HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
+    )
+    assert qaic_ep_tokens.shape == hf_tokens.shape == (1, VLM_GENERATION_LEN)
+    assert np.array_equal(qaic_ep_tokens, hf_tokens), (
+        f"Weight-free disaggregated VLM decode EP tokens do not match HF: "
+        f"HF={hf_tokens.tolist()}, QAIC={qaic_ep_tokens.tolist()}"
     )
 
 
@@ -740,7 +802,7 @@ def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp
     common = {
         "ctx_len": CTX_LEN,
         "full_batch_size": full_batch_size,
-        "num_cores": 4,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
         "split_retained_state_io": True,
@@ -810,7 +872,7 @@ def test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics(
     common = {
         "ctx_len": CTX_LEN,
         "full_batch_size": full_batch_size,
-        "num_cores": 4,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
         "split_retained_state_io": True,
@@ -898,6 +960,7 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
     dma_config,
 ):
     """Validate local Qwen3-MoE weight-free CB disagg KV handoff and HF fp32 token parity."""
+    use_onnx_subfunctions = dma_config.get("use_onnx_subfunctions", True)
     config = _build_qwen3_moe_parity_config(dtype="float32")
     hf_model = _load_qwen3_moe_parity_hf_model(config)
     checkpoint_dir = tmp_path / "qwen3_moe_fp32_checkpoint"
@@ -937,6 +1000,9 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
             use_onnx_subfunctions=dma_config.get("use_onnx_subfunctions", True),
         )
         compiled_onnx_paths["decode"] = _assert_onnx_path(qeff_model.onnx_path, "decode")
+        assert qeff_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
+        if use_onnx_subfunctions:
+            assert_has_subfunctions(compiled_onnx_paths["decode"], qeff_model)
 
         prefill_qpc_path = qeff_model.compile(
             compile_dir=_compile_dir(tmp_export_dir, "qwen3_moe_wf_cb_prefill_parity"),
@@ -1121,6 +1187,14 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
             full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
             num_cores=GPT_OSS_PARITY_NUM_CORES,
             num_devices=dma_config["decode_num_devices"],
+            qaic_config={
+                "moe_config": {
+                    "flavour": "expert_parallel",
+                    "cores_per_expert": 1,
+                    "tree_reduce": False,
+                    "expert_parallel_chunk_size": 256,
+                }
+            },
             mos=1,
             mxfp6_matmul=False,
             mxint8_kv_cache=False,

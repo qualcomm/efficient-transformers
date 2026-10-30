@@ -12,7 +12,7 @@ import pytest
 import torch
 from transformers import AutoConfig
 
-from QEfficient.utils.constants import Constants
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES, Constants
 from QEfficient.utils.test_utils import ModelConfig
 from tests.two_phase import resolve_two_phase_cleanup
 
@@ -94,7 +94,7 @@ def _run_per_pr_causal_text_case(
     comp_ctx_lengths_prefill=None,
     comp_ctx_lengths_decode=None,
     kv_cache_batch_size=None,
-    num_cores=16,
+    num_cores=DEFAULT_AIC_NUM_CORES,
     compile_options=None,
     num_speculative_tokens=None,
     prompts=None,

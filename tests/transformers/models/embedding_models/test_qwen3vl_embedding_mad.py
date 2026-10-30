@@ -23,6 +23,7 @@ from QEfficient.transformers.models.qwen3_vl._embedding_utils import (
     configure_embedding_model_config,
     resolve_model_source,
 )
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.test_utils import load_vlm_model
 from tests.utils.image_utils import load_test_image
 
@@ -153,7 +154,7 @@ def test_qwen3_vl_embedding_cpu_vs_ai100_mad_parity(model_name):
         height=compile_specs["height"],
         width=compile_specs["width"],
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         mxfp6_matmul=False,
     )
 

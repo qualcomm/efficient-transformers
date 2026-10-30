@@ -16,6 +16,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageText
 
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.two_phase import model_export_compile_lock, resolve_two_phase_cleanup
 
 MODEL_NAME = "tiny-random/qwen3-vl-moe"
@@ -23,8 +24,8 @@ PREFILL_SEQ_LEN = 64
 CTX_LEN = 512
 BATCH_SIZE = 1
 GENERATION_LEN = 4
-# Vision, prefill, and decode sessions stay resident together; 3 * 4 cores fits on one 16-core card.
-DISAGG_NUM_CORES = 4
+# Vision, prefill, and decode sessions stay resident together; use the device default per session.
+DISAGG_NUM_CORES = DEFAULT_AIC_NUM_CORES
 IMAGE_SIZE = (536, 354)
 TEXT_PROMPT = "Describe all the colors seen in the image."
 

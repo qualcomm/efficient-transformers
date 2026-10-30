@@ -14,6 +14,7 @@ import torch
 from transformers import AutoConfig
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.test_utils import load_vlm_model_from_config
 from tests.two_phase import resolve_two_phase_cleanup
 
@@ -152,7 +153,7 @@ def test_gemma4_blocked_prefill_mdp_intersection_compile_and_distinct_prefill_on
             batch_size=1,
             prefill_seq_len=prefill_seq_len,
             ctx_len=ctx_len,
-            num_cores=16,
+            num_cores=DEFAULT_AIC_NUM_CORES,
             num_devices=PREFILL_MDP_NUM_DEVICES,
             mdp_num_partitions=PREFILL_MDP_NUM_PARTITIONS,
             mdp_strategy="intersection",
@@ -191,7 +192,7 @@ def test_gemma4_blocked_decode_compile_and_distinct_decode_onnx(blocking_mode, m
             batch_size=1,
             prefill_seq_len=1,
             ctx_len=ctx_len,
-            num_cores=16,
+            num_cores=DEFAULT_AIC_NUM_CORES,
             num_devices=1,
             retain_full_kv=True,
             split_model_io=True,
