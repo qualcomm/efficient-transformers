@@ -15,6 +15,7 @@ Tests verify:
   - Real prefill cache is consumed correctly during decode handoff
 """
 
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -156,6 +157,138 @@ def make_tiny_gemma4():
         mm_cfg.vision_config.dtype = torch.float32
 
     return Gemma4ForConditionalGeneration(mm_cfg).eval(), text_cfg
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_gemma4_dflash_example_subfunction_policy(monkeypatch, moe):
+    from examples.performance.dflash import utils
+
+    config = SimpleNamespace(model_type="gemma4", text_config=SimpleNamespace(enable_moe_block=moe))
+    text_model = SimpleNamespace(fc=torch.nn.Linear(4, 4, bias=False), hidden_norm=torch.nn.LayerNorm(4))
+    options = {}
+
+    def compile_model(**kwargs):
+        options.update(kwargs)
+        return {"lang_qpc_path": "language-qpc", "vision_qpc_path": "vision-qpc"}
+
+    model = SimpleNamespace(
+        lang_model=SimpleNamespace(model=SimpleNamespace(language_model=text_model)), compile=compile_model
+    )
+    monkeypatch.setattr(utils.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    monkeypatch.setattr(utils.QEFFAutoModelForImageTextToText, "from_pretrained", lambda *args, **kwargs: model)
+    monkeypatch.setattr(
+        utils,
+        "read_dlm_meta",
+        lambda *args: ({"fc.weight": torch.eye(4), "hidden_norm.weight": torch.ones(4)}, [1], 16),
+    )
+    result = utils.compile_gemma_vlm_qpcs(
+        "target", "draft", prefill_seq_len=128, ctx_len=4096, num_cores=8, num_devices=4
+    )
+    assert result == ("language-qpc", "vision-qpc")
+    assert options["use_onnx_subfunctions"] is True
+    assert options["node_precision_info"] is True
+    assert options["dflash_block_size"] == 16
+
+
+@pytest.mark.parametrize("prompt_length", [2, 10, 22])
+def test_gemma4_dflash_verification_matches_sequential(prompt_length):
+    torch.manual_seed(7)
+    model, _ = make_tiny_gemma4()
+    qeff = QEFFAutoModelForImageTextToText(
+        model, kv_offload=True, qaic_config={"target_layer_ids": [1], "speculative_model_type": "target"}
+    )
+    wrapper = qeff.lang_model.model
+    config = model.config.text_config
+    initial_cache = qeff.model.get_dummy_pkv_cache(config, batch_size=1, seq_len=CTX_LEN)
+    specs, _ = qeff.model.get_specializations(
+        batch_size=1, prefill_seq_len=4, ctx_len=CTX_LEN, img_size=16, kv_offload=True, dflash_block_size=4
+    )
+    capacity = config.sliding_window + 3
+    assert all(spec["sliding_window"] == capacity for spec in specs["lang"])
+    for index, kind in enumerate(config.layer_types):
+        if kind == "sliding_attention":
+            initial_cache[index] = tuple(t[:, :, :capacity].clone() for t in initial_cache[index])
+
+    def run(ids, position, cache):
+        count = len(ids)
+        return wrapper(
+            input_ids=torch.tensor([ids]),
+            position_ids=torch.arange(position, position + count).view(1, -1),
+            vision_embeds=torch.zeros(1, 16, config.hidden_size),
+            image_idx=torch.zeros((1, 1), dtype=torch.int64),
+            mm_token_type_ids=torch.zeros((1, count), dtype=torch.int64),
+            past_key_values=cache,
+            num_logits_to_keep=torch.zeros((count, 1), dtype=torch.int64),
+        )
+
+    with torch.no_grad():
+        cache = initial_cache
+        for position in range(prompt_length):
+            cache = run([20 + position], position, cache)[3]
+        reference_cache = copy.deepcopy(cache)
+        block_ids = [40, 41, 42, 43]
+        block = run(block_ids, prompt_length, cache)
+        rejected_cache = copy.deepcopy(block[3])
+        sequential = []
+        seed_cache = None
+        for offset, token in enumerate(block_ids):
+            output = run([token], prompt_length + offset, reference_cache)
+            reference_cache = output[3]
+            sequential.append(output[0])
+            if offset == 0:
+                seed_cache = copy.deepcopy(reference_cache)
+        # Reject all drafts, then verify a new block after the committed seed.
+        next_block = run([60, 61, 62, 63], prompt_length + 1, rejected_cache)
+        expected_next = run([60, 61, 62, 63], prompt_length + 1, seed_cache)
+    assert block[0].shape == (1, 4, VOCAB_SIZE)
+    assert block[4].shape == (1, 4, config.hidden_size)
+    torch.testing.assert_close(block[0], torch.cat(sequential, dim=1), atol=2e-4, rtol=2e-4)
+    torch.testing.assert_close(next_block[0], expected_next[0], atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("dflash", [False, True])
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("prefill_only", [False, True, None])
+def test_gemma4_dflash_expert_parallel_policy(dflash, moe, prefill_only):
+    from QEfficient.transformers.moe import MoEFlavour
+
+    model, _ = make_tiny_gemma4()
+    config = copy.deepcopy(model.config)
+    config.text_config.enable_moe_block = moe
+    model = type(model)(config).eval()
+    qaic_config = {"moe_config": {"cores_per_expert": 2, "tree_reduce": True, "expert_parallel_chunk_size": 16}}
+    if dflash:
+        qaic_config["target_layer_ids"] = [1]
+    qeff = QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config=qaic_config)
+    original_config = copy.deepcopy(qaic_config)
+    for _ in range(2):
+        qeff.transform(
+            ctx_len=32,
+            seq_len=16,
+            bs=1,
+            num_devices=4,
+            aic_num_cores=8,
+            qaic_config=qaic_config,
+            prefill_only=prefill_only,
+            prefill_seq_len=16,
+        )
+        assert qaic_config == original_config
+        blocks = [
+            layer.moe_block for layer in qeff.lang_model.model.language_model.layers if hasattr(layer, "moe_block")
+        ]
+        if not moe:
+            assert not blocks
+            assert "moe_prefill_flavour" not in qeff.lang_model.hash_params
+            continue
+        assert blocks
+        expected = MoEFlavour.EXPERT_PARALLEL if dflash or prefill_only else MoEFlavour.DECODE_BMM
+        assert qeff.lang_model.hash_params["moe_prefill_flavour"] == expected.value
+        for block in blocks:
+            assert block._moe_flavour is expected
+            if expected is MoEFlavour.EXPERT_PARALLEL:
+                assert block.num_devices == 4
+                assert block.cores_per_expert == 2
+                assert block.tree_reduce is True
 
 
 def _make_qeff_gemma4(model):

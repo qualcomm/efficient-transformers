@@ -408,7 +408,7 @@ def compile_gemma_vlm_qpcs(
         mxint8_kv_cache=True,
         aic_enable_depth_first=True,
         mos=1,
-        use_onnx_subfunctions=False,
+        use_onnx_subfunctions=config.model_type == "gemma4",
         split_model_io=True,
         batch_size=1,
         dflash_block_size=block_size,

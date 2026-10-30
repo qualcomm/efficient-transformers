@@ -1904,6 +1904,18 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             **compiler_options,
         )
 
+        if (
+            self.dflash_tlm
+            and self.model.config.model_type == "gemma4"
+            and getattr(self.model.config.text_config, "enable_moe_block", False)
+        ):
+            # DFlash verifies a token block, not the single token optimized by decode BMM.
+            qaic_config = dict(qaic_config or getattr(self.lang_model.model, "qaic_config", None) or {})
+            qaic_config["moe_config"] = {
+                **(qaic_config.get("moe_config") or {}),
+                "flavour": MoEFlavour.EXPERT_PARALLEL.value,
+            }
+
         self.lang_model.transform(
             ctx_len=ctx_len,
             seq_len=seq_len,
