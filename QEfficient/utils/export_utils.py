@@ -33,8 +33,6 @@ from QEfficient.utils.cache import QEFF_HOME
 from QEfficient.utils.constants import (
     _KNOWN_DECODER_LAYER_ATTR_PATHS,
     _KNOWN_DECODER_LAYER_SUFFIXES,
-    DYNAMO_DIM_MAX_BATCH_SIZE,
-    DYNAMO_DIM_MIN_COMP_CTX_LENGTHS,
 )
 from QEfficient.utils.hash_utils import create_export_hash
 from QEfficient.utils.logging_utils import QEFFLogger, log_api_arguments
@@ -119,15 +117,10 @@ def convert_dynamic_axes_to_dynamic_shapes(
         {"input_ids": {0: "batch_size", 1: "seq_len"},
          "past_key.0": {0: "batch_size", 2: "ctx_len"}, ...}
     model_config : optional
-        The HuggingFace model config object (model.config). Used to read:
-          - max_position_embeddings  -> upper bound for seq_len / ctx_len dims
-          - sliding_window           -> upper bound for sliding_window dim
-        When None, safe defaults are used for all bounds and model-type-specific
-        passes are skipped.
+        Retained for API compatibility with callers that provide the model config.
     example_inputs : optional
-        Concrete export inputs used to identify dimensions that are statically
-        specialized by the traced graph, such as singleton vision axes and
-        one-token decode sequence length.
+        Retained for API compatibility with callers that provide concrete export
+        inputs.
 
     Returns
     -------
@@ -135,73 +128,11 @@ def convert_dynamic_axes_to_dynamic_shapes(
         torch.export dynamic_shapes dict with Dim objects, suitable for
         torch.onnx.export(dynamic_shapes=...).
     """
-    text_config = getattr(model_config, "text_config", None)
-    max_seq_len = getattr(
-        model_config,
-        "max_position_embeddings",
-        getattr(text_config, "max_position_embeddings", 1024),
-    )
-    model_type = getattr(model_config, "model_type", None)
-    batch_min = 1 if model_type == "gpt_oss" else 2
-
-    observed_dim_values: dict[str, set[int]] = {}
-    if example_inputs is not None:
-        for input_name, axes_map in dynamic_axes.items():
-            sample = example_inputs.get(input_name)
-            if not isinstance(sample, torch.Tensor):
-                continue
-            for axis_idx, dim_name in axes_map.items():
-                if axis_idx < sample.ndim:
-                    observed_dim_values.setdefault(dim_name, set()).add(int(sample.shape[axis_idx]))
-
     dim_registry: dict[str, Any] = {}
 
     def resolve_dim(dim_name: str):
         if dim_name not in dim_registry:
-            if (
-                "seq_len" in dim_name
-                and observed_dim_values.get(dim_name) == {1}
-                and model_type
-                in {
-                    "qwen3_vl",
-                    "qwen3_vl_moe",
-                    "qwen3_5",
-                    "qwen3_5_moe",
-                    "qwen3_5_text",
-                    "qwen3_5_moe_text",
-                }
-            ):
-                dim_registry[dim_name] = Dim.STATIC
-            elif dim_name == "time" and observed_dim_values.get(dim_name) == {1}:
-                dim_registry[dim_name] = Dim("time")
-            elif observed_dim_values.get(dim_name) == {1}:
-                dim_registry[dim_name] = Dim.AUTO
-            elif dim_name == "batch_size":
-                dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
-            elif dim_name == "full_batch_size":
-                dim_registry[dim_name] = Dim(
-                    "full_batch_size",
-                    min=batch_min + 1,
-                    max=DYNAMO_DIM_MAX_BATCH_SIZE,
-                )
-            elif "seq_len" in dim_name:
-                dim_registry[dim_name] = Dim("seq_len", min=1, max=max_seq_len)
-            elif "comp_ctx_lengths" in dim_name:
-                dim_registry[dim_name] = Dim(
-                    "comp_ctx_lengths",
-                    min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS,
-                    max=max_seq_len,
-                )
-            elif "ctx_len" in dim_name:
-                dim_registry[dim_name] = Dim("ctx_len", min=1, max=max_seq_len)
-            elif "sliding_window" in dim_name:
-                dim_registry[dim_name] = Dim(
-                    "sliding_window",
-                    min=1,
-                    max=getattr(model_config, "sliding_window", max_seq_len),
-                )
-            else:
-                dim_registry[dim_name] = Dim(dim_name)
+            dim_registry[dim_name] = Dim(dim_name)
         return dim_registry[dim_name]
 
     dynamic_shapes: dict[str, Any] = {}

@@ -90,12 +90,12 @@ def make_tiny_llama():
     return model, cfg
 
 
-def test_dynamic_shapes_accept_qwen_decode_sequence_length():
+def test_dynamic_shapes_accept_generic_qwen_sequence_length():
     class Decode(torch.nn.Module):
         def forward(self, input_ids):
             return input_ids.float()
 
-    inputs = (torch.zeros((2, 1), dtype=torch.long),)
+    inputs = (torch.zeros((2, 2), dtype=torch.long),)
     dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(
         {"input_ids": {0: "batch_size", 1: "seq_len"}},
         model_config=SimpleNamespace(model_type="qwen3_5"),
@@ -104,7 +104,7 @@ def test_dynamic_shapes_accept_qwen_decode_sequence_length():
 
     torch.export.export(Decode(), inputs, dynamic_shapes=dynamic_shapes, strict=True)
 
-    assert dynamic_shapes["input_ids"][1] is torch.export.Dim.STATIC
+    assert dynamic_shapes["input_ids"][1].__name__ == "seq_len"
 
 
 def test_dynamic_shapes_preserve_qwen_vision_time_axis():

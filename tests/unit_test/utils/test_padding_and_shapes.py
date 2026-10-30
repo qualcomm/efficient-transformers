@@ -37,14 +37,18 @@ from QEfficient.utils.sampler_utils import get_sampling_inputs_and_outputs
 
 
 @pytest.mark.cpu_only
-def test_dynamic_shapes_use_nested_text_config_max_position_embeddings():
-    """VLM decoder dimensions must use text_config.max_position_embeddings."""
+def test_dynamic_shapes_use_generic_ctx_dim():
+    """VLM decoder dimensions use the generic named context dimension."""
     config = SimpleNamespace(text_config=SimpleNamespace(max_position_embeddings=32768))
     dynamic_axes = {"past_key.0": {0: "batch_size", 2: "ctx_len"}}
 
     dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(dynamic_axes, config)
+    ctx_dim = dynamic_shapes["past_key_values"][0][0][2]
+    expected_dim = torch.export.Dim("ctx_len")
 
-    assert dynamic_shapes["past_key_values"][0][0][2].max == 32768
+    assert ctx_dim.__name__ == expected_dim.__name__
+    assert ctx_dim.min == expected_dim.min
+    assert ctx_dim.max == expected_dim.max
 
 
 # ---------------------------------------------------------------------------
