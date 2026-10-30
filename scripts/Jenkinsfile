@@ -287,6 +287,7 @@ pipeline {
                             -v ${QEFF_PIP_CACHE_PATH}:/root/.cache/pip \
                             -v ${QEFF_APT_ARCHIVES_PATH}:/var/cache/apt/archives \
                             -v ${QEFF_APT_LISTS_PATH}:/var/lib/apt/lists \
+                            -v /opt/qti-aic:/opt/qti-aic:ro \
                             ${DOCKER_LATEST}:master_latest
                             sudo docker exec ${BUILD_TAG} bash -c "
                             cd /efficient-transformers &&
