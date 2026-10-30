@@ -61,6 +61,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
 )
+from QEfficient.exporter.weight_free.export import _materialize_lifted_attention_mask_zero_initializers
 from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_free_ort_inputs
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
@@ -231,7 +232,7 @@ def _load_prepared_tensors(root):
         index = {}
         for sf in sorted(root.glob("*.safetensors")):
             with safe_open(str(sf), framework="pt") as handle:
-                for k in handle.keys():
+                for k in handle:
                     index[k] = sf.name
     loaded = {}
     for key, shard_name in index.items():
@@ -1829,3 +1830,34 @@ class TestPruneFakeInitializersTransform:
         changed = PruneFakeInitializersTransform.apply(program)
         assert not changed
         assert "real_weight" in program.model.graph.initializers
+
+
+class TestMaterializeLiftedAttentionMaskZeroInitializers:
+    def test_materializes_meta_scalar_where_zero_input(self):
+        raw_value = torch.empty((), device="meta", dtype=torch.float32)
+        initializer = MagicMock()
+        initializer.const_value.raw = raw_value
+
+        node = MagicMock()
+        node.op_type = "Where"
+        node.inputs = [SimpleNamespace(name="condition"), SimpleNamespace(name="base_model.lifted_tensor_0")]
+        node.metadata_props = {
+            "pkg.torch.onnx.fx_node": "target=torch.ops.aten.where.ScalarOther",
+            "pkg.torch.onnx.stack_trace": "attention_mask = create_bidirectional_mask(",
+        }
+
+        graph = MagicMock()
+        graph.initializers = {"base_model.lifted_tensor_0": initializer}
+        graph.__iter__ = lambda self: iter([node])
+
+        program = MagicMock()
+        program.model.graph = graph
+
+        changed = _materialize_lifted_attention_mask_zero_initializers(program)
+
+        assert changed
+        program.apply_weights.assert_called_once()
+        replacement = program.apply_weights.call_args.args[0]["base_model.lifted_tensor_0"]
+        assert replacement.shape == torch.Size([])
+        assert replacement.dtype is torch.float32
+        assert replacement.item() == 0.0

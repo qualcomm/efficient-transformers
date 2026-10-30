@@ -407,17 +407,18 @@ def _run_vlm_disaggregated_generation(
         name: value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
         for name, value in processor_inputs.items()
     }
+    prefill_seq_len = int(prefill_session.bindings[prefill_session.binding_index_map["input_ids"]].dims[1])
     model_type = getattr(qeff_model.model.config, "model_type", None)
     if model_type == "qwen3_vl_moe":
         inputs = qeff_model.model.prepare_inputs_for_generation(
             inputs=inputs,
-            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
+            prefill_seq_len=prefill_seq_len,
             batch_size=1,
         )
     pad_token_id = processor.tokenizer.pad_token_id or 1
     input_ids_length = inputs["input_ids"].shape[1]
-    num_chunks = -(input_ids_length // -VLM_PREFILL_SEQ_LEN)
-    padded_len = num_chunks * VLM_PREFILL_SEQ_LEN
+    num_chunks = -(input_ids_length // -prefill_seq_len)
+    padded_len = num_chunks * prefill_seq_len
     inputs["input_ids"] = torch.nn.functional.pad(
         inputs["input_ids"],
         (0, padded_len - input_ids_length),
@@ -455,16 +456,16 @@ def _run_vlm_disaggregated_generation(
     num_hidden_layers = qeff_model.model.config.text_config.num_hidden_layers
     for chunk_idx in range(num_chunks):
         chunk_inputs["input_ids"] = lang_inputs["input_ids"][
-            :, chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
+            :, chunk_idx * prefill_seq_len : (chunk_idx + 1) * prefill_seq_len
         ]
         chunk_inputs["position_ids"] = lang_inputs["position_ids"][
-            ..., chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
+            ..., chunk_idx * prefill_seq_len : (chunk_idx + 1) * prefill_seq_len
         ]
         if "mm_token_type_ids" in lang_inputs:
             chunk_inputs["mm_token_type_ids"] = lang_inputs["mm_token_type_ids"][
-                :, chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
+                :, chunk_idx * prefill_seq_len : (chunk_idx + 1) * prefill_seq_len
             ]
-        assert chunk_inputs["input_ids"].shape[1] == VLM_PREFILL_SEQ_LEN
+        assert chunk_inputs["input_ids"].shape[1] == prefill_seq_len
         prefill_outputs = prefill_session.run(chunk_inputs)
         _update_vlm_retained_states(chunk_inputs, prefill_outputs, num_hidden_layers)
         chunk_inputs["image_idx"] = prefill_outputs["image_idx_output"]
@@ -477,6 +478,11 @@ def _run_vlm_disaggregated_generation(
     if "mm_token_type_ids" in lang_inputs:
         decode_inputs["mm_token_type_ids"] = np.zeros((1, 1), dtype=lang_inputs["mm_token_type_ids"].dtype)
     _update_vlm_retained_states(decode_inputs, prefill_outputs, num_hidden_layers)
+    for output_name in ("image_idx_output", "vision_embeds_RetainedState"):
+        if output_name in prefill_outputs:
+            decode_inputs[
+                output_name.removesuffix("_RetainedState") if output_name.endswith("_RetainedState") else "image_idx"
+            ] = prefill_outputs[output_name]
     decode_outputs = decode_session.run(decode_inputs)
     generated_ids.append(_next_token_ids_from_logits(decode_outputs["logits"]))
     return np.stack(generated_ids, axis=1)

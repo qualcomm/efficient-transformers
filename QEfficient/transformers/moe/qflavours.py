@@ -164,18 +164,9 @@ def _cumsum_scatter_gather_update_quantized_expert(
 
         x_chunk = ctx_gather_3d_generalized(x_expanded, chunk_matched_idx)
 
-        gate_proj_unpacked = CastToUInt4Func.apply(gate_qweight)
-        gate_zeros_unpacked = CastToUInt4Func.apply(gate_qzeros)
-        gate_proj_dq = DequantizeLinearFunc.apply(gate_proj_unpacked, gate_scales, gate_zeros_unpacked, group_size)
-
-        up_proj_unpacked = CastToUInt4Func.apply(up_qweight)
-        up_zeros_unpacked = CastToUInt4Func.apply(up_qzeros)
-        up_proj_dq = DequantizeLinearFunc.apply(up_proj_unpacked, up_scales, up_zeros_unpacked, group_size)
-
-        down_proj_unpacked = CastToUInt4Func.apply(down_qweight)
-        down_zeros_unpacked = CastToUInt4Func.apply(down_qzeros)
-
-        down_proj_dq = DequantizeLinearFunc.apply(down_proj_unpacked, down_scales, down_zeros_unpacked, group_size)
+        gate_proj_dq = _dequantize_projection(gate_qweight, gate_scales, gate_qzeros, group_size)
+        up_proj_dq = _dequantize_projection(up_qweight, up_scales, up_qzeros, group_size)
+        down_proj_dq = _dequantize_projection(down_qweight, down_scales, down_qzeros, group_size)
 
         gate_out = torch.bmm(x_chunk, gate_proj_dq.transpose(1, 2).to(x_chunk.dtype))
         up_out = torch.bmm(x_chunk, up_proj_dq.transpose(1, 2).to(x_chunk.dtype))

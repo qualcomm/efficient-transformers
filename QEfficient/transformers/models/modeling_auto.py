@@ -965,7 +965,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
 
     _hf_auto_class = AutoModelForSequenceClassification
     _pytorch_transforms = [CustomOpsTransform, TextClassificationTransform]
-    _onnx_transforms = []
+    _onnx_transforms = [FP16ClipTransform]
 
     def __init__(self, model: nn.Module, **kwargs):
         """

@@ -256,10 +256,20 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
         )
         wpos_ids = wpos_ids.permute(0, 2, 1, 3)
         wpos_ids = wpos_ids.flatten()
-        pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-        pos_ids = pos_ids.repeat(bs, 1)  # check size of t
-        rotary_pos_emb = pos_ids.to(dtype=inv_freq.dtype).unsqueeze(-1) * inv_freq.view(1, 1, -1)
-        return rotary_pos_emb.flatten(1)
+
+        pos_ids = []
+        pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+        pos_ids = torch.cat(pos_ids, dim=0)
+
+        x_expanded = pos_ids.unsqueeze(0)
+        x_expanded = x_expanded.expand(bs, -1, -1)
+        pos_ids = x_expanded.reshape(-1, pos_ids.size(1))
+
+        max_grid_size = max(grid_thw.shape)
+        position_ids = torch.arange(max_grid_size, device=device, dtype=inv_freq.dtype)
+        rotary_pos_emb_full = torch.outer(position_ids, inv_freq)
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
+        return rotary_pos_emb
 
     def get_window_index(self, grid_thw):
         window_index: list = []

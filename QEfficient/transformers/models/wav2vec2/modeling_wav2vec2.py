@@ -43,6 +43,7 @@ class QEffWav2Vec2Encoder(Wav2Vec2Encoder):
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
+        **kwargs,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -61,10 +62,15 @@ class QEffWav2Vec2Encoder(Wav2Vec2Encoder):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-            layer_outputs = layer(hidden_states, attention_mask=attention_mask, output_attentions=output_attentions)
-            hidden_states = layer_outputs[0]
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
+            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
 
-            if output_attentions:
+            if output_attentions and isinstance(layer_outputs, tuple):
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
 
         if output_hidden_states:
@@ -92,6 +98,7 @@ class QEffWav2Vec2EncoderStableLayerNorm(Wav2Vec2EncoderStableLayerNorm):
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
+        **kwargs,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -108,10 +115,15 @@ class QEffWav2Vec2EncoderStableLayerNorm(Wav2Vec2EncoderStableLayerNorm):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-            layer_outputs = layer(hidden_states, attention_mask=attention_mask, output_attentions=output_attentions)
-            hidden_states = layer_outputs[0]
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
+            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
 
-            if output_attentions:
+            if output_attentions and isinstance(layer_outputs, tuple):
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
 
         hidden_states = self.layer_norm(hidden_states)

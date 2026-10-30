@@ -9,6 +9,7 @@ import json
 import random
 
 import pytest
+from torch.export import Dim
 
 from QEfficient.utils.constants import HASH_HEXDIGEST_STR_LEN
 from QEfficient.utils.hash_utils import hash_dict_params, json_serializable, to_hashable
@@ -31,6 +32,22 @@ def test_to_hashable_dict():
 
 def test_to_hashable_set():
     assert to_hashable(set(range(4))) == to_hashable(set(range(4 - 1, -1, -1)))
+
+
+def test_to_hashable_torch_export_dim_class():
+    dim = Dim("grid_height", min=1, max=1024)
+
+    assert to_hashable({"dynamic_shapes": {"pixel_values": {0: dim}}}) == (
+        b'{"dynamic_shapes":{"pixel_values":{"0":{"max":1024,"min":1,"name":"grid_height"}}}}'
+    )
+
+
+def test_to_hashable_torch_export_unbounded_dim_class():
+    dim = Dim("vision_size")
+
+    assert to_hashable({"dynamic_shapes": {"vision_embeds": {1: dim}}}) == (
+        b'{"dynamic_shapes":{"vision_embeds":{"1":{"max":"int_oo","min":0,"name":"vision_size"}}}}'
+    )
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
