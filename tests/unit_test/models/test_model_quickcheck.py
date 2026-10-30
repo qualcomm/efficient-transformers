@@ -2878,7 +2878,7 @@ def test_qwen3_5_moe_gated_norm_preserves_float16():
 
 
 def test_recurrent_state_dtype_override_preserves_mxint8_for_other_retained_states():
-    from QEfficient.transformers.models.modeling_auto import (
+    from QEfficient.transformers.modeling_utils import (
         _resolve_retained_state_dtype,
         _validate_retained_state_dtype,
     )
@@ -2975,7 +2975,7 @@ def test_dual_qpc_compile_applies_recurrent_state_dtype_to_custom_io(monkeypatch
 @pytest.mark.llm_model
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
 def test_qwen3_5_conv_state_layout_version_is_in_export_hash(model_type):
-    from QEfficient.transformers.models.modeling_auto import QWEN3_5_CONV_STATE_LAYOUT_VERSION
+    from QEfficient.utils.constants import QWEN3_5_CONV_STATE_LAYOUT_VERSION
 
     qeff_model = _tiny_qwen_qeff_model(model_type)
 

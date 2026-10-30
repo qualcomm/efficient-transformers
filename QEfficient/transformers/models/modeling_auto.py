@@ -64,6 +64,8 @@ from QEfficient.transformers.modeling_utils import (
     DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH,
     SPECIALIZED_DISAGG_SERVING_MODEL_ARCH,
     _configure_proxy_for_model,
+    _resolve_retained_state_dtype,
+    _validate_retained_state_dtype,
 )
 from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import override_gptoss_prefill_chunking
 from QEfficient.transformers.models.pytorch_transforms import (
@@ -117,33 +119,6 @@ CUSTOM_IO_DTYPE_MAP = {
     torch.float32: "float16",  # Since compiler doesn't support fp32
     "float32": "float16",  # Since compiler doesn't support fp32
 }
-SUPPORTED_RETAINED_STATE_DTYPES = {"float16", "mxfp6", "mxint8"}
-# Retained-state layout is part of the exported model ABI. Bump this value
-# whenever Qwen3.5 changes the shape/order of its externally visible state.
-QWEN3_5_CONV_STATE_LAYOUT_VERSION = "channel_last_v1"
-
-
-def _validate_retained_state_dtype(dtype: str | None, argument_name: str) -> None:
-    if dtype is not None and dtype not in SUPPORTED_RETAINED_STATE_DTYPES:
-        raise ValueError(
-            f"{argument_name} must be one of {sorted(SUPPORTED_RETAINED_STATE_DTYPES)}, got {dtype!r}"
-        )
-
-
-def _resolve_retained_state_dtype(
-    output_name: str,
-    *,
-    model_dtype: str,
-    kv_cache_dtype: str,
-    recurrent_state_dtype: str | None = None,
-) -> str:
-    if "vision_embeds" in output_name or "deepstack_features" in output_name:
-        return model_dtype
-    if recurrent_state_dtype is not None and "recurrent_state." in output_name:
-        return recurrent_state_dtype
-    return kv_cache_dtype
-
-
 def _should_convert_to_fp16(target_dtype: "torch.dtype", compiler_options: dict) -> bool:
     """Determine whether the compiler needs -convert-to-fp16.
 
@@ -1418,7 +1393,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         self.qaic_config = qaic_config
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
         if getattr(model.config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}:
-            self.hash_params["qwen3_5_conv_state_layout"] = QWEN3_5_CONV_STATE_LAYOUT_VERSION
+            self.hash_params["qwen3_5_conv_state_layout"] = constants.QWEN3_5_CONV_STATE_LAYOUT_VERSION
         self.continuous_batching = False
         if qaic_config and (mla_absorption := qaic_config.get("mla_absorption", None)):
             self.hash_params["mla_absorption"] = mla_absorption
