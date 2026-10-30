@@ -1465,6 +1465,13 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
             self.__update_prefill_transform(False, retain_full_kv=kwargs.get("retain_full_kv", False))
 
         qaic_config = kwargs.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        kv_cache_prefix = validate_kv_cache_prefix(kv_cache_prefix)
+        onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
+        if kv_cache_prefix:
+            # The outer VLM export prefixes the public retained-state names,
+            # but the ONNX transform also needs the prefix to wire the cache
+            # scatter outputs into the nested decoder subgraph.
+            onnx_transform_kwargs["kv_cache_prefix"] = kv_cache_prefix
 
         if QEfficient.base.modeling_qeff.QEFFBaseModel._layerwise_active:
             return self._export_layerwise(
@@ -1481,6 +1488,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 num_cores=kwargs.get("num_cores", constants.DEFAULT_AIC_NUM_CORES),
                 qaic_config=qaic_config,
                 prefill_seq_len=prefill_seq_len,
+                onnx_transform_kwargs=onnx_transform_kwargs,
             )
         else:
             return self._export(
@@ -1490,6 +1498,8 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+                dynamo=kwargs.get("dynamo", False),
+                onnx_transform_kwargs=onnx_transform_kwargs,
             )
 
     def compile(
