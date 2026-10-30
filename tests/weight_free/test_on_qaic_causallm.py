@@ -50,6 +50,9 @@ from ._helpers import (
 )
 
 BLOCKING_PARITY_PROMPT = "Hello world"
+# Use one parity length across every model and blocking mode. The shared context
+# leaves room for 8 generated tokens, so longer GPT-OSS contexts use that same count.
+PARITY_GEN_TOKENS = min(10, CTX_LEN - PROMPT_LEN)
 HEAD_BLOCKING_NUM_DEVICES = 4
 
 
@@ -316,13 +319,19 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     tmp_export_dir,
 ):
     """HF PT tokens match blocked weight-free QAIC tokens."""
-    if model_type == "gpt_oss" and blocking_key == "hq":
-        pytest.xfail("tokens not matching - to fix")
-
     from QEfficient.utils.run_utils import ApiRunner
 
     use_onnx_subfunctions = True
-    qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
+    # GPT-OSS HQ needs a longer context than HQKV/BHQKV for its cache/block layout.
+    if model_type == "gpt_oss" and blocking_key == "hq":
+        ctx_len = 64
+    elif model_type == "gpt_oss" and blocking_key in {"hqkv", "bhqkv"}:
+        ctx_len = 32
+    else:
+        ctx_len = CTX_LEN
+    qaic_config = {**WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key], "ctx_len": ctx_len}
+    gen_len = PARITY_GEN_TOKENS
+    hf_ctx_len = PROMPT_LEN + gen_len
     prompts = [BLOCKING_PARITY_PROMPT]
 
     try:
@@ -337,7 +346,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         config=model_hf.config,
         prompt=prompts,
         prompt_len=PROMPT_LEN,
-        ctx_len=CTX_LEN,
+        ctx_len=hf_ctx_len,
         full_batch_size=None,
     )
     hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
@@ -364,6 +373,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     blocking_config = qeff_model.hash_params.get("blocking_kwargs")
     assert blocking_config is not None
     assert blocking_config.mode == BlockingMode(qaic_config["blocking_mode"])
+    assert blocking_config.ctx_len == ctx_len
     if use_onnx_subfunctions:
         assert_has_subfunctions(onnx_path, qeff_model)
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
@@ -373,7 +383,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         onnx_path=str(onnx_path),
         compile_dir=str(tmp_export_dir / f"wf_blocking_{model_type}_{blocking_key}_{use_onnx_subfunctions}_compile"),
         prefill_seq_len=PROMPT_LEN,
-        ctx_len=CTX_LEN,
+        ctx_len=ctx_len,
         num_cores=16,
         batch_size=BATCH_SIZE,
         qaic_config=qaic_config,
@@ -388,7 +398,6 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     assert qaic_output is not None, "Blocked weight-free QAIC generate returned None"
     assert hasattr(qaic_output, "generated_ids") and qaic_output.generated_ids is not None
 
-    gen_len = CTX_LEN - PROMPT_LEN
     qaic_tokens = qaic_output.generated_ids[0].flatten()[:gen_len]
     qaic_text = getattr(qaic_output, "generated_texts", None)
     print("Blocked weight-free QAIC output:")
