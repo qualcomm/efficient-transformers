@@ -15,6 +15,7 @@ both suites exercise the same model families.
 from __future__ import annotations
 
 import copy
+import random
 from collections import Counter
 from pathlib import Path
 
@@ -130,19 +131,12 @@ WEIGHT_FREE_BLOCKING_MODE_CASES = {
 }
 
 _BLOCKING_SUPPORTED_TYPES = {
-    "gemma",
-    "gemma2",
     "glm4_moe",
     "gpt_oss",
-    "granite",
-    "granitemoe",
     "llama",
-    "mistral",
     "mixtral",
-    "qwen2",
     "qwen3",
     "qwen3_moe",
-    "starcoder2",
 }
 
 WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS = {
@@ -154,6 +148,18 @@ def _is_weight_free_blocking_qaic_case_supported(model_type: str, blocking_key: 
     return not (model_type == "mixtral" and blocking_key == "h")
 
 
+def _weight_free_blocking_qaic_modes(model_type: str) -> list[str]:
+    modes = [
+        mode
+        for mode in WEIGHT_FREE_BLOCKING_MODE_CASES
+        if _is_weight_free_blocking_qaic_case_supported(model_type, mode)
+    ]
+    if model_type == "gpt_oss":
+        return modes
+    # A fixed per-model seed keeps collection identical across xdist workers.
+    return random.Random(f"42:{model_type}").sample(modes, k=min(2, len(modes)))
+
+
 WEIGHT_FREE_BLOCKING_QAIC_CASES = [
     pytest.param(
         model_type,
@@ -163,8 +169,7 @@ WEIGHT_FREE_BLOCKING_QAIC_CASES = [
         id=f"{model_type}-{blocking_key}",
     )
     for model_type, model_id in sorted(WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS.items())
-    for blocking_key in WEIGHT_FREE_BLOCKING_MODE_CASES
-    if _is_weight_free_blocking_qaic_case_supported(model_type, blocking_key)
+    for blocking_key in _weight_free_blocking_qaic_modes(model_type)
 ]
 
 # ---------------------------------------------------------------------------

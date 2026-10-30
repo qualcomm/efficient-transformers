@@ -513,7 +513,6 @@ def _run_disagg_prefill_decode_tokens(
     prompt: str,
     generation_len: int,
     full_batch_size: int,
-    stages: int,
 ) -> np.ndarray:
     assert generation_len >= 1, "disaggregated compile/artifact token check expects at least one generated token"
     sessions = []
@@ -521,7 +520,6 @@ def _run_disagg_prefill_decode_tokens(
         prefill_session = QAICInferenceSession(
             str(prefill_qpc),
             kv_dma_share=True,
-            stages=stages,
             full_batch_size=full_batch_size,
             cluster_id="prefill",
         )
@@ -870,7 +868,6 @@ def test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics(
         DECODE_BLOCKING_PARITY_PROMPT,
         DECODE_BLOCKING_PARITY_GENERATION_LEN,
         full_batch_size,
-        DECODE_BLOCKING_PREFILL_STAGES,
     )
     hf_tokens_for_compare = np.asarray(hf_tokens).flatten()[:DECODE_BLOCKING_PARITY_GENERATION_LEN]
     assert np.array_equal(hf_tokens_for_compare, qaic_tokens), (
