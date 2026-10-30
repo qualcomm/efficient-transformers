@@ -311,8 +311,12 @@ def tokens_from_qeff_output(exec_info: Any) -> np.ndarray:
     if generated_ids is None:
         raise RuntimeError("QEff generate did not return `generated_ids`.")
     generated_ids = np.asarray(generated_ids)
-    if generated_ids.ndim == 3 and generated_ids.shape[1] == 1:
-        generated_ids = generated_ids[:, 0, :]
+    if generated_ids.ndim == 3:
+        # QEff may return either [batch, 1, sequence] or [1, batch, sequence].
+        if generated_ids.shape[1] == 1:
+            generated_ids = generated_ids[:, 0, :]
+        elif generated_ids.shape[0] == 1:
+            generated_ids = generated_ids[0, :, :]
     return generated_ids
 
 
