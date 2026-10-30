@@ -28,6 +28,11 @@ from QEfficient.base.onnx_transforms import (
     RenameRepeatedSubgraphTransform,
     RenameWsubNodesTransform,
 )
+from QEfficient.proxy.modeling_utils import (
+    _get_language_config,
+    _get_layer_signature,
+    _get_signature_horizon,
+)
 from QEfficient.transformers.cache_utils import InvalidIndexProvider
 from QEfficient.utils.cache import QEFF_HOME
 from QEfficient.utils.constants import (
@@ -322,21 +327,33 @@ def get_decoder_layer_classes_for_export(model):
     return []
 
 
-def _iter_onnx_nodes(nodes):
-    """Yield graph nodes recursively, including nodes inside nested ONNX subgraphs."""
-    for node in nodes:
-        yield node
-        for attr in node.attribute:
-            if attr.HasField("g"):
-                yield from _iter_onnx_nodes(attr.g.node)
+def _decoder_function_call_nodes(onnx_model, function_names: set[str]):
+    """Return top-level decoder function calls in graph execution order."""
+    return [node for node in onnx_model.graph.node if node.op_type in function_names]
 
 
 def _function_call_counts(onnx_model, function_names: set[str]) -> Counter:
-    """Count call sites for the selected local function names in an ONNX model."""
-    nodes = list(_iter_onnx_nodes(onnx_model.graph.node))
-    for function_proto in onnx_model.functions:
-        nodes.extend(_iter_onnx_nodes(function_proto.node))
-    return Counter(node.op_type for node in nodes if node.op_type in function_names)
+    """Count top-level decoder function calls by exact ONNX function variant."""
+    return Counter(node.op_type for node in _decoder_function_call_nodes(onnx_model, function_names))
+
+
+def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
+    """Return required and observed proxy signatures when model config supports them."""
+    model_config = getattr(getattr(qeff_model, "model", None), "config", None)
+    if model_config is None:
+        return None
+
+    language_config = _get_language_config(model_config)
+    num_hidden_layers = getattr(language_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int) or num_hidden_layers < 1:
+        return None
+
+    signature_horizon = _get_signature_horizon(language_config, num_hidden_layers)
+    required_signatures = {_get_layer_signature(language_config, layer_idx) for layer_idx in range(signature_horizon)}
+    observed_signatures = [
+        _get_layer_signature(language_config, layer_idx) for layer_idx in range(len(decoder_call_nodes))
+    ]
+    return required_signatures, observed_signatures, Counter(observed_signatures)
 
 
 def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
@@ -384,15 +401,41 @@ def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
             f"for expected classes {sorted(target_classnames)}."
         )
 
+    decoder_call_nodes = _decoder_function_call_nodes(onnx_model, function_names)
     call_counts = _function_call_counts(onnx_model, function_names)
-    single_call_functions = {
-        name: call_counts.get(name, 0) for name in sorted(function_names) if call_counts.get(name, 0) <= 1
+    exact_function_variant_counts = {name: call_counts.get(name, 0) for name in sorted(function_names)}
+    signature_info = _logical_proxy_signature_info(qeff_model, decoder_call_nodes)
+
+    if signature_info is None:
+        single_call_functions = {name: count for name, count in exact_function_variant_counts.items() if count <= 1}
+        if single_call_functions:
+            raise RuntimeError(
+                "Proxy ONNX subfunction validation failed: each decoder-layer subfunction must be invoked "
+                "more than once for a faithful compiler performance proxy. "
+                f"Observed exact function-variant call counts: {exact_function_variant_counts}."
+            )
+        return
+
+    required_signatures, ordered_signatures, logical_signature_counts = signature_info
+    missing_signatures = required_signatures - set(logical_signature_counts)
+    underrepresented_signatures = {
+        signature: count for signature, count in logical_signature_counts.items() if count < 2
     }
-    if single_call_functions:
+    underrepresented_signatures.update({signature: 0 for signature in missing_signatures})
+
+    first_call_signature = ordered_signatures[0] if ordered_signatures else None
+    if first_call_signature is None:
+        underrepresented_signatures["<missing first decoder call>"] = 0
+    elif logical_signature_counts[first_call_signature] < 2:
+        underrepresented_signatures[first_call_signature] = logical_signature_counts[first_call_signature]
+
+    if underrepresented_signatures:
         raise RuntimeError(
-            "Proxy ONNX subfunction validation failed: each decoder-layer subfunction must be invoked more "
-            "than once for a faithful compiler performance proxy. "
-            f"Observed call counts: {single_call_functions}."
+            "Proxy ONNX subfunction validation failed: each required logical decoder-layer signature must be "
+            "invoked at least twice for a faithful compiler performance proxy. "
+            f"Observed exact function-variant call counts: {exact_function_variant_counts}. "
+            f"Observed logical layer-signature call counts: {logical_signature_counts}. "
+            f"Underrepresented logical signatures: {underrepresented_signatures}."
         )
 
 
