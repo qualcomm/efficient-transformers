@@ -30,6 +30,43 @@ Popular models include:
 
 ## Available Examples
 
+### Qwen3-ASR optimized AI100 profile
+
+From the repository root, compile the mask-free 16-core profile on an AI100
+device:
+
+```bash
+python qwen_asr_onefile.py compile \
+    --profile best \
+    --ctx-len 512 \
+    --chunk-seconds 30 \
+    --batch-size 1 \
+    --num-cores 16 \
+    --device-ids <assigned-device-id>
+```
+
+The compiler writes a QPC manifest path to stdout. Use it to transcribe one
+audio file or benchmark a directory:
+
+```bash
+python qwen_asr_onefile.py run \
+    --manifest /path/to/qpc_manifest.json \
+    --audio-file /path/to/audio.wav \
+    --device-ids <assigned-device-id>
+
+python qwen_asr_onefile.py benchmark \
+    --manifest /path/to/qpc_manifest.json \
+    --audio-dir /path/to/audio-directory \
+    --device-ids <assigned-device-id> \
+    --output-json benchmark.json
+```
+
+This profile uses FP16 KV/logits and MXFP6 on the logits MatMul. It checks that
+the compiled ONNX input contract omits decoder `attention_mask`; the audio
+`input_features_mask` is retained. The measured 50-clip reference reached
+14.76x request RTFx and 3.06% WER. See the [Qwen3-ASR build notes](../../docs/source/qwen3_asr_changes.md)
+for benchmark scope and comparison caveats.
+
 ### speech_to_text.py
 Speech-to-text transcription using Whisper models.
 

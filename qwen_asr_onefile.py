@@ -139,6 +139,7 @@ def compile_qpc(args: argparse.Namespace, root: Path) -> Path:
     replace_transformers_quantizers()
     request = {
         "model": args.model_id,
+        "precision_profile": args.profile,
         "chunk_seconds": args.chunk_seconds,
         "chunk_samples": round(args.chunk_seconds * SAMPLE_RATE),
         "overlap_seconds": 0,
@@ -160,13 +161,48 @@ def compile_qpc(args: argparse.Namespace, root: Path) -> Path:
         args.model_id, attn_implementation="eager", low_cpu_mem_usage=False, dtype=torch.float32
     ).eval()
     qeff = QEFFAutoModelForSpeechSeq2Seq(model, pretrained_model_name_or_path=args.model_id)
-    qpc_dir = Path(qeff.compile(
-        ctx_len=args.ctx_len,
-        encoder_ctx_len=encoder_ctx_len,
-        batch_size=args.batch_size,
-        num_devices=len(ids),
-        num_cores=args.num_cores,
-    )).resolve()
+    compile_args = {
+        "ctx_len": args.ctx_len,
+        "encoder_ctx_len": encoder_ctx_len,
+        "prefill_seq_len": prefill_len,
+        "batch_size": args.batch_size,
+        "num_devices": len(ids),
+        "num_cores": args.num_cores,
+    }
+    onnx_path = None
+    selector_path = None
+    head_matmul = None
+    if args.profile == "best":
+        # Export explicitly so MXFP6 is assigned to the actual logits MatMul in
+        # this export. ONNX node names can change across exporter versions.
+        specializations, _ = qeff.model.get_specializations(
+            args.batch_size, encoder_ctx_len, args.ctx_len
+        )
+        onnx_path = Path(qeff.get_onnx_path(
+            specializations=specializations,
+            offload_pt_weights=False,
+            mdp_ts_num_devices=len(ids),
+            aic_num_cores=args.num_cores,
+        )).resolve()
+        selector_path = run_dir / "lm_head_mxfp6.yaml"
+        graph_inputs = {value.name for value in load_onnx_graph(onnx_path).graph.input}
+        if "attention_mask" in graph_inputs:
+            raise SystemExit(
+                "The best profile expects a mask-free Qwen3-ASR export, but the ONNX graph has an "
+                "attention_mask input. Check out the Qwen3-ASR mask-free changes in this repository."
+            )
+        head_matmul = write_logits_mxfp6_selector(onnx_path, selector_path)
+        print(f"mask_free_onnx={onnx_path}\nlm_head_mxfp6_node={head_matmul}")
+        qpc_dir = Path(qeff.compile(
+            onnx_path=str(onnx_path),
+            compile_dir=str(run_dir),
+            mxfp6_matmul=False,
+            convert_to_fp16=True,
+            node_precision_info=str(selector_path),
+            **compile_args,
+        )).resolve()
+    else:
+        qpc_dir = Path(qeff.compile(**compile_args)).resolve()
     qpc_bin = qpc_dir / "programqpc.bin"
     if not qpc_bin.is_file():
         raise SystemExit(f"compile finished without programqpc.bin: {qpc_dir}")
@@ -175,6 +211,10 @@ def compile_qpc(args: argparse.Namespace, root: Path) -> Path:
         "qpc_dir": str(qpc_dir),
         "qpc_bin": str(qpc_bin),
         "size_bytes": qpc_bin.stat().st_size,
+        "attention_mask_input": False if args.profile == "best" else None,
+        "onnx_path": str(onnx_path) if onnx_path else None,
+        "onnx_sha256": sha256_file(onnx_path) if onnx_path else None,
+        "lm_head_mxfp6_node": head_matmul,
         "finished_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
     }
     manifest_path = run_dir / "qpc_manifest.json"
@@ -182,6 +222,58 @@ def compile_qpc(args: argparse.Namespace, root: Path) -> Path:
     (run_dir / "qpc_path.txt").write_text(str(qpc_dir) + "\n", encoding="utf-8")
     print(f"qpc_manifest={manifest_path}\nqpc_dir={qpc_dir}\nqpc_size_bytes={qpc_bin.stat().st_size}")
     return manifest_path
+
+
+def load_onnx_graph(path: Path):
+    """Load ONNX metadata without loading external weight data into memory."""
+    import onnx
+
+    return onnx.load(str(path), load_external_data=False)
+
+
+def sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_logits_mxfp6_selector(onnx_path: Path, output_path: Path) -> str:
+    """Write a QAIC precision selector for the MatMul that produces logits."""
+    graph = load_onnx_graph(onnx_path).graph
+    producers = {name: node for node in graph.node for name in node.output}
+    logits = next((output.name for output in graph.output if output.name == "logits"), None)
+    if logits is None:
+        raise SystemExit(f"Qwen3-ASR ONNX graph has no logits output: {onnx_path}")
+
+    visited = set()
+
+    def find_matmul(tensor_name: str):
+        if tensor_name in visited:
+            return None
+        visited.add(tensor_name)
+        node = producers.get(tensor_name)
+        if node is None:
+            return None
+        if node.op_type == "MatMul":
+            return node
+        for input_name in node.input:
+            if input_name:
+                match = find_matmul(input_name)
+                if match is not None:
+                    return match
+        return None
+
+    node = find_matmul(logits)
+    if node is None or not node.name:
+        raise SystemExit("Could not identify a named MatMul feeding the Qwen3-ASR logits output")
+    output_path.write_text(
+        "MXFP6E2M3NodeInstanceNames:\n- " + node.name + "\n", encoding="utf-8"
+    )
+    return node.name
 
 
 def load_audio(path: Path, sample_rate: int) -> np.ndarray:
@@ -239,6 +331,8 @@ def pad_prefill(inputs: dict, length: int) -> dict:
         raise SystemExit(f"processor prompt length {actual} exceeds compiled prefill length {length}")
     result = dict(inputs)
     for name in ("input_ids", "attention_mask", "position_ids"):
+        if name not in inputs:
+            continue
         value = inputs[name]
         padded = torch.zeros((value.shape[0], length), dtype=value.dtype)
         padded[:, :actual] = value
@@ -279,9 +373,10 @@ def run_one(session, processor, audio: np.ndarray, sample_rate: int, chunk_sampl
     values = {
         "input_features": padded["input_features"].detach().cpu().numpy().astype(np.float16),
         "input_ids": padded["input_ids"].detach().cpu().numpy().astype(np.int64),
-        "attention_mask": padded["attention_mask"].detach().cpu().numpy().astype(np.int64),
         "position_ids": padded["position_ids"].detach().cpu().numpy().astype(np.int64),
     }
+    if "attention_mask" in padded:
+        values["attention_mask"] = padded["attention_mask"].detach().cpu().numpy().astype(np.int64)
     if "input_features_mask" in padded:
         values["input_features_mask"] = padded["input_features_mask"].detach().cpu().numpy().astype(np.int64)
     values = {name: value for name, value in values.items() if name in input_names}
@@ -291,9 +386,10 @@ def run_one(session, processor, audio: np.ndarray, sample_rate: int, chunk_sampl
     stopped = stop_on_eos and generated[-1] in eos_ids
     decode = {
         "input_features": np.zeros(decode_shapes["input_features"], dtype=np.float16),
-        "attention_mask": np.ones(decode_shapes["attention_mask"], dtype=np.int64),
         "position_ids": np.full(decode_shapes["position_ids"], int(values["position_ids"].max()) + 1, dtype=np.int64),
     }
+    if "attention_mask" in decode_shapes:
+        decode["attention_mask"] = np.ones(decode_shapes["attention_mask"], dtype=np.int64)
     if "input_features_mask" in input_names:
         decode["input_features_mask"] = np.ones(decode_shapes["input_features_mask"], dtype=np.int64)
     retained(outputs, decode, input_names)
@@ -328,7 +424,7 @@ def open_runtime(manifest_path: Path, ids: list[int], qeff_root: Path | None = N
     session = QAICInferenceSession(str(qpc_dir), ids)
     names = set(session.input_names)
     prefill = allowed_shapes(session, lambda s: s.get("input_ids", (0, 0))[1] > 1 and s.get("input_features", (0, 0, 0))[-1] == int(manifest["encoder_ctx_len"]))
-    decode = allowed_shapes(session, lambda s: s.get("input_ids") == (1, 1) and s.get("attention_mask") == (1, 1) and s.get("position_ids") == (1, 1))
+    decode = allowed_shapes(session, lambda s: s.get("input_ids") == (1, 1) and s.get("position_ids") == (1, 1))
     bind_output_buffers(session, set(session.output_names), decode)
     return manifest, processor, config, session, names, prefill, decode, token_ids(getattr(config, "eos_token_id", None))
 
@@ -380,16 +476,19 @@ def benchmark_command(args: argparse.Namespace, root: Path) -> int:
         run_one(session, processor, np.zeros(chunk_samples, dtype=np.float32), SAMPLE_RATE, chunk_samples, args.generation_len, args.stop_on_eos, prefill, decode, names, eos_ids)
         print(f"warmup_complete=True warmup_s={perf_counter() - warmup_start:.4f}", flush=True)
     rows = []
+    total_audio_seconds = 0.0
     for path in files:
         audio = load_audio(path, SAMPLE_RATE)
+        total_audio_seconds += audio.size / SAMPLE_RATE
         for index, start in enumerate(range(0, audio.size, stride)):
             chunk = audio[start:start + chunk_samples]
             if chunk.size < chunk_samples:
                 chunk = np.pad(chunk, (0, chunk_samples - chunk.size))
             result = run_one(session, processor, chunk, SAMPLE_RATE, chunk_samples, args.generation_len, args.stop_on_eos, prefill, decode, names, eos_ids)
-            rows.append({"file": path.name, "chunk_index": index, "chunk_start_s": start / SAMPLE_RATE, "generated_tokens": len(result["tokens"]), "chunk_e2e_s": result["elapsed_s"], "decoded": result["decoded"]})
+            rows.append({"file": path.name, "chunk_index": index, "chunk_start_s": start / SAMPLE_RATE, "audio_seconds": min(chunk_samples, audio.size - start) / SAMPLE_RATE, "generated_tokens": len(result["tokens"]), "chunk_e2e_s": result["elapsed_s"], "decoded": result["decoded"]})
             print(f"{path.name} chunk={index} elapsed_s={result['elapsed_s']:.4f} tokens={len(result['tokens'])}", flush=True)
-    summary = {"manifest": str(manifest_path), "audio_dir": str(args.audio_dir.resolve()), "file_count": len(files), "chunk_count": len(rows), "generation_len": args.generation_len, "stop_on_eos": args.stop_on_eos, "overlap_seconds": overlap, "qpc_session_reused": True, "total_elapsed_s": sum(row["chunk_e2e_s"] for row in rows)}
+    total_elapsed = sum(row["chunk_e2e_s"] for row in rows)
+    summary = {"manifest": str(manifest_path), "audio_dir": str(args.audio_dir.resolve()), "file_count": len(files), "chunk_count": len(rows), "generation_len": args.generation_len, "stop_on_eos": args.stop_on_eos, "overlap_seconds": overlap, "qpc_session_reused": True, "total_audio_seconds": total_audio_seconds, "total_elapsed_s": total_elapsed, "request_rtf": total_elapsed / total_audio_seconds, "request_rtfx": total_audio_seconds / total_elapsed}
     if args.output_json:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps({"summary": summary, "chunks": rows}, indent=2) + "\n", encoding="utf-8")
@@ -425,7 +524,8 @@ def main() -> int:
     compile_parser.add_argument("--chunk-seconds", type=float, default=30)
     compile_parser.add_argument("--ctx-len", type=int, default=512)
     compile_parser.add_argument("--batch-size", type=int, default=1)
-    compile_parser.add_argument("--num-cores", type=int, default=8)
+    compile_parser.add_argument("--num-cores", type=int, default=16)
+    compile_parser.add_argument("--profile", choices=("best", "standard"), default="best", help="best: FP16 with MXFP6 on the logits MatMul only; standard: default QEff compiler precision")
     compile_parser.add_argument("--device-ids", default="0")
     compile_parser.add_argument("--output-root", type=Path)
     compile_parser.add_argument("--qeff-root", type=Path, help="optional QEfficient checkout; otherwise use installed packages")
@@ -452,7 +552,8 @@ def main() -> int:
     compile_run.add_argument("--ctx-len", type=int, default=512)
     compile_run.add_argument("--chunk-seconds", type=float, default=30)
     compile_run.add_argument("--batch-size", type=int, default=1)
-    compile_run.add_argument("--num-cores", type=int, default=8)
+    compile_run.add_argument("--num-cores", type=int, default=16)
+    compile_run.add_argument("--profile", choices=("best", "standard"), default="best", help="best: FP16 with MXFP6 on the logits MatMul only; standard: default QEff compiler precision")
     compile_run.add_argument("--output-root", type=Path)
     compile_run.add_argument("--device-ids", default="0")
     compile_run.add_argument("--audio-file", type=Path, default=root / DEFAULT_AUDIO)
