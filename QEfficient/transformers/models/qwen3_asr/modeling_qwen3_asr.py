@@ -303,7 +303,6 @@ class QEffQwen3ASRForConditionalGeneration(Qwen3ASRForConditionalGeneration):
             ),
             "input_features_mask": torch.ones((batch_size, feature_len), dtype=torch.int64),
             "input_ids": input_ids,
-            "attention_mask": torch.ones((batch_size, seq_len), dtype=torch.int64),
             "position_ids": torch.arange(seq_len, dtype=torch.int64).view(1, seq_len).repeat(batch_size, 1),
             "past_key_values": [[] for _ in range(text_config.num_hidden_layers)],
         }
@@ -340,7 +339,6 @@ class QEffQwen3ASRForConditionalGeneration(Qwen3ASRForConditionalGeneration):
             "input_features": {0: "batch_size", 2: "feature_len"},
             "input_features_mask": {0: "batch_size", 1: "feature_len"},
             "input_ids": {0: "batch_size", 1: "seq_len"},
-            "attention_mask": {0: "batch_size", 1: "seq_len"},
             "position_ids": {0: "batch_size", 1: "seq_len"},
         }
         for layer_idx in range(self.config.text_config.num_hidden_layers):
