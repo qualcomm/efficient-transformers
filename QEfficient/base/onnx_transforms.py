@@ -27,30 +27,30 @@ from QEfficient.customop.ctx_scatter_gather import (
     CtxGather3D,
     CtxGatherBlockedKV,
     CtxGatherBlockedKVBatch,
+    CtxGatherBlockedKVDP,
+    CtxGatherBlockRangeKVDP,
     CtxGatherDP,
     CtxGatherDPCP,
     CtxGatherDPCPFunc,
     CtxGatherDPFunc,
     CtxGatherFoldedRows,
     CtxGatherFoldedRowsFunc,
-    CtxGatherBlockedKVDP,
-    CtxGatherBlockRangeKVDP,
     CtxGatherFunc,
     CtxGatherFunc3D,
     CtxGatherFunc3DGeneralized,
     CtxGatherFuncBlockedKV,
     CtxGatherFuncBlockedKVBatch,
-    CtxGatherRows,
-    CtxGatherRowsFunc,
-    CtxPagedScatter,
-    CtxPagedScatterFunc,
     CtxGatherFuncBlockedKVDP,
     CtxGatherFuncBlockRangeKVDP,
     CtxGatherFuncPagedKVDP,
     CtxGatherFuncPagedKVHeads,
     CtxGatherPagedKVDP,
     CtxGatherPagedKVHeads,
+    CtxGatherRows,
+    CtxGatherRowsFunc,
+    CtxPagedScatter,
     CtxPagedScatterDP,
+    CtxPagedScatterFunc,
     CtxPagedScatterFuncDP,
     CtxPagedScatterFuncPage,
     CtxPagedScatterPage,
@@ -1128,6 +1128,7 @@ class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
                     if old in node.name:
                         node.name = node.name.replace(old, new)
 
+
 class DeduplicateRepeatedSubgraphTransform(BaseOnnxTransform):
     """Collapse structurally identical repeated local functions emitted by dynamo export."""
 
@@ -1451,6 +1452,7 @@ class DeduplicateRepeatedSubgraphTransform(BaseOnnxTransform):
         tensor = copy.deepcopy(tensor)
         tensor.name = ""
         return tensor.data_type, tuple(tensor.dims), tensor.SerializeToString().hex()
+
 
 class AdapterWeightsToInputsTransform(BaseOnnxTransform):
     @classmethod
