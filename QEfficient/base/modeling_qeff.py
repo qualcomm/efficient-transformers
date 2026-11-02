@@ -79,6 +79,10 @@ from QEfficient.utils.torch_patches import layerwise_safe_onnx_export_patches
 logger = QEFFLogger.get_logger("INFRA")
 
 
+def _log_mdp_generation_milestone(milestone: str, message: str) -> None:
+    QEFFLogger.log_event("milestone", "INFRA", message, api="compile", milestone=milestone)
+
+
 _LEGACY_MOE_PREFILL_PACKED_CHUNK_SIZE_ERROR = (
     "moe_prefill_packed_chunk_size is no longer supported; use qaic_config['moe_config']['expert_parallel_chunk_size']"
 )
@@ -1589,6 +1593,10 @@ class QEFFBaseModel(ABC):
             mdp_ts_json = load_json(str(mdp_ts_json_path))
         elif mdp_num_partitions > 1:
             # Disaggregated (pipeline-parallel) MDP — delegate to focused helper.
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_START,
+                "MDP generation started.",
+            )
             compile_dir.mkdir(parents=True, exist_ok=True)
             num_cores = compiler_options.get("aic_num_cores", constants.DEFAULT_AIC_NUM_CORES)
             num_layers = getattr(self, "num_layers", None)
@@ -1623,12 +1631,24 @@ class QEFFBaseModel(ABC):
                 num_layers=num_layers,
                 qaic_config=getattr(self.model, "qaic_config", None),
             )
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_COMPLETE,
+                "MDP generation completed.",
+            )
             command.append(f"-mdp-load-partition-config={mdp_ts_json_path}")
         elif mdp_ts_num_devices > 1 and not compiler_options.get("mdp_dump_partition_config", None):
             # Template (tensor-slice) MDP: single partition, empty nodeList; compiler fills it.
             # File write and command flag are deferred to after compile_dir is finalised (post-hash).
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_START,
+                "MDP generation started.",
+            )
             mdp_ts_json = generate_mdp_partition_config(
                 mdp_ts_num_devices, compiler_options.get("aic_num_cores", constants.DEFAULT_AIC_NUM_CORES)
+            )
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_COMPLETE,
+                "MDP generation completed.",
             )
 
         compile_hash_params = {
