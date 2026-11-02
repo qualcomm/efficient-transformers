@@ -78,6 +78,22 @@ def ctx_gather_blocked_kv(data: torch.Tensor, ctx_indices: torch.Tensor) -> torc
     return select_interface(CtxGatherFuncBlockedKV.apply, torch.ops.qefficient.ctx_gather_blocked_kv)(data, ctx_indices)
 
 
+def ctx_chunk_scatter_batch(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxChunkScatterBatchFunc
+
+    return select_interface(CtxChunkScatterBatchFunc.apply, torch.ops.qefficient.ctx_chunk_scatter_batch)(
+        data, position_ids, updates
+    )
+
+
+def ctx_gather_blocked_kv_batch(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKVBatch
+
+    return select_interface(CtxGatherFuncBlockedKVBatch.apply, torch.ops.qefficient.ctx_gather_blocked_kv_batch)(
+        data, ctx_indices
+    )
+
+
 # ---------------------------------------------------------------------------
 # Interface functions for ctx_scatter_gather_cb ops
 # ---------------------------------------------------------------------------
@@ -127,3 +143,9 @@ def ctx_gather_cb_3d(data: torch.Tensor, batch_index: torch.Tensor, ctx_indices:
     return select_interface(CtxGatherFuncCB3D.apply, torch.ops.qefficient.ctx_gather_cb_3d)(
         data, batch_index, ctx_indices
     )
+
+
+def custom_rms_norm_func(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
+    from QEfficient.customop.rms_norm import CustomRMSNormFunc
+
+    return select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(hidden_states, weight, epsilon)

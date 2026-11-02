@@ -54,6 +54,20 @@ class _CompileOnlyVLM:
         return [{"batch_size": 1}], dict(kwargs)
 
 
+class _ExportOnlyVLM(_CompileOnlyVLM):
+    def get_dummy_inputs(self, **kwargs):
+        return {
+            "vision": {"pixel_values": torch.zeros((1, 1), dtype=torch.float32)},
+            "lang": {"input_ids": torch.zeros((1, 1), dtype=torch.int64)},
+        }
+
+    def get_onnx_dynamic_axes(self, **kwargs):
+        return {
+            "vision": {"pixel_values": {0: "batch_size"}},
+            "lang": {"input_ids": {0: "batch_size"}},
+        }
+
+
 # ---------------------------------------------------------------------------
 # Tests: QEFFAutoModelForImageTextToText structure
 # ---------------------------------------------------------------------------
@@ -97,6 +111,54 @@ class TestQEFFAutoModelForImageTextToTextStructure:
         assert hasattr(QEFFAutoModelForImageTextToText, "__new__")
 
 
+def test_weight_free_vlm_rejects_single_qpc():
+    from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
+
+    with pytest.raises(
+        NotImplementedError,
+        match=r"weight-free export is only supported with kv_offload=True \(dual-QPC mode\)",
+    ):
+        QEFFAutoModelForImageTextToText.from_pretrained.__func__.__wrapped__(
+            QEFFAutoModelForImageTextToText,
+            "dummy-model",
+            kv_offload=False,
+            weight_free=True,
+        )
+
+
+def test_weight_free_vlm_defaults_to_dual_qpc(monkeypatch):
+    from QEfficient.transformers.models import modeling_auto
+    from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
+
+    meta_model = object()
+    dual_wrapper = object()
+    dual_calls = []
+
+    monkeypatch.setattr(modeling_auto, "validate_dynamo_export_requirements", lambda feature_name: None)
+    monkeypatch.setattr(modeling_auto, "_build_meta_model", lambda *args, **kwargs: meta_model)
+
+    def build_dual(model, continuous_batching=False, qaic_config=None, **kwargs):
+        dual_calls.append((model, continuous_batching, qaic_config, kwargs))
+        return dual_wrapper
+
+    monkeypatch.setattr(modeling_auto, "_QEffAutoModelForImageTextToTextDualQPC", build_dual)
+    monkeypatch.setattr(
+        modeling_auto,
+        "_QEFFAutoModelForImageTextToTextSingleQPC",
+        lambda *args, **kwargs: pytest.fail("weight-free VLM must not select the single-QPC wrapper"),
+    )
+
+    result = QEFFAutoModelForImageTextToText.from_pretrained.__func__.__wrapped__(
+        QEFFAutoModelForImageTextToText,
+        "dummy-model",
+        weight_free=True,
+    )
+
+    assert result is dual_wrapper
+    assert dual_calls[0][0] is meta_model
+    assert dual_calls[0][3]["weight_free"] is True
+
+
 # ---------------------------------------------------------------------------
 # Tests: Internal VLM classes structure
 # ---------------------------------------------------------------------------
@@ -132,8 +194,10 @@ class TestInternalVLMClassesStructure:
 
         class _QwenLikeVLM:
             config = SimpleNamespace(model_type="qwen2_5_vl")
+            dummy_input_kwargs = None
 
             def get_dummy_inputs(self, **kwargs):
+                self.dummy_input_kwargs = kwargs
                 return {"vision": {}, "lang": {"input_ids": torch.zeros((1, 1), dtype=torch.long)}}
 
             def get_onnx_dynamic_axes(self, **kwargs):
@@ -163,9 +227,11 @@ class TestInternalVLMClassesStructure:
         qeff_model.vision_model = _Vision()
         qeff_model.continuous_batching = False
         qeff_model.comp_ctx_lengths_decode = None
+        qeff_model._weight_free = True
 
         qeff_model.export(skip_vision=True)
 
+        assert qeff_model.model.dummy_input_kwargs["weight_free"] is True
         assert qeff_model.lang_model.exported_inputs["past_repetition_penalty_buffer"].shape == (1, 97)
 
     def test_single_qpc_class_has_compile_method(self):
@@ -234,6 +300,40 @@ class TestQEffAutoModelForImageTextToTextDualQPCStructure:
         sig = inspect.signature(_QEffAutoModelForImageTextToTextDualQPC.compile)
         assert "skip_lang" in sig.parameters
         assert "skip_vision" in sig.parameters
+
+    def test_dual_qpc_export_initializes_weight_free_from_constructor(self, monkeypatch):
+        """Dual-QPC export must have the outer weight-free flag initialized by __init__."""
+        from QEfficient.transformers.models import modeling_auto
+
+        calls = []
+
+        class ExportOnlyVision:
+            onnx_path = None
+
+            def __init__(self, model, **kwargs):
+                self.model = model
+
+            def export(self, inputs, output_names, dynamic_axes, **kwargs):
+                calls.append(kwargs)
+
+        class ExportOnlyLang:
+            onnx_path = None
+
+            def __init__(self, model, **kwargs):
+                self.model = SimpleNamespace(qaic_config=None)
+
+        monkeypatch.setattr(modeling_auto, "QEffVisionEncoderForTextImageToTextModel", ExportOnlyVision)
+        monkeypatch.setattr(modeling_auto, "QEffCausalLMForTextImageToTextModel", ExportOnlyLang)
+        monkeypatch.setattr(
+            modeling_auto.SamplerTransform, "apply", lambda model, qaic_config, **kwargs: (model, False)
+        )
+
+        qeff_model = modeling_auto._QEffAutoModelForImageTextToTextDualQPC(_ExportOnlyVLM(), weight_free=True)
+        qeff_model.export(skip_lang=True)
+
+        assert calls == [
+            {"export_dir": None, "offload_pt_weights": False, "use_onnx_subfunctions": False, "dynamo": True}
+        ]
 
     def test_dual_qpc_compile_ignores_public_mdp_ts_num_devices(self, caplog):
         """Dual-QPC compile ignores public mdp_ts_num_devices before internal _compile calls."""

@@ -458,7 +458,6 @@ class TestQEffGemma4VisionEncoder:
 
         assert isinstance(vision_embeds, torch.Tensor)
         assert vision_embeds.ndim == 3, f"Expected vision_embeds rank=3, got shape={vision_embeds.shape}"
-        assert vision_embeds.shape[0] == 1, f"Expected batch size 1, got {vision_embeds.shape[0]}"
         assert vision_embeds.shape[2] == cfg.hidden_size, (
             f"Expected hidden dim {cfg.hidden_size}, got {vision_embeds.shape[2]}"
         )

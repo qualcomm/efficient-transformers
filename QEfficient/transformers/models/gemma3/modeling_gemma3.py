@@ -245,7 +245,6 @@ class QEffGemma3Attention(Gemma3Attention):
                 "sliding_window": getattr(past_key_values, "sliding_window_len", self.config.sliding_window),
             }
             if comp_ctx_lengths is not None:
-                attention_mask = attention_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
                 cache_kwargs["CCL"] = attention_mask.shape[-1]
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
@@ -456,8 +455,13 @@ class QEffGemma3TextModel(Gemma3TextModel):
                     target_length=full_ctx_len,
                 ),
             }
-
-        # decoder layers
+        if comp_ctx_lengths is not None:
+            # Trim while comp_ctx_lengths is still the original CCL vector.
+            # Later decoder subfunctions receive the derived width, so applying
+            # .shape[-1] there would create a dynamic Slice.ends input.
+            ccl_width = comp_ctx_lengths.shape[-1]
+            _causal_mask_mapping["sliding_attention"] = _causal_mask_mapping["sliding_attention"][:, :, :, :ccl_width]
+            _causal_mask_mapping["full_attention"] = _causal_mask_mapping["full_attention"][:, :, :, :ccl_width]
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):

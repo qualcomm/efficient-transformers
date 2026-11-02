@@ -183,7 +183,7 @@ def test_causal_lm_hash_creation(config, cb, subfunc, prefill_only, tmp_path):
     hash_params["onnx_transform_version"] = 1
     hash_params["dynamo"] = False
     if subfunc:
-        hash_params["onnx_subfunction_version"] = 3
+        hash_params["onnx_subfunction_version"] = 4
 
     # Create parameters separately for hash creation
     bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE

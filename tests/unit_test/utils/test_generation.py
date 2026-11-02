@@ -92,6 +92,7 @@ def _make_mock_session(
     session.input_names = [b.name for b in bindings if b.dir == "input"]
     session.output_names = [b.name for b in bindings if b.dir == "output"]
     session.is_active = True
+    session.binding_is_bfloat16.return_value = False
 
     # run() returns logits with argmax-able values
     def _run(inputs):
@@ -174,6 +175,11 @@ class TestGenerationModuleImportability:
         import QEfficient.generation.text_generation_inference
 
         assert QEfficient.generation.text_generation_inference is not None
+
+    def test_retained_state_name_accepts_subfunction_prefix(self):
+        from QEfficient.generation.cloud_infer import is_retained_state_name
+
+        assert is_retained_state_name("repeated_subgraph0/past_key.0_InternalRetainedState")
 
     def test_vlm_generation_importable(self):
         import QEfficient.generation.vlm_generation
@@ -637,6 +643,31 @@ class TestRunPrefill:
         obj.run_prefill(prompt=["Hello world"], generation_len=None)
         assert mock_session.run.called
 
+    def test_run_prefill_records_invocation_context(self):
+        obj, _, mock_session = _make_base_instance()
+        contexts = []
+
+        class InvocationContext:
+            def __init__(self, **metadata):
+                self.metadata = metadata
+
+            def __enter__(self):
+                contexts.append(self.metadata)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_session.invocation_context.side_effect = lambda **metadata: InvocationContext(**metadata)
+        obj.initialize_decode_inputs(1, 1, CTX_LEN)
+
+        obj.run_prefill(prompt=["Hello world"], generation_len=None)
+
+        assert contexts[0]["phase"] == "prefill"
+        assert contexts[0]["prefill_chunk"] == 0
+        assert contexts[0]["logical_invocation"] == "prefill_chunk"
+        assert contexts[0]["is_prefill"] is True
+        assert contexts[0]["is_decode"] is False
+
     def test_run_prefill_generation_len_bounded_by_ctx_len(self):
         obj, _, _ = _make_base_instance(ctx_len=CTX_LEN)
         obj.initialize_decode_inputs(1, 1, CTX_LEN)
@@ -707,6 +738,30 @@ class TestRunDecode:
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
         obj.run_decode(decode_inputs, gen_len, automation=True)
         assert mock_session.run.called
+
+    def test_run_decode_records_invocation_context(self):
+        obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
+        contexts = []
+
+        class InvocationContext:
+            def __init__(self, **metadata):
+                self.metadata = metadata
+
+            def __enter__(self):
+                contexts.append(self.metadata)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        mock_session.invocation_context.side_effect = lambda **metadata: InvocationContext(**metadata)
+
+        obj.run_decode(decode_inputs, gen_len, automation=True)
+
+        assert contexts[0]["phase"] == "decode"
+        assert contexts[0]["decode_step"] == 1
+        assert contexts[0]["logical_invocation"] == "decode"
+        assert contexts[0]["is_prefill"] is False
+        assert contexts[0]["is_decode"] is True
 
     def test_run_decode_updates_generated_ids(self):
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
@@ -859,7 +914,7 @@ class TestPrefillChunking:
 class TestContinuousBatching:
     """run_continuous_batching_decode must handle the CB decode loop correctly."""
 
-    def _make_cb_instance(self, full_batch_size=2):
+    def _make_cb_instance(self, full_batch_size=2, enable_full_batch_prefill=False):
         from QEfficient.generation.text_generation_inference import QEffTextGenerationBase
 
         tok = _make_tokenizer()
@@ -910,6 +965,7 @@ class TestContinuousBatching:
                 qpc_path="/fake/path/model.qpc",
                 ctx_len=CTX_LEN,
                 full_batch_size=full_batch_size,
+                enable_full_batch_prefill=enable_full_batch_prefill,
             )
         return obj, tok, mock_session
 
@@ -949,6 +1005,143 @@ class TestContinuousBatching:
         obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
         assert len(prompt_queue) == 0
 
+    def test_continuous_batching_records_terminal_decode_schedule(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11], [12]], dtype=np.int64)
+        obj.decode_pos_ids[:] = np.array([[1], [1]], dtype=np.int64)
+        obj.generation_len[:] = 1
+        obj.generated_ids[:, 0] = obj.decode_input_ids[:, 0]
+        obj.batch_index = np.arange(2).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(), generation_len=1)
+
+        event_types = [event["type"] for event in schedule_events]
+        assert event_types == [
+            "decode_invocation",
+            "slot_completed",
+            "slot_released",
+            "slot_completed",
+            "slot_released",
+        ]
+        assert schedule_events[0]["active_slots"] == [0, 1]
+        assert schedule_events[1]["reason"] == "generation_len"
+        assert schedule_events[1]["terminal_decode"] is True
+        assert schedule_events[3]["terminal_decode"] is True
+
+    def test_continuous_batching_records_replacement_prefill_schedule(self):
+        obj, tok, mock_session = self._make_cb_instance(full_batch_size=1)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 1, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11]], dtype=np.int64)
+        obj.decode_pos_ids[:] = np.array([[1]], dtype=np.int64)
+        obj.generation_len[:] = 1
+        obj.generated_ids[0, 0] = 11
+        obj.batch_index = np.arange(1).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(["replacement"]), generation_len=1)
+
+        event_types = [event["type"] for event in schedule_events]
+        assert "replacement_prefill" in event_types
+        replacement_event = next(event for event in schedule_events if event["type"] == "replacement_prefill")
+        assert replacement_event["slot"] == 0
+        assert replacement_event["logical_prompt_index"] == 1
+        assert replacement_event["trigger"] == "generation_len"
+        assert replacement_event["queue_depth_before_pop"] == 1
+        assert replacement_event["queue_depth_after_pop"] == 0
+
+    def test_runtime_schedule_position_ids_do_not_assume_batch_major(self):
+        obj, _, _ = self._make_cb_instance(full_batch_size=2)
+        decode_inputs = {
+            "input_ids": np.array([[11], [12]], dtype=np.int64),
+            "position_ids": np.array(
+                [
+                    [[10], [20]],
+                    [[110], [120]],
+                    [[210], [220]],
+                    [[310], [320]],
+                ],
+                dtype=np.int64,
+            ),
+        }
+
+        position_ids = obj._runtime_schedule_position_ids(decode_inputs)
+
+        assert position_ids == [[10, 110, 210, 310], [20, 120, 220, 320]]
+        assert obj._runtime_schedule_position_id_for_slot(decode_inputs, 1) == [20, 120, 220, 320]
+
+    def test_continuous_batching_logs_non_batch_major_position_ids(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        obj.decode_input_ids[:] = np.array([[11], [12]], dtype=np.int64)
+        obj.decode_pos_ids = np.array(
+            [
+                [[10], [20]],
+                [[110], [120]],
+                [[210], [220]],
+                [[310], [320]],
+            ],
+            dtype=np.int64,
+        )
+        obj.generation_len[:] = 2
+        obj.generated_ids[:, 0] = obj.decode_input_ids[:, 0]
+        obj.batch_index = np.arange(2).reshape(-1, 1)
+
+        obj.run_continuous_batching_decode(deque(), generation_len=2)
+
+        decode_invocation = next(event for event in schedule_events if event["type"] == "decode_invocation")
+        slot_advanced = [event for event in schedule_events if event["type"] == "slot_advanced"]
+        assert decode_invocation["decode_position_ids"] == [[10, 110, 210, 310], [20, 120, 220, 320]]
+        assert slot_advanced[0]["next_position_id"] == [11, 110, 210, 310]
+
+    def test_full_batch_prefill_uses_full_batch_bindings(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        prefill_inputs = mock_session.run.call_args_list[0][0][0]
+        assert prefill_inputs["input_ids"].shape == (2, PREFILL_LEN)
+        assert prefill_inputs["position_ids"].shape == (2, PREFILL_LEN)
+        assert prefill_inputs["batch_index"].shape == (2, 1)
+        assert prefill_inputs["batch_index"].tolist() == [[0], [1]]
+
+    def test_full_batch_prefill_supports_decode_sized_chunks(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj._prefill_seq_len = 1
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        first_chunk_inputs = mock_session.run.call_args_list[0][0][0]
+        assert first_chunk_inputs["input_ids"].shape == (2, 1)
+        assert first_chunk_inputs["position_ids"].shape == (2, 1)
+        assert first_chunk_inputs["batch_index"].shape == (2, 1)
+
+    def test_full_batch_prefill_sends_block_table_and_slot_id_when_kv_blocked(self):
+        obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
+        obj._prefill_seq_len = 1
+        obj.num_kv_blocks = 2
+        obj.kv_block_size = 16
+        obj.block_table = np.arange(4, dtype=np.int64).reshape(2, 2)
+        obj.initialize_decode_inputs(2, 2, CTX_LEN)
+        prompt_queue = deque(["Hello", "World"])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=None)
+
+        first_chunk_inputs = mock_session.run.call_args_list[0][0][0]
+        assert first_chunk_inputs["block_table"].shape == (2, 2)
+        assert first_chunk_inputs["block_table"].tolist() == [[0, 1], [2, 3]]
+        assert first_chunk_inputs["slot_id"].shape == (2,)
+        assert first_chunk_inputs["slot_id"].tolist() == [0, 0]
+
 
 # ---------------------------------------------------------------------------
 # Tests: _fetch_next_token_id
@@ -984,6 +1177,132 @@ class TestFetchNextTokenId:
         outputs = {"logits": logits}
         token = obj._fetch_next_token_id(outputs)
         assert token[0, 0] == 55
+
+
+class TestBfloat16GenerationRegression:
+    """CPU-only regression coverage for BF16 transport buffers and logits."""
+
+    @staticmethod
+    def _make_cloud_session(output_names):
+        session = SimpleNamespace()
+        session.output_names = output_names
+        session.binding_index_map = {name: index for index, name in enumerate(output_names)}
+        session.bindings = [SimpleNamespace(type=11) for _ in output_names]
+        session.aic_to_np_dtype_mapping = {11: np.dtype(np.float16)}
+        session.binding_is_bfloat16 = lambda name: True
+        return session
+
+    def test_bfloat16_to_float32_decodes_raw_patterns(self):
+        from QEfficient.generation.cloud_infer import _bfloat16_to_float32
+
+        raw = np.array([0x3F80, 0xC020, 0x4049], dtype=np.uint16).view(np.float16)
+        decoded = _bfloat16_to_float32(raw)
+
+        assert decoded.dtype == np.float32
+        np.testing.assert_allclose(decoded, [1.0, -2.5, 3.140625])
+
+    @pytest.mark.parametrize("output_name", ["logits", "language_model/logits"])
+    def test_build_outputs_decodes_plain_and_prefixed_bfloat16_logits(self, output_name):
+        from QEfficient.generation import cloud_infer
+
+        raw_logits = np.array([0x3F00, 0x3F80, 0x4000, 0xBF80, 0x4040, 0x4080, 0x3E80, 0x0000], dtype=np.uint16).view(
+            np.float16
+        )
+        raw_logits = raw_logits.reshape(1, 2, 4)
+        raw_vision = np.array([0x3F80, 0xC020], dtype=np.uint16).view(np.float16)
+        raw_kv = np.array([0x3F00, 0x4000], dtype=np.uint16).view(np.float16)
+        session = self._make_cloud_session([output_name, "vision_embeds", "past_key.0_RetainedState"])
+        qbuffers = [raw_logits, raw_vision, raw_kv]
+        output_qbuffers = [raw_logits, raw_vision, raw_kv]
+
+        outputs = cloud_infer.QAICInferenceSession._build_outputs(
+            session,
+            output_qbuffers,
+            qbuffers,
+            [(2, [1, 2, 4]), (2, [2]), (2, [2])],
+        )
+
+        logits = outputs[output_name]
+        assert logits.dtype == np.float32
+        assert logits.shape == (1, 2, 4)
+        np.testing.assert_array_equal(logits.argmax(2), [[2, 1]])
+        assert outputs["logits"] is logits
+        np.testing.assert_array_equal(outputs["vision_embeds"].view(np.uint16), raw_vision.view(np.uint16))
+        np.testing.assert_array_equal(outputs["past_key.0_RetainedState"].view(np.uint16), raw_kv.view(np.uint16))
+
+    def test_set_output_buffers_allocates_bfloat16_prefill_and_cb_buffers(self):
+        obj, _, session = _make_base_instance()
+        session.binding_is_bfloat16.return_value = True
+
+        obj._set_output_buffers(batch_size=2, sequence_length=4)
+
+        logits = session.set_buffers.call_args[0][0]["logits"]
+        assert logits.shape == (2, 4, VOCAB_SIZE)
+        assert logits.dtype == np.float16
+        assert logits.itemsize == 2
+
+    def test_set_output_buffers_allocates_bfloat16_continuous_batch_buffer(self):
+        obj, _, session = TestContinuousBatching()._make_cb_instance(full_batch_size=2)
+        session.binding_is_bfloat16.return_value = True
+
+        obj._set_output_buffers(batch_size=2, sequence_length=1)
+
+        logits = session.set_buffers.call_args[0][0]["logits"]
+        assert logits.shape == (2, 1, VOCAB_SIZE)
+        assert logits.dtype == np.float16
+        assert logits.itemsize == 2
+
+    def test_tlm_decode_allocates_bfloat16_buffer(self):
+        obj, _, session = _make_base_instance()
+        obj.is_tlm = True
+        obj.batch_size = 1
+        obj._decode_seq_len = 1
+        obj._vocab_size = VOCAB_SIZE
+        session.binding_is_bfloat16.return_value = True
+
+        obj.run_decode(
+            {"input_ids": np.zeros((1, 1), dtype=np.int64), "position_ids": np.zeros((1, 1), dtype=np.int64)},
+            generation_len=1,
+            automation=False,
+        )
+
+        logits = session.set_buffers.call_args[0][0]["logits"]
+        assert logits.shape == (1, 1, VOCAB_SIZE)
+        assert logits.dtype == np.float16
+        assert logits.itemsize == 2
+
+    @pytest.mark.parametrize("output_name", ["logits", "language_model/logits"])
+    def test_kv_dma_decodes_plain_and_prefixed_logits(self, output_name):
+        from QEfficient.generation._kv_dma_handoff import KvDmaHandoff
+
+        output_names = [output_name, "vision_embeds"]
+        session = SimpleNamespace(
+            cluster_id="decode",
+            stages=1,
+            input_names=[],
+            output_names=output_names,
+            binding_index_map={name: index for index, name in enumerate(output_names)},
+            bindings=[
+                SimpleNamespace(name=output_name, dims=[1, 1, 4], type=11),
+                SimpleNamespace(name="vision_embeds", dims=[2], type=11),
+            ],
+            aic_to_np_dtype_mapping={11: np.dtype(np.float16)},
+            binding_is_bfloat16=lambda name: True,
+        )
+        handoff = KvDmaHandoff(session)
+        handoff.init_buffer_maps()
+        raw_logits = np.array([0x3F00, 0x3F80, 0x4000, 0xBF80], dtype=np.uint16).view(np.float16).reshape(1, 1, 4)
+        raw_vision = np.array([0x3F80, 0xC020], dtype=np.uint16).view(np.float16)
+        handoff.output_buffers[0][output_name][:] = raw_logits
+        handoff.output_buffers[0]["vision_embeds"][:] = raw_vision
+
+        outputs = handoff.get_outputs(0)
+
+        assert outputs[output_name].dtype == np.float32
+        assert outputs[output_name].shape == (1, 1, 4)
+        assert outputs[output_name].argmax(2).item() == 2
+        assert outputs["logits"] is outputs[output_name]
+        np.testing.assert_array_equal(outputs["vision_embeds"].view(np.uint16), raw_vision.view(np.uint16))
 
 
 # ---------------------------------------------------------------------------
@@ -1140,6 +1459,21 @@ def _make_vlg_stub(full_batch_size=None, prefill_seq_len=8):
     session.run.return_value = {}
     obj._session = session
     return obj
+
+
+def test_vlm_padding_uses_largest_vision_specialization():
+    from QEfficient.generation.vlm_generation import _max_allowed_sequence_length
+
+    session = SimpleNamespace(
+        binding_index_map={"vision_embeds": 1},
+        allowed_shapes=[
+            [(4, [1, 176, 8]), (2, [1, 176, 8])],
+            [(4, [1, 704, 8]), (2, [1, 704, 8])],
+        ],
+        bindings=[SimpleNamespace(dims=[1, 176, 8]), SimpleNamespace(dims=[1, 176, 8])],
+    )
+
+    assert _max_allowed_sequence_length(session, "vision_embeds", 1) == 704
 
 
 # ---------------------------------------------------------------------------

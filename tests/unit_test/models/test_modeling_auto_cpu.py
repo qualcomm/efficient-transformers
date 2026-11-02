@@ -230,7 +230,6 @@ class TestQEFFTransformersBase:
     @pytest.mark.parametrize(
         ("wrapper_cls", "model_factory"),
         [
-            pytest.param(QEFFAutoModel, make_tiny_bert, id="automodel"),
             pytest.param(QEFFAutoModelForSequenceClassification, make_tiny_bert_seq_cls, id="sequence-classification"),
             pytest.param(QEFFAutoModelForSpeechSeq2Seq, make_tiny_whisper, id="speech-seq2seq"),
             pytest.param(QEFFAutoModelForCTC, make_tiny_wav2vec2, id="ctc"),
@@ -257,14 +256,13 @@ class TestQEFFTransformersBase:
     @pytest.mark.parametrize(
         ("wrapper_cls", "model_factory"),
         [
-            pytest.param(QEFFAutoModel, make_tiny_bert, id="automodel"),
             pytest.param(QEFFAutoModelForSequenceClassification, make_tiny_bert_seq_cls, id="sequence-classification"),
             pytest.param(QEFFAutoModelForSpeechSeq2Seq, make_tiny_whisper, id="speech-seq2seq"),
             pytest.param(QEFFAutoModelForCTC, make_tiny_wav2vec2, id="ctc"),
         ],
     )
     def test_direct_init_disables_unsupported_weight_free(self, wrapper_cls, model_factory, caplog):
-        """Non-CausalLM direct construction must not enable the weight-free export path."""
+        """Direct construction disables weight-free mode for unsupported wrappers."""
         caplog.set_level(logging.WARNING, logger="QEfficient")
 
         qeff_model = wrapper_cls(model_factory()[0], weight_free=True)
@@ -281,6 +279,32 @@ class TestQEFFTransformersBase:
 
         assert qeff_model._weight_free is True
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
+
+    def test_embedding_direct_init_preserves_weight_free(self):
+        """Embedding models retain weight-free mode for Dynamo export."""
+        qeff_model = QEFFAutoModel(make_tiny_bert()[0], weight_free=True)
+
+        assert qeff_model._weight_free is True
+
+    def test_embedding_export_defaults_to_dynamo_in_weight_free_mode(self, monkeypatch):
+        """Weight-free embedding export supplies Dynamo-compatible dynamic inputs."""
+        qeff_model = QEFFAutoModel(make_tiny_bert()[0], weight_free=True)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured["example_inputs"] = example_inputs
+            captured.update(kwargs)
+            return "embedding.onnx"
+
+        monkeypatch.setattr(qeff_model, "_export", fake_export)
+        qeff_model.export(dynamo=False)
+
+        assert captured["dynamo"] is True
+        assert captured["dynamic_axes"] == {
+            "input_ids": {0: "batch_size", 1: "seq_len"},
+            "attention_mask": {0: "batch_size", 1: "seq_len"},
+        }
+        assert captured["example_inputs"]["input_ids"].shape[0] >= 2
 
 
 # ---------------------------------------------------------------------------

@@ -148,8 +148,9 @@ def _cumsum_scatter_gather_update_quantized_expert(
     packed_chunk_size = seq_len // num_packed_chunks
 
     matched_idx = _build_matched_idx_from_cumsum(token_to_expert)
-    valid_rows = token_to_expert.to(torch.int32).sum(dim=-1, keepdim=True)
-    row_range = torch.arange(packed_chunk_size, dtype=torch.int32, device=x.device).unsqueeze(0)
+    index_dtype = torch.int64
+    valid_rows = torch.einsum("bi->b", token_to_expert.to(index_dtype)).unsqueeze(1)
+    row_range = torch.arange(packed_chunk_size, dtype=index_dtype, device=x.device).unsqueeze(0)
     x_expanded = x.unsqueeze(0).expand(batch_size, -1, -1)
 
     for chunk_idx in range(num_packed_chunks):

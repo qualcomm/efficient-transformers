@@ -36,7 +36,7 @@ MODEL_ID = "google/gemma-4-E2B-it"
 # Continuous-batching parameters
 # ---------------------------------------------------------------------------
 BATCH_SIZE = 1  # Per-slot prefill batch size
-FULL_BATCH_SIZE = 4  # Total concurrent CB slots
+FULL_BATCH_SIZE = 2  # Total concurrent CB slots
 
 # ---------------------------------------------------------------------------
 # Sequence-length budget
@@ -48,7 +48,7 @@ GENERATION_LEN = 100
 # ---------------------------------------------------------------------------
 # Testing knobs: reduce layers for fast end-to-end validation
 # ---------------------------------------------------------------------------
-NUM_LANG_HIDDEN_LAYER = 2
+NUM_LANG_HIDDEN_LAYER = 6
 NUM_VISION_HIDDEN_LAYER = 2
 
 # ---------------------------------------------------------------------------
@@ -116,6 +116,7 @@ def main():
         kv_offload=True,  # Dual-QPC: vision encoder + LM decoder
         ignore_mismatched_sizes=True,
         continuous_batching=True,  # Enable CB scheduling
+        weight_free=True,
     )
     remove_fp16clip_transform_if_disabled(qeff_model, effective_fp16clip=True)
 
@@ -135,7 +136,7 @@ def main():
         mos=1,
         split_model_io=True,
         node_precision_info=NODE_PRECISION_INFO,
-        use_onnx_subfunctions=False,
+        use_onnx_subfunctions=True,
     )
 
     # ------------------------------------------------------------------

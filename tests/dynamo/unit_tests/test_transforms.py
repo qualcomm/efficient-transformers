@@ -5,22 +5,12 @@
 #
 # -----------------------------------------------------------------------------
 
-"""
-Unit tests for the dynamo-specific transforms and context managers introduced
-in the enable_dynamo_for_causallm branch.
-
-Covered:
-  - temporarily_enable_nested_compile_regions
-  - PreserveNestedCacheRetainedStateTransform
-  - RenameRepeatedSubgraphTransform
-  - PruneFakeInitializersTransform
-
-CPU-only. No QAIC hardware required.
-"""
+"""CPU-only tests for Dynamo-specific transform helpers."""
 
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,6 +26,47 @@ from QEfficient.base.onnx_transforms import (
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils.torch_patches import preserve_subfunction_source_lines, temporarily_enable_nested_compile_regions
+
+
+def _make_export_region(operation):
+    graph = torch.fx.Graph()
+    value = graph.placeholder("value")
+    output = graph.call_function(operation, (value, 2))
+    graph.output(output)
+    return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+
+def _make_exported_region_program(second_operation=torch.ops.aten.add.Tensor):
+    class RegionHolder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.first = _make_export_region(torch.ops.aten.add.Tensor)
+            self.second = _make_export_region(second_operation)
+
+    holder = RegionHolder()
+    fake_mode = torch._subclasses.fake_tensor.FakeTensorMode()
+    fake_value = fake_mode.from_tensor(torch.ones(2))
+    graph = torch.fx.Graph()
+    value = graph.placeholder("value")
+    value.meta["val"] = fake_value
+    first_attr = graph.get_attr("first")
+    first_call = graph.call_function(
+        torch.ops.higher_order.invoke_subgraph,
+        (first_attr, "first", value),
+    )
+    second_attr = graph.get_attr("second")
+    second_call = graph.call_function(
+        torch.ops.higher_order.invoke_subgraph,
+        (second_attr, "second", value),
+    )
+    graph.output((first_call, second_call))
+    root = torch.fx.GraphModule(holder, graph)
+    for region_name in ("first", "second"):
+        for node in getattr(root, region_name).graph.nodes:
+            if node.op == "placeholder":
+                node.meta["example_value"] = fake_value
+    return SimpleNamespace(graph_module=root, validate=lambda: root.graph.lint()), first_call, second_call
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,6 +103,65 @@ def test_preserve_subfunction_source_lines_interprets_graph_modules(monkeypatch)
     assert original_reenter_make_fx is not invoke_subgraph.reenter_make_fx
 
 
+def test_reuse_exported_subfunctions_merges_equivalent_regions():
+    from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
+
+    exported_program, first_call, second_call = _make_exported_region_program()
+
+    result = reuse_exported_subfunctions(exported_program)
+
+    assert result is exported_program
+    assert first_call.args[0] is second_call.args[0]
+    assert not hasattr(exported_program.graph_module, "second")
+
+
+def test_reuse_exported_subfunctions_keeps_non_equivalent_regions_separate():
+    from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
+
+    exported_program, first_call, second_call = _make_exported_region_program(torch.ops.aten.mul.Tensor)
+
+    reuse_exported_subfunctions(exported_program)
+
+    assert first_call.args[0] is not second_call.args[0]
+    assert hasattr(exported_program.graph_module, "first")
+    assert hasattr(exported_program.graph_module, "second")
+
+
+def test_reuse_exported_subfunctions_preserves_program_on_planning_failure(monkeypatch):
+    import QEfficient.utils.export_subfunctions as export_subfunctions
+
+    exported_program, _, _ = _make_exported_region_program()
+    original_graph = str(exported_program.graph_module.graph)
+
+    def fail_planning(_root):
+        raise RuntimeError("planning failure")
+
+    monkeypatch.setattr(export_subfunctions, "_plan_region_merges", fail_planning)
+
+    result = export_subfunctions.reuse_exported_subfunctions(exported_program)
+
+    assert result is exported_program
+    assert str(exported_program.graph_module.graph) == original_graph
+
+
+def test_preserve_mixed_export_subfunctions_restores_private_hooks():
+    import QEfficient.utils.torch_patches as torch_patches
+
+    utils = importlib.import_module("torch._higher_order_ops.utils")
+    original_hop_compile = utils._hop_compile_and_call
+    onnx_core = importlib.import_module("torch.onnx._internal.exporter._core")
+    original_prepare = getattr(onnx_core, "_prepare_exported_program_for_export", None)
+    if original_prepare is None:
+        pytest.skip("PyTorch ONNX exporter has no subfunction preparation hook")
+
+    with torch_patches.preserve_mixed_export_subfunctions():
+        assert utils._hop_compile_and_call is not original_hop_compile
+        assert onnx_core._prepare_exported_program_for_export is not original_prepare
+
+    assert utils._hop_compile_and_call is original_hop_compile
+    assert onnx_core._prepare_exported_program_for_export is original_prepare
+
+
 def make_tiny_llama():
     cfg = LlamaConfig(
         num_hidden_layers=2,
@@ -87,12 +177,7 @@ def make_tiny_llama():
 
 
 def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_count_per_fn: int = 2):
-    """
-    Build a minimal ONNX ModelProto that mimics dynamo's repeated-subgraph output:
-      - graph has num_layers call nodes (one per layer), each referencing repeated_subgraphN
-      - each function contains scatter_count_per_fn CtxScatter nodes
-      - graph outputs include past_key/value _RetainedState placeholders (dangling)
-    """
+    """Build a minimal ONNX model that mimics Dynamo repeated subgraphs."""
     functions = []
     call_nodes = []
     graph_outputs = []
@@ -101,7 +186,6 @@ def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_coun
     for i in range(num_layers):
         fn_name = f"repeated_subgraph{i}"
 
-        # Scatter nodes inside the function
         scatter_nodes = []
         fn_outputs = []
         for j in range(scatter_count_per_fn):
@@ -126,9 +210,7 @@ def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_coun
         )
         functions.append(fn)
 
-        # Call node in the main graph — outputs start EMPTY so that the
-        # _RetainedState names in graph.output are dangling (not produced by any
-        # node). PreserveNestedCacheRetainedStateTransform must wire them up.
+        # Empty call outputs leave graph _RetainedState outputs dangling.
         retained_key = f"past_key.{i}_RetainedState"
         retained_val = f"past_value.{i}_RetainedState"
         call_node = helper.make_node(
@@ -155,11 +237,6 @@ def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_coun
     return model
 
 
-# ---------------------------------------------------------------------------
-# TestTemporarilyEnableNestedCompileRegions
-# ---------------------------------------------------------------------------
-
-
 class TestTemporarilyEnableNestedCompileRegions:
     def test_patches_decoder_layers_and_restores(self):
         model_hf, _ = make_tiny_llama()
@@ -182,7 +259,6 @@ class TestTemporarilyEnableNestedCompileRegions:
                     f"got qualname: {qualname!r}"
                 )
 
-        # After context: original forward restored
         for m, orig_qn in zip(decoder_layers, original_qualnames):
             fwd = getattr(m, "forward", None)
             qualname = getattr(fwd, "__qualname__", "")
@@ -195,33 +271,22 @@ class TestTemporarilyEnableNestedCompileRegions:
 
         decoder_layers = [m for m in inner_model.modules() if isinstance(m, QEffLlamaDecoderLayer)]
 
-        # Enter once
         with temporarily_enable_nested_compile_regions(inner_model, target_classes=[QEffLlamaDecoderLayer]):
             wrapped_forwards_first = [id(m.forward) for m in decoder_layers]
 
-            # Enter again — already wrapped, should not double-wrap
             with temporarily_enable_nested_compile_regions(inner_model, target_classes=[QEffLlamaDecoderLayer]):
                 wrapped_forwards_second = [id(m.forward) for m in decoder_layers]
 
-        # IDs may differ (second context creates a new binding), but both contexts
-        # must restore cleanly — the important invariant is no crash and final state is restored.
         assert len(wrapped_forwards_first) == len(wrapped_forwards_second)
-
-
-# ---------------------------------------------------------------------------
-# TestPreserveNestedCacheRetainedStateTransform
-# ---------------------------------------------------------------------------
 
 
 class TestPreserveNestedCacheRetainedStateTransform:
     def test_adds_retained_state_outputs_to_call_nodes(self):
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=2, scatter_count_per_fn=2)
 
-        # Initially the call nodes have outputs but the functions don't expose scatter outputs
         changed = PreserveNestedCacheRetainedStateTransform.apply(model)
         assert changed, "Transform should have modified the model (dangling _RetainedState outputs)"
 
-        # After transform: function outputs should include scatter node outputs
         for i, fn in enumerate(model.functions):
             assert len(fn.output) >= 2, (
                 f"Function '{fn.name}' should have at least 2 outputs after transform, got {list(fn.output)}"
@@ -230,7 +295,6 @@ class TestPreserveNestedCacheRetainedStateTransform:
     def test_noop_when_no_dangling_retained_states(self):
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=2, scatter_count_per_fn=2)
 
-        # Remove all _RetainedState outputs from the graph — nothing is dangling
         for out in list(model.graph.output):
             if out.name.endswith("_RetainedState"):
                 model.graph.output.remove(out)
@@ -239,19 +303,12 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert not changed, "Transform should be a no-op when there are no dangling _RetainedState outputs"
 
     def test_rejects_missing_cache_writer_without_partial_rewire(self):
-        # Build model where function has only 1 scatter node
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=1, scatter_count_per_fn=1)
         with pytest.raises(ValueError, match="Could not uniquely resolve"):
             PreserveNestedCacheRetainedStateTransform.apply(model)
-        # The key invariant: the function call is not partially rewired.
         fn = model.functions[0]
         assert len(fn.output) == 1, f"Function with 1 scatter should not have outputs added, got {list(fn.output)}"
-        assert not model.graph.node[0].output
-
-
-# ---------------------------------------------------------------------------
-# TestRenameRepeatedSubgraphTransform
-# ---------------------------------------------------------------------------
+        assert not model.graph.node[0].output, "Function call must not be partially rewired"
 
 
 class TestRenameRepeatedSubgraphTransform:
@@ -264,7 +321,6 @@ class TestRenameRepeatedSubgraphTransform:
         assert "QEffLlamaDecoderLayer" in fn_names, f"Expected 'QEffLlamaDecoderLayer' in {fn_names}"
         assert "QEffLlamaDecoderLayer_1" in fn_names, f"Expected 'QEffLlamaDecoderLayer_1' in {fn_names}"
 
-        # Call-site op_type must also be updated
         node_op_types = [n.op_type for n in model.graph.node]
         assert "QEffLlamaDecoderLayer" in node_op_types
         assert "QEffLlamaDecoderLayer_1" in node_op_types
@@ -275,7 +331,6 @@ class TestRenameRepeatedSubgraphTransform:
         assert not changed
 
     def test_noop_when_no_repeated_subgraph_functions(self):
-        # Build a model with a non-repeated_subgraph function name
         fn = helper.make_function(
             domain="",
             fname="SomeOtherFunction",
@@ -292,7 +347,6 @@ class TestRenameRepeatedSubgraphTransform:
         assert not changed
 
     def test_handles_alternative_subgraph_pattern(self):
-        # torch < 2.5 naming: subgraph_0, subgraph_1
         fn0 = helper.make_function(
             domain="",
             fname="subgraph_0",
@@ -321,11 +375,6 @@ class TestRenameRepeatedSubgraphTransform:
         assert "MyDecoderLayer" in fn_names
 
 
-# ---------------------------------------------------------------------------
-# TestPruneFakeInitializersTransform
-# ---------------------------------------------------------------------------
-
-
 class TestPruneFakeInitializersTransform:
     def _make_mock_onnx_program(self, initializer_names, used_names, fake_initializers):
         """Build a mock onnx_program object matching PruneFakeInitializersTransform's API."""
@@ -344,7 +393,6 @@ class TestPruneFakeInitializersTransform:
         mock_graph = MagicMock()
         mock_graph.initializers = initializers
 
-        # Simulate used_names via graph nodes + outputs
         mock_node = MagicMock()
         mock_node.inputs = list(used_names)
         mock_graph.__iter__ = lambda self: iter([mock_node])
@@ -383,3 +431,28 @@ class TestPruneFakeInitializersTransform:
         changed = PruneFakeInitializersTransform.apply(program)
         assert not changed
         assert "real_weight" in program.model.graph.initializers
+
+
+def test_ctx_scatter_gather_dynamo_translation_table_complete():
+    from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
+
+    required_ctx_ops = {
+        "ctx_scatter": torch.ops.qefficient.ctx_scatter.default,
+        "ctx_scatter_3d": torch.ops.qefficient.ctx_scatter_3d.default,
+        "ctx_scatter_3d_generalized": torch.ops.qefficient.ctx_scatter_3d_generalized.default,
+        "ctx_scatter_3d_int": torch.ops.qefficient.ctx_scatter_3d_int.default,
+        "ctx_scatter_cb": torch.ops.qefficient.ctx_scatter_cb.default,
+        "ctx_scatter_cb_3d": torch.ops.qefficient.ctx_scatter_cb_3d.default,
+        "ctx_chunk_scatter_batch": torch.ops.qefficient.ctx_chunk_scatter_batch.default,
+        "ctx_gather": torch.ops.qefficient.ctx_gather.default,
+        "ctx_gather_3d": torch.ops.qefficient.ctx_gather_3d.default,
+        "ctx_gather_3d_generalized": torch.ops.qefficient.ctx_gather_3d_generalized.default,
+        "ctx_gather_cb": torch.ops.qefficient.ctx_gather_cb.default,
+        "ctx_gather_cb_3d": torch.ops.qefficient.ctx_gather_cb_3d.default,
+        "ctx_gather_blocked_kv": torch.ops.qefficient.ctx_gather_blocked_kv.default,
+        "ctx_gather_blocked_kv_cb": torch.ops.qefficient.ctx_gather_blocked_kv_cb.default,
+        "ctx_gather_blocked_kv_batch": torch.ops.qefficient.ctx_gather_blocked_kv_batch.default,
+    }
+
+    missing = [name for name, op in required_ctx_ops.items() if op not in DYNAMO_CUSTOM_OP_TABLE]
+    assert not missing

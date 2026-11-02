@@ -9,30 +9,84 @@
 
 from __future__ import annotations
 
+import copy
+import io
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
+import requests
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from PIL import Image
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    AutoTokenizer,
+)
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
 
+from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
-from ._helpers import skip_on_model_fetch_error
+from ._helpers import (
+    WEIGHT_FREE_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_VLM_MODEL_PARAMS,
+    assert_blocked_kv_ops_for_mode,
+    assert_has_subfunctions,
+    load_weight_free_vlm_model,
+    skip_on_model_fetch_error,
+)
 
+GPT_OSS_TINY_MODEL_ID = "tiny-random/gpt-oss"
+
+DISAGG_MODEL_IDS = (
+    ("qwen3_moe", "tiny-random/qwen3-moe"),
+    ("gpt_oss", GPT_OSS_TINY_MODEL_ID),
+)
 DISAGG_MODEL_PARAMS = [
-    pytest.param("glm4_moe", "tiny-random/glm-4-moe", id="glm4-moe"),
-    pytest.param("qwen3_moe", "tiny-random/qwen3-moe", id="qwen3-moe"),
-    pytest.param("gpt_oss", "tiny-random/gpt-oss-mxfp4", id="gpt-oss"),
+    pytest.param(model_type, model_id, id=model_type.replace("_", "-")) for model_type, model_id in DISAGG_MODEL_IDS
+]
+WEIGHT_FREE_DISAGG_DECODE_BLOCKING_CASES = [
+    pytest.param(model_type, model_id, blocking_key, id=f"{model_type.replace('_', '-')}-{blocking_key}")
+    for model_type, model_id in DISAGG_MODEL_IDS
+    for blocking_key in WEIGHT_FREE_BLOCKING_MODE_CASES
 ]
 
-CTX_LEN = 128
+CTX_LEN = 512
 PREFILL_SEQ_LEN = 32
 MOE_PREFILL_PACKED_CHUNK_SIZE = 16
+VLM_PREFILL_SEQ_LEN = 64
+VLM_CTX_LEN = 512
+VLM_IMAGE_HEIGHT = 354
+VLM_IMAGE_WIDTH = 536
+VLM_NUM_CORES = 16
+VLM_NUM_DEVICES = 1
 MDP_NUM_PARTITIONS = 2
+VLM_GENERATION_LEN = 2
+VLM_PROMPT = "Can you Describe this image in detail?"
+VLM_IMAGE_URL = "https://wallup.net/wp-content/uploads/2017/03/28/351036-San_Francisco-USA-bridge-sunset-Golden_Gate_Bridge-lights.jpg"
+VLM_VISION_INPUTS = {
+    "pixel_values",
+    "image_grid_thw",
+    "image_masks",
+    "image_position_ids",
+    "image_input_idx",
+    "valid_idx",
+    "aspect_ratio_ids",
+    "aspect_ratio_mask",
+}
+VLM_VISION_FP16_INPUTS = {"pixel_values", "image_masks"}
+VLM_VISION_OUTPUTS = ("vision_embeds", "deepstack_features")
+DECODE_BLOCKING_PREFILL_NUM_DEVICES = 4
+DECODE_BLOCKING_DECODE_NUM_DEVICES = 1
+DECODE_BLOCKING_PREFILL_STAGES = 2
+DECODE_BLOCKING_PARITY_PROMPT = "Hello world"
+DECODE_BLOCKING_PARITY_GENERATION_LEN = 10
 
 
 def _compile_dir(tmp_export_dir, name):
@@ -42,8 +96,28 @@ def _compile_dir(tmp_export_dir, name):
     return str(compile_dir)
 
 
+def _build_disagg_decode_blocking_qaic_config(blocking_key: str) -> dict:
+    qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
+    qaic_config["ctx_len"] = CTX_LEN
+    return qaic_config
+
+
+def _assert_disagg_blocking_artifact(
+    onnx_path: Path,
+    qeff_model: QEFFAutoModelForCausalLM,
+    blocking_key: str,
+    qaic_config: dict,
+    use_onnx_subfunctions: bool,
+) -> None:
+    blocking_config = qeff_model.hash_params.get("blocking_kwargs")
+    assert blocking_config is not None
+    assert blocking_config.mode == BlockingMode(qaic_config["blocking_mode"])
+    if use_onnx_subfunctions:
+        assert_has_subfunctions(onnx_path, qeff_model)
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key, continuous_batching=True)
+
+
 PREFILL_NUM_DEVICES = 2
-GPT_OSS_TINY_MODEL_ID = "tiny-random/gpt-oss"
 GPT_OSS_PARITY_CTX_LEN = 256
 GPT_OSS_PARITY_GENERATION_LEN = 40
 GPT_OSS_PARITY_FULL_BATCH_SIZE = 2
@@ -90,6 +164,21 @@ def _load_weight_free_model(model_id: str, continuous_batching: bool = False, nu
         weight_free=True,
         continuous_batching=continuous_batching,
     )
+
+
+def _load_hf_reference_model(model_id: str, num_hidden_layers: int | None = 2) -> AutoModelForCausalLM:
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    if num_hidden_layers is not None:
+        config.num_hidden_layers = num_hidden_layers
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        config=config,
+        trust_remote_code=True,
+        attn_implementation="eager",
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=False,
+    )
+    return model.eval()
 
 
 def _build_gpt_oss_parity_config(dtype: str = "float32"):
@@ -174,6 +263,22 @@ def _run_hf_torch_fp32_from_input_ids(model, input_ids: np.ndarray, generation_l
     return outputs[0, prompt_len:].detach().cpu().numpy()
 
 
+def _run_hf_torch_fp32_text(model, tokenizer, prompt: str, generation_len: int) -> np.ndarray:
+    model = model.to(dtype=torch.float32).eval()
+    inputs = tokenizer(prompt, return_tensors="pt")
+    with torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=generation_len,
+            min_new_tokens=generation_len,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+        )
+    prompt_len = inputs["input_ids"].shape[-1]
+    return outputs[0, prompt_len:].detach().cpu().numpy()
+
+
 def _prepare_gpt_oss_parity_prompt(tokenizer, prompt: str):
     enc = tokenizer(prompt, return_tensors="np", padding=True)
     prompt_len = enc["input_ids"].shape[1]
@@ -196,19 +301,195 @@ def _prepare_parity_input_ids(input_ids: np.ndarray):
     return padded_input_ids.astype(np.int64), position_ids, num_chunks, prompt_len
 
 
-def _next_token_ids_from_logits(logits: np.ndarray) -> np.ndarray:
+def _next_token_ids_from_logits(logits: np.ndarray, token_index: int | None = None) -> np.ndarray:
     logits = np.asarray(logits)
     if logits.ndim == 2:
         return logits.argmax(axis=-1).astype(np.int64)
-    return logits[:, -1, :].argmax(axis=-1).astype(np.int64)
+    if token_index is None:
+        token_index = -1
+    if logits.shape[1] == 1:
+        token_index = 0
+    return logits[:, token_index, :].argmax(axis=-1).astype(np.int64)
+
+
+def test_next_token_ids_from_logits_uses_single_kept_prefill_logit() -> None:
+    logits = np.array([[[0.1, 0.2, 0.9, 0.3]]], dtype=np.float32)
+
+    token_ids = _next_token_ids_from_logits(logits, token_index=7)
+
+    assert token_ids.tolist() == [2]
+
+
+def _load_vlm_hf_reference(model_id: str):
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    try:
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            config=config,
+            attn_implementation="eager",
+            trust_remote_code=True,
+            torch_dtype=torch.float32,
+        )
+    except ValueError:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            attn_implementation="eager",
+            trust_remote_code=True,
+            torch_dtype=torch.float32,
+        )
+    return model.eval()
+
+
+def _prepare_vlm_inputs(processor) -> dict:
+    process_vision_info = pytest.importorskip("qwen_vl_utils").process_vision_info
+    response = requests.get(VLM_IMAGE_URL, timeout=30)
+    response.raise_for_status()
+    image = Image.open(io.BytesIO(response.content)).convert("RGB")
+    image = image.resize(
+        (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT),
+        Image.Resampling.BICUBIC,
+    )
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": VLM_PROMPT},
+                ],
+            }
+        ]
+    ]
+    texts = [processor.apply_chat_template(message, tokenize=False, add_generation_prompt=True) for message in messages]
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
+    return dict(inputs)
+
+
+def _run_vlm_hf_reference(model, processor_inputs: dict) -> np.ndarray:
+    inputs = {
+        name: value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+        for name, value in processor_inputs.items()
+    }
+    inputs = {
+        name: value.to(dtype=torch.float32) if torch.is_floating_point(value) else value
+        for name, value in inputs.items()
+    }
+    with torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=VLM_GENERATION_LEN,
+            min_new_tokens=VLM_GENERATION_LEN,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+        )
+    prompt_len = inputs["input_ids"].shape[-1]
+    return outputs[:, prompt_len:].detach().cpu().numpy()
+
+
+def _update_vlm_retained_states(target_inputs: dict, source_outputs: dict, num_hidden_layers: int) -> None:
+    for layer_idx in range(num_hidden_layers):
+        target_inputs[f"past_key.{layer_idx}"] = source_outputs[f"past_key.{layer_idx}_RetainedState"]
+        target_inputs[f"past_value.{layer_idx}"] = source_outputs[f"past_value.{layer_idx}_RetainedState"]
+
+
+def _run_vlm_disaggregated_generation(
+    qeff_model,
+    processor,
+    processor_inputs: dict,
+    vision_session,
+    prefill_session,
+    decode_session,
+) -> np.ndarray:
+    inputs = {
+        name: value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+        for name, value in processor_inputs.items()
+    }
+    model_type = getattr(qeff_model.model.config, "model_type", None)
+    if model_type == "qwen3_vl_moe":
+        inputs = qeff_model.model.prepare_inputs_for_generation(
+            inputs=inputs,
+            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
+            batch_size=1,
+        )
+    pad_token_id = processor.tokenizer.pad_token_id or 1
+    input_ids_length = inputs["input_ids"].shape[1]
+    num_chunks = -(input_ids_length // -VLM_PREFILL_SEQ_LEN)
+    padded_len = num_chunks * VLM_PREFILL_SEQ_LEN
+    inputs["input_ids"] = torch.nn.functional.pad(
+        inputs["input_ids"],
+        (0, padded_len - input_ids_length),
+        "constant",
+        pad_token_id,
+    )
+    inputs["attention_mask"] = torch.nn.functional.pad(
+        inputs["attention_mask"],
+        (0, padded_len - input_ids_length),
+        "constant",
+        0,
+    )
+    inputs = {name: np.array(value) for name, value in inputs.items()}
+
+    vision_inputs = {name: value for name, value in inputs.items() if name in VLM_VISION_INPUTS}
+    vision_inputs.update(
+        {name: vision_inputs[name].astype("float16") for name in VLM_VISION_FP16_INPUTS if name in vision_inputs}
+    )
+    vision_outputs = vision_session.run(vision_inputs)
+
+    lang_inputs = {name: value for name, value in inputs.items() if name not in vision_inputs}
+    if "position_ids" in inputs:
+        lang_inputs["position_ids"] = inputs["position_ids"]
+        lang_inputs.pop("attention_mask", None)
+    else:
+        lang_inputs["position_ids"] = np.where(lang_inputs.pop("attention_mask"), np.arange(padded_len), -1)
+    lang_inputs["image_idx"] = np.array([[0]])
+    for output_name in VLM_VISION_OUTPUTS:
+        if output_name in vision_outputs:
+            lang_inputs[output_name] = vision_outputs[output_name]
+
+    prefill_session.set_buffers(vision_outputs)
+    chunk_inputs = dict(lang_inputs)
+    prefill_outputs = None
+    num_hidden_layers = qeff_model.model.config.text_config.num_hidden_layers
+    for chunk_idx in range(num_chunks):
+        chunk_inputs["input_ids"] = lang_inputs["input_ids"][
+            :, chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
+        ]
+        chunk_inputs["position_ids"] = lang_inputs["position_ids"][
+            ..., chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
+        ]
+        if "mm_token_type_ids" in lang_inputs:
+            chunk_inputs["mm_token_type_ids"] = lang_inputs["mm_token_type_ids"][
+                :, chunk_idx * VLM_PREFILL_SEQ_LEN : (chunk_idx + 1) * VLM_PREFILL_SEQ_LEN
+            ]
+        assert chunk_inputs["input_ids"].shape[1] == VLM_PREFILL_SEQ_LEN
+        prefill_outputs = prefill_session.run(chunk_inputs)
+        _update_vlm_retained_states(chunk_inputs, prefill_outputs, num_hidden_layers)
+        chunk_inputs["image_idx"] = prefill_outputs["image_idx_output"]
+
+    generated_ids = [_next_token_ids_from_logits(prefill_outputs["logits"])]
+    decode_inputs = {
+        "input_ids": generated_ids[-1].reshape(1, 1),
+        "position_ids": np.max(lang_inputs["position_ids"], axis=-1, keepdims=True) + 1,
+    }
+    if "mm_token_type_ids" in lang_inputs:
+        decode_inputs["mm_token_type_ids"] = np.zeros((1, 1), dtype=lang_inputs["mm_token_type_ids"].dtype)
+    _update_vlm_retained_states(decode_inputs, prefill_outputs, num_hidden_layers)
+    decode_outputs = decode_session.run(decode_inputs)
+    generated_ids.append(_next_token_ids_from_logits(decode_outputs["logits"]))
+    return np.stack(generated_ids, axis=1)
 
 
 def _prefill_gpt_oss_parity_slot(prefill_session, input_ids, position_ids, num_chunks, slot: int, slot_kv_view):
     chunk_inputs = {"batch_index": np.array([[slot]], dtype=np.int64)}
     exec_idx = None
+    chunk_position_ids = None
     for i in range(num_chunks):
         chunk_inputs["input_ids"] = input_ids[:, i * PREFILL_SEQ_LEN : (i + 1) * PREFILL_SEQ_LEN]
         chunk_inputs["position_ids"] = position_ids[:, i * PREFILL_SEQ_LEN : (i + 1) * PREFILL_SEQ_LEN]
+        chunk_position_ids = chunk_inputs["position_ids"]
         last_chunk = i == num_chunks - 1
         exec_idx = prefill_session.np_run_pipeline(
             chunk_inputs,
@@ -218,9 +499,78 @@ def _prefill_gpt_oss_parity_slot(prefill_session, input_ids, position_ids, num_c
         prefill_session.complete_inf(exec_idx, is_prefill=True)
 
     prefill_out = prefill_session.get_outputs(index=exec_idx)
-    first_token = int(_next_token_ids_from_logits(prefill_out["logits"])[0])
+    valid_token_indices = np.flatnonzero(chunk_position_ids[0] >= 0)
+    token_index = int(valid_token_indices[-1])
+    first_token = int(_next_token_ids_from_logits(prefill_out["logits"], token_index=token_index)[0])
     next_pos = int(np.max(position_ids)) + 1
     return first_token, next_pos
+
+
+def _run_disagg_prefill_decode_tokens(
+    prefill_qpc: Path,
+    decode_qpc: Path,
+    tokenizer,
+    prompt: str,
+    generation_len: int,
+    full_batch_size: int,
+) -> np.ndarray:
+    assert generation_len >= 1, "disaggregated compile/artifact token check expects at least one generated token"
+    sessions = []
+    try:
+        prefill_session = QAICInferenceSession(
+            str(prefill_qpc),
+            kv_dma_share=True,
+            full_batch_size=full_batch_size,
+            cluster_id="prefill",
+        )
+        decode_session = QAICInferenceSession(
+            str(decode_qpc),
+            kv_dma_share=True,
+            full_batch_size=full_batch_size,
+            cluster_id="decode",
+        )
+        sessions.extend([prefill_session, decode_session])
+
+        assert "batch_index" in decode_session.binding_index_map, "batch_index not a compiled decode input binding"
+
+        kv_caches = [np.zeros(shape, dtype=dtype) for (shape, dtype) in decode_session.kv_cache_info]
+        assert kv_caches and kv_caches[0].shape[0] == full_batch_size, (
+            f"decode KV batch dim {kv_caches[0].shape[0] if kv_caches else None} != full_batch_size {full_batch_size}"
+        )
+
+        input_ids, position_ids, num_chunks, _ = _prepare_gpt_oss_parity_prompt(tokenizer, prompt)
+        first_token, next_pos = _prefill_gpt_oss_parity_slot(
+            prefill_session,
+            input_ids,
+            position_ids,
+            num_chunks,
+            slot=0,
+            slot_kv_view=[kv[:1] for kv in kv_caches],
+        )
+
+        decode_kv_map = decode_session.decode_buff_map + decode_session.decode_rs_kv_only_buff_map
+        generated_ids = [first_token]
+        for position in range(next_pos, next_pos + generation_len - 1):
+            decode_session.set_data_for_kv_handoff(
+                kv_caches + kv_caches,
+                [("batch_index", 0), ("ctx_start", 0)],
+                index=decode_session.decode_execObj_idx,
+                buff_map=decode_kv_map,
+            )
+            decode_inputs = {
+                "input_ids": np.array([[generated_ids[-1]]] + [[-1]] * (full_batch_size - 1), dtype=np.int64),
+                "position_ids": np.array([[position]] + [[-1]] * (full_batch_size - 1), dtype=np.int64),
+                "batch_index": np.array([[0]] + [[-1]] * (full_batch_size - 1), dtype=np.int64),
+            }
+            exec_idx = decode_session.np_run(decode_inputs, is_prefill=False)
+            decode_session.complete_inf(exec_idx, is_prefill=False)
+            decode_out = decode_session.get_outputs(index=exec_idx)
+            logits = decode_out["logits"].reshape(full_batch_size, -1, decode_out["logits"].shape[-1])[:, -1, :]
+            generated_ids.append(int(np.argmax(logits, axis=-1)[0]))
+        return np.asarray(generated_ids, dtype=np.int64)
+    finally:
+        for session in sessions:
+            session.deactivate()
 
 
 def _assert_onnx_path(onnx_path, label: str) -> Path:
@@ -239,7 +589,7 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
     """Compile weight-free decode and chunked-prefill QPCs for disaggregated serving."""
     try:
         qeff_model = _load_weight_free_model(model_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     moe_config = {"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}}
@@ -275,13 +625,113 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
 
 @pytest.mark.weight_free
 @pytest.mark.on_qaic
+@pytest.mark.multimodal
+@pytest.mark.parametrize("model_type,model_id", WEIGHT_FREE_VLM_MODEL_PARAMS)
+def test_weight_free_vlm_disaggregated_prefill_and_decode(
+    manual_cleanup,
+    model_type,
+    model_id,
+    tmp_export_dir,
+):
+    """Run separate weight-free VLM QPCs and compare prefill/decode tokens with HF."""
+    try:
+        hf_model = _load_vlm_hf_reference(model_id)
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        qeff_model = load_weight_free_vlm_model(model_id)
+    except Exception as exc:
+        skip_on_model_fetch_error(exc, model_id)
+
+    processor_inputs = _prepare_vlm_inputs(processor)
+    hf_tokens = _run_vlm_hf_reference(hf_model, processor_inputs)
+
+    common = {
+        "batch_size": 1,
+        "ctx_len": VLM_CTX_LEN,
+        "height": VLM_IMAGE_HEIGHT,
+        "width": VLM_IMAGE_WIDTH,
+        "num_cores": VLM_NUM_CORES,
+        "num_devices": VLM_NUM_DEVICES,
+        "mxfp6_matmul": False,
+        "mxint8_kv_cache": False,
+        "aic_enable_depth_first": True,
+        "mos": 1,
+        "split_model_io": True,
+        "use_onnx_subfunctions": True,
+    }
+    config_model_type = getattr(qeff_model.model.config, "model_type", None)
+    if config_model_type == "gemma4":
+        common.pop("height")
+        common.pop("width")
+    sessions = []
+    compiled_onnx_paths = {}
+    try:
+        vision_qpcs = qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_vision"),
+            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
+            skip_lang=True,
+            **common,
+        )
+        compiled_onnx_paths["vision"] = _assert_onnx_path(qeff_model.vision_model.onnx_path, "vision")
+
+        prefill_qpcs = qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_prefill"),
+            prefill_seq_len=VLM_PREFILL_SEQ_LEN,
+            prefill_only=True,
+            enable_chunking=True,
+            retain_full_kv=True,
+            skip_vision=True,
+            **common,
+        )
+        compiled_onnx_paths["prefill"] = _assert_onnx_path(qeff_model.lang_model.onnx_path, "prefill")
+
+        decode_qpcs = qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_decode"),
+            prefill_seq_len=1,
+            skip_vision=True,
+            **common,
+        )
+        compiled_onnx_paths["decode"] = _assert_onnx_path(qeff_model.lang_model.onnx_path, "decode")
+
+        assert len(set(compiled_onnx_paths.values())) == 3
+        vision_qpc_path = vision_qpcs.get("vision_qpc_path")
+        prefill_qpc_path = prefill_qpcs.get("lang_prefill_qpc_path")
+        decode_qpc_path = decode_qpcs.get("lang_decode_qpc_path")
+        assert vision_qpc_path
+        assert prefill_qpc_path
+        assert decode_qpc_path
+
+        vision_session = QAICInferenceSession(vision_qpc_path)
+        prefill_session = QAICInferenceSession(prefill_qpc_path)
+        decode_session = QAICInferenceSession(decode_qpc_path)
+        sessions.extend([vision_session, prefill_session, decode_session])
+        qaic_tokens = _run_vlm_disaggregated_generation(
+            qeff_model,
+            processor,
+            processor_inputs,
+            vision_session,
+            prefill_session,
+            decode_session,
+        )
+    finally:
+        for session in sessions:
+            session.deactivate()
+        manual_cleanup(list(compiled_onnx_paths.values()))
+
+    assert qaic_tokens.shape == hf_tokens.shape == (1, VLM_GENERATION_LEN)
+    assert np.array_equal(qaic_tokens, hf_tokens), (
+        f"Weight-free disaggregated VLM tokens do not match HF: HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
+    )
+
+
+@pytest.mark.weight_free
+@pytest.mark.on_qaic
 @pytest.mark.llm_model
 @pytest.mark.parametrize("model_type,model_id", DISAGG_MODEL_PARAMS)
 def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp_export_dir):
     """Compile CB decode and chunked-prefill QPCs for weight-free disaggregated serving."""
     try:
         qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     full_batch_size = 2
@@ -315,6 +765,122 @@ def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp
 
     assert decode_qpc
     assert prefill_qpc
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_blocking
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+@pytest.mark.disagg_dma
+@pytest.mark.parametrize("model_type,model_id,decode_blocking_key", WEIGHT_FREE_DISAGG_DECODE_BLOCKING_CASES)
+def test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics(
+    model_type,
+    model_id,
+    decode_blocking_key,
+    tmp_export_dir,
+    record_property,
+):
+    """Compile decode-blocked weight-free disaggregated QPCs and record artifact metrics."""
+    use_onnx_subfunctions = True
+    decode_qaic_config = _build_disagg_decode_blocking_qaic_config(decode_blocking_key)
+    prefill_qaic_config = {"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}}
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        hf_model = _load_hf_reference_model(model_id)
+        decode_qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
+        prefill_qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
+        decode_qeff_model.model.eval()
+        prefill_qeff_model.model.eval()
+    except Exception as exc:  # noqa: BLE001
+        skip_on_model_fetch_error(exc, model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    hf_tokens = _run_hf_torch_fp32_text(
+        hf_model,
+        tokenizer,
+        DECODE_BLOCKING_PARITY_PROMPT,
+        DECODE_BLOCKING_PARITY_GENERATION_LEN,
+    )
+
+    full_batch_size = 2
+    common = {
+        "ctx_len": CTX_LEN,
+        "full_batch_size": full_batch_size,
+        "num_cores": 4,
+        "mxfp6_matmul": False,
+        "mxint8_kv_cache": False,
+        "split_retained_state_io": True,
+        "retain_full_kv": True,
+        "use_onnx_subfunctions": use_onnx_subfunctions,
+        "offload_pt_weights": True,
+    }
+
+    decode_compile_start = time.perf_counter()
+    decode_qpc = Path(
+        decode_qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_blocked_{decode_blocking_key}_cb_decode"),
+            prefill_seq_len=1,
+            num_devices=DECODE_BLOCKING_DECODE_NUM_DEVICES,
+            qaic_config=decode_qaic_config,
+            **common,
+        )
+    )
+    decode_compile_seconds = time.perf_counter() - decode_compile_start
+    decode_onnx_path = _assert_onnx_path(decode_qeff_model.onnx_path, "decode")
+    _assert_disagg_blocking_artifact(
+        decode_onnx_path,
+        decode_qeff_model,
+        decode_blocking_key,
+        decode_qaic_config,
+        use_onnx_subfunctions,
+    )
+
+    prefill_compile_start = time.perf_counter()
+    prefill_qpc = Path(
+        prefill_qeff_model.compile(
+            compile_dir=_compile_dir(tmp_export_dir, f"{model_type}_decode_blocked_{decode_blocking_key}_cb_prefill"),
+            prefill_seq_len=PREFILL_SEQ_LEN,
+            prefill_only=True,
+            enable_chunking=True,
+            num_devices=DECODE_BLOCKING_PREFILL_NUM_DEVICES,
+            mdp_num_partitions=DECODE_BLOCKING_PREFILL_STAGES,
+            qaic_config=prefill_qaic_config,
+            **common,
+        )
+    )
+    prefill_compile_seconds = time.perf_counter() - prefill_compile_start
+    prefill_onnx_path = _assert_onnx_path(prefill_qeff_model.onnx_path, "prefill")
+    if use_onnx_subfunctions:
+        assert_has_subfunctions(prefill_onnx_path, prefill_qeff_model)
+
+    assert decode_qpc
+    assert prefill_qpc
+    assert decode_qpc.exists(), f"decode QPC path does not exist: {decode_qpc}"
+    assert prefill_qpc.exists(), f"prefill QPC path does not exist: {prefill_qpc}"
+    assert decode_onnx_path != prefill_onnx_path
+
+    qaic_tokens = _run_disagg_prefill_decode_tokens(
+        prefill_qpc,
+        decode_qpc,
+        tokenizer,
+        DECODE_BLOCKING_PARITY_PROMPT,
+        DECODE_BLOCKING_PARITY_GENERATION_LEN,
+        full_batch_size,
+    )
+    hf_tokens_for_compare = np.asarray(hf_tokens).flatten()[:DECODE_BLOCKING_PARITY_GENERATION_LEN]
+    assert np.array_equal(hf_tokens_for_compare, qaic_tokens), (
+        f"Decode-blocked disaggregated weight-free HW/HF parity failed for {model_id} "
+        f"mode={decode_blocking_key}: HF={hf_tokens_for_compare.tolist()}, QAIC={qaic_tokens.tolist()}"
+    )
+
+    metrics = {
+        "decode_qpc_compile_seconds": decode_compile_seconds,
+        "prefill_qpc_compile_seconds": prefill_compile_seconds,
+    }
+    for name, value in metrics.items():
+        record_property(name, value)
 
 
 @pytest.mark.weight_free
@@ -525,7 +1091,7 @@ def test_weight_free_gpt_oss_disagg_cb_kv_handoff_and_hf_parity(
         config = _build_gpt_oss_parity_config(dtype="float32")
         hf_model = _load_gpt_oss_parity_hf_model(config)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     checkpoint_dir = tmp_path / "gpt_oss_fp32_checkpoint"

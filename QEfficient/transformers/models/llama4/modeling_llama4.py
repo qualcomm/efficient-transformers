@@ -523,7 +523,6 @@ class QEffLlama4TextAttention(Llama4TextAttention):
                 "position_ids": chunk_position_ids,
             }
             if comp_ctx_lengths is not None:
-                attention_mask = attention_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
                 cache_kwargs["CCL"] = attention_mask.shape[-1]
 
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -682,6 +681,12 @@ class QEffLlama4TextModel(Llama4TextModel):
             chunk_position_ids = position_ids
             target_length = past_key_values.layers[0].keys.shape[-2]
         chunk_causal_mask = _create_causal_mask(position_ids=chunk_position_ids, target_length=target_length)
+        if comp_ctx_lengths is not None:
+            # Trim while comp_ctx_lengths is still the original CCL vector.
+            # Later decoder subfunctions receive the derived width, so applying
+            # .shape[-1] there would create a dynamic Slice.ends input.
+            causal_mask = causal_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
+            chunk_causal_mask = chunk_causal_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
         causal_mask_mapping = {
             "full_attention": causal_mask,
             "chunked_attention": chunk_causal_mask,

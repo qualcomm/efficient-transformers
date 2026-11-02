@@ -46,6 +46,7 @@ from QEfficient.transformers.moe import (
     QEffMoEBlockMixin,
     build_canonical_expert_weights,
     delete_module_attrs,
+    gptoss_clamp,
     gptoss_clamped_glu_mlp,
 )
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
@@ -151,8 +152,8 @@ class _QEffGptOssLegacyBlockedMixin:
                 up = (tgb @ W_u) + b_u  # [T, I]
 
                 # Apply GptOss activation with clamping
-                gate = gate.clamp(min=torch.finfo(torch.float16).min, max=self.experts.limit)
-                up = up.clamp(min=-self.experts.limit, max=self.experts.limit)
+                gate = gptoss_clamp(gate, min_value=torch.finfo(torch.float16).min, max_value=self.experts.limit)
+                up = gptoss_clamp(up, min_value=-self.experts.limit, max_value=self.experts.limit)
 
                 # GLU activation
                 glu = gate * torch.sigmoid(gate * self.experts.alpha)
@@ -235,8 +236,10 @@ class _QEffGptOssLegacyBlockedMixin:
                         cur_gate = (tgb @ W_g[:, i * 128 : (i + 1) * 128]) + b_g[i * 128 : (i + 1) * 128]
                         cur_up = (tgb @ W_u[:, i * 128 : (i + 1) * 128]) + b_u[i * 128 : (i + 1) * 128]
 
-                    cur_gate = cur_gate.clamp(min=torch.finfo(torch.float16).min, max=self.experts.limit)
-                    cur_up = cur_up.clamp(min=-self.experts.limit, max=self.experts.limit)
+                    cur_gate = gptoss_clamp(
+                        cur_gate, min_value=torch.finfo(torch.float16).min, max_value=self.experts.limit
+                    )
+                    cur_up = gptoss_clamp(cur_up, min_value=-self.experts.limit, max_value=self.experts.limit)
                     cur_glu = cur_gate * torch.sigmoid(cur_gate * self.experts.alpha)
                     cur_intermediate = (cur_up + 1) * cur_glu
                     intermediates.append(cur_intermediate)
@@ -328,8 +331,8 @@ class QEffGptOssMLP(_QEffGptOssLegacyBlockedMixin, QEffMoEBlockMixin, GptOssMLP)
         up = torch.bmm(expert_in, up_proj) + up_proj_bias.unsqueeze(1)
 
         # Apply activation with clamping
-        gate = gate.clamp(min=None, max=self.experts.limit)
-        up = up.clamp(min=-self.experts.limit, max=self.experts.limit)
+        gate = gptoss_clamp(gate, max_value=self.experts.limit)
+        up = gptoss_clamp(up, min_value=-self.experts.limit, max_value=self.experts.limit)
         glu = gate * torch.sigmoid(gate * self.experts.alpha)
         gated_output = (up + 1) * glu
 
@@ -399,8 +402,8 @@ class QEffGptOssMLP(_QEffGptOssLegacyBlockedMixin, QEffMoEBlockMixin, GptOssMLP)
             up = (hidden_states @ W_u) + b_u  # [T, I]
 
             # Apply GptOss activation with clamping
-            gate = gate.clamp(min=None, max=self.experts.limit)
-            up = up.clamp(min=-self.experts.limit, max=self.experts.limit)
+            gate = gptoss_clamp(gate, max_value=self.experts.limit)
+            up = gptoss_clamp(up, min_value=-self.experts.limit, max_value=self.experts.limit)
 
             # GLU activation
             glu = gate * torch.sigmoid(gate * self.experts.alpha)
@@ -649,7 +652,14 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos_cached, sin_cached)
 
-        if past_key_values is not None:
+        blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
+        blocking_mode = BlockingMode.resolve(blocking_config.mode) if blocking_config is not None else BlockingMode.NONE
+        use_blocking = (
+            blocking_config is not None and blocking_mode != BlockingMode.NONE and (self.sliding_window is None)
+        )
+        use_decode_blocking = use_blocking and not blocking_mode.is_prefill
+
+        if past_key_values is not None and not use_decode_blocking:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {
                 "sin": sin_cached,
@@ -672,9 +682,6 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                     key_states, value_states, self.layer_idx, cache_kwargs
                 )
 
-        blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
-        use_blocking = blocking_config is not None and blocking_config.mode.is_prefill and (self.sliding_window is None)
-
         if use_blocking:
             attention_interface = generic_blocked_attention_interface
         else:
@@ -695,7 +702,8 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
             position_ids=position_ids,
             past_key_value=past_key_values,
             batch_index=batch_index,
-            prefill_only=True,
+            prefill_only=blocking_mode.is_prefill,
+            sinks=self.sinks,
             **kwargs,
         )
 
@@ -843,6 +851,11 @@ class QEffGptOssAttention(GptOssAttention):
                 attention_mask=attention_mask,
                 past_key_value=past_key_values,
                 comp_ctx_lengths=comp_ctx_lengths,
+                ccl_length=(
+                    attention_mask.shape[-1]
+                    if comp_ctx_lengths is not None and not torch._dynamo.is_compiling()
+                    else None
+                ),
                 batch_index=batch_index,
                 position_ids=position_ids,
                 sliding_window=self.sliding_window,
@@ -1091,12 +1104,17 @@ class QEffGptOssModel(GptOssModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        is_dynamo_export = torch._dynamo.is_compiling()
         causal_mask = _create_causal_mask(position_ids=position_ids, target_length=past_key_values.get_max_cache_len())
+        if comp_ctx_lengths is not None and not is_dynamo_export:
+            causal_mask = causal_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
         sliding_mask = _create_causal_mask(
             position_ids=position_ids,
             target_length=past_key_values.get_sliding_window_len(),
             sliding_window=past_key_values.get_sliding_window_len(),
         )
+        if comp_ctx_lengths is not None and not is_dynamo_export:
+            sliding_mask = sliding_mask[:, :, :, : comp_ctx_lengths.shape[-1]]
 
         hidden_states = inputs_embeds
 

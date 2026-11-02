@@ -95,7 +95,7 @@ config = AutoConfig.from_pretrained(model_id)
 
 # For faster execution user can run with lesser layers, For Testing Purpose Only
 config.vision_config.depth = 5
-config.text_config.num_hidden_layers = 4
+config.text_config.num_hidden_layers = 8
 config.torch_dtype = "float16"
 layer_types = list(getattr(config.text_config, "layer_types", []))
 if len(layer_types) < config.text_config.num_hidden_layers:
@@ -162,7 +162,7 @@ FULL_BATCH_SIZE = 512  # Total concurrent CB slots
 qaic_config = {
     "blocking_mode": "prefill_online",
     "num_kv_blocks": 16,
-    "num_q_blocks": 4,
+    "num_q_blocks": 2,
     "n_rep_chunk": 1,
     "skip_kv": True,
     "gdn_chunk_size": gdn_chunk_size,
@@ -176,6 +176,7 @@ qaic_config = {
 #     "blocking_mode": "kv_headpar",
 #     "num_kv_blocks": 8,
 #     "skip_kv": True,
+#     "gdn_full_state_update": True,
 # }
 
 # CL 14K BSZ512

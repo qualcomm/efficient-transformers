@@ -52,6 +52,9 @@ with open(CONFIG_PATH, "r") as f:
     config_data = json.load(f)
     multimodal_models = config_data["image_text_models"]
 test_mm_models = [model_config["model_name"] for model_config in multimodal_models]
+test_mm_ccl_models = [
+    model_config["model_name"] for model_config in multimodal_models if model_config.get("supports_ccl", True)
+]
 model_config_dict = {model["model_name"]: model for model in multimodal_models}
 test_mm_moe_models = [model["model_name"] for model in multimodal_models if "moe" in model.get("model_type", "")]
 test_mm_blocking_models = [model["model_name"] for model in multimodal_models if model.get("supports_blocking")]
@@ -613,7 +616,7 @@ def _run_dummy_dual_qpc_case(model_name, manual_cleanup, layer_types=None, **kwa
 @pytest.mark.dummy_layers
 @pytest.mark.on_qaic
 @pytest.mark.multimodal
-@pytest.mark.parametrize("model_name", test_mm_models)
+@pytest.mark.parametrize("model_name", test_mm_ccl_models)
 def test_dummy_image_text_to_text_ccl_dual_qpc(model_name, manual_cleanup):
     """Compute-context-length (CCL) parity for every VLM, dual QPC only.
 

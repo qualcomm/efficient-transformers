@@ -52,6 +52,15 @@ model_config_dict = {model["model_name"]: model for model in multimodal_models}
 
 NEW_GENERATION_TOKENS = 10
 
+ONNX_SUBFUNCTION_MODEL_TYPES = {
+    "gemma4",
+    "qwen2_5_vl",
+    "qwen3_5",
+    "qwen3_5_moe",
+    "qwen3_vl",
+    "qwen3_vl_moe",
+}
+
 
 def _assert_runtime_token_parity(reference_tokens, qpc_tokens, message, parity_issue=None):
     """Compare HF and QAIC tokens, xfail only a configured numerical parity mismatch."""
@@ -177,7 +186,8 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100_CB(
     # requested so the default CB runs keep inferring it from full_batch_size.
     if kv_cache_batch_size is not None:
         compile_kwargs["kv_cache_batch_size"] = kv_cache_batch_size
-    if model_name in ["qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe", "gemma4"]:
+    model_type = getattr(config, "model_type", model_config_dict[model_name].get("model_type"))
+    if model_type in ONNX_SUBFUNCTION_MODEL_TYPES:
         compile_kwargs["use_onnx_subfunctions"] = True
 
     images = []

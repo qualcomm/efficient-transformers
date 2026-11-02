@@ -120,6 +120,8 @@ def _run_per_pr_causal_text_case(
         pytest.xfail(model_config["known_runtime_parity_issue"])
 
     config = _per_pr_dummy_config(model_config)
+    if model_config["model_type"] == "gemma3_text":
+        config._sliding_window_pattern = 2
     aic_hw_version = "ai200" if torch_dtype == torch.bfloat16 else "ai100"
     num_cores = 4 if aic_hw_version == "ai200" else model_config.get("num_cores", num_cores)
     compile_options = {**model_config.get("compile_options", {}), **(compile_options or {})}

@@ -122,6 +122,7 @@ def CtxScatter3D(data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates
 
     # keep index tensor types aligned for backend that require exact dtype match
     batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
+    position_ids = ops.Cast(position_ids, to=onnxscript.INT32.dtype)
     ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
 
@@ -188,6 +189,7 @@ def CtxScatter3DInt(
     # Create indices
     batch_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, batch_size, one), [1, 2]), exp_shape)
     batch_idx = ops.Cast(batch_idx, to=onnxscript.INT32.dtype)
+    position_ids = ops.Cast(position_ids, to=onnxscript.INT32.dtype)
     ctx_idx = ops.Expand(ops.Unsqueeze(position_ids, [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
 
@@ -333,7 +335,7 @@ class CtxGatherFuncBlockedKV(torch.autograd.Function):
 # compile time) so batch and KV-head are pre-flattened onto one axis that
 # matches a B*Hkv physical core/device layout 1:1.
 # ─────────────────────────────────────────────────────────────────────────────
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
+@qeff_custom_op("com.qti.aisw.onnx", 1)
 def CtxChunkScatterBatch(
     data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates: onnxscript.FLOAT
 ) -> onnxscript.FLOAT:
@@ -412,7 +414,7 @@ class CtxChunkScatterBatchFunc(torch.autograd.Function):
         return g.onnxscript_op(CtxChunkScatterBatch, data, position_ids, updates).setTypeAs(data)
 
 
-@onnxscript.script(onnxscript.values.Opset("com.qti.aisw.onnx", 1))
+@qeff_custom_op("com.qti.aisw.onnx", 1)
 def CtxGatherBlockedKVBatch(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxscript.FLOAT:
     # data [1, BH, T, D], ctx_indices [1, BH, T_block]  (BH = B*NKVH, static at compile time)
     # batch_dims=2: checks data.shape[0]==indices.shape[0] (1==1) and

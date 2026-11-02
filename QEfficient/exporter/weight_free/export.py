@@ -38,6 +38,34 @@ def _to_meta(value: Any) -> Any:
     return value
 
 
+def _iter_weight_free_configs(qeff_model):
+    model = getattr(qeff_model, "model", None)
+    nested_model = getattr(model, "model", None)
+
+    for config in (
+        getattr(model, "config", None),
+        getattr(qeff_model, "config", None),
+        getattr(getattr(model, "vision_model", None), "config", None),
+        getattr(getattr(nested_model, "vision_model", None), "config", None),
+        getattr(nested_model, "config", None),
+    ):
+        if config is not None:
+            yield config
+
+
+def _resolve_weight_free_config(qeff_model):
+    return next(_iter_weight_free_configs(qeff_model), None)
+
+
+def _resolve_weight_free_target_dtype(qeff_model) -> torch.dtype:
+    for config in _iter_weight_free_configs(qeff_model):
+        for attr in ("dtype", "torch_dtype"):
+            dtype = getattr(config, attr, None)
+            if isinstance(dtype, torch.dtype):
+                return dtype
+    return torch.float32
+
+
 def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
     """Finish preparing a meta-device QEfficient wrapper for weight-free tracing, in place."""
     model_ref = qeff_model.hash_params.get("pretrained_model_name_or_path")
@@ -47,7 +75,8 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
             "Pass `pretrained_model_name_or_path=...` when constructing the QEff model manually."
         )
 
-    quant_config = getattr(qeff_model.model.config, "quantization_config", None)
+    config = _resolve_weight_free_config(qeff_model)
+    quant_config = getattr(config, "quantization_config", None)
 
     if quant_config is not None:
         # For quantized models the meta model must use the same quantized layer types as the
@@ -241,7 +270,7 @@ def export_weight_free_onnx(
     tuple
         Meta QEfficient model, updated ONNX transform kwargs, and cleanup callback.
     """
-    target_dtype = qeff_model.model.config.dtype
+    target_dtype = _resolve_weight_free_target_dtype(qeff_model)
     meta_qeff_model = _run_quantizer_for_wf(qeff_model, target_dtype)
 
     # export_wrapper (the @export_wrapper decorator on _export) already ran

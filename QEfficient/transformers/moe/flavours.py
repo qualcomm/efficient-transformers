@@ -125,7 +125,8 @@ def cumsum_scatter_gather_update_expert_blocked(
     )
     packed_chunk_size = seq_len // num_packed_chunks
     matched_idx = build_matched_idx_from_cumsum(T2Ei)
-    valid_rows = T2Ei.to(torch.int32).sum(dim=-1, keepdim=True)
+    index_dtype = torch.int64
+    valid_rows = torch.einsum("ij->i", T2Ei.to(index_dtype)).unsqueeze(1)
     x_expanded = x.unsqueeze(0).expand(batch_size, -1, -1)
     for chunk_idx in range(num_packed_chunks):
         packed_start = chunk_idx * packed_chunk_size
@@ -134,7 +135,7 @@ def cumsum_scatter_gather_update_expert_blocked(
         else:
             packed_stop = packed_start + packed_chunk_size
         chunk_rows = packed_stop - packed_start
-        row_range = torch.arange(chunk_rows, dtype=torch.int32, device=x.device).unsqueeze(0)
+        row_range = torch.arange(chunk_rows, dtype=index_dtype, device=x.device).unsqueeze(0)
         chunk_matched_idx = matched_idx[:, packed_start:packed_stop]
 
         x_chunk = ctx_gather_3d_generalized(x_expanded, chunk_matched_idx)

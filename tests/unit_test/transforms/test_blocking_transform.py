@@ -24,7 +24,7 @@ from copy import deepcopy
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from QEfficient.blocking import attention_blocking
 from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
@@ -335,6 +335,53 @@ def test_generic_blocked_attention_infers_prefill_only_from_mode(monkeypatch):
     assert weights is None
     assert len(cache.write_only_calls) == 1
     assert len(strategy_calls) == 1
+
+
+@pytest.mark.transforms
+def test_past_key_value_update_uses_comp_ctx_length_by_default():
+    class Cache:
+        def update(self, key, value, layer_idx, cache_kwargs):
+            self.cache_kwargs = cache_kwargs
+            return key, value
+
+    attention_mask = torch.zeros(1, 1, 1, 8)
+    cache = Cache()
+
+    _, _, updated_attention_mask, _ = attention_blocking.past_key_value_update(
+        module=type("Attention", (), {"layer_idx": 0})(),
+        key=torch.ones(1, 1, 1, 1),
+        value=torch.ones(1, 1, 1, 1),
+        attention_mask=attention_mask,
+        past_key_value=cache,
+        comp_ctx_lengths=torch.zeros(4, dtype=torch.long),
+    )
+
+    assert updated_attention_mask.shape[-1] == 4
+    assert cache.cache_kwargs["CCL"] == 4
+
+
+@pytest.mark.transforms
+def test_past_key_value_update_preserves_pre_aligned_attention_mask():
+    class Cache:
+        def update(self, key, value, layer_idx, cache_kwargs):
+            self.cache_kwargs = cache_kwargs
+            return key, value
+
+    attention_mask = torch.zeros(1, 1, 1, 4)
+    cache = Cache()
+
+    _, _, updated_attention_mask, _ = attention_blocking.past_key_value_update(
+        module=type("Attention", (), {"layer_idx": 0})(),
+        key=torch.ones(1, 1, 1, 1),
+        value=torch.ones(1, 1, 1, 1),
+        attention_mask=attention_mask,
+        past_key_value=cache,
+        comp_ctx_lengths=torch.zeros(4, dtype=torch.long),
+        ccl_length=attention_mask.shape[-1],
+    )
+
+    assert updated_attention_mask is attention_mask
+    assert cache.cache_kwargs["CCL"] == 4
 
 
 @pytest.mark.transforms

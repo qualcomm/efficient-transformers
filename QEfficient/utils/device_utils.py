@@ -37,13 +37,15 @@ def get_qaic_mdp_device_groups(min_nsp: int = 16, devices_per_group: int = 4) ->
     records = re.split(r"(?=^QID \d+\s*$)", result.stdout, flags=re.MULTILINE)
     for record in records:
         qid_match = re.search(r"^QID (\d+)\s*$", record, flags=re.MULTILINE)
-        nsp_match = re.search(r"^\s*Nsp Total:(\d+)\s*$", record, flags=re.MULTILINE)
+        nsp_free_match = re.search(r"^\s*Nsp Free:(\d+)\s*$", record, flags=re.MULTILINE)
+        nsp_total_match = re.search(r"^\s*Nsp Total:(\d+)\s*$", record, flags=re.MULTILINE)
         board_match = re.search(r"^\s*Board serial:(.+?)\s*$", record, flags=re.MULTILINE)
-        if not qid_match or not nsp_match or not board_match:
+        if not qid_match or not (nsp_free_match or nsp_total_match) or not board_match:
             continue
         if "Status:Ready" not in record or "HybridBoot+" not in record or "MDP+" not in record:
             continue
-        if int(nsp_match.group(1)) < min_nsp:
+        available_nsp = int((nsp_free_match or nsp_total_match).group(1))
+        if available_nsp < min_nsp:
             continue
         groups[board_match.group(1).strip()].append(int(qid_match.group(1)))
 
@@ -103,7 +105,7 @@ def is_multi_qranium_setup_available():
     result = None
     command = ["/opt/qti-aic/tools/qaic-util", "-q"]
     try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, universal_newlines=True)
+        result = subprocess.run(command, stdout=subprocess.PIPE, text=True)
         filtered_result = subprocess.run(
             ["grep", "Device Capabilities"], input=result.stdout, stdout=subprocess.PIPE, text=True
         )

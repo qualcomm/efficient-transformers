@@ -43,6 +43,18 @@ from QEfficient.utils.logging_utils import QEFFLogger
 logger = QEFFLogger.get_logger("INFRA")
 
 
+def _max_allowed_sequence_length(session, binding_name: str, sequence_dim: int) -> int:
+    binding_index = session.binding_index_map[binding_name]
+    allowed_lengths = [
+        shape_spec[binding_index][1][sequence_dim]
+        for shape_spec in session.allowed_shapes
+        if len(shape_spec) > binding_index and len(shape_spec[binding_index][1]) > sequence_dim
+    ]
+    if allowed_lengths:
+        return max(allowed_lengths)
+    return int(session.bindings[binding_index].dims[sequence_dim])
+
+
 class VisionLanguageGeneration(QEffTextGenerationBase):
     """
     Enhanced vision-language generation class inheriting from QEffTextGenerationBase.
@@ -99,6 +111,7 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
         return_pdfs: bool = False,
         include_guided_decoding: bool = False,
         sampling_params: Optional[Dict[str, Any]] = None,
+        dump_inputs_path: str | bool | None = None,
     ):
         """
         Initialize vision-language generation with enhanced capabilities
@@ -148,6 +161,8 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
             include_guided_decoding=include_guided_decoding,
             sampling_params=sampling_params,
             activate=False,  # vision components need to be initialized first
+            dump_inputs_path=dump_inputs_path,
+            dump_component_name="text",
         )
 
         # Physical KV block table for paged attention on the language QPC. None (default)
@@ -180,6 +195,7 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
         self._vision_qpc_path = vision_qpc_path
         self.device_ids = device_ids  # Store device_ids for vision components
         self.enable_debug_logs = enable_debug_logs  # Store for vision components
+        self.dump_inputs_path = dump_inputs_path
         self._vision_outputs_cache = LRUCache(max_size=100)  # LRU cache for vision outputs
         self._vision_cache = {}  # Cache for vision outputs across batches
         self._init_vision_components()
@@ -198,7 +214,12 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
         """Initialize vision-specific components"""
         # Vision session (separate from base class language session)
         self._vision_session = QAICInferenceSession(
-            self._vision_qpc_path, self.device_ids, activate=False, enable_debug_logs=self.enable_debug_logs
+            self._vision_qpc_path,
+            self.device_ids,
+            activate=False,
+            enable_debug_logs=self.enable_debug_logs,
+            dump_inputs_path=self.dump_inputs_path,
+            dump_component_name="vision",
         )
 
         # Vision handler with language session coordination
@@ -274,15 +295,35 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
         """
         for decode_batch_id in range(self.full_batch_size):
             next_prompt = prompt_queue.popleft()
+            self._record_runtime_schedule_event(
+                {
+                    "type": "prompt_arrival",
+                    "phase": "initial_prefill",
+                    "logical_prompt_index": decode_batch_id,
+                    "slot": decode_batch_id,
+                    "queue_depth_after_pop": len(prompt_queue),
+                    **self._prompt_descriptor(next_prompt),
+                }
+            )
 
             # run prefill for num_chunks
             outputs, position_ids, generation_len = self.run_prefill(
                 next_prompt, generation_len, decode_batch_id=np.array(decode_batch_id, dtype=np.int64).reshape(1, 1)
             )
             if self.is_qwen_vl:
-                _ = self.update_decode_inputs_qwen_vl(outputs, position_ids, generation_len, decode_batch_id)
+                new_token_id = self.update_decode_inputs_qwen_vl(outputs, position_ids, generation_len, decode_batch_id)
             else:
-                _ = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
+                new_token_id = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
+            self._record_runtime_schedule_event(
+                {
+                    "type": "slot_assigned",
+                    "phase": "initial_prefill",
+                    "logical_prompt_index": decode_batch_id,
+                    "slot": decode_batch_id,
+                    "prefill_token": int(np.asarray(new_token_id).reshape(-1)[-1]),
+                    "generation_len": int(np.asarray(generation_len).reshape(-1)[-1]),
+                }
+            )
 
     def update_decode_inputs_qwen_vl(self, outputs, position_ids, generation_len, decode_batch_id=None):
         """
@@ -416,7 +457,16 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
                 for op in Constants.SAMPLER_OPS | ({"token_bitmasks"} if self.include_guided_decoding else set()):
                     chunk_inputs[op] = lang_inputs[op]
 
-            outputs = self._session.run(chunk_inputs)
+            outputs = self._session_run_with_context(
+                chunk_inputs,
+                phase="prefill",
+                prefill_chunk=i,
+                prefill_chunks=num_chunks,
+                slot=int(np.asarray(decode_batch_id).reshape(-1)[0]) if decode_batch_id is not None else None,
+                logical_invocation="vlm_prefill_chunk",
+                is_prefill=True,
+                is_decode=False,
+            )
 
             if "image_idx_output" in outputs:
                 chunk_image_idx = outputs["image_idx_output"]
@@ -711,11 +761,12 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
                         (vision_outputs["vision_embeds"], chunk_outputs["vision_embeds"]), axis=1
                     )
 
+            vision_sequence_length = _max_allowed_sequence_length(self._session, "vision_embeds", 1)
             vision_outputs["vision_embeds"] = np.pad(
                 vision_outputs["vision_embeds"],
                 pad_width=(
                     (0, 0),
-                    (0, self._session.allowed_shapes[0][1][1][1] - vision_outputs["vision_embeds"].shape[-2]),
+                    (0, vision_sequence_length - vision_outputs["vision_embeds"].shape[-2]),
                     (0, 0),
                 ),  # pad axis=1 only
                 mode="constant",
@@ -727,7 +778,7 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
                     pad_width=(
                         (0, 0),
                         (0, 0),
-                        (0, self._session.allowed_shapes[0][1][1][1] - vision_outputs["deepstack_features"].shape[-2]),
+                        (0, vision_sequence_length - vision_outputs["deepstack_features"].shape[-2]),
                         (0, 0),
                     ),  # pad axis=1 only
                     mode="constant",
@@ -962,7 +1013,17 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
         """
         for decode_batch_id in range(self.full_batch_size):
             # Pop the promt as we are processing
-            _ = prompt_queue.popleft()
+            prompt = prompt_queue.popleft()
+            self._record_runtime_schedule_event(
+                {
+                    "type": "prompt_arrival",
+                    "phase": "initial_prefill",
+                    "logical_prompt_index": decode_batch_id,
+                    "slot": decode_batch_id,
+                    "queue_depth_after_pop": len(prompt_queue),
+                    **self._prompt_descriptor(prompt),
+                }
+            )
 
             # Get cached vision outputs for this batch slot
             cached = self._vision_outputs_cache.get(decode_batch_id)
@@ -998,11 +1059,23 @@ class VisionLanguageGeneration(QEffTextGenerationBase):
 
                 # Update decode inputs
                 if self.is_qwen_vl:
-                    self.update_decode_inputs_qwen_vl(
+                    new_token_id = self.update_decode_inputs_qwen_vl(
                         outputs, position_ids_decode, generation_len_final, decode_batch_id
                     )
                 else:
-                    self.update_decode_input(outputs, position_ids_decode, generation_len_final, decode_batch_id)
+                    new_token_id = self.update_decode_input(
+                        outputs, position_ids_decode, generation_len_final, decode_batch_id
+                    )
+                self._record_runtime_schedule_event(
+                    {
+                        "type": "slot_assigned",
+                        "phase": "initial_prefill",
+                        "logical_prompt_index": decode_batch_id,
+                        "slot": decode_batch_id,
+                        "prefill_token": int(np.asarray(new_token_id).reshape(-1)[-1]),
+                        "generation_len": int(np.asarray(generation_len_final).reshape(-1)[-1]),
+                    }
+                )
             else:
                 logger.error(f"No cached vision outputs for batch_id {decode_batch_id}")
                 raise RuntimeError(f"Vision outputs not cached for batch_id {decode_batch_id}")

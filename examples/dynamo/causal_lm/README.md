@@ -34,7 +34,8 @@ export HF_TOKEN=<your_token>
 ### `basic_dynamo_inference.py`
 
 End-to-end example: export via `torch.export` (dynamo), compile to QPC, and run
-generation on Cloud AI 100.
+generation on Cloud AI 100. The script prints the QPC compile time and the
+compiled QPC size after `compile()` completes.
 
 **Default usage:**
 ```bash
@@ -57,6 +58,20 @@ python examples/dynamo/causal_lm/basic_dynamo_inference.py \
     --weight-free
 ```
 
+**Weight-free export with CausalLM blocking:**
+```bash
+python examples/dynamo/causal_lm/basic_dynamo_inference.py \
+    --model-name Qwen/Qwen2-1.5B-Instruct \
+    --prompt "My name is" \
+    --prefill-seq-len 128 \
+    --ctx-len 128 \
+    --num-cores 16 \
+    --weight-free \
+    --blocking-mode qkv \
+    --num-kv-blocks 2 \
+    --num-q-blocks 2
+```
+
 **Parameters:**
 
 | Parameter | Default | Description |
@@ -68,6 +83,11 @@ python examples/dynamo/causal_lm/basic_dynamo_inference.py \
 | `--generation-len` | `100` | New tokens to generate |
 | `--num-cores` | `16` | Number of AI 100 cores |
 | `--aic-hw-version` | `ai100` | Hardware version |
+| `--blocking-mode` | disabled | Enable CausalLM blocking through `qaic_config`; supported: `kv`, `qkv`, `hqkv`, `kv_headpar` |
+| `--num-kv-blocks` | auto | Number of K/V cache blocks |
+| `--num-q-blocks` | auto | Number of query blocks |
+| `--head-block-size` | auto | Number of attention heads per head block |
+| `--headpar-split` | auto | Head-parallel split count for `kv_headpar` |
 | `--num-hidden-layers` | `-1` | Override model depth (for debugging) |
 | `--weight-free` | `False` | Build a meta-device model and load weights during compile |
 | `--device-group` | `None` | Device IDs, e.g. `[0,1]` |

@@ -42,10 +42,11 @@ class CtxScatterFuncCB(torch.autograd.Function):
     def forward(data: torch.Tensor, batch_index: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor):
         # Avoid mutating graph inputs in-place during export.
         data = data.clone()
-        batch_idx = batch_index.view(-1, 1, 1)
-        head_idx = torch.arange(data.shape[1]).view(1, -1, 1)
-        ctx_idx = position_ids.unsqueeze(1)
-        data[batch_idx, head_idx, ctx_idx] = updates
+        batch_idx = batch_index.view(-1, 1, 1).expand(-1, data.shape[1], position_ids.shape[1])
+        head_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1).expand_as(batch_idx)
+        ctx_idx = position_ids.unsqueeze(1).expand_as(batch_idx)
+        valid = ctx_idx != torch.iinfo(torch.int32).max
+        data[batch_idx[valid], head_idx[valid], ctx_idx[valid].long()] = updates[valid]
         return data
 
     @staticmethod
@@ -84,9 +85,10 @@ class CtxScatterFuncCB3D(torch.autograd.Function):
     def forward(data: torch.Tensor, batch_index: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor):
         # Avoid mutating graph inputs in-place during export.
         data = data.clone()
-        batch_idx = batch_index.view(-1, 1)
-        ctx_idx = position_ids
-        data[batch_idx, ctx_idx] = updates
+        batch_idx = batch_index.view(-1, 1).expand(-1, position_ids.shape[-1])
+        ctx_idx = position_ids.expand(batch_idx.shape[0], -1)
+        valid = ctx_idx != torch.iinfo(torch.int32).max
+        data[batch_idx[valid], ctx_idx[valid].long()] = updates[valid]
         return data
 
     @staticmethod

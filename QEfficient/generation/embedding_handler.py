@@ -374,7 +374,17 @@ class VisionHandler:
             self._vision_session.activate()
 
             # Run inference
-            vision_outputs = self._vision_session.run(vision_inputs)
+            invocation_context = getattr(self._vision_session, "invocation_context", None)
+            if invocation_context is None:
+                vision_outputs = self._vision_session.run(vision_inputs)
+            else:
+                with invocation_context(
+                    phase="vision",
+                    logical_invocation="vision_encode",
+                    is_prefill=False,
+                    is_decode=False,
+                ):
+                    vision_outputs = self._vision_session.run(vision_inputs)
 
             # Deactivate vision session
             logger.debug("Deactivating vision session after inference")

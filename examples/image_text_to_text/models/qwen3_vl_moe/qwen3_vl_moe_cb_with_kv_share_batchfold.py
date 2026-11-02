@@ -86,7 +86,6 @@ def _build_config(model_id: str):
 
 
 def _decode_qaic_config(ctx_len: int, num_kv_blocks: int) -> dict:
-
     return {
         "blocking_mode": "kv_batch_fold",
         "num_kv_blocks": num_kv_blocks,
@@ -96,7 +95,6 @@ def _decode_qaic_config(ctx_len: int, num_kv_blocks: int) -> dict:
 
 
 def _prefill_qaic_config(ctx_len: int, num_kv_blocks: int, prefill_seq_len: int) -> dict:
-
     cfg = _decode_qaic_config(ctx_len, num_kv_blocks)
     cfg["blocking_mode"] = f"prefill_{PREFILL_BLOCKING_MODE}"
     cfg["num_q_blocks"] = -(-prefill_seq_len // PREFILL_QL_CHUNK)  # ceil divide

@@ -5,13 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""
-Dynamo nightly generate tests.
-
-Mirrors tests/nightly_pipeline/causal_lm_models/test_generate.py but reads
-artifacts from dynamo_causal_model_artifacts (produced by test_export_compile.py
-in this directory) rather than causal_model_artifacts.
-"""
+"""Dynamo nightly generate tests."""
 
 from __future__ import annotations
 
@@ -42,6 +36,7 @@ def test_dynamo_generate_causal_lm(model_name, dynamo_causal_model_artifacts, ge
     compile_params, generate_params = pre_generate_utils(
         model_name, "causal_pipeline_configs", get_pipeline_config, dynamo_causal_model_artifacts
     )
+    compile_params = {**compile_params, "use_onnx_subfunctions": True}
 
     onnx_path = dynamo_causal_model_artifacts[model_name].get("onnx_path")
 

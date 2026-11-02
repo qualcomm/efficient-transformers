@@ -33,6 +33,11 @@ except ImportError:
     qaicrt = None
 
 
+def _bfloat16_to_float32(values: np.ndarray) -> np.ndarray:
+    """Decode a numpy float16-sized array containing raw bfloat16 bit patterns."""
+    return (values.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+
+
 def _is_linear_state_name(name: str) -> bool:
     """Return True for linear/recurrent (3-D) retained-state bindings."""
     return name.startswith(("conv_state.", "recurrent_state."))
@@ -52,7 +57,8 @@ def _kv_layer_sort_key(item: Tuple[str, int]) -> Tuple[int, str]:
 
 def is_retained_state_name(name: str) -> bool:
     """Return True when an I/O binding participates in retained-state cache flow."""
-    return name.startswith(("past_", "conv_state.", "recurrent_state.", "compressed_", "k_pe"))
+    base_name = name.rsplit("/", 1)[-1]
+    return base_name.startswith(("past_", "conv_state.", "recurrent_state.", "compressed_", "k_pe"))
 
 
 class KvDmaHandoff:
@@ -237,6 +243,15 @@ class KvDmaHandoff:
             tuple_list.append((index, self.output_buffers[exec_obj_idx][name]))
         return tuple_list
 
+    def _dump_inputs_with_persistent(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        merged_inputs = dict(inputs)
+        for name, buffer in self.persistent_inputs.items():
+            merged_inputs.setdefault(name, buffer)
+        return merged_inputs
+
+    def _dump_readable_output_shapes(self, exec_obj_idx: int) -> Dict[str, tuple]:
+        return {name: tuple(self.output_buffers[exec_obj_idx][name].shape) for name, _ in self.readable_output_bindings}
+
     def set_data_for_kv_handoff(self, kv_cache_buffers, slicing_parameters, index=0, buff_map=None):
         """Wire a sliced DMA descriptor so the runtime writes RetainedState
         outputs directly into ``kv_cache_buffers`` at the ``slicing_parameters``
@@ -281,6 +296,13 @@ class KvDmaHandoff:
         )
         if status != qaicrt.QStatus.QS_SUCCESS:
             raise RuntimeError("Failed to setDataWithSlices")
+        if self.session.input_dumper is not None:
+            self.session.input_dumper.record_slice_config(
+                index=index,
+                kv_cache_buffers=kv_cache_buffers,
+                slicing_parameters=slicing_parameters,
+                buff_map=buff_map,
+            )
         return kv_cache_buffers
 
     def np_run(self, inputs: Dict[str, np.ndarray], slicing_parameters=None, is_prefill: bool = True) -> int:
@@ -301,6 +323,15 @@ class KvDmaHandoff:
             )
         if status != qaicrt.QStatus.QS_SUCCESS:
             raise MemoryError("Failed to setData")
+        if session.input_dumper is not None:
+            session.input_dumper.record_invocation(
+                kind="np_run_prefill" if is_prefill else "np_run_decode",
+                inputs=self._dump_inputs_with_persistent(inputs),
+                output_names=[name for name, _ in self.readable_output_bindings],
+                output_shapes=self._dump_readable_output_shapes(exec_obj_idx),
+                metadata={"slicing_parameters": slicing_parameters},
+                exec_obj_index=exec_obj_idx,
+            )
         if session.queue.enqueue(session.execObj[exec_obj_idx]) != qaicrt.QStatus.QS_SUCCESS:
             raise MemoryError("Failed to enqueue")
         return exec_obj_idx
@@ -331,6 +362,15 @@ class KvDmaHandoff:
             )
         if status != qaicrt.QStatus.QS_SUCCESS:
             raise MemoryError("Failed to setData")
+        if session.input_dumper is not None:
+            session.input_dumper.record_invocation(
+                kind="np_run_pipeline_last_chunk" if last_chunk else "np_run_pipeline",
+                inputs=self._dump_inputs_with_persistent(inputs),
+                output_names=[name for name, _ in self.readable_output_bindings],
+                output_shapes=self._dump_readable_output_shapes(exec_obj_idx),
+                metadata={"last_chunk": last_chunk, "slicing_parameters": slicing_parameters},
+                exec_obj_index=exec_obj_idx,
+            )
         if session.queue.enqueue(session.execObj[exec_obj_idx]) != qaicrt.QStatus.QS_SUCCESS:
             raise MemoryError("Failed to enqueue")
         return exec_obj_idx
@@ -357,6 +397,8 @@ class KvDmaHandoff:
         outputs: Dict[str, np.ndarray] = {}
         for name, _ in self.readable_output_bindings:
             output = self.output_buffers[index][name]
+            if name.rsplit("/", 1)[-1] == "logits" and self.session.binding_is_bfloat16(name):
+                output = _bfloat16_to_float32(output)
             outputs[name] = output
             outputs.setdefault(name.rsplit("/", 1)[-1], output)
         return outputs

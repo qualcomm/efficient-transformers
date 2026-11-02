@@ -346,7 +346,7 @@ class FusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
     before grouped tasks are planned.
     """
 
-    TRANSFORM_ID = "fused_expert_split_v1"
+    TRANSFORM_ID = "fused_expert_split_v2"
 
     # Canonical key patterns — all architectures map to these names.
     _FUSED_GATE_UP_RE = re.compile(r"^(.+\.experts)\.gate_up_proj$")
@@ -983,9 +983,11 @@ def _plan_fused_stages(cls, context: CheckpointPlanningContext) -> None:
             output_refs=output_refs,
         ):
             out_tensors = {}
-            for canonical_key in canonical_keys:
-                raw_key = key_translation.get(canonical_key, canonical_key)
-                tensor = get_tensor(TensorRef(raw_key, "raw"))
+            source_tensors = {
+                canonical_key: get_tensor(TensorRef(key_translation.get(canonical_key, canonical_key), "raw"))
+                for canonical_key in canonical_keys
+            }
+            for canonical_key, tensor in source_tensors.items():
                 gate_up_match = cls._FUSED_GATE_UP_RE.match(canonical_key)
                 down_match = cls._FUSED_DOWN_RE.match(canonical_key)
                 gate_bias_match = cls._FUSED_GATE_UP_BIAS_RE.match(canonical_key)
@@ -994,11 +996,16 @@ def _plan_fused_stages(cls, context: CheckpointPlanningContext) -> None:
                 if gate_up_match:
                     group_prefix = gate_up_match.group(1)
                     group_moe_prefix = _moe_weights_prefix_from_experts_prefix(group_prefix)
-                    split_dim = cls._resolve_split_dim(group_prefix, canonical_index)
+                    down = source_tensors[f"{group_prefix}.down_proj"]
+                    split_dim = _infer_fused_gate_up_split_dim(
+                        tuple(tensor.shape),
+                        tuple(down.shape),
+                        preferred_split_dim=cls._resolve_split_dim(group_prefix, canonical_index),
+                    )
                     gate, up = _split_fused_gate_up_to_canonical(
                         tensor,
-                        None,
-                        interleaved=split_dim == 2,
+                        tuple(down.shape),
+                        interleaved=f"{group_prefix}.gate_up_proj_bias" in canonical_index,
                         preferred_split_dim=split_dim,
                     )
                     out_tensors[f"{group_moe_prefix}.gate"] = gate
@@ -1006,9 +1013,10 @@ def _plan_fused_stages(cls, context: CheckpointPlanningContext) -> None:
                 elif down_match:
                     group_prefix = down_match.group(1)
                     group_moe_prefix = _moe_weights_prefix_from_experts_prefix(group_prefix)
+                    gate_up = source_tensors[f"{group_prefix}.gate_up_proj"]
                     out_tensors[f"{group_moe_prefix}.down"] = _down_to_canonical(
                         tensor,
-                        None,
+                        tuple(gate_up.shape),
                         preferred_split_dim=cls._resolve_split_dim(group_prefix, canonical_index),
                     )
                 elif gate_bias_match:
