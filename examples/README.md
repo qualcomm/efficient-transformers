@@ -65,12 +65,13 @@ Multimodal reranker scoring examples.
 [See all reranker examples →](reranker/)
 
 ### Audio
-Speech processing models.
+Speech recognition and speech synthesis models.
 
 | Example | Model | Task | Script |
 |---------|-------|------|--------|
 | Speech-to-Text | Whisper | Transcription | [audio/speech_to_text.py](audio/speech_to_text.py) |
 | CTC Speech Recognition | Wav2Vec2 | Recognition | [audio/wav2vec2_inference.py](audio/wav2vec2_inference.py) |
+| Text-to-Speech | Chatterbox Multilingual | Speech synthesis (23 languages) | [audio/text_to_speech.py](audio/text_to_speech.py) |
 
 [See all audio examples →](audio/)
 
