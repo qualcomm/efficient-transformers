@@ -91,12 +91,7 @@ def _find_mdp_partition_order_violations(onnx_path: str, mdp_json: Dict[str, Any
     return violations
 
 
-def _drop_alias_prone_top_level_nodes(
-    onnx_path: str,
-    mdp_json: Dict[str, Any],
-    dropped_nodes: Set[str],
-    protected_nodes: Set[str],
-) -> int:
+def _drop_alias_prone_top_level_nodes(onnx_path: str, mdp_json: Dict[str, Any], dropped_nodes: Set[str]) -> int:
     """Drop alias-prone top-level nodes that conflict with /language_model siblings.
 
     In some subfunction compile flows, compiler IR may materialize dotted aliases
@@ -122,7 +117,7 @@ def _drop_alias_prone_top_level_nodes(
     for node_name in name_to_node:
         if not node_name.startswith("/") or node_name.startswith("/language_model/"):
             continue
-        if node_name in dropped_nodes or node_name in protected_nodes:
+        if node_name in dropped_nodes:
             continue
         if _is_decoder_layer_callsite(node_name):
             continue
@@ -163,12 +158,10 @@ def precheck_and_autofix_mdp_partition_order(
     onnx_path: str,
     mdp_json: Dict[str, Any],
     max_rounds: int = 8,
-    protected_nodes: Optional[Set[str]] = None,
 ) -> int:
     """Best-effort pre-check: scan all violation pairs and auto-fix before compile."""
     removed_total = 0
     dropped_nodes: Set[str] = set()
-    protected_nodes = protected_nodes or set()
     for _ in range(max_rounds):
         violations = _find_mdp_partition_order_violations(onnx_path=onnx_path, mdp_json=mdp_json)
         if not violations:
@@ -176,7 +169,6 @@ def precheck_and_autofix_mdp_partition_order(
                 onnx_path=onnx_path,
                 mdp_json=mdp_json,
                 dropped_nodes=dropped_nodes,
-                protected_nodes=protected_nodes,
             )
             if alias_removed <= 0:
                 break
@@ -201,7 +193,7 @@ def precheck_and_autofix_mdp_partition_order(
         trigger_consumer, trigger_producer = violations[0]
         for consumer_node, producer_node in violations:
             for candidate in (consumer_node, producer_node):
-                if not candidate or candidate in dropped_nodes or candidate in protected_nodes:
+                if not candidate or candidate in dropped_nodes:
                     continue
                 if _is_decoder_layer_callsite(candidate):
                     continue
@@ -569,76 +561,6 @@ def generate_disagg_mdp_partition_config(
     }
 
 
-def _repair_scoped_alias_partitioning(onnx_path: str, mdp_json: Dict[str, Any], compiler_dump: Dict[str, Any]) -> int:
-    """Align scoped aliases with the compiler dump partition."""
-    model = onnx.load(onnx_path, load_external_data=False)
-    names = {n.name for n in model.graph.node if n.name}
-    inlined_node_map, _ = _get_inlined_node_map(model)
-    for expanded_names in inlined_node_map.values():
-        names.update(expanded_names)
-    compiler_partition, compiler_position, compiler_nodes = {}, {}, set()
-    for partition_idx, partition in enumerate(compiler_dump.get("partitions", [])):
-        for node_pos, node_name in enumerate(partition.get("nodeList", [])):
-            if node_name:
-                compiler_nodes.add(node_name)
-                compiler_partition.setdefault(node_name, partition_idx)
-                compiler_position.setdefault(node_name, (partition_idx, node_pos))
-    current_partition = {}
-    for partition_idx, partition in enumerate(mdp_json.get("partitions", [])):
-        for node_name in partition.get("nodeList", []):
-            if node_name:
-                current_partition[node_name] = partition_idx
-    node_by_name = {node.name: node for node in model.graph.node if node.name}
-    consumers_by_value = {}
-    for node in model.graph.node:
-        if not node.name:
-            continue
-        for input_name in node.input:
-            if input_name:
-                consumers_by_value.setdefault(input_name, []).append(node.name)
-    repairs = []
-    for node_name, source_idx in current_partition.items():
-        if not node_name.startswith("/") or node_name.startswith("/language_model/"):
-            continue
-        peer_name = "/language_model" + node_name
-        target_idx = compiler_partition.get(node_name)
-        if peer_name not in names or peer_name in compiler_nodes or target_idx is None or target_idx == source_idx:
-            continue
-        node = node_by_name.get(node_name)
-        if node is not None:
-            consumer_partitions = {
-                current_partition[consumer_name]
-                for output_name in node.output
-                for consumer_name in consumers_by_value.get(output_name, [])
-                if consumer_name in current_partition
-            }
-            if any(consumer_idx < target_idx for consumer_idx in consumer_partitions):
-                logger.warning(
-                    "Skipping MDP alias repair for %r: compiler target Partition%d would follow "
-                    "an existing consumer partition",
-                    node_name,
-                    target_idx,
-                )
-                continue
-        repairs.append((node_name, source_idx, target_idx, compiler_position[node_name]))
-    for node_name, source_idx, target_idx, dump_pos in sorted(repairs, key=lambda item: item[3]):
-        mdp_json["partitions"][source_idx]["nodeList"].remove(node_name)
-        target_nodes = mdp_json["partitions"][target_idx]["nodeList"]
-        insert_at = len(target_nodes)
-        for idx, existing_name in enumerate(target_nodes):
-            if compiler_position.get(existing_name, (10**9, 10**9)) > dump_pos:
-                insert_at = idx
-                break
-        target_nodes.insert(insert_at, node_name)
-        logger.warning(
-            "MDP repaired compiler-scoped alias %r: moved from Partition%d to Partition%d",
-            node_name,
-            source_idx,
-            target_idx,
-        )
-    return len(repairs)
-
-
 def generate_disagg_mdp_intersection_config(
     onnx_path: str,
     compiler_dump_path: str,
@@ -654,9 +576,7 @@ def generate_disagg_mdp_intersection_config(
     QEff MDP, but the QEff MDP also contains nodes the compiler optimises away
     (constant-folded, etc.).  The intersection keeps only nodes that survive
     into the compiler IR, while preserving the **QEff MDP node order and
-    partition assignment** as the authoritative source of truth, except for
-    scoped aliases whose partition is aligned with the compiler dump when the
-    compiler materializes only the unscoped alias.
+    partition assignment** as the authoritative source of truth.
 
     Algorithm
     ---------
@@ -667,16 +587,12 @@ def generate_disagg_mdp_intersection_config(
        names the compiler will actually process.
     3. For each partition in the QEff MDP, retain only nodes whose names appear
        in the compiler dump set, in the original QEff order.
-    4. For scoped aliases with a compiler-only unscoped name, move the alias to
-       the compiler dump partition while preserving the compiler-relative order
-       needed by the compiler's partition validator.
 
     Why this is better than re-assigning compiler-dump nodes by heuristic:
     - Node order follows the ONNX topsort (compiler's SplitPlanMerge requires
       this); the compiler dump order is the compiler's internal IR order which
       may differ after constant-folding and other transforms.
-    - Partition boundaries are the same as the onnx strategy, except for the
-      narrow scoped-alias repair described above.
+    - Partition boundaries are the same as the onnx strategy — no divergence.
     - Every retained node is an exact-match hit in ``doManualPartitioning()``.
     - Output JSON is compact (~1-2 MB) because constant-folded nodes are pruned.
 
@@ -748,17 +664,6 @@ def generate_disagg_mdp_intersection_config(
             }
         )
 
-    mdp_json = {
-        "connections": qeff_mdp["connections"],
-        "partitions": partition_objs,
-    }
-
-    _repair_scoped_alias_partitioning(
-        onnx_path=onnx_path,
-        mdp_json=mdp_json,
-        compiler_dump=dump,
-    )
-
     logger.info(
         f"Intersection: {total_kept} nodes kept, {total_dropped} dropped "
         f"({total_dropped * 100 // max(qeff_total, 1)}% pruned by compiler)"
@@ -771,7 +676,10 @@ def generate_disagg_mdp_intersection_config(
             f"(compiler may have renamed them). Examples: {list(in_dump_not_qeff)[:5]}"
         )
 
-    return mdp_json
+    return {
+        "connections": qeff_mdp["connections"],
+        "partitions": partition_objs,
+    }
 
 
 def generate_disagg_mdp_config(
@@ -833,18 +741,10 @@ def generate_disagg_mdp_config(
             num_cores=num_cores,
         )
 
-    # Every intersection node was observed in the compiler dump and must remain assigned.
-    protected_nodes = (
-        {name for partition in mdp_ts_json["partitions"] for name in partition["nodeList"]}
-        if mdp_strategy is MdpStrategy.INTERSECTION
-        else set()
-    )
-
     # Best-effort pre-check for producer->consumer ordering in nodeList before compile.
     precheck_removed = precheck_and_autofix_mdp_partition_order(
         onnx_path=str(onnx_path),
         mdp_json=mdp_ts_json,
-        protected_nodes=protected_nodes,
     )
     if precheck_removed:
         logger.warning(

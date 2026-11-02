@@ -16,9 +16,6 @@ Run with: pytest tests/dynamo/ -m "not on_qaic" -n 4 -v
 
 from __future__ import annotations
 
-import random
-
-import numpy as np
 import pytest
 import torch
 
@@ -38,7 +35,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "dynamo_export: CPU-only dynamo export smoke and parity tests")
     config.addinivalue_line(
         "markers",
-        "dynamo_multi_device: dynamo multi-device (MDP) compile tests require MDP-capable QAIC setup",
+        "dynamo_multi_device: dynamo multi-device (MDP) compile tests — requires MDP-capable QAIC setup",
     )
 
 
@@ -62,8 +59,6 @@ def set_cpu_threads():
 
 @pytest.fixture(autouse=True)
 def set_deterministic_seed():
-    random.seed(42)
-    np.random.seed(42)
     torch.manual_seed(42)
 
 

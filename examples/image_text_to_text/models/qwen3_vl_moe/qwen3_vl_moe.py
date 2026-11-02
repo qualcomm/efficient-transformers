@@ -26,13 +26,16 @@ qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
     attn_implementation="eager",
     kv_offload=True,
     config=config,
-    weight_free=True,
+    # For CCL activation
+    # qaic_config={
+    #     "ccl_enabled": True,
+    # },
 )
 
 tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 processor = AutoProcessor.from_pretrained(model_id)
 ### use skip_vision=Ture, if want to run only text, or false ###
-skip_vision = True
+skip_vision = False
 
 # Compute-Context-Length (CCL) lists for prefill and decode. When both are None and
 # ccl_enabled=True, they are auto-generated from ctx_len.

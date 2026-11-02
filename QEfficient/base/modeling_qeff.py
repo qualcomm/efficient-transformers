@@ -822,15 +822,9 @@ class QEFFBaseModel(ABC):
             onnx_transforms = OnnxTransformPipeline(transforms=active_transforms)
             model, transformed = onnx_transforms.apply(model, **transform_kwargs)
 
-            # Nested Dynamo subfunctions use internal retained-state names inside
-            # their function bodies, but the top-level graph must expose the
-            # public names expected by the QAIC retained-state contract.
-            has_internal_retained_outputs = any(
-                "_InternalRetainedState" in output.name for output in model.graph.output
-            )
-            if has_internal_retained_outputs:
-                _restore_retained_state_output_names(model, output_names)
-            elif QEFFBaseModel._layerwise_active:
+            # Keep this strictly layerwise-scoped so regular non-layerwise export
+            # remains backward compatible.
+            if QEFFBaseModel._layerwise_active:
                 _restore_retained_state_output_names(model, output_names)
 
             transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]
@@ -1169,6 +1163,8 @@ class QEFFBaseModel(ABC):
         qaic_config: Optional[dict] = None,
         **compiler_options,
     ):
+        # Apply the transformations that are dependent on compilation parameters
+        moe_batch_size = compiler_options.pop("moe_batch_size", bs)
         model_config = getattr(self.model, "config", None) or getattr(
             getattr(self.model, "model", None), "config", None
         )
@@ -1177,15 +1173,25 @@ class QEFFBaseModel(ABC):
             num_devices,
             qaic_config,
         )
-        self._apply_attention_blocking_from_qaic(
-            ctx_len=ctx_len,
-            seq_len=seq_len,
-            bs=bs,
-            num_devices=num_devices,
-            qaic_config=qaic_config,
-            model_config=model_config,
-            **compiler_options,
-        )
+        if model_config:
+            blocking_config = build_transformer_blocking_config_for_transform(
+                model_config,
+                ctx_len=ctx_len,
+                seq_len=seq_len,
+                bs=bs,
+                num_devices=num_devices,
+                qaic_config=qaic_config,
+                **compiler_options,
+            )
+        else:
+            # without a model config, this is not a model that is possible to block
+            blocking_config = None
+
+        if blocking_config is not None:
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
+            self.hash_params["blocking_kwargs"] = blocking_config
+        else:
+            self.hash_params.pop("blocking_kwargs", None)
         gated_delta_config = build_gated_delta_config_for_transform(seq_len=seq_len, qaic_config=qaic_config)
         self.model, gated_delta_transformed = GatedDeltaConfigTransform.apply(
             self.model, gated_delta_config=gated_delta_config
@@ -1199,9 +1205,6 @@ class QEFFBaseModel(ABC):
         else:
             self.hash_params.pop("qaic_config", None)
         self.hash_params["num_replicate_kv_heads"] = effective_num_replicate_kv_heads
-
-        # Apply the transformations that are dependent on compilation parameters
-        moe_batch_size = compiler_options.pop("moe_batch_size", bs)
 
         num_cores = compiler_options.get("num_cores", compiler_options.get("aic_num_cores"))
         if num_cores is None:
@@ -1227,44 +1230,6 @@ class QEFFBaseModel(ABC):
             prefill_seq_len=prefill_seq_len,
             hash_params=self.hash_params,
         )
-
-    def _apply_attention_blocking_from_qaic(
-        self,
-        ctx_len: Optional[int] = None,
-        seq_len: Optional[int] = None,
-        bs: Optional[int] = 1,
-        num_devices: int = 1,
-        qaic_config: Optional[dict] = None,
-        model_config=None,
-        **compiler_options,
-    ):
-        """Attach attention blocking config derived from qaic_config."""
-        if model_config is None:
-            model_config = getattr(self.model, "config", None) or getattr(
-                getattr(self.model, "model", None), "config", None
-            )
-        if model_config:
-            blocking_config = build_transformer_blocking_config_for_transform(
-                model_config,
-                ctx_len=ctx_len,
-                seq_len=seq_len,
-                bs=bs,
-                num_devices=num_devices,
-                qaic_config=qaic_config,
-                **compiler_options,
-            )
-        else:
-            # without a model config, this is not a model that is possible to block
-            blocking_config = None
-
-        if blocking_config is not None:
-            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
-            self.hash_params["blocking_kwargs"] = blocking_config
-        else:
-            self.hash_params.pop("blocking_kwargs", None)
-        if qaic_config is not None:
-            self.hash_params["qaic_config"] = qaic_config
-        return blocking_config
 
     @dump_qconfig
     def _compile(
@@ -1449,11 +1414,13 @@ class QEFFBaseModel(ABC):
             logger.info("Using ONNX subfunctions for compilation.")
             command.append("-sub-functions")
 
-        custom_io_for_compiler = (
-            {key: value for key, value in custom_io.items() if "bfloat16" not in value} or None
-            if custom_io is not None
-            else None
+        model_in_bfloat16 = hasattr(self, "config") and (self.config.torch_dtype == torch.bfloat16)
+        io_name_prefix = ("past_", "pixel_values", "conv_", "recurrent_", "compressed_kv")
+        pkv_in_bfloat16 = (custom_io is not None) and any(
+            any(bfloat16_io_name in key for bfloat16_io_name in io_name_prefix) and "bfloat16" in value
+            for key, value in custom_io.items()
         )
+        custom_io_for_compiler = custom_io if not (model_in_bfloat16 and pkv_in_bfloat16) else None
 
         # MDP partition config selection (highest priority first):
         #   1. User-provided pre-built MDP JSON (mdp_load_partition_config).
@@ -1513,7 +1480,7 @@ class QEFFBaseModel(ABC):
         compile_hash_params = {
             "command": command,
             "specializations": specializations,
-            "custom_io": custom_io_for_compiler,
+            "custom_io": custom_io,
             "mdp_ts_num_devices": mdp_ts_num_devices,
             "mdp_num_partitions": mdp_num_partitions,
             "mdp_strategy": mdp_strategy.value,
@@ -1582,12 +1549,17 @@ class QEFFBaseModel(ABC):
             command.append(f"-network-specialization-config={specializations_json}")
 
         # Write custom_io.yaml file
-        if custom_io_for_compiler is not None:
+        if custom_io is not None:
             custom_io_yaml = compile_dir / "custom_io.yaml"
             with open(custom_io_yaml, "w") as fp:
-                for io_name, dtype in custom_io_for_compiler.items():
+                for io_name, dtype in custom_io.items():
                     fp.write(f" - IOName: {io_name}\n   Precision: {dtype}\n\n")
-            command.append(f"-custom-IO-list-file={custom_io_yaml}")
+            if model_in_bfloat16 and pkv_in_bfloat16:
+                logger.warning(
+                    "Model and Past KV types are both bfloat16. Custom IO list file will be ignored during compile."
+                )
+            else:
+                command.append(f"-custom-IO-list-file={custom_io_yaml}")
 
         command.append(f"-aic-binary-dir={qpc_path}")
         if artifacts:

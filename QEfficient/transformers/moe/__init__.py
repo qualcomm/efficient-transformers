@@ -31,7 +31,6 @@ from QEfficient.transformers.moe.flavours import (
 from QEfficient.transformers.moe.profiles import (
     SILU_GLU_PROFILE,
     MoEProfile,
-    gptoss_clamp,
     gptoss_clamped_glu_mlp,
     silu_glu_mlp,
 )
@@ -63,7 +62,6 @@ __all__ = [
     "cumsum_scatter_gather_update_expert_blocked",
     "SILU_GLU_PROFILE",
     "MoEProfile",
-    "gptoss_clamp",
     "gptoss_clamped_glu_mlp",
     "silu_glu_mlp",
     "MoEWeights",

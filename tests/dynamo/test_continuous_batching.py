@@ -5,7 +5,12 @@
 #
 # -----------------------------------------------------------------------------
 
-"""CPU-only Dynamo continuous-batching export tests."""
+"""
+Dynamo continuous-batching export tests.
+
+All tests run with dynamo=True and use_onnx_subfunctions=True.
+CPU-only. No QAIC hardware required.
+"""
 
 from __future__ import annotations
 
@@ -13,15 +18,13 @@ import pytest
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
-from .._helpers import (
-    DTYPE,
-    DYNAMO,
+from ._helpers import (
     DYNAMO_CAUSAL_LM_MODEL_IDS,
     assert_has_subfunctions,
     assert_retained_state_outputs,
     exported_onnx_path,
     load_hf_model,
-    skip_on_hf_model_load_error,
+    skip_on_model_fetch_error,
 )
 
 
@@ -31,17 +34,18 @@ from .._helpers import (
     "model_type,model_id", sorted(DYNAMO_CAUSAL_LM_MODEL_IDS.items()), ids=sorted(DYNAMO_CAUSAL_LM_MODEL_IDS)
 )
 def test_dynamo_cb_export(model_type, model_id, tmp_export_dir):
-    """Validate continuous-batching Dynamo export structure."""
+    """continuous_batching=True + dynamo=True and use_onnx_subfunctions=True."""
 
     try:
-        model_hf = load_hf_model(model_id, torch_dtype=DTYPE)
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, torch_dtype=DTYPE, continuous_batching=True)
+        model_hf = load_hf_model(model_id)
     except Exception as exc:
-        skip_on_hf_model_load_error(exc, model_id)
+        skip_on_model_fetch_error(exc, model_id)
+
+    qeff_model = QEFFAutoModelForCausalLM(model_hf, continuous_batching=True)
     onnx_path = exported_onnx_path(
         qeff_model.export(
             tmp_export_dir,
-            dynamo=DYNAMO,
+            dynamo=True,
             use_onnx_subfunctions=True,
             offload_pt_weights=False,
         )

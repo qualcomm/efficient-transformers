@@ -13,7 +13,7 @@ from transformers import AutoConfig, AutoProcessor, TextStreamer
 
 from QEfficient import QEFFAutoModelForImageTextToText
 
-model_id = "Qwen/Qwen3-VL-2B-Instruct"
+model_id = "Qwen/Qwen3-VL-32B-Instruct"
 config = AutoConfig.from_pretrained(model_id)
 
 # config.vision_config.depth = 9
@@ -25,7 +25,6 @@ qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
     attn_implementation="eager",
     kv_offload=True,
     config=config,
-    weight_free=True,
     # # For CCL activation
     # qaic_config={
     #     "ccl_enabled": True,
@@ -34,7 +33,7 @@ qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
 tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 processor = AutoProcessor.from_pretrained(model_id)
 ### use skip_vision=Ture, if want to run only text, else false ###
-skip_vision = False
+skip_vision = True
 
 # Compute-Context-Length (CCL) lists for prefill and decode. When both are None and
 # ccl_enabled=True, they are auto-generated from ctx_len.
@@ -104,7 +103,7 @@ else:
         mxint8_kv_cache=True,
         aic_enable_depth_first=True,
         mos=1,
-        use_onnx_subfunctions=True,
+        use_onnx_subfunctions=False,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
     )

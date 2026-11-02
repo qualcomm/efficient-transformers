@@ -98,10 +98,9 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 55
+EXPECTED_SCENARIO_COUNT = 52
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
-        "retain_full_kv",
         "height",
         "mdp_compiler_dump_path",
         "mdp_dump_partition_config",
@@ -740,120 +739,6 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
         },
     ),
     RegressionScenario(
-        name="qwen36-gdn-full-batch-decode-state-update",
-        stage="compile",
-        source_model_card="Qwen/Qwen3.6-35B-A3B",
-        tiny_model_id=None,
-        official_model_id="Qwen/Qwen3.6-35B-A3B",
-        summary="Qwen3.6 kv_headpar full-batch decode must update GDN retained state without CB gather/scatter",
-        model_api="image_text_to_text",
-        config={"compile_components": ("decode",)},
-        load_kwargs={
-            "attn_implementation": "eager",
-            "kv_offload": True,
-            "continuous_batching": True,
-            "dtype": torch.float16,
-            "text_num_hidden_layers": 8,
-        },
-        export_kwargs={
-            "prefill_only": False,
-            "prefill_seq_len": 1,
-            "use_onnx_subfunctions": True,
-            "offload_pt_weights": False,
-            "qaic_config": {
-                "blocking_mode": "kv_headpar",
-                "num_kv_blocks": 8,
-                "skip_kv": True,
-                "gdn_full_state_update": True,
-            },
-        },
-        compile_kwargs={
-            "batch_size": 1,
-            "full_batch_size": 1,
-            "kv_cache_batch_size": 1,
-            "prefill_seq_len": 1,
-            "ctx_len": 65536,
-            "height": 354,
-            "width": 536,
-            "num_cores": 16,
-            "num_devices": 2,
-            "mxfp6_matmul": True,
-            "mxint8_kv_cache": True,
-            "retain_full_kv": True,
-            "split_model_io": True,
-            "aic_enable_depth_first": False,
-            "user_tiled": True,
-            "prefill_only": False,
-            "skip_vision": True,
-            "use_onnx_subfunctions": True,
-            "kv_cache_prefix": "vllmKvCache",
-            "allow_mxint8_mdp_io": True,
-            "qaic_config": {
-                "blocking_mode": "kv_headpar",
-                "num_kv_blocks": 8,
-                "skip_kv": True,
-                "gdn_full_state_update": True,
-            },
-        },
-    ),
-    RegressionScenario(
-        name="qwen36-gdn-full-batch-decode-state-update-bsz4",
-        stage="compile",
-        source_model_card="Qwen/Qwen3.6-35B-A3B",
-        tiny_model_id=None,
-        official_model_id="Qwen/Qwen3.6-35B-A3B",
-        summary="Qwen3.6 kv_headpar full-batch decode must compile with batch size 4 GDN retained-state updates",
-        model_api="image_text_to_text",
-        config={"compile_components": ("decode",)},
-        load_kwargs={
-            "attn_implementation": "eager",
-            "kv_offload": True,
-            "continuous_batching": True,
-            "dtype": torch.float16,
-            "text_num_hidden_layers": 8,
-        },
-        export_kwargs={
-            "prefill_only": False,
-            "prefill_seq_len": 1,
-            "use_onnx_subfunctions": True,
-            "offload_pt_weights": False,
-            "qaic_config": {
-                "blocking_mode": "kv_headpar",
-                "num_kv_blocks": 8,
-                "skip_kv": True,
-                "gdn_full_state_update": True,
-            },
-        },
-        compile_kwargs={
-            "batch_size": 4,
-            "full_batch_size": 4,
-            "kv_cache_batch_size": 4,
-            "prefill_seq_len": 1,
-            "ctx_len": 65536,
-            "height": 354,
-            "width": 536,
-            "num_cores": 16,
-            "num_devices": 2,
-            "mxfp6_matmul": True,
-            "mxint8_kv_cache": True,
-            "retain_full_kv": True,
-            "split_model_io": True,
-            "aic_enable_depth_first": False,
-            "user_tiled": True,
-            "prefill_only": False,
-            "skip_vision": True,
-            "use_onnx_subfunctions": True,
-            "kv_cache_prefix": "vllmKvCache",
-            "allow_mxint8_mdp_io": True,
-            "qaic_config": {
-                "blocking_mode": "kv_headpar",
-                "num_kv_blocks": 8,
-                "skip_kv": True,
-                "gdn_full_state_update": True,
-            },
-        },
-    ),
-    RegressionScenario(
         name="qwen3vl-custom-io-subfunctions",
         stage="compile",
         source_model_card="Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -962,43 +847,6 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
             "batch_size": 1,
             "num_devices": 1,
             "num_cores": 16,
-        },
-    ),
-    RegressionScenario(
-        name="qwen35-moe-dual-alias-mdp-intersection",
-        stage="compile",
-        source_model_card="Qwen/Qwen3.5-35B-A3B",
-        tiny_model_id=None,
-        official_model_id="Qwen/Qwen3.5-35B-A3B",
-        summary="intersection MDP must retain scoped and unscoped compiler aliases",
-        model_api="image_text_to_text",
-        config={"compile_components": ("prefill",)},
-        load_kwargs={"dtype": torch.float16, "kv_offload": True, "layerwise": False},
-        export_kwargs={"offload_pt_weights": True},
-        compile_kwargs={
-            "prefill_seq_len": 64,
-            "ctx_len": 32768,
-            "height": 354,
-            "width": 536,
-            "batch_size": 1,
-            "num_devices": 2,
-            "num_cores": 16,
-            "mos": 1,
-            "mxfp6_matmul": True,
-            "mxint8_kv_cache": True,
-            "allow_mxint8_mdp_io": True,
-            "retain_full_kv": True,
-            "split_model_io": True,
-            "aic_enable_depth_first": True,
-            "prefill_only": True,
-            "enable_chunking": True,
-            "skip_vision": True,
-            "use_onnx_subfunctions": True,
-            "comp_ctx_lengths_prefill": [8192, 16384, 32736],
-            "kv_cache_prefix": "vllmKvCache",
-            "mdp_num_partitions": 2,
-            "mdp_strategy": "intersection",
-            "_mdp_intersection": True,
         },
     ),
     RegressionScenario(
@@ -1356,18 +1204,11 @@ def _load_vlm_model(scenario: RegressionScenario):
     load_kwargs.setdefault("cache_dir", os.environ["HF_HUB_CACHE"])
     # VLM constructors reject ``num_hidden_layers`` as a top-level argument.
     # Apply the reduced-layer setting to the nested text config instead, then
-    # allow unused official checkpoint layers to be ignored.
+    # allow the tiny checkpoint's layer-shaped weights to be loaded partially.
     num_hidden_layers = load_kwargs.pop("num_hidden_layers", -1)
-    text_num_hidden_layers = load_kwargs.pop("text_num_hidden_layers", -1)
-    if num_hidden_layers != -1 and text_num_hidden_layers != -1:
-        raise ValueError(f"{scenario.name}: choose num_hidden_layers or text_num_hidden_layers, not both")
-    if num_hidden_layers != -1 or text_num_hidden_layers != -1:
+    if num_hidden_layers != -1:
         config = AutoConfig.from_pretrained(model_id, **load_kwargs)
-        if text_num_hidden_layers != -1:
-            config.text_config.num_hidden_layers = text_num_hidden_layers
-            config.text_config.layer_types = config.text_config.layer_types[:text_num_hidden_layers]
-        else:
-            set_num_layers_vlm(config, num_hidden_layers)
+        set_num_layers_vlm(config, num_hidden_layers)
         load_kwargs["config"] = config
         load_kwargs.setdefault("ignore_mismatched_sizes", True)
     return QEFFAutoModelForImageTextToText.from_pretrained(model_id, **load_kwargs)
@@ -1502,21 +1343,33 @@ def _assert_compile_kwargs_supported(
         assert path.is_file(), f"{scenario.name}: node_precision_info YAML does not exist: {path}"
 
 
-# MDP intersection reproducers use the production compile path's automatic dump.
+# MDP intersection reproducers generate their compiler dump locally.
 def _compile_with_optional_mdp(qeff_model, scenario: RegressionScenario, compile_dir: Path):
-    """Compile once, enabling the production intersection flow when requested.
+    """Compile once or run the local two-pass MDP intersection flow.
 
-    ``QEFFBaseModel._compile`` generates and consumes the compiler dump internally
-    for ``mdp_strategy="intersection"``. Reproducer helpers must not add a second,
-    unused public compile pass.
+    The helper replaces reporter-machine MDP JSON paths with artifacts generated
+    inside pytest's temp directory, following the Qwen3-VL MDP compile example.
     """
     compile_kwargs = dict(scenario.compile_kwargs)
     use_intersection = compile_kwargs.pop("_mdp_intersection", False)
-    if use_intersection:
-        compile_kwargs["mdp_strategy"] = "intersection"
-        compile_kwargs.pop("mdp_compiler_dump_path", None)
-    _assert_compile_kwargs_supported(qeff_model, scenario, compile_kwargs)
-    return qeff_model.compile(compile_dir=compile_dir, **compile_kwargs)
+    if not use_intersection:
+        _assert_compile_kwargs_supported(qeff_model, scenario, compile_kwargs)
+        return qeff_model.compile(compile_dir=compile_dir, **compile_kwargs)
+
+    dump_path = compile_dir / "mdp_compiler_dump.json"
+    (compile_dir / "mdp_dump").mkdir(parents=True, exist_ok=True)
+    (compile_dir / "mdp_intersection").mkdir(parents=True, exist_ok=True)
+    dump_kwargs = dict(compile_kwargs)
+    dump_kwargs.pop("mdp_num_partitions", None)
+    dump_kwargs.pop("mdp_strategy", None)
+    _assert_compile_kwargs_supported(qeff_model, scenario, {**dump_kwargs, "mdp_dump_partition_config": str(dump_path)})
+    qeff_model.compile(compile_dir=compile_dir / "mdp_dump", mdp_dump_partition_config=str(dump_path), **dump_kwargs)
+
+    final_kwargs = dict(compile_kwargs)
+    final_kwargs["mdp_strategy"] = "intersection"
+    final_kwargs["mdp_compiler_dump_path"] = str(dump_path)
+    _assert_compile_kwargs_supported(qeff_model, scenario, final_kwargs)
+    return qeff_model.compile(compile_dir=compile_dir / "mdp_intersection", **final_kwargs)
 
 
 # Compile reports use QEfficient's compile API and validate the produced QPC.
@@ -1557,14 +1410,10 @@ def _run_vlm_compile_test(scenario: RegressionScenario, tmp_path: Path) -> None:
     export_dir = tmp_path / scenario.name / "export"
     export_kwargs = dict(scenario.export_kwargs)
     export_kwargs.setdefault("offload_pt_weights", False)
-    compile_components = tuple(scenario.config.get("compile_components", ("vision", "prefill", "decode")))
-    assert compile_components in {("vision", "prefill", "decode"), ("prefill",), ("decode",)}, (
-        f"{scenario.name}: unsupported VLM compile component sequence {compile_components}"
-    )
     # Export must use the same component selection as compile.  In particular,
     # skip_vision prevents the tiny language-only reproducer from tracing the
     # unsupported vision rotary-input shape.
-    skip_vision = bool(scenario.compile_kwargs.get("skip_vision", False)) or "vision" not in compile_components
+    skip_vision = bool(scenario.compile_kwargs.get("skip_vision", False))
     skip_lang = bool(scenario.compile_kwargs.get("skip_lang", False))
     onnx_paths = qeff_model.export(
         export_dir=export_dir,
@@ -1577,23 +1426,6 @@ def _run_vlm_compile_test(scenario: RegressionScenario, tmp_path: Path) -> None:
     use_intersection = common_kwargs.pop("_mdp_intersection", False)
     common_kwargs.pop("skip_vision", None)
     common_kwargs.pop("skip_lang", None)
-    if compile_components == ("decode",):
-        decode_kwargs = {**common_kwargs, "prefill_only": False, "prefill_seq_len": 1}
-        for prefill_only_key in ("enable_chunking", "mdp_num_partitions", "mdp_strategy"):
-            decode_kwargs.pop(prefill_only_key, None)
-        _assert_compile_kwargs_supported(qeff_model, scenario, {**decode_kwargs, "skip_vision": True})
-        decode_qpcs = qeff_model.compile(
-            compile_dir=compile_dir / "lang_decode",
-            vision_onnx_path=vision_onnx_path,
-            lang_onnx_path=lang_onnx_path,
-            skip_vision=True,
-            **decode_kwargs,
-        )
-        for qpc_path in decode_qpcs.values():
-            _qpc_succeeded(qpc_path)
-        _record_result(scenario, "PASSED", f"VLM decode QPCs: {decode_qpcs}")
-        return
-
     vision_kwargs = dict(common_kwargs)
     for language_only_key in (
         "prefill_only",
@@ -1608,7 +1440,7 @@ def _run_vlm_compile_test(scenario: RegressionScenario, tmp_path: Path) -> None:
     vision_qpcs = {}
     # Do not call compile() for a component explicitly excluded by the
     # scenario: omitting its ONNX path would make QEff re-export that component.
-    if "vision" in compile_components and not skip_vision:
+    if not skip_vision:
         _assert_compile_kwargs_supported(qeff_model, scenario, {**vision_kwargs, "skip_lang": True})
         vision_qpcs = qeff_model.compile(
             compile_dir=compile_dir / "vision",
@@ -1620,8 +1452,25 @@ def _run_vlm_compile_test(scenario: RegressionScenario, tmp_path: Path) -> None:
     prefill_kwargs = dict(common_kwargs)
     prefill_kwargs["prefill_only"] = True
     if use_intersection:
+        dump_path = compile_dir / "lang_prefill_mdp_dump.json"
+        (compile_dir / "lang_prefill_mdp_dump").mkdir(parents=True, exist_ok=True)
+        (compile_dir / "lang_prefill").mkdir(parents=True, exist_ok=True)
+        dump_kwargs = dict(prefill_kwargs)
+        dump_kwargs.pop("mdp_num_partitions", None)
+        dump_kwargs.pop("mdp_strategy", None)
+        _assert_compile_kwargs_supported(
+            qeff_model, scenario, {**dump_kwargs, "skip_vision": True, "mdp_dump_partition_config": str(dump_path)}
+        )
+        qeff_model.compile(
+            compile_dir=compile_dir / "lang_prefill_mdp_dump",
+            vision_onnx_path=vision_onnx_path,
+            lang_onnx_path=lang_onnx_path,
+            skip_vision=True,
+            mdp_dump_partition_config=str(dump_path),
+            **dump_kwargs,
+        )
         prefill_kwargs["mdp_strategy"] = "intersection"
-        prefill_kwargs.pop("mdp_compiler_dump_path", None)
+        prefill_kwargs["mdp_compiler_dump_path"] = str(dump_path)
     _assert_compile_kwargs_supported(qeff_model, scenario, {**prefill_kwargs, "skip_vision": True})
     prefill_qpcs = qeff_model.compile(
         compile_dir=compile_dir / "lang_prefill",
@@ -1630,11 +1479,6 @@ def _run_vlm_compile_test(scenario: RegressionScenario, tmp_path: Path) -> None:
         skip_vision=True,
         **prefill_kwargs,
     )
-    if compile_components == ("prefill",):
-        for qpc_path in prefill_qpcs.values():
-            _qpc_succeeded(qpc_path)
-        _record_result(scenario, "PASSED", f"VLM prefill QPCs: {prefill_qpcs}")
-        return
     decode_kwargs = {**common_kwargs, "prefill_seq_len": 1}
     for prefill_only_key in ("prefill_only", "enable_chunking", "mdp_num_partitions", "mdp_strategy"):
         decode_kwargs.pop(prefill_only_key, None)
@@ -1792,187 +1636,3 @@ def test_active_scenarios_are_real_stage_verdicts() -> None:
             **scenario.inference_kwargs,
         }
         assert not _contains_external_path(combined)
-
-
-@pytest.mark.parametrize(
-    "compile_components, expected_skip_vision, expected_compile_calls",
-    [
-        (("prefill",), True, [{"skip_vision": True, "skip_lang": False}]),
-        (("decode",), True, [{"skip_vision": True, "skip_lang": False}]),
-        (
-            ("vision", "prefill", "decode"),
-            False,
-            [
-                {"skip_vision": False, "skip_lang": True},
-                {"skip_vision": True, "skip_lang": False},
-                {"skip_vision": True, "skip_lang": False},
-            ],
-        ),
-    ],
-    ids=("prefill", "decode", "all-components"),
-)
-def test_vlm_component_selection_controls_export_and_compile(
-    monkeypatch,
-    tmp_path: Path,
-    compile_components: tuple[str, ...],
-    expected_skip_vision: bool,
-    expected_compile_calls: list[dict[str, bool]],
-) -> None:
-    """VLM component selection must control both export and compilation."""
-    export_calls = []
-    compile_calls = []
-
-    class FakeQEffModel:
-        def export(self, export_dir, skip_vision=False, skip_lang=False, **kwargs):
-            export_calls.append({"skip_vision": skip_vision, "skip_lang": skip_lang})
-            return Path(export_dir) / "vision.onnx", Path(export_dir) / "language.onnx"
-
-        def compile(
-            self,
-            compile_dir,
-            *,
-            prefill_seq_len=None,
-            prefill_only=None,
-            skip_vision=False,
-            skip_lang=False,
-            **kwargs,
-        ):
-            compile_calls.append({"skip_vision": skip_vision, "skip_lang": skip_lang})
-            qpc_path = Path(compile_dir) / "qpc"
-            qpc_path.mkdir(parents=True)
-            (qpc_path / "programqpc.bin").touch()
-            return {"qpc": qpc_path}
-
-    scenario = RegressionScenario(
-        name="prefill-only-component-selection",
-        stage="compile",
-        source_model_card="synthetic VLM",
-        tiny_model_id="synthetic-vlm",
-        summary="prefill-only VLM compile excludes vision",
-        model_api="image_text_to_text",
-        config={"compile_components": compile_components},
-        compile_kwargs={"prefill_seq_len": 64},
-    )
-    monkeypatch.setattr(sys.modules[__name__], "_load_vlm_model", lambda unused_scenario: FakeQEffModel())
-    monkeypatch.setattr(sys.modules[__name__], "_record_result", lambda *args, **kwargs: None)
-
-    _run_vlm_compile_test(scenario, tmp_path)
-
-    assert export_calls == [{"skip_vision": expected_skip_vision, "skip_lang": False}]
-    assert compile_calls == expected_compile_calls
-
-
-def test_vlm_prefill_only_intersection_uses_production_auto_dump(monkeypatch, tmp_path: Path) -> None:
-    """Prefill-only intersection delegates one compile to the production auto-dump path."""
-    export_calls = []
-    compile_calls = []
-
-    class FakeQEffModel:
-        def export(self, export_dir, skip_vision=False, skip_lang=False, **kwargs):
-            export_calls.append({"skip_vision": skip_vision, "skip_lang": skip_lang})
-            return Path(export_dir) / "vision.onnx", Path(export_dir) / "language.onnx"
-
-        def compile(
-            self,
-            compile_dir,
-            *,
-            prefill_seq_len=None,
-            prefill_only=None,
-            skip_vision=False,
-            skip_lang=False,
-            mdp_strategy=None,
-            **kwargs,
-        ):
-            compile_calls.append(
-                {
-                    "skip_vision": skip_vision,
-                    "skip_lang": skip_lang,
-                    "prefill_only": prefill_only,
-                    "mdp_strategy": mdp_strategy,
-                }
-            )
-            qpc_path = Path(compile_dir) / "qpc"
-            qpc_path.mkdir(parents=True)
-            (qpc_path / "programqpc.bin").touch()
-            return {"qpc": qpc_path}
-
-    scenario = RegressionScenario(
-        name="prefill-only-intersection-component-selection",
-        stage="compile",
-        source_model_card="synthetic VLM",
-        tiny_model_id="synthetic-vlm",
-        summary="prefill-only intersection excludes vision and decode",
-        model_api="image_text_to_text",
-        config={"compile_components": ("prefill",)},
-        compile_kwargs={
-            "prefill_seq_len": 64,
-            "mdp_num_partitions": 2,
-            "mdp_strategy": "intersection",
-            "_mdp_intersection": True,
-        },
-    )
-    monkeypatch.setattr(sys.modules[__name__], "_load_vlm_model", lambda unused_scenario: FakeQEffModel())
-    monkeypatch.setattr(sys.modules[__name__], "_record_result", lambda *args, **kwargs: None)
-
-    _run_vlm_compile_test(scenario, tmp_path)
-
-    assert export_calls == [{"skip_vision": True, "skip_lang": False}]
-    assert compile_calls == [
-        {
-            "skip_vision": True,
-            "skip_lang": False,
-            "prefill_only": True,
-            "mdp_strategy": "intersection",
-        },
-    ]
-
-
-def test_causal_intersection_uses_production_auto_dump(tmp_path: Path) -> None:
-    """Causal reproducers also delegate one compile to the production auto-dump path."""
-    compile_calls = []
-
-    class FakeQEffModel:
-        def compile(
-            self,
-            compile_dir,
-            *,
-            prefill_seq_len=None,
-            mdp_num_partitions=None,
-            mdp_strategy=None,
-            **kwargs,
-        ):
-            compile_calls.append(
-                {
-                    "compile_dir": compile_dir,
-                    "prefill_seq_len": prefill_seq_len,
-                    "mdp_num_partitions": mdp_num_partitions,
-                    "mdp_strategy": mdp_strategy,
-                    **kwargs,
-                }
-            )
-            return compile_dir / "qpc"
-
-    scenario = RegressionScenario(
-        name="causal-intersection-auto-dump",
-        stage="compile",
-        source_model_card="synthetic causal model",
-        tiny_model_id="synthetic-causal",
-        summary="intersection uses the production auto-dump flow",
-        compile_kwargs={
-            "prefill_seq_len": 64,
-            "mdp_num_partitions": 2,
-            "_mdp_intersection": True,
-        },
-    )
-
-    result = _compile_with_optional_mdp(FakeQEffModel(), scenario, tmp_path)
-
-    assert result == tmp_path / "qpc"
-    assert compile_calls == [
-        {
-            "compile_dir": tmp_path,
-            "prefill_seq_len": 64,
-            "mdp_num_partitions": 2,
-            "mdp_strategy": "intersection",
-        }
-    ]
