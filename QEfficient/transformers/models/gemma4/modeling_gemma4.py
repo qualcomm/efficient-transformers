@@ -1350,16 +1350,17 @@ class QEffGemma4EncoderWrapper(nn.Module):
             )
         hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0.0)
         if hidden_states.shape[1] != output_length:
-            hidden_states, pooler_mask = self._avg_pool_by_positions_static_kernel(
+            hidden_states, _ = self._avg_pool_by_positions_static_kernel(
                 hidden_states=hidden_states,
                 pixel_position_ids=image_position_ids,
                 length=output_length,
             )
-        hidden_states = hidden_states * vision_tower.pooler.root_hidden_size
         if vision_tower.config.standardize:
             std_bias = vision_tower.std_bias.to(hidden_states.device)
             std_scale = vision_tower.std_scale.to(hidden_states.device)
-            hidden_states = (hidden_states - std_bias) * std_scale
+            hidden_states = hidden_states * (vision_tower.pooler.root_hidden_size * std_scale) - std_bias * std_scale
+        else:
+            hidden_states = hidden_states * vision_tower.pooler.root_hidden_size
 
         vision_embeds = self.model.model.embed_vision(inputs_embeds=hidden_states)
         if vision_embeds.dim() == 2:
@@ -1369,7 +1370,6 @@ class QEffGemma4EncoderWrapper(nn.Module):
         # Gemma4 uses vision_config.default_output_length/image_seq_length
         # image placeholders (280), while the vision pooler may emit extra
         # padded bins for the max-patch canvas.
-        del pooler_mask
         return vision_embeds[:, : self.mm_tokens_per_image, :]
 
 
