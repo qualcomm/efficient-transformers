@@ -179,6 +179,11 @@ WAV2VEC2_MAX_SEQ_LEN = 480000  # 30 seconds of audio at 16 kHz sampling rate (16
 
 # Chatterbox (text-to-speech) Constants
 CHATTERBOX_T3_CFG_BATCH_SIZE = 2  # conditional + unconditional row for classifier-free guidance
+CHATTERBOX_MEL_FRAMES_PER_TOKEN = 2
+CHATTERBOX_MEL_CHANNELS = 80
+CHATTERBOX_HIFT_SAMPLES_PER_MEL_FRAME = 480  # prod(upsample_rates) * hop length = 8 * 5 * 3 * 4
+CHATTERBOX_ONNX_EXPORT_TOKENS = 64
+CHATTERBOX_ONNX_EXPORT_MEL_FRAMES = 64
 
 # Qwen2_5_vl Constants
 QWEN2_5_VL_HEIGHT = 354

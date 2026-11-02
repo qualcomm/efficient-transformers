@@ -6195,6 +6195,109 @@ def test_chatterbox_t3_cpu_parity_and_export(tmp_path):
 
 
 @pytest.mark.llm_model
+def test_chatterbox_s3gen_cpu_parity_and_export(tmp_path):
+    pytest.importorskip("chatterbox")
+    from chatterbox.models.s3gen.decoder import ConditionalDecoder
+    from chatterbox.models.s3gen.f0_predictor import ConvRNNF0Predictor
+    from chatterbox.models.s3gen.flow import CausalMaskedDiffWithXvec
+    from chatterbox.models.s3gen.flow_matching import CausalConditionalCFM
+    from chatterbox.models.s3gen.hifigan import HiFTGenerator
+    from chatterbox.models.s3gen.transformer.upsample_encoder import UpsampleConformerEncoder
+
+    from QEfficient.tts.models.chatterbox.modeling_chatterbox import (
+        QEffHiFTDecodeWrapper,
+        QEffS3GenFlowEncoderWrapper,
+    )
+    from QEfficient.tts.pipelines.pipeline_module import (
+        QEffHiFTDecoder,
+        QEffHiFTF0Predictor,
+        QEffS3GenFlowEncoder,
+        QEffS3GenFlowEstimator,
+    )
+
+    torch.manual_seed(0)
+    encoder = UpsampleConformerEncoder(
+        linear_units=256, num_blocks=1, dropout_rate=0.0, positional_dropout_rate=0.0, attention_dropout_rate=0.0
+    )
+    estimator = ConditionalDecoder(n_blocks=1, num_mid_blocks=1, num_heads=2, attention_head_dim=32)
+    flow = CausalMaskedDiffWithXvec(encoder=encoder, decoder=CausalConditionalCFM(spk_emb_dim=80, estimator=estimator))
+    hift = HiFTGenerator(
+        sampling_rate=24000,
+        base_channels=64,
+        upsample_rates=[8, 5, 3],
+        upsample_kernel_sizes=[16, 11, 7],
+        source_resblock_kernel_sizes=[7, 7, 11],
+        source_resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        f0_predictor=ConvRNNF0Predictor(cond_channels=64),
+    )
+    for module in (flow, hift):
+        module.eval()
+
+    # Upstream references, computed before the QEff transforms swap classes in place
+    num_tokens, token_bucket, num_mel = 20, 32, 16
+    tokens = torch.randint(0, 6561, (1, num_tokens))
+    mel, source = torch.randn(1, 80, num_mel), 0.1 * torch.randn(1, 1, num_mel * 480)
+    with torch.no_grad():
+        hidden, _ = flow.encoder(flow.input_embedding(tokens), torch.tensor([num_tokens]))
+        ref_mu = flow.encoder_proj(hidden).transpose(1, 2).numpy()
+        ref_f0 = hift.f0_predictor(mel).numpy()
+        ref_wav = hift.decode(x=mel, s=source).numpy()
+
+    # Flow encoder: the padded bucket reproduces the unpadded upstream output in the valid frames
+    flow_encoder = QEffS3GenFlowEncoder(QEffS3GenFlowEncoderWrapper(flow))
+    padded_tokens = torch.nn.functional.pad(tokens, (0, token_bucket - num_tokens))
+    with torch.no_grad():
+        mu, _ = flow_encoder.model(padded_tokens, torch.tensor([num_tokens]))
+    assert np.allclose(mu.numpy()[..., : 2 * num_tokens], ref_mu, atol=1e-4)
+    inputs, dynamic_axes, output_names = flow_encoder.get_onnx_params(num_tokens=token_bucket)
+    session = _ort_session(
+        _exported_onnx_path(flow_encoder.export(inputs, output_names, dynamic_axes, export_dir=tmp_path / "enc"))
+    )
+    ort_mu = session.run(None, {"token": padded_tokens.numpy(), "token_len": np.array([num_tokens])})[0]
+    assert np.allclose(ort_mu, mu.numpy(), atol=1e-4)
+
+    # Flow estimator: exported as-is
+    flow_estimator = QEffS3GenFlowEstimator(estimator)
+    inputs, dynamic_axes, output_names = flow_estimator.get_onnx_params(num_frames=64)
+    feed = {name: value if name == "mask" else torch.randn_like(value) for name, value in inputs.items()}
+    with torch.no_grad():
+        ref_dxdt = estimator(**feed).numpy()
+    session = _ort_session(
+        _exported_onnx_path(flow_estimator.export(inputs, output_names, dynamic_axes, export_dir=tmp_path / "est"))
+    )
+    assert np.allclose(session.run(None, {k: v.numpy() for k, v in feed.items()})[0], ref_dxdt, atol=1e-4)
+
+    # HiFT: folded weight_norm, convolutional STFT/iSTFT and 2D ConvTranspose equal the upstream vocoder
+    hift_f0 = QEffHiFTF0Predictor(hift.f0_predictor)
+    hift_decoder = QEffHiFTDecoder(QEffHiFTDecodeWrapper(hift))
+    with torch.no_grad():
+        f0 = hift_f0.model(mel).numpy()
+        wav = hift_decoder.model(mel, source).numpy()
+    assert np.allclose(f0, ref_f0, atol=1e-5)
+    assert np.allclose(wav, ref_wav, atol=1e-5)
+    # Padded to a bucket, the non-causal HiFT convolutions only reach the last few frames from the padding
+    mel_bucket, tail_frames, samples_per_frame = 2 * num_mel, 5, 480
+    with torch.no_grad():
+        f0_padded = hift_f0.model(torch.nn.functional.pad(mel, (0, mel_bucket - num_mel))).numpy()
+        wav_padded = hift_decoder.model(
+            torch.nn.functional.pad(mel, (0, mel_bucket - num_mel)),
+            torch.nn.functional.pad(source, (0, (mel_bucket - num_mel) * samples_per_frame)),
+        ).numpy()
+    assert np.allclose(f0_padded[:, : num_mel - tail_frames], ref_f0[:, : num_mel - tail_frames], atol=1e-5)
+    valid = (num_mel - tail_frames) * samples_per_frame
+    assert np.allclose(wav_padded[:, :valid], ref_wav[:, :valid], atol=1e-4)
+    for qeff_model, feed, expected, name in (
+        (hift_f0, {"x": mel}, f0, "f0"),
+        (hift_decoder, {"mel": mel, "source": source}, wav, "decoder"),
+    ):
+        inputs, dynamic_axes, output_names = qeff_model.get_onnx_params(num_mel_frames=num_mel)
+        session = _ort_session(
+            _exported_onnx_path(qeff_model.export(inputs, output_names, dynamic_axes, export_dir=tmp_path / name))
+        )
+        assert np.allclose(session.run(None, {k: v.numpy() for k, v in feed.items()})[0], expected, atol=1e-4)
+
+
+@pytest.mark.llm_model
 def test_chatterbox_t3_subfunction_export(tmp_path):
     from QEfficient.tts.models.chatterbox.modeling_t3 import QEffChatterboxT3DecoderWrapper
     from QEfficient.tts.pipelines.pipeline_t3 import QEffChatterboxT3
