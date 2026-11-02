@@ -177,6 +177,9 @@ ROPE_DIM = 64
 # Wav2Vec2 Constant
 WAV2VEC2_MAX_SEQ_LEN = 480000  # 30 seconds of audio at 16 kHz sampling rate (16,000 samples/sec × 30 sec)
 
+# Chatterbox (text-to-speech) Constants
+CHATTERBOX_T3_CFG_BATCH_SIZE = 2  # conditional + unconditional row for classifier-free guidance
+
 # Qwen2_5_vl Constants
 QWEN2_5_VL_HEIGHT = 354
 QWEN2_5_VL_WIDTH = 536

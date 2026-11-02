@@ -6104,3 +6104,159 @@ def test_qaic_input_dumper_records_kv_slice_handoff_inputs(tmp_path):
     assert slice_configs[0]["buffers"][0]["name"] == "past_key.0"
     kv_path = dumper.session_dir / slice_configs[0]["buffers"][0]["path"]
     assert kv_path.stat().st_size == kv_cache.nbytes
+
+
+def _tiny_chatterbox_t3():
+    """Tiny T3: a Llama backbone driven by inputs_embeds plus a speech head, with the real T3's llama3 RoPE scaling."""
+    from transformers import LlamaModel
+
+    torch.manual_seed(0)
+    config = LlamaConfig(
+        vocab_size=8,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=16,
+        max_position_embeddings=256,
+        rope_scaling={
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+        },
+    )
+    return SimpleNamespace(tfmr=LlamaModel(config).eval(), speech_head=nn.Linear(64, 32, bias=False), cfg=config)
+
+
+def _chatterbox_t3_run(step_fn, prefill: torch.Tensor, steps, chunk: int):
+    """Chunked prefill as the pipeline runs it (padded positions = -1), then one decode call per step; returns the
+    last-position logits."""
+    length = prefill.shape[1]
+    num_chunks = -(-length // chunk)
+    padded = torch.nn.functional.pad(prefill, (0, 0, 0, num_chunks * chunk - length))
+    positions = torch.where(torch.arange(num_chunks * chunk) < length, torch.arange(num_chunks * chunk), -1).repeat(
+        2, 1
+    )
+    for i in range(num_chunks):
+        window = slice(i * chunk, (i + 1) * chunk)
+        prefill_logits = step_fn(padded[:, window], positions[:, window])
+    logits = [prefill_logits]
+    for i, embed in enumerate(steps):
+        logits.append(step_fn(embed, torch.full((2, 1), length + i)))
+    return np.concatenate([np.asarray(item)[:, -1] for item in logits])
+
+
+@pytest.mark.llm_model
+def test_chatterbox_t3_cpu_parity_and_export(tmp_path):
+    from QEfficient.tts.models.chatterbox.modeling_t3 import QEffChatterboxT3DecoderWrapper
+    from QEfficient.tts.pipelines.pipeline_t3 import QEffChatterboxT3
+
+    t3 = _tiny_chatterbox_t3()
+    prefill, steps = torch.randn(2, 13, 64), [torch.randn(2, 1, 64) for _ in range(4)]  # 13 tokens: two prefill chunks
+
+    with torch.no_grad():
+        outputs = t3.tfmr(inputs_embeds=prefill, use_cache=True)
+        hf_logits = [t3.speech_head(outputs.last_hidden_state[:, -1:])]
+        for embed in steps:
+            outputs = t3.tfmr(inputs_embeds=embed, past_key_values=outputs.past_key_values, use_cache=True)
+            hf_logits.append(t3.speech_head(outputs.last_hidden_state[:, -1:]))
+    hf_logits = np.concatenate([item.numpy()[:, -1] for item in hf_logits])
+
+    qeff_model = QEffChatterboxT3(QEffChatterboxT3DecoderWrapper(t3))
+    inputs, dynamic_axes, output_names = qeff_model.get_onnx_params(batch_size=2, seq_len=8, ctx_len=32)
+    past = inputs["past_key_values"]
+
+    def qeff_step(embeds, positions):
+        nonlocal past
+        with torch.no_grad():
+            logits, past = qeff_model.model(embeds, positions, past)
+        return logits.numpy()
+
+    qeff_logits = _chatterbox_t3_run(qeff_step, prefill, steps, chunk=8)
+    assert np.allclose(hf_logits, qeff_logits, atol=1e-4)
+
+    onnx_path = _exported_onnx_path(qeff_model.export(inputs, output_names, dynamic_axes, export_dir=tmp_path))
+    session = _ort_session(onnx_path)
+    output_names = [output.name for output in session.get_outputs()]
+    kv = {i.name: np.zeros((2, 4, 32, 16), np.float32) for i in session.get_inputs() if i.name.startswith("past_")}
+
+    def ort_step(embeds, positions):
+        outputs = session.run(None, {"inputs_embeds": embeds.numpy(), "position_ids": positions.numpy(), **kv})
+        for name, value in zip(output_names[1:], outputs[1:]):
+            kv[name.replace("_RetainedState", "")] = value
+        return outputs[0]
+
+    ort_logits = _chatterbox_t3_run(ort_step, prefill, steps, chunk=8)
+    assert np.allclose(hf_logits, ort_logits, atol=1e-4)
+    assert (hf_logits.argmax(-1) == ort_logits.argmax(-1)).all()
+
+
+@pytest.mark.llm_model
+def test_chatterbox_t3_subfunction_export(tmp_path):
+    from QEfficient.tts.models.chatterbox.modeling_t3 import QEffChatterboxT3DecoderWrapper
+    from QEfficient.tts.pipelines.pipeline_t3 import QEffChatterboxT3
+
+    t3 = _tiny_chatterbox_t3()
+    prefill = torch.randn(2, 7, 64)
+    with torch.no_grad():
+        hf_logits = t3.speech_head(t3.tfmr(inputs_embeds=prefill).last_hidden_state[:, -1:]).numpy()
+
+    qeff_model = QEffChatterboxT3(QEffChatterboxT3DecoderWrapper(t3))
+    inputs, dynamic_axes, output_names = qeff_model.get_onnx_params(batch_size=2, seq_len=8, ctx_len=32)
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(inputs, output_names, dynamic_axes, export_dir=tmp_path, use_onnx_subfunctions=True)
+    )
+    onnx_model = onnx.load(onnx_path, load_external_data=False)
+    assert _count_decoder_block_subfunctions(onnx_model, qeff_model) > 0
+
+    session = _ort_session(onnx_path)
+    kv = {i.name: np.zeros((2, 4, 32, 16), np.float32) for i in session.get_inputs() if i.name.startswith("past_")}
+    padded = torch.nn.functional.pad(prefill, (0, 0, 0, 1))
+    positions = torch.tensor([[0, 1, 2, 3, 4, 5, 6, -1]] * 2)
+    ort_logits = session.run(None, {"inputs_embeds": padded.numpy(), "position_ids": positions.numpy(), **kv})[0]
+    assert np.allclose(hf_logits, ort_logits, atol=1e-4)
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize("use_onnx_subfunctions", [False, True])
+@pytest.mark.parametrize("mxint8_kv_cache", [False, True])
+def test_chatterbox_t3_compile_custom_io(tmp_path, monkeypatch, use_onnx_subfunctions, mxint8_kv_cache):
+    """The KV cache stays on the device in fp16 (or MXINT8): every past_* input and retained-state output gets that
+    dtype once the base compile maps the names onto the exported graph, and the graph is compiled to fp16."""
+    from QEfficient.tts.models.chatterbox.modeling_t3 import QEffChatterboxT3DecoderWrapper
+    from QEfficient.tts.pipelines.pipeline_t3 import QEffChatterboxT3
+
+    qeff_model = QEffChatterboxT3(QEffChatterboxT3DecoderWrapper(_tiny_chatterbox_t3()))
+    inputs, dynamic_axes, output_names = qeff_model.get_onnx_params(batch_size=2, seq_len=8, ctx_len=32)
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(
+            inputs, output_names, dynamic_axes, export_dir=tmp_path, use_onnx_subfunctions=use_onnx_subfunctions
+        )
+    )
+    captured = {}
+    monkeypatch.setattr(qeff_model, "_compile", lambda **kwargs: captured.update(kwargs))
+    qeff_model.compile(
+        specializations=[{"batch_size": 2, "seq_len": 8, "ctx_len": 32}],
+        mxint8_kv_cache=mxint8_kv_cache,
+        use_onnx_subfunctions=use_onnx_subfunctions,
+        onnx_path=onnx_path,
+    )
+
+    graph = onnx.load(onnx_path, load_external_data=False).graph
+    io_names = {value.name for value in list(graph.input) + list(graph.output)}
+
+    def as_compiled(name):  # the base _compile's mapping of retained-state aliases onto the graph's names
+        if name in io_names:
+            return name
+        for a, b in (("_InternalRetainedState", "_RetainedState"), ("_RetainedState", "_InternalRetainedState")):
+            if name.endswith(a) and name[: -len(a)] + b in io_names:
+                return name[: -len(a)] + b
+        return name
+
+    kv_dtype = "mxint8" if mxint8_kv_cache else "float16"
+    custom_io = {as_compiled(name): dtype for name, dtype in captured["custom_io"].items()}
+    assert custom_io == {name: kv_dtype for name in io_names if name.startswith("past_")}
+    assert captured["convert_to_fp16"] is True and captured["retained_state"] is True
