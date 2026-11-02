@@ -1071,10 +1071,10 @@ class TestWeightFreeCheckpointTransforms:
         assert _safetensors_shapes(str(tmp_path / "model.safetensors")) == {"a": [3, 5], "b": [7]}
 
     @staticmethod
-    def _weight_graph(source_dtype, target_dtype):
-        weight = ir.Value(name="weight", shape=[2, 2], type=ir.TensorType(target_dtype))
-        hidden = ir.Value(name="hidden", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
-        output = ir.Value(name="output", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+    def _weight_graph(source_dtype, target_dtype, target_shape=(2, 2), source_shape=None):
+        weight = ir.Value(name="weight", shape=target_shape, type=ir.TensorType(target_dtype))
+        hidden = ir.Value(name="hidden", shape=[target_shape[1], 2], type=ir.TensorType(ir.DataType.FLOAT))
+        output = ir.Value(name="output", shape=[target_shape[0], 2], type=ir.TensorType(ir.DataType.FLOAT))
         matmul = ir.Node(
             domain="",
             op_type="MatMul",
@@ -1092,7 +1092,7 @@ class TestWeightFreeCheckpointTransforms:
         )
         from QEfficient.exporter.weight_free.checkpoint_key_resolver import _promote_initializer
 
-        _promote_initializer(SimpleNamespace(graph=graph), "weight", weight, source_dtype)
+        _promote_initializer(SimpleNamespace(graph=graph), "weight", weight, source_dtype, source_shape)
         return graph
 
     def test_original_bfloat16_weight_casts_to_fp16_graph_dtype(self):
@@ -1118,6 +1118,23 @@ class TestWeightFreeCheckpointTransforms:
         assert [node.op_type for node in graph] == ["MatMul"]
         assert list(graph)[0].inputs[0].name == "weight"
         assert not graph.initializers
+
+    def test_original_weight_layout_inserts_transpose(self):
+        graph = self._weight_graph(
+            ir.DataType.FLOAT16,
+            ir.DataType.FLOAT16,
+            target_shape=(2, 3),
+            source_shape=[3, 2],
+        )
+
+        assert [(value.name, list(value.shape)) for value in graph.inputs] == [
+            ("hidden", [3, 2]),
+            ("weight", [3, 2]),
+        ]
+        assert [node.op_type for node in graph] == ["Transpose", "MatMul"]
+        transpose, matmul = list(graph)
+        assert list(transpose.attributes["perm"].value) == [1, 0]
+        assert matmul.inputs[0].name == transpose.outputs[0].name
 
     def test_scheduler_waits_for_staged_dependency(self, tmp_path):
         execution_order = []

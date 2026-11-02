@@ -45,6 +45,7 @@ from transformers import (
     WhisperForConditionalGeneration,
 )
 
+import QEfficient.transformers.models.modeling_auto as modeling_auto
 from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
 from QEfficient.transformers.models.modeling_auto import (
     MultimodalUtilityMixin,
@@ -281,6 +282,41 @@ class TestQEFFTransformersBase:
 
         assert qeff_model._weight_free is True
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("weight_free", "use_original_checkpoint", "expected"),
+        [
+            pytest.param(False, None, False, id="regular"),
+            pytest.param(True, None, True, id="weight-free-default"),
+            pytest.param(True, False, False, id="explicit-converted-checkpoint"),
+            pytest.param(True, True, True, id="explicit-original-checkpoint"),
+        ],
+    )
+    def test_causal_lm_weight_free_defaults_to_original_checkpoint(
+        self, monkeypatch, weight_free, use_original_checkpoint, expected
+    ):
+        """Weight-free CausalLM export should use source safetensors unless opted out."""
+
+        def fake_new(cls, model, *args, **kwargs):
+            return SimpleNamespace(
+                _weight_free=kwargs["weight_free"],
+                _use_original_checkpoint=kwargs["use_original_checkpoint"],
+            )
+
+        monkeypatch.setattr(modeling_auto, "validate_dynamo_export_requirements", lambda *_: None)
+        monkeypatch.setattr(modeling_auto, "_resolve_torch_dtype", lambda _kwargs: None)
+        monkeypatch.setattr(modeling_auto, "_build_meta_model", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(QEFFAutoModelForCausalLM._hf_auto_class, "from_pretrained", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(QEFFAutoModelForCausalLM, "__new__", staticmethod(fake_new))
+
+        model = QEFFAutoModelForCausalLM.from_pretrained(
+            "dummy-model",
+            weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
+        )
+
+        assert model._weight_free is weight_free
+        assert model._use_original_checkpoint is expected
 
     def test_embedding_direct_init_preserves_weight_free(self):
         """Embedding models retain weight-free mode for Dynamo export."""
