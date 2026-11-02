@@ -2877,6 +2877,111 @@ def test_qwen3_5_moe_gated_norm_preserves_float16():
     assert out.dtype == torch.float16
 
 
+def test_recurrent_state_dtype_override_preserves_mxint8_for_other_retained_states():
+    from QEfficient.transformers.modeling_utils import (
+        _resolve_retained_state_dtype,
+        _validate_retained_state_dtype,
+    )
+
+    _validate_retained_state_dtype("float16", "recurrent_state_dtype")
+    with pytest.raises(ValueError, match="recurrent_state_dtype must be one of"):
+        _validate_retained_state_dtype("int4", "recurrent_state_dtype")
+
+    assert (
+        _resolve_retained_state_dtype(
+            "recurrent_state.1_RetainedState",
+            model_dtype="float16",
+            kv_cache_dtype="mxint8",
+            recurrent_state_dtype="float16",
+        )
+        == "float16"
+    )
+    for output_name in (
+        "past_key.0_RetainedState",
+        "past_value.0_RetainedState",
+        "conv_state.1_RetainedState",
+    ):
+        assert (
+            _resolve_retained_state_dtype(
+                output_name,
+                model_dtype="float16",
+                kv_cache_dtype="mxint8",
+                recurrent_state_dtype="float16",
+            )
+            == "mxint8"
+        )
+
+
+@pytest.mark.llm_model
+def test_dual_qpc_compile_applies_recurrent_state_dtype_to_custom_io(monkeypatch):
+    from QEfficient.transformers.models import modeling_auto
+    from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
+
+    captured = {}
+    model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
+    model.continuous_batching = True
+    model.ccl_enabled = False
+    model.comp_ctx_lengths_prefill = None
+    model.comp_ctx_lengths_decode = None
+    model.transform = lambda **kwargs: None
+    model.model = type(
+        "Model",
+        (),
+        {
+            "config": type("Config", (), {"torch_dtype": torch.float32, "model_type": "qwen3_5_moe"})(),
+            "get_output_names": lambda self, **kwargs: {
+                "vision": [],
+                "lang": [
+                    "past_key.0_RetainedState",
+                    "past_value.0_RetainedState",
+                    "conv_state.1_RetainedState",
+                    "recurrent_state.1_RetainedState",
+                ],
+            },
+            "get_specializations": lambda self, **kwargs: ({"vision": [], "lang": [{"seq_len": 1}]}, {}),
+        },
+    )()
+
+    def fake_compile(**kwargs):
+        captured.update(kwargs)
+        return "decode.qpc"
+
+    model.lang_model = type(
+        "LanguageModel",
+        (),
+        {"onnx_path": "language.onnx", "_compile": staticmethod(fake_compile)},
+    )()
+    monkeypatch.setattr(modeling_auto, "_filter_custom_io_for_onnx", lambda custom_io, onnx_path: custom_io)
+
+    model.compile(
+        prefill_seq_len=1,
+        ctx_len=16,
+        batch_size=1,
+        full_batch_size=4,
+        skip_vision=True,
+        lang_onnx_path="language.onnx",
+        mxint8_kv_cache=True,
+        recurrent_state_dtype="float16",
+    )
+
+    custom_io = captured["custom_io"]
+    assert custom_io["recurrent_state.1"] == "float16"
+    assert custom_io["recurrent_state.1_RetainedState"] == "float16"
+    for state_name in ("past_key.0", "past_value.0", "conv_state.1"):
+        assert custom_io[state_name] == "mxint8"
+        assert custom_io[f"{state_name}_RetainedState"] == "mxint8"
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen3_5_conv_state_layout_version_is_in_export_hash(model_type):
+    from QEfficient.utils.constants import QWEN3_5_CONV_STATE_LAYOUT_VERSION
+
+    qeff_model = _tiny_qwen_qeff_model(model_type)
+
+    assert qeff_model.lang_model.hash_params["qwen3_5_conv_state_layout"] == QWEN3_5_CONV_STATE_LAYOUT_VERSION
+
+
 def test_qwen3_5_moe_get_submodules_for_export_keeps_decoder_layer_for_mixed_layer_types():
     """Mixed full/linear attention configs must still expose decoder layer subfunctions."""
     from types import SimpleNamespace
@@ -3125,6 +3230,58 @@ def test_qwen3_5_moe_partial_batch_state_update_preserves_inactive_rows():
         torch.testing.assert_close(
             updated_recurrent.index_select(0, inactive_rows),
             initial_recurrent.index_select(0, inactive_rows),
+            msg=lambda msg, layer_idx=layer_idx: f"recurrent_state.{layer_idx}: {msg}",
+        )
+
+
+@pytest.mark.llm_model
+def test_qwen3_5_moe_position_zero_resets_batched_recurrent_state_without_shape_change():
+    config = _tiny_qwen3_5_moe_config()
+    config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
+    config.text_config.linear_key_head_dim = 4
+    config.text_config.linear_value_head_dim = 4
+    config.text_config.linear_num_key_heads = 2
+    config.text_config.linear_num_value_heads = 4
+    torch.manual_seed(0)
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(
+        hf_model,
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        batch_size=2,
+        prefill_seq_len=1,
+    )["lang"]
+    inputs["input_ids"] = torch.tensor([[1], [2]], dtype=torch.int64)
+    inputs["position_ids"].fill_(3)
+    inputs["position_ids"][:, 0, :].zero_()
+    inputs["batch_index"] = torch.tensor([[1], [3]], dtype=torch.int64)
+    for layer_state in inputs["past_key_values"]:
+        for state in layer_state:
+            state.normal_()
+
+    changed_reset_state_inputs = deepcopy(inputs)
+    reset_physical_slot = inputs["batch_index"][0, 0]
+    for _, recurrent_state in changed_reset_state_inputs["past_key_values"]:
+        recurrent_state[reset_physical_slot].add_(100)
+
+    qeff_model.transform(ctx_len=8, seq_len=1, bs=2, prefill_only=False, prefill_seq_len=1)
+    with torch.no_grad():
+        outputs = qeff_model.lang_model.model(**deepcopy(inputs))
+        changed_outputs = qeff_model.lang_model.model(**deepcopy(changed_reset_state_inputs))
+
+    for layer_idx, ((_, recurrent_state), (_, changed_recurrent_state)) in enumerate(
+        zip(outputs[3], changed_outputs[3])
+    ):
+        expected_shape = inputs["past_key_values"][layer_idx][1].shape
+        assert recurrent_state.shape == expected_shape
+        assert changed_recurrent_state.shape == expected_shape
+        torch.testing.assert_close(
+            changed_recurrent_state,
+            recurrent_state,
             msg=lambda msg, layer_idx=layer_idx: f"recurrent_state.{layer_idx}: {msg}",
         )
 
@@ -3413,8 +3570,7 @@ def test_qwen3_vl_moe_batch_index_boundary_reorders_inputs_and_outputs():
     assert torch.equal(physical_positions[:, batch_index.flatten()], logical_positions)
 
 
-@pytest.mark.parametrize("grouped_state", [False, True])
-def test_qwen3_5_moe_conv_decode_slice_matches_gather_reference(grouped_state):
+def test_qwen3_5_moe_conv_decode_slice_matches_gather_reference():
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
         qeff_torch_causal_conv1d_update,
     )
@@ -3422,20 +3578,19 @@ def test_qwen3_5_moe_conv_decode_slice_matches_gather_reference(grouped_state):
     torch.manual_seed(0)
     batch_size, hidden_size, state_len = 3, 8, 3
     hidden_states = torch.randn(batch_size, hidden_size, 1)
-    flat_state = torch.randn(batch_size, hidden_size, state_len)
-    conv_state = flat_state.reshape(batch_size, 2, 4, state_len) if grouped_state else flat_state
+    conv_state = torch.randn(batch_size, state_len, hidden_size)
     weight = torch.randn(hidden_size, 3)
     bias = torch.randn(hidden_size)
     position_ids = torch.tensor([[[4], [5], [-1]]])
 
-    state_input = flat_state
+    state_input = conv_state.transpose(1, 2)
     hidden_states_new = torch.cat([state_input, hidden_states], dim=-1).to(weight.dtype)
     order = torch.argsort(
         torch.cat([torch.zeros((batch_size, state_len), dtype=position_ids.dtype), position_ids[0]], dim=1), dim=1
     )
     expected_state = torch.gather(hidden_states_new, 2, order[:, None, -state_len:].expand(-1, hidden_size, -1))
     expected_state[2] = state_input[2]
-    expected_state = expected_state.reshape_as(conv_state)
+    expected_state = expected_state.transpose(1, 2)
     expected_output = torch.nn.functional.silu(
         torch.nn.functional.conv1d(hidden_states_new, weight.unsqueeze(1), bias, groups=hidden_size)
     )[:, :, -1:]
@@ -3459,7 +3614,7 @@ def test_qwen3_5_moe_conv_decode_slice_keeps_prefill_gather_path():
 
     torch.manual_seed(1)
     batch_size, hidden_size, state_len, seq_len = 2, 6, 3, 4
-    conv_state = torch.randn(batch_size, hidden_size, state_len)
+    conv_state = torch.randn(batch_size, state_len, hidden_size)
     hidden_states = torch.randn(batch_size, hidden_size, seq_len)
     weight = torch.randn(hidden_size, 3)
     bias = torch.randn(hidden_size)
@@ -3473,11 +3628,13 @@ def test_qwen3_5_moe_conv_decode_slice_keeps_prefill_gather_path():
         bias,
     )
 
-    hidden_states_new = torch.cat([conv_state, hidden_states], dim=-1).to(weight.dtype)
+    hidden_states_new = torch.cat([conv_state.transpose(1, 2), hidden_states], dim=-1).to(weight.dtype)
     order = torch.argsort(
         torch.cat([torch.zeros((batch_size, state_len), dtype=position_ids.dtype), position_ids[0]], dim=1), dim=1
     )
-    expected_state = torch.gather(hidden_states_new, 2, order[:, None, -state_len:].expand(-1, hidden_size, -1))
+    expected_state = torch.gather(
+        hidden_states_new, 2, order[:, None, -state_len:].expand(-1, hidden_size, -1)
+    ).transpose(1, 2)
     expected_output = torch.nn.functional.silu(
         torch.nn.functional.conv1d(hidden_states_new, weight.unsqueeze(1), bias, groups=hidden_size)
     )[:, :, -seq_len:]
@@ -3492,16 +3649,18 @@ def test_qwen3_5_conv_decode_slice_matches_gather_reference():
     torch.manual_seed(0)
     batch_size, hidden_size, state_len = 3, 8, 3
     hidden_states = torch.randn(batch_size, hidden_size, 1)
-    conv_state = torch.randn(batch_size, hidden_size, state_len)
+    conv_state = torch.randn(batch_size, state_len, hidden_size)
     weight = torch.randn(hidden_size, 3)
     bias = torch.randn(hidden_size)
     position_ids = torch.tensor([[[4], [5], [-1]]])
 
-    hidden_states_new = torch.cat([conv_state, hidden_states], dim=-1).to(weight.dtype)
+    hidden_states_new = torch.cat([conv_state.transpose(1, 2), hidden_states], dim=-1).to(weight.dtype)
     order = torch.argsort(
         torch.cat([torch.zeros((batch_size, state_len), dtype=position_ids.dtype), position_ids[0]], dim=1), dim=1
     )
-    expected_state = torch.gather(hidden_states_new, 2, order[:, None, -state_len:].expand(-1, hidden_size, -1))
+    expected_state = torch.gather(
+        hidden_states_new, 2, order[:, None, -state_len:].expand(-1, hidden_size, -1)
+    ).transpose(1, 2)
     expected_state[2] = conv_state[2]
     expected_output = torch.nn.functional.silu(
         torch.nn.functional.conv1d(hidden_states_new, weight.unsqueeze(1), bias, groups=hidden_size)
@@ -3518,7 +3677,7 @@ def test_qwen3_5_conv_decode_slice_keeps_prefill_gather_path():
 
     torch.manual_seed(1)
     batch_size, hidden_size, state_len, seq_len = 2, 6, 3, 4
-    conv_state = torch.randn(batch_size, hidden_size, state_len)
+    conv_state = torch.randn(batch_size, state_len, hidden_size)
     hidden_states = torch.randn(batch_size, hidden_size, seq_len)
     weight = torch.randn(hidden_size, 3)
     bias = torch.randn(hidden_size)
@@ -3526,11 +3685,13 @@ def test_qwen3_5_conv_decode_slice_keeps_prefill_gather_path():
 
     output, state = qeff_torch_causal_conv1d_update(hidden_states, conv_state, weight, position_ids, bias)
 
-    hidden_states_new = torch.cat([conv_state, hidden_states], dim=-1).to(weight.dtype)
+    hidden_states_new = torch.cat([conv_state.transpose(1, 2), hidden_states], dim=-1).to(weight.dtype)
     order = torch.argsort(
         torch.cat([torch.zeros((batch_size, state_len), dtype=position_ids.dtype), position_ids[0]], dim=1), dim=1
     )
-    expected_state = torch.gather(hidden_states_new, 2, order[:, None, -state_len:].expand(-1, hidden_size, -1))
+    expected_state = torch.gather(
+        hidden_states_new, 2, order[:, None, -state_len:].expand(-1, hidden_size, -1)
+    ).transpose(1, 2)
     expected_output = torch.nn.functional.silu(
         torch.nn.functional.conv1d(hidden_states_new, weight.unsqueeze(1), bias, groups=hidden_size)
     )[:, :, -seq_len:]
