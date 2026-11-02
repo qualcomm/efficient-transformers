@@ -21,9 +21,11 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 
 from ._helpers import (
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
+    WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES,
     assert_has_subfunctions,
     assert_retained_state_outputs,
     exported_onnx_path,
+    original_checkpoint_kwargs,
     skip_on_model_fetch_error,
 )
 
@@ -45,7 +47,11 @@ def test_weight_free_cb_export(model_type, model_id, tmp_export_dir):
         config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
         config.num_hidden_layers = 2
         qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
-            model_id, config=config, weight_free=True, continuous_batching=True
+            model_id,
+            config=config,
+            weight_free=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
+            continuous_batching=True,
         )
     except Exception as exc:
         skip_on_model_fetch_error(exc, model_id)

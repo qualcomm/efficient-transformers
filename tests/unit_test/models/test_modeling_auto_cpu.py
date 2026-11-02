@@ -45,6 +45,7 @@ from transformers import (
     WhisperForConditionalGeneration,
 )
 
+import QEfficient.transformers.models.modeling_auto as modeling_auto
 from QEfficient.transformers.models.modeling_auto import (
     MultimodalUtilityMixin,
     QEFFAutoModel,
@@ -280,6 +281,52 @@ class TestQEFFTransformersBase:
 
         assert qeff_model._weight_free is True
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
+
+    @pytest.mark.parametrize(
+        "wrapper_cls",
+        [
+            pytest.param(QEFFAutoModelForCausalLM, id="causal-lm"),
+            pytest.param(QEFFAutoModelForImageTextToText, id="vlm"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("weight_free", "use_original_checkpoint", "expected"),
+        [
+            pytest.param(False, None, False, id="legacy-default"),
+            pytest.param(True, None, True, id="weight-free-default"),
+            pytest.param(True, False, False, id="explicit-opt-out"),
+            pytest.param(True, True, True, id="explicit-opt-in"),
+        ],
+    )
+    def test_from_pretrained_original_checkpoint_default_and_override(
+        self, wrapper_cls, weight_free, use_original_checkpoint, expected, monkeypatch
+    ):
+        captured = {}
+
+        def fake_resolve_torch_dtype(kwargs, *, weight_free=False, use_original_checkpoint=False):
+            captured["use_original_checkpoint"] = use_original_checkpoint
+
+        def fake_new(cls, model, *args, **kwargs):
+            return SimpleNamespace(
+                _weight_free=kwargs.get("weight_free", False),
+                _use_original_checkpoint=kwargs.get("use_original_checkpoint", False),
+            )
+
+        monkeypatch.setattr(modeling_auto, "validate_dynamo_export_requirements", lambda *_: None)
+        monkeypatch.setattr(modeling_auto, "_resolve_torch_dtype", fake_resolve_torch_dtype)
+        monkeypatch.setattr(modeling_auto, "_build_meta_model", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(wrapper_cls._hf_auto_class, "from_pretrained", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(wrapper_cls, "__new__", staticmethod(fake_new))
+
+        model = wrapper_cls.from_pretrained(
+            "dummy-model",
+            weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
+        )
+
+        assert captured["use_original_checkpoint"] is expected
+        assert model._weight_free is weight_free
+        assert model._use_original_checkpoint is expected
 
     def test_vlm_original_checkpoint_requires_weight_free(self):
         with pytest.raises(ValueError, match="use_original_checkpoint=True requires weight_free=True"):

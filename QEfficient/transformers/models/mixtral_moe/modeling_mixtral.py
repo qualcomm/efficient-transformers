@@ -375,7 +375,7 @@ class QeffMixtralDecoderLayer(MixtralDecoderLayer):
 
         residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states).to(self.self_attn.config.torch_dtype)
 
         # Self Attention
         hidden_states, _ = self.self_attn(
@@ -398,7 +398,7 @@ class QeffMixtralDecoderLayer(MixtralDecoderLayer):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states).to(self.self_attn.config.torch_dtype)
         moe_block = getattr(self, "block_sparse_moe", None)
         if moe_block is None:
             moe_block = getattr(self, "mlp", None)

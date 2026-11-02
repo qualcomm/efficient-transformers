@@ -37,7 +37,10 @@ from QEfficient.utils import constants
 from QEfficient.utils.test_utils import load_vlm_model_from_config
 
 from ._helpers import (
+    WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES,
     WEIGHT_FREE_VLM_MODEL_PARAMS,
+    assert_original_checkpoint_weight_spec,
+    original_checkpoint_kwargs,
     skip_on_model_fetch_error,
 )
 
@@ -70,7 +73,11 @@ VLM_NUM_CORES = 4
 VLM_PROMPT = "Describe this image."
 
 
-def _build_vlm_test_checkpoint(model_type: str, checkpoint_dir: Path, model_id: str | None = None):
+def _build_vlm_test_checkpoint(
+    model_type: str,
+    checkpoint_dir: Path,
+    model_id: str | None = None,
+):
     model_config = _VLM_MODEL_CONFIGS[model_type]
     if model_id is None:
         config = AutoConfig.for_model(
@@ -405,17 +412,26 @@ def _run_qwen35_three_qpc(qeff_model, qeff_inputs, qpc_paths, layer_types, gener
 @pytest.mark.weight_free
 @pytest.mark.weight_free_export
 @pytest.mark.parametrize("model_type", WEIGHT_FREE_VLM_QAIC_MODEL_PARAMS)
-def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tmp_export_dir):
+def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tmp_export_dir, monkeypatch):
     """Export every supported VLM from a synthesized checkpoint on CPU."""
     model_config = _VLM_MODEL_CONFIGS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_cpu_checkpoint"
+    prepared_checkpoint_home = tmp_export_dir / "prepared_checkpoints"
+    use_original_checkpoint = model_type in WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES
+    if use_original_checkpoint:
+        monkeypatch.setattr("QEfficient.utils.cache.QEFF_CHECKPOINT_HOME", prepared_checkpoint_home)
     tiny_model_types = {"qwen2_5_vl", "qwen3_vl"}
     dummy_model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS.get(model_type) if model_type in tiny_model_types else None
-    model, model_config = _build_vlm_test_checkpoint(model_type, checkpoint_dir, dummy_model_id)
+    _model, model_config = _build_vlm_test_checkpoint(
+        model_type,
+        checkpoint_dir,
+        dummy_model_id,
+    )
     qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
         str(checkpoint_dir),
         kv_offload=True,
         weight_free=True,
+        use_original_checkpoint=use_original_checkpoint,
         dtype=torch.float32,
     )
     skip_vision = model_type == "qwen2_5_vl"
@@ -432,6 +448,8 @@ def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tm
     language_onnx = Path(export_paths[-1])
     assert language_onnx.is_file()
     _assert_weight_spec(language_onnx)
+    if use_original_checkpoint:
+        assert_original_checkpoint_weight_spec(language_onnx, checkpoint_dir, prepared_checkpoint_home)
     _assert_vlm_weight_free_graph(model_type, language_onnx)
     if model_type in {"qwen3_5", "qwen3_5_moe"}:
         _assert_input_trace_length(language_onnx, model_config["prompt_len"])
@@ -441,6 +459,8 @@ def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tm
     vision_onnx = Path(export_paths[0])
     assert vision_onnx.is_file()
     _assert_weight_spec(vision_onnx)
+    if use_original_checkpoint:
+        assert_original_checkpoint_weight_spec(vision_onnx, checkpoint_dir, prepared_checkpoint_home)
 
     specialization_kwargs = _get_vlm_specialization_kwargs(
         qeff_model.model,
@@ -462,15 +482,18 @@ def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tm
 
 @pytest.mark.weight_free
 @pytest.mark.weight_free_export
-def test_weight_free_gemma4_decode_dummy_trace_length(tmp_export_dir):
-    """Trace Gemma4 decode with a non-degenerate dummy KV cache."""
+def test_weight_free_gemma4_decode_dummy_trace_length(tmp_export_dir, monkeypatch):
+    """Trace Gemma4-MoE decode without preparing a checkpoint copy."""
     model_config = _VLM_MODEL_CONFIGS["gemma4"]
     checkpoint_dir = tmp_export_dir / "gemma4_decode_cpu_checkpoint"
+    prepared_checkpoint_home = tmp_export_dir / "prepared_checkpoints"
+    monkeypatch.setattr("QEfficient.utils.cache.QEFF_CHECKPOINT_HOME", prepared_checkpoint_home)
     _build_vlm_test_checkpoint("gemma4", checkpoint_dir)
     qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
         str(checkpoint_dir),
         kv_offload=True,
         weight_free=True,
+        use_original_checkpoint=True,
         dtype=torch.float32,
     )
     dummy_inputs = qeff_model.model.get_dummy_inputs(
@@ -491,6 +514,7 @@ def test_weight_free_gemma4_decode_dummy_trace_length(tmp_export_dir):
     )
     language_onnx = Path(export_paths[-1])
     assert language_onnx.is_file()
+    assert_original_checkpoint_weight_spec(language_onnx, checkpoint_dir, prepared_checkpoint_home)
 
 
 def _prepare_vlm_inputs(
@@ -553,6 +577,7 @@ def test_weight_free_vlm_combined_compile(model_type, model_id, tmp_export_dir):
             str(checkpoint_dir),
             kv_offload=True,
             weight_free=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES),
             dtype=torch.float32,
         )
     except Exception as exc:
@@ -651,6 +676,7 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         str(checkpoint_dir),
         kv_offload=True,
         weight_free=True,
+        **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES),
         dtype=torch.float32,
     )
     hf_inputs, qeff_inputs = _prepare_vlm_test_inputs(
@@ -777,6 +803,7 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
         str(checkpoint_dir),
         kv_offload=True,
         weight_free=True,
+        **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES),
         dtype=torch.float32,
     )
     hf_inputs, qeff_inputs = _prepare_vlm_test_inputs(

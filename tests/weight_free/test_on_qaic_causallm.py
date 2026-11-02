@@ -39,6 +39,7 @@ from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_BLOCKING_QAIC_CASES,
     WEIGHT_FREE_EMBEDDING_MODEL_PARAMS,
+    WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES,
     WEIGHT_FREE_QAIC_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
@@ -46,6 +47,7 @@ from ._helpers import (
     load_causal_lm_config,
     load_hf_model,
     load_tokenizer,
+    original_checkpoint_kwargs,
     skip_on_model_fetch_error,
 )
 
@@ -126,7 +128,12 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
     try:
         config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
         config.num_hidden_layers = 2
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            weight_free=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
+        )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
@@ -184,7 +191,12 @@ def test_weight_free_hw_hf_parity(model_type, model_id, tmp_export_dir):
     try:
         config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
         config.num_hidden_layers = get_num_layers_from_config(model_hf.config)
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            weight_free=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
+        )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
@@ -264,7 +276,12 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
     try:
         config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
         config.num_hidden_layers = get_num_layers_from_config(model_hf.config)
-        qeff_weight_free = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
+        qeff_weight_free = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            weight_free=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
+        )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
@@ -349,6 +366,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         model_id,
         config=config,
         weight_free=True,
+        **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
         qaic_config=qaic_config,
     )
 

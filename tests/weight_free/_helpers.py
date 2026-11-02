@@ -26,8 +26,10 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
 
-from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
+from QEfficient.exporter.weight_free import load_weight_free_ort_inputs, resolve_weight_spec_path
+from QEfficient.exporter.weight_free.weight_spec import load_weight_spec
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.utils.checkpoint_utils import resolve_checkpoint_dir
 
 # ---------------------------------------------------------------------------
 # Worker-level model cache
@@ -61,6 +63,23 @@ WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
     "qwen3_moe": "tiny-random/qwen3-moe",
     "starcoder2": "hf-tiny-v2/tiny-random-Starcoder2ForCausalLM",
 }
+
+WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES = frozenset({"qwen3", "qwen3_moe"})
+WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES = frozenset(
+    {
+        "gemma4_moe",
+        "qwen2_5_vl",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3_vl",
+        "qwen3_vl_moe",
+    }
+)
+
+
+def original_checkpoint_kwargs(model_type: str, supported_model_types: frozenset[str]) -> dict[str, bool]:
+    return {"use_original_checkpoint": model_type in supported_model_types}
+
 
 WEIGHT_FREE_EMBEDDING_MODELS = {
     "bge_reranker": ("BAAI/bge-reranker-v2-m3", "mean"),
@@ -238,7 +257,7 @@ def load_tokenizer(model_id: str) -> AutoTokenizer:
     return tokenizer
 
 
-def load_weight_free_vlm_model(model_id: str) -> QEFFAutoModelForImageTextToText:
+def load_weight_free_vlm_model(model_id: str, use_original_checkpoint: bool = False) -> QEFFAutoModelForImageTextToText:
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     return QEFFAutoModelForImageTextToText.from_pretrained(
         model_id,
@@ -248,6 +267,7 @@ def load_weight_free_vlm_model(model_id: str) -> QEFFAutoModelForImageTextToText
         kv_offload=True,
         trust_remote_code=True,
         weight_free=True,
+        use_original_checkpoint=use_original_checkpoint,
     )
 
 
@@ -257,6 +277,22 @@ def exported_onnx_path(export_result) -> Path:
     onnx_path = Path(export_result)
     assert onnx_path.is_file(), f"Expected ONNX file at {onnx_path}"
     return onnx_path
+
+
+def assert_original_checkpoint_weight_spec(
+    onnx_path: Path,
+    source_checkpoint: str | Path,
+    prepared_checkpoint_home: Path | None = None,
+) -> None:
+    """Assert a weight-free export references its source without preparing a copy."""
+    weight_spec = load_weight_spec(resolve_weight_spec_path(onnx_path))
+    source_dir = resolve_checkpoint_dir(str(source_checkpoint))
+
+    assert Path(weight_spec.model_id).resolve() == source_dir.resolve()
+    assert "qeff-prepared" not in weight_spec.model_id
+    assert all("qeff-prepared" not in checkpoint_file.path for checkpoint_file in weight_spec.files)
+    if prepared_checkpoint_home is not None:
+        assert not prepared_checkpoint_home.exists() or not any(prepared_checkpoint_home.iterdir())
 
 
 # ---------------------------------------------------------------------------

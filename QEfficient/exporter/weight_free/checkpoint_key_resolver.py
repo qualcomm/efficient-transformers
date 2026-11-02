@@ -325,30 +325,57 @@ def _safetensors_onnx_dtype(dtype: str) -> ir.DataType:
         raise ValueError(f"Unsupported safetensors dtype '{dtype}' in weight-free export") from exc
 
 
+def _layout_permutation(source_shape: list[int], target_shape: list[int]) -> list[int] | None:
+    """Return the unique source-to-target axis permutation, if one exists."""
+    if source_shape == target_shape:
+        return None
+    if len(source_shape) != len(target_shape):
+        raise ValueError(f"Cannot map stored shape {source_shape} to graph shape {target_shape}")
+
+    candidates = []
+
+    def visit(axis: int, permutation: list[int], used_axes: set[int]) -> None:
+        if axis == len(target_shape):
+            candidates.append(permutation)
+            return
+        for source_axis, source_dim in enumerate(source_shape):
+            if source_axis not in used_axes and source_dim == target_shape[axis]:
+                visit(axis + 1, [*permutation, source_axis], used_axes | {source_axis})
+
+    visit(0, [], set())
+    if len(candidates) != 1:
+        raise ValueError(
+            f"Cannot uniquely map stored shape {source_shape} to graph shape {target_shape}. "
+            "Weight-free export requires an unambiguous layout transform."
+        )
+    return candidates[0]
+
+
 def _promote_initializer(
     model_ir,
     name: str,
     init_value,
     source_dtype: ir.DataType,
+    source_shape: list[int] | None = None,
 ) -> None:
-    """Promote one initializer, inserting a source-to-graph dtype cast when needed."""
+    """Promote one initializer, preserving stored dtype and layout with graph ops."""
     graph = model_ir.graph
     target_dtype = init_value.dtype
+    target_shape = list(init_value.shape)
+    source_shape = source_shape or target_shape
+    permutation = _layout_permutation(source_shape, target_shape)
     graph_input = ir.Value(
         name=name,
-        shape=init_value.shape,
+        shape=ir.Shape(source_shape),
         type=ir.TensorType(source_dtype),
     )
-
-    if source_dtype == target_dtype:
-        if hasattr(init_value, "replace_all_uses_with"):
-            init_value.replace_all_uses_with(graph_input)
-        graph.inputs.append(graph_input)
-    else:
+    replacement = graph_input
+    nodes = []
+    if source_dtype != target_dtype:
         cast_name = f"{name}__qeff_cast_{source_dtype.name.lower()}_to_{target_dtype.name.lower()}"
         cast_output = ir.Value(
             name=cast_name,
-            shape=init_value.shape,
+            shape=ir.Shape(source_shape),
             type=ir.TensorType(target_dtype),
         )
         cast_node = ir.Node(
@@ -360,30 +387,55 @@ def _promote_initializer(
             version=13,
             name=cast_name,
         )
-        consumers = init_value.consumers() if hasattr(init_value, "consumers") else ()
-        if hasattr(init_value, "replace_all_uses_with"):
-            init_value.replace_all_uses_with(cast_output)
-        graph.inputs.append(graph_input)
+        nodes.append(cast_node)
+        replacement = cast_output
+    if permutation is not None:
+        transpose_name = f"{name}__qeff_transpose_{'_'.join(map(str, permutation))}"
+        transpose_output = ir.Value(
+            name=transpose_name,
+            shape=ir.Shape(target_shape),
+            type=ir.TensorType(target_dtype),
+        )
+        nodes.append(
+            ir.Node(
+                domain="",
+                op_type="Transpose",
+                inputs=[replacement],
+                attributes={"perm": ir.AttrInt64s("perm", permutation)},
+                outputs=[transpose_output],
+                version=13,
+                name=transpose_name,
+            )
+        )
+        replacement = transpose_output
+
+    consumers = init_value.consumers() if hasattr(init_value, "consumers") else ()
+    if hasattr(init_value, "replace_all_uses_with"):
+        init_value.replace_all_uses_with(replacement)
+    graph.inputs.append(graph_input)
+    for node in nodes:
         if consumers:
-            graph.insert_before(min(consumers, key=graph.index), cast_node)
+            graph.insert_before(min(consumers, key=graph.index), node)
         else:
-            graph.append(cast_node)
+            graph.append(node)
 
     del graph.initializers[name]
 
 
-def _check_stored_shape(name: str, graph_shape, checkpoint_key: str, stored_shape: List[int]) -> None:
-    """Fail the export when a graph weight input cannot bind to its stored tensor."""
+def _check_stored_shape(name: str, graph_shape, checkpoint_key: str, stored_shape: list[int]) -> None:
+    """Validate that a stored tensor can reach the graph layout through Transpose."""
     try:
         dims = [int(dim) for dim in graph_shape]
     except (TypeError, ValueError):
         return
-    if dims != stored_shape:
+    try:
+        _layout_permutation(stored_shape, dims)
+    except ValueError as exc:
         raise ValueError(
             f"Weight input '{name}' expects shape {dims}, but checkpoint tensor '{checkpoint_key}' has shape "
             f"{stored_shape}. Weight-free export requires the graph to consume weights in their stored layout; "
             "express any layout change as graph ops instead of rewriting the checkpoint."
-        )
+        ) from exc
 
 
 def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name: str, qeff_model) -> WeightSpec:
@@ -481,7 +533,13 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
                 f"ONNX initializer '{name}'."
             ) from exc
         _check_stored_shape(name, init_value.shape, checkpoint_key, stored_shape)
-        _promote_initializer(model_ir, name, init_value, _safetensors_onnx_dtype(stored_dtype))
+        _promote_initializer(
+            model_ir,
+            name,
+            init_value,
+            _safetensors_onnx_dtype(stored_dtype),
+            stored_shape,
+        )
         promoted_inputs.append(
             WeightSpecInput(
                 name=name,

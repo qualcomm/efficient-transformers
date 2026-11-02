@@ -35,10 +35,13 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES,
+    WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES,
     WEIGHT_FREE_VLM_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
     load_weight_free_vlm_model,
+    original_checkpoint_kwargs,
     skip_on_model_fetch_error,
 )
 
@@ -153,7 +156,12 @@ QWEN3_MOE_PARITY_DMA_CONFIG = pytest.param(
 )
 
 
-def _load_weight_free_model(model_id: str, continuous_batching: bool = False, num_hidden_layers: int | None = 2):
+def _load_weight_free_model(
+    model_id: str,
+    continuous_batching: bool = False,
+    num_hidden_layers: int | None = 2,
+    use_original_checkpoint: bool = False,
+):
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     if num_hidden_layers is not None:
         config.num_hidden_layers = num_hidden_layers
@@ -162,6 +170,7 @@ def _load_weight_free_model(model_id: str, continuous_batching: bool = False, nu
         config=config,
         trust_remote_code=True,
         weight_free=True,
+        use_original_checkpoint=use_original_checkpoint,
         continuous_batching=continuous_batching,
     )
 
@@ -594,7 +603,9 @@ def _assert_onnx_path(onnx_path, label: str) -> Path:
 def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_export_dir):
     """Compile weight-free decode and chunked-prefill QPCs for disaggregated serving."""
     try:
-        qeff_model = _load_weight_free_model(model_id)
+        qeff_model = _load_weight_free_model(
+            model_id, **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES)
+        )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
@@ -643,7 +654,10 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
     try:
         hf_model = _load_vlm_hf_reference(model_id)
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        qeff_model = load_weight_free_vlm_model(model_id)
+        qeff_model = load_weight_free_vlm_model(
+            model_id,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES),
+        )
     except Exception as exc:
         skip_on_model_fetch_error(exc, model_id)
 
@@ -736,7 +750,11 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
 def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp_export_dir):
     """Compile CB decode and chunked-prefill QPCs for weight-free disaggregated serving."""
     try:
-        qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
+        qeff_model = _load_weight_free_model(
+            model_id,
+            continuous_batching=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
+        )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
@@ -794,8 +812,16 @@ def test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics(
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         hf_model = _load_hf_reference_model(model_id)
-        decode_qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
-        prefill_qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
+        decode_qeff_model = _load_weight_free_model(
+            model_id,
+            continuous_batching=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
+        )
+        prefill_qeff_model = _load_weight_free_model(
+            model_id,
+            continuous_batching=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
+        )
         decode_qeff_model.model.eval()
         prefill_qeff_model.model.eval()
     except Exception as exc:  # noqa: BLE001
@@ -916,6 +942,7 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
         config=config,
         trust_remote_code=True,
         weight_free=True,
+        use_original_checkpoint=True,
         continuous_batching=True,
     )
 

@@ -3655,7 +3655,7 @@ class QEFFAutoModelForImageTextToText:
         qaic_config: dict | None = None,
         layerwise: bool = False,
         weight_free: bool = False,
-        use_original_checkpoint: bool = False,
+        use_original_checkpoint: bool | None = None,
         **kwargs,
     ):
         """
@@ -3675,9 +3675,10 @@ class QEFFAutoModelForImageTextToText:
         weight_free : bool, optional
             Build the model with meta tensors and load checkpoint weights during
             compilation. Weight-free VLM export requires dual-QPC mode.
-        use_original_checkpoint : bool, optional
+        use_original_checkpoint : bool or None, optional
             If True, weight-free export references the source safetensors directly
-            instead of preparing a converted checkpoint. Requires ``weight_free=True``.
+            instead of preparing a converted checkpoint. Defaults to the value of
+            ``weight_free``; pass False to retain checkpoint preparation.
         **kwargs :
             Additional arguments passed to HuggingFace's ``from_pretrained``.
 
@@ -3704,6 +3705,8 @@ class QEFFAutoModelForImageTextToText:
         if weight_free:
             kv_offload = True
             validate_dynamo_export_requirements("weight_free=True")
+        if use_original_checkpoint is None:
+            use_original_checkpoint = weight_free
         if use_original_checkpoint and not weight_free:
             raise ValueError("use_original_checkpoint=True requires weight_free=True")
 
@@ -3967,7 +3970,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         max_seq_len_cached: int | None = None,
         layerwise: bool = False,
         weight_free: bool = False,
-        use_original_checkpoint: bool = False,
+        use_original_checkpoint: bool | None = None,
         *args,
         **kwargs,
     ):
@@ -4013,12 +4016,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             ``QEFF_CHECKPOINT_HOME`` environment variable if set, otherwise next
             to the source checkpoint under the Hugging Face cache.
 
-        use_original_checkpoint : bool, optional
+        use_original_checkpoint : bool or None, optional
             If True, weight-free export references the source safetensors
-            directly and skips checkpoint preparation. This is currently an
-            opt-in path for model layouts that expose source checkpoint keys in
-            the graph, such as the unfused Qwen3-MoE expert weights. The source
-            tensor dtype must be supported by the target compiler and hardware.
+            directly and skips checkpoint preparation. Defaults to the value of
+            ``weight_free``; pass False to retain checkpoint preparation. The
+            source tensor dtype must be supported by the target compiler and
+            hardware.
 
         *args :
             Positional arguments passed directly to `cls._hf_auto_class.from_pretrained`.
@@ -4039,6 +4042,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         if weight_free:
             validate_dynamo_export_requirements("weight_free=True")
+        if use_original_checkpoint is None:
+            use_original_checkpoint = weight_free
         if use_original_checkpoint and not weight_free:
             raise ValueError("use_original_checkpoint=True requires weight_free=True")
 

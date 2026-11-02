@@ -41,9 +41,11 @@ from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
     WEIGHT_FREE_EMBEDDING_MODEL_PARAMS,
+    WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
     assert_no_int64_kv_cache_inputs,
+    assert_original_checkpoint_weight_spec,
     assert_retained_state_outputs,
     assert_subfunction_names_match_decoder_class,
     assert_unique_graph_input_names,
@@ -52,6 +54,7 @@ from ._helpers import (
     load_hf_embedding_model,
     load_hf_model,
     load_tokenizer,
+    original_checkpoint_kwargs,
     run_weight_free_ort,
     skip_on_model_fetch_error,
 )
@@ -86,7 +89,12 @@ def test_weight_free_embedding_export_ort_parity(model_type, model_id, pooling, 
         hf_hidden_states = model_hf(**inputs).last_hidden_state
         hf_output = POOLING_MAP[pooling](hf_hidden_states, inputs["attention_mask"])
 
-    qeff_model = QEFFAutoModel.from_pretrained(model_id, pooling=pooling, weight_free=True)
+    qeff_model = QEFFAutoModel.from_pretrained(
+        model_id,
+        pooling=pooling,
+        weight_free=True,
+        dtype=torch.float32,
+    )
     onnx_path = exported_onnx_path(qeff_model.export(tmp_export_dir, dynamo=True, offload_pt_weights=False))
     assert onnx_path.is_file(), f"Expected ONNX file at {onnx_path}"
 
@@ -120,7 +128,7 @@ def test_weight_free_embedding_export_ort_parity(model_type, model_id, pooling, 
     sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.items()),
     ids=sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS),
 )
-def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir):
+def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir, monkeypatch):
     """Export with weight_free=True and use_onnx_subfunctions=True, then validate:
     - Correct _RetainedState output count (2 x num_layers)
     - Subfunctions renamed to decoder class names
@@ -135,7 +143,17 @@ def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir)
         # can write weight_spec.json pointing at the HF cache checkpoint.
         config = load_causal_lm_config(model_id)
         config.num_hidden_layers = 2
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
+        use_original_checkpoint = model_type in WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES
+        prepared_checkpoint_home = tmp_export_dir / "prepared_checkpoints"
+        if use_original_checkpoint:
+            monkeypatch.setattr("QEfficient.utils.cache.QEFF_CHECKPOINT_HOME", prepared_checkpoint_home)
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            model_id,
+            config=config,
+            weight_free=True,
+            use_original_checkpoint=use_original_checkpoint,
+            **({"dtype": torch.float32} if use_original_checkpoint else {}),
+        )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
@@ -146,6 +164,9 @@ def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir)
             offload_pt_weights=False,
         )
     )
+
+    if use_original_checkpoint:
+        assert_original_checkpoint_weight_spec(onnx_path, model_id, prepared_checkpoint_home)
 
     # Shared structure checks
     num_layers = qeff_model.model.config.num_hidden_layers
@@ -173,6 +194,7 @@ def test_weight_free_export_applies_causal_lm_blocking_from_qaic_config(model_ty
             model_id,
             config=config,
             weight_free=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
             qaic_config=qaic_config,
         )
     except Exception as exc:  # noqa: BLE001
@@ -216,6 +238,7 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
             model_id,
             config=config,
             weight_free=True,
+            **original_checkpoint_kwargs(model_type, WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES),
             qaic_config=qaic_config,
         )
     except Exception as exc:  # noqa: BLE001
@@ -255,7 +278,7 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
     sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.items()),
     ids=sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS),
 )
-def test_weight_free_export_ort_parity(model_type, model_id, tmp_export_dir):
+def test_weight_free_export_ort_parity(model_type, model_id, tmp_export_dir, monkeypatch):
     """Export with weight_free=True, inject real weights into ORT, then validate
     HF PyTorch == ORT token parity.
 
@@ -279,6 +302,7 @@ def test_weight_free_export_ort_parity(model_type, model_id, tmp_export_dir):
         prompt_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
         full_batch_size=None,
+        dtype=torch.float32,
     )
 
     # HF PyTorch reference tokens (real weights)
@@ -292,7 +316,23 @@ def test_weight_free_export_ort_parity(model_type, model_id, tmp_export_dir):
     try:
         config = load_causal_lm_config(model_id)
         config.num_hidden_layers = get_num_layers_from_config(model_hf.config)
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
+        config.torch_dtype = torch.float32
+        config.dtype = torch.float32
+        use_original_checkpoint = model_type in WEIGHT_FREE_ORIGINAL_CHECKPOINT_CAUSAL_LM_TYPES
+        source_checkpoint = model_id
+        if use_original_checkpoint:
+            source_checkpoint = tmp_export_dir / "original_checkpoint"
+            model_hf.save_pretrained(source_checkpoint, safe_serialization=True)
+        prepared_checkpoint_home = tmp_export_dir / "prepared_checkpoints"
+        if use_original_checkpoint:
+            monkeypatch.setattr("QEfficient.utils.cache.QEFF_CHECKPOINT_HOME", prepared_checkpoint_home)
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            str(source_checkpoint),
+            config=config,
+            weight_free=True,
+            use_original_checkpoint=use_original_checkpoint,
+            dtype=torch.float32,
+        )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
@@ -304,6 +344,8 @@ def test_weight_free_export_ort_parity(model_type, model_id, tmp_export_dir):
         )
     )
     weight_spec_path = resolve_weight_spec_path(onnx_path)
+    if use_original_checkpoint:
+        assert_original_checkpoint_weight_spec(onnx_path, source_checkpoint, prepared_checkpoint_home)
 
     # ORT inference with weights injected from HF cache
     ort_tokens = run_weight_free_ort(api_runner, onnx_path, weight_spec_path)

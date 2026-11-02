@@ -322,6 +322,9 @@ class TestWeightFreeCheckpointTransforms:
                 )
             )
 
+        with torch.no_grad():
+            for parameter in experts.parameters():
+                parameter.normal_()
         source_gate_up = experts.gate_up_proj.detach().clone()
         source_down = experts.down_proj.detach().clone()
         experts._qeff_use_original_checkpoint = True
@@ -336,6 +339,12 @@ class TestWeightFreeCheckpointTransforms:
         else:
             assert tuple(experts.gate_up_proj.shape) == (2, 12, 4)
             assert tuple(experts.down_proj.shape) == (2, 4, 6)
+        if model_type == "qwen3_vl_moe":
+            torch.testing.assert_close(experts.gate_up_proj, source_gate_up.transpose(-1, -2))
+            torch.testing.assert_close(experts.down_proj, source_down.transpose(-1, -2))
+        else:
+            torch.testing.assert_close(experts.gate_up_proj, source_gate_up)
+            torch.testing.assert_close(experts.down_proj, source_down)
         assert tuple(weights.gate.shape) == (2, 4, 6)
         assert tuple(weights.up.shape) == (2, 4, 6)
         assert tuple(weights.down.shape) == (2, 6, 4)
@@ -350,6 +359,9 @@ class TestWeightFreeCheckpointTransforms:
         from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffGptOssExperts
 
         experts = QEffGptOssExperts(GptOssConfig(num_local_experts=2, hidden_size=4, intermediate_size=6))
+        with torch.no_grad():
+            for parameter in experts.parameters():
+                parameter.normal_()
         source = {name: parameter.detach().clone() for name, parameter in experts.named_parameters()}
         experts._qeff_use_original_checkpoint = True
 
@@ -376,6 +388,9 @@ class TestWeightFreeCheckpointTransforms:
             enable_moe_block=True,
         )
         experts = Gemma4TextExperts(config)
+        with torch.no_grad():
+            for parameter in experts.parameters():
+                parameter.normal_()
         source_gate_up = experts.gate_up_proj.detach().clone()
         source_down = experts.down_proj.detach().clone()
         experts._qeff_use_original_checkpoint = True
@@ -966,6 +981,40 @@ class TestWeightFreeCheckpointTransforms:
         assert [node.op_type for node in graph] == ["MatMul"]
         assert list(graph)[0].inputs[0].name == "weight"
         assert not graph.initializers
+
+    def test_original_weight_layout_is_preserved_with_transpose(self):
+        weight = ir.Value(name="weight", shape=ir.Shape([16, 8, 128]), type=ir.TensorType(ir.DataType.FLOAT))
+        hidden = ir.Value(name="hidden", shape=ir.Shape([128, 8]), type=ir.TensorType(ir.DataType.FLOAT))
+        output = ir.Value(name="output", shape=ir.Shape([16, 8]), type=ir.TensorType(ir.DataType.FLOAT))
+        matmul = ir.Node(
+            domain="",
+            op_type="MatMul",
+            inputs=[weight, hidden],
+            outputs=[output],
+            name="matmul",
+            version=17,
+        )
+        graph = ir.Graph(
+            inputs=[hidden],
+            outputs=[output],
+            nodes=[matmul],
+            initializers=[weight],
+            opset_imports={"": 17},
+        )
+        from QEfficient.exporter.weight_free.checkpoint_key_resolver import _promote_initializer
+
+        _promote_initializer(
+            SimpleNamespace(graph=graph),
+            "weight",
+            weight,
+            ir.DataType.FLOAT,
+            source_shape=[16, 128, 8],
+        )
+
+        assert [node.op_type for node in graph] == ["Transpose", "MatMul"]
+        transpose, matmul = graph
+        assert transpose.attributes["perm"].value == (0, 2, 1)
+        assert matmul.inputs[0].name == "weight__qeff_transpose_0_2_1"
 
     def test_scheduler_waits_for_staged_dependency(self, tmp_path):
         execution_order = []
