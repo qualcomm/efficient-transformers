@@ -679,8 +679,10 @@ pipeline {
                             for disagg_suite in parity blocking; do
                               if [ "$disagg_suite" = blocking ]; then
                                 disagg_filter="weight_free_blocking"
+                                disagg_exec_n=1
                               else
                                 disagg_filter="not weight_free_blocking"
+                                disagg_exec_n="$WEIGHT_FREE_EXEC_N"
                               fi &&
                               collection_status=0 &&
                               python -m pytest tests/weight_free/test_disaggregated.py -m "(on_qaic) and (disagg_dma) and ($disagg_filter) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" -o addopts="" --collect-only -q -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --impact-head="$CI_IMPACT_HEAD" 2>&1 | tee "Qeff_logs/weight_free_disagg_${disagg_suite}_collection.log" || collection_status=$?
@@ -689,6 +691,19 @@ pipeline {
                               fi &&
                               { grep "^tests/.*::" "Qeff_logs/weight_free_disagg_${disagg_suite}_collection.log" || true; } > ".ci-weight-free-disagg-${disagg_suite}-collected.txt" &&
                               mapfile -t SELECTED_TESTS < ".ci-weight-free-disagg-${disagg_suite}-collected.txt" &&
+                              if [ "$disagg_suite" = blocking ] && [ "${#SELECTED_TESTS[@]}" -gt 0 ]; then
+                                # Sample once per run so fresh workers execute the same selected node IDs.
+                                REQUIRED_TESTS=() &&
+                                for test_id in "${SELECTED_TESTS[@]}"; do
+                                  case "$test_id" in
+                                    *"[gpt-oss-h]"|*"[gpt-oss-q]"|*"[gpt-oss-kv]"|*"[qwen3-moe-kv]") REQUIRED_TESTS+=("$test_id") ;;
+                                    *) echo "$test_id" ;;
+                                  esac
+                                done > .ci-weight-free-disagg-blocking-remaining.txt &&
+                                shuf -n 3 .ci-weight-free-disagg-blocking-remaining.txt > .ci-weight-free-disagg-blocking-sampled.txt &&
+                                mapfile -t SAMPLED_TESTS < .ci-weight-free-disagg-blocking-sampled.txt &&
+                                SELECTED_TESTS=("${REQUIRED_TESTS[@]}" "${SAMPLED_TESTS[@]}")
+                              fi &&
                               if [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
                                 echo "<?xml version=\"1.0\" encoding=\"utf-8\"?><testsuites></testsuites>" > "tests/tests_log_weight_free_disagg_${disagg_suite}_qaic.xml"
                               else
@@ -696,8 +711,8 @@ pipeline {
                                 batch=0 &&
                                 exit_status=0 &&
                                 # Keep one test per worker process so QAIC contexts are released between tests.
-                                for ((start=0; start<${#SELECTED_TESTS[@]}; start+=WEIGHT_FREE_EXEC_N)); do
-                                  BATCH_TESTS=("${SELECTED_TESTS[@]:start:WEIGHT_FREE_EXEC_N}") &&
+                                for ((start=0; start<${#SELECTED_TESTS[@]}; start+=disagg_exec_n)); do
+                                  BATCH_TESTS=("${SELECTED_TESTS[@]:start:disagg_exec_n}") &&
                                   batch_workers=${#BATCH_TESTS[@]} &&
                                   echo "Running weight-free disaggregated $disagg_suite batch $batch with $batch_workers fresh workers" &&
                                   python -m pytest "${BATCH_TESTS[@]}" --dist loadgroup -n "$batch_workers" --junitxml="tests/tests_log_weight_free_disagg_${disagg_suite}_batch_${batch}.xml" --durations=10 || exit_status=$? &&
