@@ -58,11 +58,7 @@ def pytest_collection_modifyitems(config, items):
             callspec = getattr(item, "callspec", None)
             model_type = callspec.params.get("model_type") if callspec is not None else None
             if model_type in ep_vlm_models and model_type != selected_ep_vlm:
-                item.add_marker(
-                    pytest.mark.skip(
-                        reason=f"CI selected {selected_ep_vlm}; skipping {model_type}"
-                    )
-                )
+                item.add_marker(pytest.mark.skip(reason=f"CI selected {selected_ep_vlm}; skipping {model_type}"))
 
     torch_version = _parse_torch_version()
     for item in items:
