@@ -1720,39 +1720,22 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 -3.0e4,
             )
             sinks = self.sinks.view(1, 1, self.num_heads, 1).float()
-            stable_max = torch.maximum(local_scores.max(dim=-1, keepdim=True).values, sinks)
-            local_probs = torch.exp(local_scores - stable_max)
-            local_probs = local_probs / (local_probs.sum(dim=-1, keepdim=True) + torch.exp(sinks - stable_max))
-            local_output = torch.einsum("bsht,btd->bshd", local_probs, local_states.float()).to(local_states.dtype)
-            local_output = self._csa_prefill_rotate(
-                local_output, cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
-            )
-
-            causal_threshold = torch.div(position_chunk[:, :1] + 1, ratio, rounding_mode="floor")
-            running_max = torch.full(
-                (batch_size, chunk_length, self.num_heads), -3.0e4, dtype=torch.float32, device=hidden_states.device
-            )
-            running_sum = torch.zeros_like(running_max)
-            running_output = torch.zeros(
-                batch_size,
-                chunk_length,
-                self.num_heads,
-                self.head_dim,
-                dtype=torch.float32,
-                device=hidden_states.device,
-            )
+            running_max = torch.maximum(local_scores.amax(dim=-1), sinks.squeeze(-1))
+            local_exp_scores = torch.exp(local_scores - running_max.unsqueeze(-1))
+            local_exp_scores = torch.where(local_valid.unsqueeze(2), local_exp_scores, 0.0)
+            running_sum = local_exp_scores.sum(dim=-1) + torch.exp(sinks.squeeze(-1) - running_max)
+            running_output = torch.einsum("bsht,btd->bshd", local_exp_scores, local_states.float())
+            causal_threshold = torch.div(position_chunk + 1, ratio, rounding_mode="floor")
             slot_ids = torch.arange(compressed_kv_cache.shape[2], device=hidden_states.device)
             for compressed_start in range(0, compressed_kv_cache.shape[2], compressed_block_size):
                 compressed_end = min(compressed_start + compressed_block_size, compressed_kv_cache.shape[2])
                 tile_slots = slot_ids[compressed_start:compressed_end]
-                tile_valid = tile_slots.view(1, -1) < causal_threshold
+                tile_valid = tile_slots.view(1, 1, -1) < causal_threshold.unsqueeze(-1)
                 tile_indices = tile_slots.unsqueeze(0).expand(batch_size, -1)
-                safe_indices = torch.where(tile_valid, tile_indices, torch.zeros_like(tile_indices)).to(torch.int32)
-                gathered = ctx_gather_blocked_kv(compressed_kv_cache, safe_indices.unsqueeze(1))[:, 0]
-                gathered = torch.where(tile_valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
+                gathered = ctx_gather_blocked_kv(compressed_kv_cache, tile_indices.to(torch.int32).unsqueeze(1))[:, 0]
                 compressed_scores = torch.einsum("bshd,bkd->bshk", query_chunk.float(), gathered.float()) * self.scaling
                 compressed_scores = torch.where(
-                    tile_valid.view(batch_size, 1, 1, -1),
+                    tile_valid.unsqueeze(2),
                     compressed_scores,
                     -3.0e4,
                 )
@@ -1760,16 +1743,17 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 next_max = torch.maximum(running_max, tile_max)
                 previous_scale = torch.exp(running_max - next_max)
                 exp_scores = torch.exp(compressed_scores - next_max.unsqueeze(-1))
+                exp_scores = torch.where(tile_valid.unsqueeze(2), exp_scores, 0.0)
                 running_output = running_output * previous_scale.unsqueeze(-1) + torch.einsum(
                     "bshk,bkd->bshd", exp_scores, gathered.float()
                 )
                 running_sum = running_sum * previous_scale + exp_scores.sum(dim=-1)
                 running_max = next_max
-            compressed_output = (running_output / running_sum.unsqueeze(-1).clamp(min=1.0e-9)).to(hidden_states.dtype)
-            compressed_output = self._csa_prefill_rotate(
-                compressed_output, cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
+            attention_output = (running_output / running_sum.unsqueeze(-1)).to(hidden_states.dtype)
+            attention_output = self._csa_prefill_rotate(
+                attention_output, cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
             )
-            chunk_outputs.append(local_output + compressed_output)
+            chunk_outputs.append(attention_output)
 
         cache_states = (
             local_kv_cache,
