@@ -44,7 +44,6 @@ from ._helpers import (
 )
 
 GPT_OSS_TINY_MODEL_ID = "tiny-random/gpt-oss"
-
 DISAGG_MODEL_IDS = (
     ("qwen3_moe", "tiny-random/qwen3-moe"),
     ("gpt_oss", GPT_OSS_TINY_MODEL_ID),
@@ -1000,6 +999,7 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
             offload_pt_weights=False,
             split_retained_state_io=True,
             retain_full_kv=True,
+            qaic_config=_build_moe_prefill_qaic_config(),
             use_onnx_subfunctions=dma_config.get("use_onnx_subfunctions", True),
         )
         compiled_onnx_paths["decode"] = _assert_onnx_path(qeff_model.onnx_path, "decode")

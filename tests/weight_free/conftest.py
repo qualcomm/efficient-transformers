@@ -18,6 +18,8 @@ Run with: pytest tests/weight_free/ -m "not on_qaic" -n auto -v
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 
@@ -40,6 +42,28 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
+    selected_ep_vlm = os.environ.get("QEFF_WF_EP_VLM_MODEL")
+    ep_vlm_models = {"qwen3_vl_moe", "gemma4_moe"}
+
+    if selected_ep_vlm:
+        if selected_ep_vlm not in ep_vlm_models:
+            valid_models = ", ".join(sorted(ep_vlm_models))
+            raise pytest.UsageError(f"QEFF_WF_EP_VLM_MODEL must be one of: {valid_models}")
+
+        for item in items:
+            test_name = getattr(item, "originalname", item.name.split("[", 1)[0])
+            if test_name != "test_weight_free_vlm_disaggregated_prefill_and_decode":
+                continue
+
+            callspec = getattr(item, "callspec", None)
+            model_type = callspec.params.get("model_type") if callspec is not None else None
+            if model_type in ep_vlm_models and model_type != selected_ep_vlm:
+                item.add_marker(
+                    pytest.mark.skip(
+                        reason=f"CI selected {selected_ep_vlm}; skipping {model_type}"
+                    )
+                )
+
     torch_version = _parse_torch_version()
     for item in items:
         if not (item.fspath.parts and "weight_free" in str(item.fspath)):

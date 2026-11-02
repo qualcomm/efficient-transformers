@@ -27,6 +27,9 @@ if _xdist_worker and os.environ.get("QEFF_HOME") and not _two_phase_session:
 # lets the existing QEFF_HOME session cleanup remove them with the QPC artifacts.
 if "QEFF_WF_HOME" not in os.environ:
     qeff_home_for_checkpoints = Path(os.environ.get("QEFF_HOME", "~/.cache/qeff_models")).expanduser()
+    if _xdist_worker and not _two_phase_session and not os.environ.get("QEFF_HOME"):
+        worker_id = _xdist_worker[2:] if _xdist_worker.startswith("gw") else _xdist_worker
+        qeff_home_for_checkpoints /= f"worker_{worker_id}"
     os.environ["QEFF_WF_HOME"] = str(qeff_home_for_checkpoints / "weight_free_checkpoints")
 elif _xdist_worker and not _two_phase_session:
     os.environ["QEFF_WF_HOME"] = str(Path(os.environ["QEFF_WF_HOME"]) / _xdist_worker)
