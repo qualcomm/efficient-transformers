@@ -22,6 +22,7 @@ from QEfficient.transformers.quantizers.auto import replace_transformers_quantiz
 from QEfficient.utils import hf_download
 from QEfficient.utils._utils import load_hf_processor
 from QEfficient.utils.constants import WAV2VEC2_MAX_SEQ_LEN
+from tests import NUM_AIC_CORES
 
 from ..check_model_results import dump_and_compare_results
 
@@ -162,6 +163,7 @@ def check_ctc_pytorch_vs_kv_vs_ort_vs_ai100(
     assert pytorch_output == ort_output, "Tokens don't match for pytorch output and ORT output."
 
     qeff_model.compile(
+        num_cores=NUM_AIC_CORES,
         batch_size=batch_size,
         num_devices=num_devices,
     )

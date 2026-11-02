@@ -444,7 +444,14 @@ def test_explicit_qaic_device_group_is_assigned_to_worker(monkeypatch):
 
 
 @pytest.mark.cpu_only
-def test_empty_explicit_qaic_device_groups_fall_back_to_discovery(monkeypatch):
+@pytest.mark.parametrize(
+    "num_cores,free,total,eligible",
+    [(14, 14, 14, True), (14, 14, 16, True), (14, 13, 14, False), (16, 14, 14, False), (16, 16, 16, True)],
+)
+def test_empty_explicit_qaic_device_groups_fall_back_to_discovery(monkeypatch, num_cores, free, total, eligible):
+    from types import SimpleNamespace
+
+    import QEfficient.utils.device_utils as device_utils
     import tests.conftest as test_config
 
     class Config:
@@ -452,29 +459,31 @@ def test_empty_explicit_qaic_device_groups_fall_back_to_discovery(monkeypatch):
         def addinivalue_line(*args):
             return None
 
-    discovered_groups = [
-        [0, 1, 2, 3],
-        [4, 5, 6, 7],
-        [8, 9, 10, 11],
-        [12, 13, 14, 15],
-        [16, 17, 18, 19],
-    ]
-
-    def discover_groups(devices_per_group):
-        assert devices_per_group == 4
-        return discovered_groups
-
+    output = "".join(
+        f"QID {device_id}\n    Status:Ready\n    Device Capabilities: HybridBoot+ MDP+\n"
+        f"    Nsp Free:{free}\n    Nsp Total:{total}\n    Board serial:board-{device_id // 4}\n"
+        for device_id in range(20)
+    )
+    monkeypatch.setattr(
+        device_utils.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=output, stderr=""),
+    )
+    monkeypatch.setattr(test_config, "NUM_AIC_CORES", num_cores)
     monkeypatch.setattr(test_config, "_xdist_worker", "gw4")
-    monkeypatch.setattr(test_config, "get_qaic_mdp_device_groups", discover_groups)
     monkeypatch.setenv("QEFF_QAIC_DEVICE_GROUPS", "")
     monkeypatch.setenv("QEFF_QAIC_DEVICES_PER_WORKER", "4")
     monkeypatch.setenv("QEFF_ISOLATE_QAIC_WORKERS", "1")
     monkeypatch.setenv("QEFF_MODEL_TIER", "all")
     monkeypatch.delenv("QAIC_VISIBLE_DEVICES", raising=False)
 
-    test_config.pytest_configure(Config())
-
-    assert os.environ["QAIC_VISIBLE_DEVICES"] == "16,17,18,19"
+    if eligible:
+        test_config.pytest_configure(Config())
+        assert os.environ["QAIC_VISIBLE_DEVICES"] == "16,17,18,19"
+    else:
+        with pytest.raises(pytest.UsageError, match="no isolated 4-device group"):
+            test_config.pytest_configure(Config())
+        assert "QAIC_VISIBLE_DEVICES" not in os.environ
 
 
 # --------------------------------------------------------------------------- #

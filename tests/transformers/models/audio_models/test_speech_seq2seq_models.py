@@ -22,6 +22,7 @@ from QEfficient.transformers.quantizers.auto import replace_transformers_quantiz
 from QEfficient.utils import get_padding_shape_from_config, hf_download
 from QEfficient.utils._utils import load_hf_processor
 from QEfficient.utils.constants import Constants
+from tests import NUM_AIC_CORES
 
 from ..check_model_results import dump_and_compare_results
 
@@ -334,6 +335,7 @@ def check_seq2seq_pytorch_vs_kv_vs_ort_vs_ai100(
     assert (pytorch_kv_tokens == ort_tokens).all(), "Tokens don't match for pytorch output and ort output"
 
     qeff_model.compile(
+        num_cores=NUM_AIC_CORES,
         ctx_len=ctx_len,
         num_devices=num_devices,
         batch_size=batch_size,

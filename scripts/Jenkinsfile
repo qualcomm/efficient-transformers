@@ -168,6 +168,7 @@ pipeline {
     }
 
     environment {
+        NUM_AIC_CORES = '14'
         TEST_FILTER = testFilter(params.TEST_PROFILE)
         IMPACT_TEST_FILTER = testFilter(params.TEST_PROFILE)
         CI_IMPACT_MODE = 'full'
@@ -278,6 +279,7 @@ pipeline {
                             mkdir -p "${QEFF_UV_CACHE_PATH}" "${QEFF_PIP_CACHE_PATH}" "${QEFF_APT_ARCHIVES_PATH}/partial" "${QEFF_APT_LISTS_PATH}/partial"
                             sudo docker run --pull=always --privileged -dit --name ${BUILD_TAG} \
                             -e HF_TOKEN=${HF_TOKEN} \
+                            -e NUM_AIC_CORES=${NUM_AIC_CORES} \
                             -e TMPDIR=/efficient-transformers/.ci-tmp/default \
                             -e PIP_CACHE_DIR=/root/.cache/pip \
                             -e UV_CACHE_DIR=/root/.cache/uv \

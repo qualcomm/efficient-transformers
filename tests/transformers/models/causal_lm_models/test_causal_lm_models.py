@@ -14,6 +14,7 @@ from transformers import AutoConfig
 
 from QEfficient.utils.constants import Constants
 from QEfficient.utils.test_utils import ModelConfig
+from tests import NUM_AIC_CORES
 from tests.two_phase import resolve_two_phase_cleanup
 
 from .check_causal_models import (
@@ -94,7 +95,7 @@ def _run_per_pr_causal_text_case(
     comp_ctx_lengths_prefill=None,
     comp_ctx_lengths_decode=None,
     kv_cache_batch_size=None,
-    num_cores=16,
+    num_cores=NUM_AIC_CORES,
     compile_options=None,
     num_speculative_tokens=None,
     prompts=None,

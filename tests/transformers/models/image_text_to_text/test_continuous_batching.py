@@ -31,6 +31,7 @@ from QEfficient.utils.test_utils import (
     load_vlm_model_from_config,
     set_num_layers_vlm,
 )
+from tests import NUM_AIC_CORES
 from tests.two_phase import model_export_compile_lock, resolve_two_phase_cleanup
 from tests.utils.image_utils import load_test_image
 from tests.utils.load_kimi_utils import (
@@ -173,7 +174,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100_CB(
             continuous_batching=True,
         )
     compile_kwargs = {
-        "num_cores": 16,
+        "num_cores": NUM_AIC_CORES,
         "num_devices": num_devices,
         "prefill_seq_len": prompt_len,
         "ctx_len": ctx_len,

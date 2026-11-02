@@ -20,6 +20,7 @@ from QEfficient.utils.test_utils import (
     load_hf_vlm_model,
     load_qeff_model_with_sampler,
 )
+from tests import NUM_AIC_CORES
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/feature_configs.json")
 with open(CONFIG_PATH, "r") as f:
@@ -93,7 +94,7 @@ def check_guided_decoding_sampler(
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_devices=1,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
         num_speculative_tokens=spec_length,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,
@@ -103,7 +104,7 @@ def check_guided_decoding_sampler(
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_devices=1,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
         num_speculative_tokens=spec_length,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,
