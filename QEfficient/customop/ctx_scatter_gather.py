@@ -1241,13 +1241,13 @@ class CtxGatherFuncPagedKVDP(torch.autograd.Function):
     @staticmethod
     def forward(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids)
-        num_pages, rows = int(block_ids.shape[0]), int(block_ids.shape[1])
+        num_pages, rows = block_ids.shape
         _, data_rows, page_size, head_dim = data.shape
         if rows != data_rows:
             raise ValueError("Paged GQA gather block-id rows must match pool rows.")
-        row_idx = torch.arange(rows, device=data.device).view(rows, 1)
-        pages = data[block_ids.transpose(0, 1).long(), row_idx]
-        return pages.reshape(1, rows, num_pages * page_size, head_dim)
+        row_idx = torch.arange(rows, device=data.device).view(1, rows)
+        pages = data[block_ids.long(), row_idx]
+        return pages.permute(1, 0, 2, 3).reshape(1, rows, num_pages * page_size, head_dim)
 
     @staticmethod
     def setup_context(ctx, inputs, outputs):
@@ -1290,12 +1290,12 @@ class CtxGatherFuncPagedKVHeads(torch.autograd.Function):
     @staticmethod
     def forward(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         block_ids = torch.where(block_ids == torch.iinfo(torch.int32).max, torch.zeros_like(block_ids), block_ids)
-        num_pages, heads = int(block_ids.shape[0]), int(block_ids.shape[1])
+        num_pages, heads = block_ids.shape
         if heads != data.shape[1]:
             raise ValueError("Paged head gather IDs must match the cache head dimension.")
-        head_idx = torch.arange(heads, device=data.device).view(heads, 1)
-        pages = data[block_ids.transpose(0, 1).long(), head_idx]
-        return pages.reshape(1, heads, num_pages * data.shape[2], data.shape[3])
+        head_idx = torch.arange(heads, device=data.device).view(1, heads)
+        pages = data[block_ids.long(), head_idx]
+        return pages.permute(1, 0, 2, 3).reshape(1, heads, num_pages * data.shape[2], data.shape[3])
 
     @staticmethod
     def setup_context(ctx, inputs, outputs):
