@@ -597,6 +597,7 @@ class QEffDynamicLayer(CacheLayerMixin):
             block_id = block_id.unsqueeze(-1)
             self.keys = CtxScatterFuncPagedAttention.apply(self.keys, block_id, ctx_indices, key_states)
             self.values = CtxScatterFuncPagedAttention.apply(self.values, block_id, ctx_indices, value_states)
+
     def write_only_paged_attention_dp(self, key_states, value_states, cache_kwargs):
         """Write GQA K/V into a physical page pool with rows ordered [DP, CP, Hkv]."""
         if self.keys is None or self.values is None:
@@ -690,7 +691,6 @@ class QEffDynamicLayer(CacheLayerMixin):
         self.keys = ctx_paged_scatter_dp(self.keys, block_id.to(torch.int32), address, key_updates)
         self.values = ctx_paged_scatter_dp(self.values, block_id.to(torch.int32), address, value_updates)
         return self.keys, self.values
-
 
     def write_only(self, key_states, value_states, cache_kwargs):
         """
@@ -2571,6 +2571,8 @@ class QEffQwen4ExpDynamicCache(Cache):
             for layer_idx, state in enumerate(states):
                 if state is not None:
                     states[layer_idx] = state.index_select(0, beam_idx.to(state.device))
+
+
 def read_kv_cache_with_indices(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
@@ -2620,8 +2622,6 @@ def scatter_kv_into_cache(
     """Write key_states and value_states into the flat KV cache at position_ids."""
     pid = position_ids.to(torch.int32)
     return ctx_scatter(key_cache, pid, key_states), ctx_scatter(value_cache, pid, value_states)
-
-
 
 
 class QEffMiniMaxSparseCache(QEffDynamicCache):

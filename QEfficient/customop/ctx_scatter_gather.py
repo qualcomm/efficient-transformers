@@ -629,9 +629,7 @@ class CtxPagedScatterFunc(torch.autograd.Function):
         rows = torch.arange(updates.shape[1], device=data.device).view(1, -1, 1).expand_as(block_id)
         safe_block = torch.where(valid, block_id, torch.zeros_like(block_id)).long()
         safe_addr = addr.long().clamp_(0, data.shape[2] - 1)
-        out[safe_block, rows.long(), safe_addr] = torch.where(
-            valid.unsqueeze(-1), updates, torch.zeros_like(updates)
-        )
+        out[safe_block, rows.long(), safe_addr] = torch.where(valid.unsqueeze(-1), updates, torch.zeros_like(updates))
         return out
 
     @staticmethod
@@ -862,6 +860,7 @@ class V4CtxScatter1DFunc(torch.autograd.Function):
     def symbolic(g: torch.Graph, data: torch.Value, position_ids: torch.Value, updates: torch.Value) -> torch.Value:
         return g.onnxscript_op(V4CtxScatter1D, data, position_ids, updates).setTypeAs(data)
 
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # MiniMax-M3 indexer scatter
@@ -910,6 +909,7 @@ class M3CtxScatterFunc(torch.autograd.Function):
     @staticmethod
     def symbolic(g: torch.Graph, data: torch.Value, position_ids: torch.Value, updates: torch.Value) -> torch.Value:
         return g.onnxscript_op(M3CtxScatter, data, position_ids, updates).setTypeAs(data)
+
 
 @qeff_custom_op("com.qualcomm.cloud", 1)
 def CtxGather1D(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxscript.FLOAT:
@@ -997,7 +997,9 @@ class CompressedAttnFunc(torch.autograd.Function):
         scale: torch.Value,
         masked_logit: torch.Value,
     ) -> torch.Value:
-        return g.onnxscript_op(CompressedAttn, kv_cache, topk_indices, valid, query, scale, masked_logit).setTypeAs(query)
+        return g.onnxscript_op(CompressedAttn, kv_cache, topk_indices, valid, query, scale, masked_logit).setTypeAs(
+            query
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1194,6 +1196,7 @@ class CtxGatherFuncBlockedKVDP(torch.autograd.Function):
         output = g.onnxscript_op(CtxGatherBlockedKVDP, data, ctx_indices)
         return _set_gather_output_type(output, data, ctx_indices)
 
+
 # @qeff_custom_op("com.qti.aisw.onnx", 1)
 @qeff_custom_op("com.qualcomm.cloud", 1)
 def CtxGatherPagedKVDP(data: onnxscript.FLOAT, block_ids: onnxscript.INT32) -> onnxscript.FLOAT:
@@ -1310,6 +1313,7 @@ def CtxGatherBlockRangeKVDP(data: onnxscript.FLOAT, block_ids: onnxscript.INT32)
     # data: [B_local, rows, cache_blocks, block_size, D]
     # ids:  [B_local, rows, selected_blocks]
     return ops.GatherND(data, ops.Unsqueeze(block_ids, [-1]), batch_dims=2)
+
 
 class CtxGatherFuncBlockRangeKVDP(torch.autograd.Function):
     """Block-range gather for 5-D GP caches (cache laid out as blocks).
