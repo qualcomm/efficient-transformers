@@ -33,11 +33,13 @@ from QEfficient.customop.glm_dsa import (
     GlmFoldedRowGatherFunc,
     GlmPagedScatterFunc,
     GlmSparseScatterFunc,
+    V4CtxGatherRowsFunc,
     glm_folded_row_gather,
     glm_int_div,
     glm_int_mod,
     glm_paged_scatter,
     glm_sparse_scatter,
+    v4_ctx_gather_rows,
 )
 from QEfficient.customop.rms_norm import CustomRMSNormAIC, GemmaCustomRMSNormAIC
 from QEfficient.customop.utils import (
@@ -78,6 +80,7 @@ __all__ = [
     "GlmFoldedRowGatherFunc",
     "GlmPagedScatterFunc",
     "GlmSparseScatterFunc",
+    "V4CtxGatherRowsFunc",
     # Interface functions (dynamo-aware, prefer these at call sites)
     "ctx_scatter",
     "ctx_scatter_3d",
@@ -93,6 +96,7 @@ __all__ = [
     "ctx_gather_blocked_kv_cb",
     "ctx_gather_cb_3d",
     "glm_folded_row_gather",
+    "v4_ctx_gather_rows",
     "glm_paged_scatter",
     "glm_sparse_scatter",
     "glm_int_div",

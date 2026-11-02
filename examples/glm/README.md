@@ -7,6 +7,9 @@ and DSA attention configurations. It supports weight-free ONNX export, QAIC comp
 prefill-parallel or folded DSA modes. Use it for disaggregated-serving experiments where prefill and decode run as
 separate QPCs.
 
+Both prefill entry points accept `--dtype float32|float16|bfloat16` (default: `float32`). This selects the model and
+prepared weight dtype; it is separate from cache I/O dtype and the compiler's execution precision.
+
 ## Setup
 
 Run from the repository root. Set the Hugging Face cache before loading the model and enable accelerated Hub transfer
@@ -83,8 +86,9 @@ python examples/glm/glm53_four_layer_prefill_compile.py \
   --qeff-home "$QEFF_HOME"
 ```
 
-Use `dense_prefill_parallel_online` for the online prefill variant. This script intentionally uses a regular loaded
-model path. Weight-free disaggregated compile is currently blocked by the core export/compile contract.
+Use `dense_prefill_parallel_online` for the online prefill variant. This compile example intentionally uses a regular
+loaded-model path. For weight-free prefill export/compile and trace capture, use
+`glm53_four_layer_prefill_trace.py` with `--weight-free`.
 
 Run the folded DSA prefill path with:
 

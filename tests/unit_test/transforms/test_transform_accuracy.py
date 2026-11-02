@@ -1310,6 +1310,23 @@ class _DummyOptimizedMoEModel(nn.Module):
         self.block = _DummyOptimizedMoEBlock()
 
 
+def test_moe_prefill_defaults_to_expert_parallel_and_decode_to_decode_bmm():
+    from QEfficient.transformers.moe import select_moe_flavour
+
+    supported = (MoEFlavour.SIMPLE_LOOP, MoEFlavour.DECODE_BMM, MoEFlavour.EXPERT_PARALLEL)
+
+    assert select_moe_flavour(supported_flavours=supported, is_prefill=True) is MoEFlavour.EXPERT_PARALLEL
+    assert select_moe_flavour(supported_flavours=supported, is_prefill=False) is MoEFlavour.DECODE_BMM
+    assert (
+        select_moe_flavour(
+            supported_flavours=supported,
+            is_prefill=True,
+            requested_flavour=MoEFlavour.SIMPLE_LOOP,
+        )
+        is MoEFlavour.SIMPLE_LOOP
+    )
+
+
 class _DummyNestedOptimizedMoEBlock(_DummyOptimizedMoEBlock):
     supported_moe_flavours = _DummyOptimizedMoEBlock.supported_moe_flavours
 

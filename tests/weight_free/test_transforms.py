@@ -163,6 +163,47 @@ def _load_prepared_tensors(root):
 
 
 class TestWeightFreeCheckpointTransforms:
+    def test_reduced_glm_transform_requires_fp8_metadata_when_quant_config_is_cleared(self):
+        weight_map = {
+            "model.layers.0.self_attn.q_b_proj.weight": "model.safetensors",
+            "model.layers.0.self_attn.q_b_proj.weight_scale_inv": "model.safetensors",
+            "model.layers.0.mlp.gate_proj.weight": "model.safetensors",
+            "model.layers.0.mlp.up_proj.weight": "model.safetensors",
+            "model.layers.0.mlp.down_proj.weight": "model.safetensors",
+            "model.layers.1.mlp.experts.0.gate_proj.weight": "model.safetensors",
+        }
+        config_without_source_metadata = SimpleNamespace(model_type="glm_moe_dsa", quantization_config=None)
+        config_with_source_metadata = SimpleNamespace(
+            model_type="glm_moe_dsa",
+            quantization_config=None,
+            _glm_moe_dsa_weight_block_size=(128, 64),
+        )
+
+        assert not GlmMoeDsaReducedCheckpointTransform.is_applicable(
+            weight_map, model_config=config_without_source_metadata
+        )
+        assert GlmMoeDsaReducedCheckpointTransform.is_applicable(
+            weight_map, model_config=config_with_source_metadata
+        )
+
+    def test_weight_free_compile_default_is_only_glm_multitoken_prefill(self, monkeypatch):
+        from QEfficient.transformers.models.modeling_auto import (
+            _allow_weight_free_prefill_compile_by_default,
+        )
+
+        glm_config = SimpleNamespace(model_type="glm_moe_dsa", architectures=None)
+        other_config = SimpleNamespace(model_type="llama", architectures=None)
+        monkeypatch.delenv("QEFF_ALLOW_WEIGHT_FREE_PREFILL_COMPILE", raising=False)
+
+        assert _allow_weight_free_prefill_compile_by_default(glm_config, prefill_only=True, prefill_seq_len=128)
+        assert not _allow_weight_free_prefill_compile_by_default(
+            glm_config, prefill_only=False, prefill_seq_len=128
+        )
+        assert not _allow_weight_free_prefill_compile_by_default(glm_config, prefill_only=True, prefill_seq_len=1)
+        assert not _allow_weight_free_prefill_compile_by_default(
+            other_config, prefill_only=True, prefill_seq_len=128
+        )
+
     def test_prepares_reduced_glm_moe_dsa_fp8_checkpoint(self, tmp_path):
         src = tmp_path / "src"
         out = tmp_path / "out"
@@ -247,6 +288,73 @@ class TestWeightFreeCheckpointTransforms:
         torch.testing.assert_close(tensors["model.layers.3.mlp.gate.weight"], torch.full((2, 2), 6.0))
         assert not any("layers.4" in key or ".mtp." in key or key.endswith("_scale_inv") for key in tensors)
 
+    def test_prepares_reduced_glm_moe_dsa_checkpoint_in_expert_parallel_layout(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        tensors = {
+            "model.layers.0.self_attn.q_b_proj.weight": torch.ones(8, 2),
+            "model.layers.0.self_attn.q_b_proj.weight_scale_inv": torch.ones(4, 1),
+            "model.layers.0.mlp.gate_proj.weight": torch.ones(2, 2),
+            "model.layers.0.mlp.up_proj.weight": torch.ones(2, 2),
+            "model.layers.0.mlp.down_proj.weight": torch.ones(2, 2),
+        }
+        source_experts = {"gate": [], "up": [], "down": []}
+        for expert_idx in range(4):
+            for kind, shape in (("gate", (2, 4)), ("up", (2, 4)), ("down", (4, 2))):
+                tensor = torch.arange(8, dtype=torch.float32).reshape(shape) + 10 * expert_idx
+                source_experts[kind].append(tensor)
+                tensors[f"model.layers.3.mlp.experts.{expert_idx}.{kind}_proj.weight"] = tensor
+                scale_shape = (1, 2) if kind != "down" else (2, 1)
+                tensors[f"model.layers.3.mlp.experts.{expert_idx}.{kind}_proj.weight_scale_inv"] = torch.ones(
+                    scale_shape
+                )
+        _write_safetensors_checkpoint(src, tensors)
+
+        config = SimpleNamespace(
+            model_type="glm_moe_dsa",
+            num_hidden_layers=4,
+            num_attention_heads=2,
+            qk_nope_head_dim=2,
+            qk_rope_head_dim=2,
+            n_routed_experts=4,
+            mlp_layer_types=["dense", "dense", "dense", "sparse"],
+            quantization_config={"quant_method": "fp8", "weight_block_size": [2, 2]},
+        )
+        expert_parallel_layout = {
+            "flavour": "expert_parallel",
+            "layout_version": 1,
+            "num_pipeline_stages": 2,
+            "num_parallelized_experts": 2,
+        }
+
+        assert GlmMoeDsaReducedCheckpointTransform.apply(
+            src,
+            out,
+            model_config=config,
+            expert_parallel_layout=expert_parallel_layout,
+        )
+
+        prepared = _load_prepared_tensors(out)
+        for kind, canonical in (
+            (
+                "gate",
+                torch.stack(source_experts["gate"]).transpose(1, 2),
+            ),
+            (
+                "up",
+                torch.stack(source_experts["up"]).transpose(1, 2),
+            ),
+            (
+                "down",
+                torch.stack(source_experts["down"]).transpose(1, 2),
+            ),
+        ):
+            expected = canonical.view(2, 2, *canonical.shape[1:]).transpose(0, 1).contiguous()
+            actual = prepared[f"model.layers.3.mlp.moe_weights.{kind}"]
+            assert actual.shape == expected.shape
+            torch.testing.assert_close(actual, expected)
+
     def test_glm_moe_dsa_checkpoint_requires_positive_layer_count(self, tmp_path):
         src = tmp_path / "src"
         src.mkdir()
@@ -313,6 +421,13 @@ class TestWeightFreeCheckpointTransforms:
         assert transforms.index(GlmMoeDsaReducedCheckpointTransform) < transforms.index(
             MoEExpertStackingCheckpointTransform
         )
+
+    def test_glm_fp8_block_size_uses_preserved_metadata_after_quant_config_is_cleared(self):
+        config = SimpleNamespace(quantization_config=None, _glm_moe_dsa_weight_block_size=(128, 64))
+        assert GlmMoeDsaReducedCheckpointTransform._weight_block_size(config) == (128, 64)
+
+        with pytest.raises(ValueError, match="two-dimensional FP8 weight_block_size"):
+            GlmMoeDsaReducedCheckpointTransform._weight_block_size(SimpleNamespace(quantization_config=None))
 
     def test_glm_partial_fp8_hf_patch_uses_configured_block_size(self, monkeypatch):
         from transformers.integrations.finegrained_fp8 import Fp8Dequantize
@@ -404,6 +519,7 @@ class TestWeightFreeCheckpointTransforms:
             num_devices=16,
             num_cores=16,
             cache_io_dtype="mxint8",
+            user_tiled=False,
         )
 
         compile_kwargs = qeff_model._compile.call_args.kwargs
@@ -466,6 +582,49 @@ class TestWeightFreeCheckpointTransforms:
         manifest = json.loads((out / CHECKPOINT_PREPARED_MANIFEST).read_text())
         assert not stale_marker.exists()
         assert manifest["transform_context"] == {"model_type": "glm_moe_dsa", "num_hidden_layers": 78}
+
+    def test_checkpoint_pipeline_rebuilds_when_moe_weight_layout_changes(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        _write_safetensors_checkpoint(src, {"weight": torch.ones(2, dtype=torch.float16)})
+        pipeline = CheckpointTransformPipeline([DtypeConversionCheckpointTransform])
+        model_config = SimpleNamespace(model_type="glm_moe_dsa", num_hidden_layers=4)
+
+        pipeline.apply(
+            src,
+            out,
+            target_dtype=torch.float32,
+            model_config=model_config,
+            checkpoint_transform_context={
+                "moe_weight_layout": {
+                    "flavour": "expert_parallel",
+                    "num_pipeline_stages": 2,
+                    "num_parallelized_experts": 2,
+                }
+            },
+        )
+        stale_marker = out / "stale"
+        stale_marker.touch()
+        pipeline.apply(
+            src,
+            out,
+            target_dtype=torch.float32,
+            model_config=model_config,
+            checkpoint_transform_context={
+                "moe_weight_layout": {
+                    "flavour": "expert_parallel",
+                    "num_pipeline_stages": 4,
+                    "num_parallelized_experts": 1,
+                }
+            },
+        )
+
+        manifest = json.loads((out / CHECKPOINT_PREPARED_MANIFEST).read_text())
+        assert not stale_marker.exists()
+        assert manifest["transform_context"]["checkpoint_transform_context"]["moe_weight_layout"][
+            "num_pipeline_stages"
+        ] == 4
 
     def test_checkpoint_pipeline_rebuilds_incomplete_prepared_dir(self, tmp_path):
         src = tmp_path / "src"

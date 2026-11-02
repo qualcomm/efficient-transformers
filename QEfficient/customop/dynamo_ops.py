@@ -22,7 +22,15 @@ from QEfficient.customop.ctx_scatter_gather_cb import (  # noqa: E402
     CtxScatterCB,
     CtxScatterCB3D,
 )
-from QEfficient.customop.glm_dsa import GlmFoldedRowGather, GlmIntDiv, GlmIntMod, GlmPagedScatter, GlmSparseScatter
+from QEfficient.customop.glm_dsa import (
+    GlmFoldedRowGather,
+    GlmIntDiv,
+    GlmIntMod,
+    GlmPagedScatter,
+    GlmSparseScatter,
+    V4CtxGatherRows,
+    V4CtxGatherRowsDynamoTranslation,
+)
 from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
 from QEfficient.customop.rms_norm import CustomRMSNorm  # noqa: E402
 
@@ -379,6 +387,29 @@ def _(data: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     return torch.empty((*indices.shape, data.shape[-1]), dtype=data.dtype, device=data.device)
 
 
+@torch.library.custom_op("qefficient::v4_ctx_gather_rows", mutates_args=())
+def v4_ctx_gather_rows_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    if ctx_indices.ndim < 3:
+        raise ValueError("ctx_indices must have shape [B, rows, ...].")
+    batch_indices = torch.arange(data.shape[0], device=data.device).view(
+        data.shape[0], *(1,) * (ctx_indices.ndim - 1)
+    )
+    row_indices = torch.arange(data.shape[1], device=data.device).view(
+        1, data.shape[1], *(1,) * (ctx_indices.ndim - 2)
+    )
+    safe_indices = torch.where(
+        ctx_indices == torch.iinfo(torch.int32).max,
+        torch.zeros_like(ctx_indices),
+        ctx_indices,
+    )
+    return data[batch_indices, row_indices, safe_indices.long()]
+
+
+@v4_ctx_gather_rows_op.register_fake
+def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    return torch.empty((*ctx_indices.shape, data.shape[-1]), dtype=data.dtype, device=data.device)
+
+
 @torch.library.custom_op("qefficient::glm_paged_scatter", mutates_args=())
 def glm_paged_scatter_op(
     data: torch.Tensor,
@@ -452,6 +483,7 @@ DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.ctx_gather_blocked_kv_cb.default: get_dynamo_onnxscript_func(CtxGatherBlockedKVCB),
     torch.ops.qefficient.ctx_gather_3d_generalized.default: get_dynamo_onnxscript_func(CtxGather3D),
     torch.ops.qefficient.glm_folded_row_gather.default: get_dynamo_onnxscript_func(GlmFoldedRowGather),
+    torch.ops.qefficient.v4_ctx_gather_rows.default: V4CtxGatherRowsDynamoTranslation,
     torch.ops.qefficient.glm_paged_scatter.default: get_dynamo_onnxscript_func(GlmPagedScatter),
     torch.ops.qefficient.glm_sparse_scatter.default: get_dynamo_onnxscript_func(GlmSparseScatter),
     torch.ops.qefficient.glm_int_div.default: get_dynamo_onnxscript_func(GlmIntDiv),

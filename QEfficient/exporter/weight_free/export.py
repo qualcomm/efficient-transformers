@@ -5,6 +5,7 @@
 #
 # ----------------------------------------------------------------------------
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -104,6 +105,38 @@ def _resolve_weight_free_target_dtype(config) -> torch.dtype:
     return target_dtype
 
 
+def _resolve_expert_parallel_checkpoint_layout(qeff_model) -> dict[str, Any] | None:
+    """Return the EP weight layout that must also be materialized on disk."""
+    config = qeff_model.model.config
+    architectures = getattr(config, "architectures", None) or []
+    is_glm_moe_dsa = (
+        "GlmMoeDsaForCausalLM" in architectures
+        or getattr(config, "model_type", None) == "glm_moe_dsa"
+    )
+    if not is_glm_moe_dsa:
+        return None
+    hash_params = getattr(qeff_model, "hash_params", {}) or {}
+    flavour = hash_params.get("moe_prefill_flavour")
+    flavour = getattr(flavour, "value", flavour)
+    if flavour != "expert_parallel":
+        return None
+
+    layout_fields = {
+        "num_pipeline_stages": "moe_prefill_num_pipeline_stages",
+        "num_parallelized_experts": "moe_prefill_num_parallelized_experts",
+    }
+    layout = {name: hash_params.get(param_name) for name, param_name in layout_fields.items()}
+    if any(value is None for value in layout.values()):
+        raise ValueError(
+            "Weight-free EP export requires num_pipeline_stages and num_parallelized_experts "
+            "in the model's resolved export parameters."
+        )
+    layout = {name: int(value) for name, value in layout.items()}
+    if any(value <= 0 for value in layout.values()):
+        raise ValueError(f"Invalid weight-free EP checkpoint layout: {layout}")
+    return {"flavour": flavour, "layout_version": 1, **layout}
+
+
 def _prune_unused_fake_initializers(onnx_program) -> None:
     """Remove FakeTensor initializers not referenced by any graph node.
 
@@ -153,6 +186,11 @@ def _prepare_checkpoint_for_weight_free_export(
     model_type = getattr(model_config, "model_type", "unknown")
     num_hidden_layers = getattr(model_config, "num_hidden_layers", "unknown")
     prepared_name = source_dir.name + f"-qeff-prepared-{model_type}-layers{num_hidden_layers}-{dtype_suffix}"
+    expert_parallel_layout = _resolve_expert_parallel_checkpoint_layout(qeff_model)
+    if expert_parallel_layout is not None:
+        layout_signature = json.dumps(expert_parallel_layout, sort_keys=True, separators=(",", ":"))
+        layout_hash = hashlib.sha256(layout_signature.encode("utf-8")).hexdigest()[:12]
+        prepared_name += f"-moe-ep-v{expert_parallel_layout['layout_version']}-{layout_hash}"
     if QEFF_CHECKPOINT_HOME:
         prepared_out = QEFF_CHECKPOINT_HOME.expanduser() / prepared_name
     else:
@@ -164,6 +202,10 @@ def _prepare_checkpoint_for_weight_free_export(
             out=prepared_out,
             target_dtype=target_dtype,
             model_config=model_config,
+            expert_parallel_layout=expert_parallel_layout,
+            checkpoint_transform_context=(
+                {"moe_weight_layout": expert_parallel_layout} if expert_parallel_layout is not None else None
+            ),
         )
     )
 

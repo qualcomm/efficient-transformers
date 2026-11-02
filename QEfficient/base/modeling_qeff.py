@@ -446,6 +446,8 @@ class QEFFBaseModel(ABC):
         offload_pt_weights: bool = True,
         dynamo: bool = False,
         dynamic_shapes: Optional[Dict[str, Dict[int, Any]]] = None,
+        prefill_only: Optional[bool] = False,
+        prefill_seq_len: Optional[int] = None,
         **export_kwargs,
     ) -> str:
         """

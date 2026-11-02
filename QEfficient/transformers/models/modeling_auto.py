@@ -3484,6 +3484,15 @@ MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP = {
 }
 
 
+def _allow_weight_free_prefill_compile_by_default(
+    config, prefill_only: Optional[bool], prefill_seq_len: int
+) -> bool:
+    """Keep the default weight-free disaggregated compile allowance GLM-prefill-only."""
+    architectures = getattr(config, "architectures", None) or []
+    is_glm_moe_dsa = "GlmMoeDsaForCausalLM" in architectures or getattr(config, "model_type", None) == "glm_moe_dsa"
+    return is_glm_moe_dsa and prefill_only is True and prefill_seq_len > 1
+
+
 class QEFFAutoModelForCausalLM(QEFFBaseModel):
     """
     QEfficient class for Causal Language Models from the HuggingFace hub (e.g., GPT-2, Llama).
@@ -4348,6 +4357,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
                 dynamo=dynamo,
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
+                prefill_only=prefill_only,
+                prefill_seq_len=prefill_seq_len,
             )
         finally:
             if is_glm_moe_dsa and hasattr(self.model, "_qeff_export_with_cache_outputs"):
@@ -4686,7 +4697,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if prefill_only is not None and not isinstance(prefill_only, bool):
             raise TypeError("`prefill_only` must be a boolean.")
 
-        if self._weight_free and (prefill_only is True or prefill_seq_len == 1):
+        # The benchmark-aligned GLM DSA prefill path has a tested
+        # weight-free ONNX/QPC compile path, so allow it by default for that model and
+        # stage. Keep the historical opt-in requirement for every other model
+        # and for decode/single-token compilation.
+        allow_weight_free_prefill = _allow_weight_free_prefill_compile_by_default(
+            self.model.config, prefill_only, prefill_seq_len
+        ) or (
+            os.environ.get("QEFF_ALLOW_WEIGHT_FREE_PREFILL_COMPILE", "0") == "1"
+        )
+        if self._weight_free and (prefill_only is True or prefill_seq_len == 1) and not allow_weight_free_prefill:
             raise NotImplementedError(
                 "weight_free=True is not supported with disaggregated compile (prefill_only=True or prefill_seq_len=1)."
             )

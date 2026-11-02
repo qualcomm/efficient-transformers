@@ -6,7 +6,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""Generate QAIC per-op traces for a four-layer GLM-5.3 prefill graph."""
+"""Generate QAIC per-op traces for a reduced-layer GLM-5.3 prefill graph."""
 
 from __future__ import annotations
 
@@ -40,14 +40,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ctx-len", type=int, default=65536)
     parser.add_argument("--num-devices", type=int, default=1)
     parser.add_argument("--num-cores", type=int, default=16)
+    parser.add_argument(
+        "--dtype",
+        choices=("float32", "float16", "bfloat16"),
+        default="float32",
+        help="Target floating-point dtype for the model and prepared weights.",
+    )
     parser.add_argument("--hw-version", choices=("ai100", "ai200"), default="ai100")
     parser.add_argument("--device-list", default=None, help="qaic-runner device mapping, for example 1 or 0:1.")
     parser.add_argument("--attention-preset", default="dsa_prefill_cp1")
     parser.add_argument("--attention-qaic-json", default=None)
     parser.add_argument("--dynamo", action="store_true")
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
+    parser.add_argument("--weight-free", action="store_true", help="Use the weight-free export/compile path.")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--prepare-only", action="store_true", help="Write profiling scripts without running them.")
+    parser.add_argument(
+        "--existing-onnx",
+        type=Path,
+        default=None,
+        help="Reuse an already-exported ONNX graph and skip the export step.",
+    )
     parser.add_argument("--perf-num-iters", type=int, default=30)
     parser.add_argument("--perf-profile-start-iter", type=int, default=20)
     parser.add_argument("--perf-num-samples", type=int, default=2)
@@ -263,8 +276,8 @@ def main() -> None:
         args.model_id = str(model_path.resolve())
     args.hf_cache = args.hf_cache.expanduser().resolve()
     args.artifact_root = args.artifact_root.expanduser().resolve()
-    if args.num_hidden_layers != 4:
-        raise ValueError("This reduced GLM-5.3 profiling flow supports exactly four layers.")
+    if args.num_hidden_layers < 1 or args.num_hidden_layers > 4:
+        raise ValueError("This reduced GLM-5.3 profiling flow supports one through four layers.")
     if args.prefill_seq_len <= 1 or args.prefill_seq_len > args.ctx_len:
         raise ValueError("prefill_seq_len must be greater than 1 and no larger than ctx_len.")
     if args.perf_profile_start_iter + args.perf_num_samples > args.perf_num_iters:
@@ -287,8 +300,11 @@ def main() -> None:
     from examples.glm.glm53_four_layer_prefill_compile import (
         PREFILL_ATTENTION_PRESETS,
         install_partial_fp8_dequant_patch,
+        resolve_prefill_torch_dtype,
         validate_prefill_dimensions,
     )
+
+    target_dtype = resolve_prefill_torch_dtype(args.dtype)
 
     if args.attention_preset not in PREFILL_ATTENTION_PRESETS:
         raise ValueError(
@@ -298,6 +314,9 @@ def main() -> None:
     qaic_config = copy.deepcopy(PREFILL_ATTENTION_PRESETS[args.attention_preset])
     if args.attention_qaic_json:
         qaic_config.update(json.loads(args.attention_qaic_json))
+    # This entry point builds a GLM prefill graph; keep EP local to prefill and
+    # allow an explicit caller flavour to override it for A/B experiments.
+    qaic_config.setdefault("moe_config", {}).setdefault("flavour", "expert_parallel")
     validate_prefill_dimensions(
         qaic_config,
         prefill_seq_len=args.prefill_seq_len,
@@ -309,6 +328,15 @@ def main() -> None:
         cache_dir=str(args.hf_cache),
         local_files_only=args.local_files_only,
     )
+    # Weight-free tracing removes quantization_config from the runtime config,
+    # but checkpoint preparation still needs the source FP8 block geometry.
+    source_quantization_config = getattr(config, "quantization_config", None)
+    if isinstance(source_quantization_config, dict):
+        source_block_size = source_quantization_config.get("weight_block_size")
+    else:
+        source_block_size = getattr(source_quantization_config, "weight_block_size", None)
+    if source_block_size is not None:
+        config._glm_moe_dsa_weight_block_size = tuple(int(size) for size in source_block_size)
     config.num_hidden_layers = args.num_hidden_layers
     if args.attention_preset.startswith("dense"):
         config.layer_types = ["full_attention"] * args.num_hidden_layers
@@ -316,23 +344,35 @@ def main() -> None:
         config.layer_types = list(config.layer_types[: args.num_hidden_layers])
         config.indexer_types = list(config.indexer_types[: args.num_hidden_layers])
     config.use_cache = True
-    config.torch_dtype = torch.float32
-    config.dtype = torch.float32
+    config.torch_dtype = target_dtype
+    config.dtype = target_dtype
 
-    install_partial_fp8_dequant_patch()
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        args.model_id,
-        config=config,
-        cache_dir=str(args.hf_cache),
-        local_files_only=args.local_files_only,
-        torch_dtype=torch.float32,
-        device_map="cpu",
-    ).eval()
-    qeff_model = QEFFAutoModelForCausalLM(
-        hf_model,
-        pretrained_model_name_or_path=args.model_id,
-        qaic_config=qaic_config,
-    )
+    if args.weight_free:
+        config.quantization_config = None
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            config=config,
+            cache_dir=str(args.hf_cache),
+            local_files_only=args.local_files_only,
+            torch_dtype=target_dtype,
+            weight_free=True,
+            qaic_config=qaic_config,
+        )
+    else:
+        install_partial_fp8_dequant_patch()
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            config=config,
+            cache_dir=str(args.hf_cache),
+            local_files_only=args.local_files_only,
+            torch_dtype=target_dtype,
+            device_map="cpu",
+        ).eval()
+        qeff_model = QEFFAutoModelForCausalLM(
+            hf_model,
+            pretrained_model_name_or_path=args.model_id,
+            qaic_config=qaic_config,
+        )
     qeff_model.transform(
         ctx_len=args.ctx_len,
         seq_len=args.prefill_seq_len,
@@ -345,17 +385,23 @@ def main() -> None:
 
     export_root = args.artifact_root / "onnx"
     compile_root = args.artifact_root / "compile"
-    print("Exporting the multi-token prefill graph")
-    onnx_path = Path(
-        qeff_model.export(
-            export_dir=str(export_root),
-            prefill_only=True,
-            prefill_seq_len=args.prefill_seq_len,
-            offload_pt_weights=False,
-            dynamo=args.dynamo,
-            use_onnx_subfunctions=args.use_onnx_subfunctions,
+    if args.existing_onnx is not None:
+        onnx_path = args.existing_onnx.resolve()
+        if not onnx_path.is_file():
+            raise FileNotFoundError(f"Existing ONNX graph not found: {onnx_path}")
+        print(f"Reusing existing ONNX graph: {onnx_path}")
+    else:
+        print("Exporting the multi-token prefill graph")
+        onnx_path = Path(
+            qeff_model.export(
+                export_dir=str(export_root),
+                prefill_only=True,
+                prefill_seq_len=args.prefill_seq_len,
+                offload_pt_weights=False,
+                dynamo=args.dynamo,
+                use_onnx_subfunctions=args.use_onnx_subfunctions,
+            )
         )
-    )
     print(f"ONNX_PATH={onnx_path}")
 
     print("Capturing the production prefill compiler command")
@@ -373,6 +419,7 @@ def main() -> None:
                 prefill_only=True,
                 use_onnx_subfunctions=args.use_onnx_subfunctions,
                 offload_pt_weights=False,
+                user_tiled=True,
             )
         )
     if len(captured) != 1:

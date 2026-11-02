@@ -48,6 +48,7 @@ from QEfficient.customop.ctx_scatter_gather_cb import (
     CtxScatterFuncCB,
     CtxScatterFuncCB3D,
 )
+from QEfficient.customop.glm_dsa import V4CtxGatherRows, V4CtxGatherRowsFunc
 from QEfficient.customop.onnxscript_utils import get_onnxscript_func
 from QEfficient.customop.quantization_ops import CastToUInt4, CastToUInt4Func
 from QEfficient.customop.rms_norm import CustomRMSNorm, CustomRMSNormFunc
@@ -118,6 +119,7 @@ class CustomOpTransform(BaseOnnxTransform):
         "CastToUInt4": (CastToUInt4Func, CastToUInt4),
         "CtxChunkScatterBatchFunc": (CtxChunkScatterBatchFunc, CtxChunkScatterBatch),
         "CtxGatherFuncBlockedKVBatch": (CtxGatherFuncBlockedKVBatch, CtxGatherBlockedKVBatch),
+        "V4CtxGatherRowsFunc": (V4CtxGatherRowsFunc, V4CtxGatherRows),
     }
 
     @classmethod
@@ -160,6 +162,36 @@ class CustomOpTransform(BaseOnnxTransform):
                 if node.domain:
                     cls._ensure_opset_imports(fn, node.domain, 1)
                     cls._ensure_opset_imports(model, node.domain, 1)
+
+
+class InlineV4CtxGatherRowsDynamoWrapperTransform(BaseOnnxTransform):
+    """Lower Dynamo's local V4 wrapper to the compiler-supported QTI op."""
+
+    _WRAPPER_NAME = "V4CtxGatherRowsDynamoTranslation"
+
+    @classmethod
+    def apply(cls, model: ModelProto, onnx_export_opset: int = constants.ONNX_LEGACY_EXPORT_OPSET) -> bool:
+        function_ids = [
+            (function.domain, function.name)
+            for function in model.functions
+            if function.name == cls._WRAPPER_NAME
+        ]
+        if not function_ids:
+            return False
+
+        from onnx.inliner import inline_selected_functions
+
+        inlined_model = inline_selected_functions(model, function_ids)
+        model.CopyFrom(inlined_model)
+        selected_ids = set(function_ids)
+        keep = [(function.domain, function.name) for function in model.functions]
+        for index in reversed(range(len(keep))):
+            if keep[index] in selected_ids:
+                del model.functions[index]
+
+        # Register the emitted vendor node's standard function prototype.
+        CustomOpTransform.apply(model)
+        return True
 
 
 class RemovePrefix(BaseOnnxTransform):
@@ -960,6 +992,14 @@ class OnnxTransformPipeline(BaseOnnxTransform):
 
         if AdapterWeightsToInputsTransform in requested:
             applied[AdapterWeightsToInputsTransform] = AdapterWeightsToInputsTransform.apply(model, **kwargs)
+
+        if InlineV4CtxGatherRowsDynamoWrapperTransform in requested:
+            applied[InlineV4CtxGatherRowsDynamoWrapperTransform] = (
+                InlineV4CtxGatherRowsDynamoWrapperTransform.apply(
+                    model,
+                    onnx_export_opset=kwargs.get("onnx_export_opset", constants.ONNX_LEGACY_EXPORT_OPSET),
+                )
+            )
 
         for t, done in applied.items():
             logger.info(f"Transform '{t.__name__}' applied={done}")

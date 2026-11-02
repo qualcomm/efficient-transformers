@@ -702,6 +702,15 @@ class TestQEFFAutoModelForCausalLMExportPrefillSeqLen:
 
         assert captured["example_inputs"]["input_ids"].shape[1] == 512
 
+    def test_export_forwards_prefill_context_to_onnx_transform_setup(self):
+        """The wrapped exporter needs prefill settings to select prefill-only ONNX transforms."""
+        qeff = self._make_specialized_qeff()
+
+        captured = self._capture_export(qeff, prefill_only=True, prefill_seq_len=128, enable_chunking=True)
+
+        assert captured["kwargs"]["prefill_only"] is True
+        assert captured["kwargs"]["prefill_seq_len"] == 128
+
     def test_expert_parallel_keeps_default_export_seq_len_when_divisible_by_num_packed_chunks(self):
         """Expert-parallel export leaves seq_len unchanged when it is already divisible by packed chunks."""
         from QEfficient.transformers.moe.flavours import MoEFlavour

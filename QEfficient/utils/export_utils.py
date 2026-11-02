@@ -12,7 +12,7 @@ import warnings
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -20,6 +20,7 @@ from torch.export import Dim
 
 from QEfficient.base.onnx_transforms import (
     CustomOpTransform,
+    InlineV4CtxGatherRowsDynamoWrapperTransform,
     LocalizeFunctionReduceSumAxesTransform,
     PreserveNestedCacheRetainedStateTransform,
     RenameFunctionOutputsTransform,
@@ -470,6 +471,15 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
     return export_hash, filtered_hash_params
 
 
+def _is_glm_multitoken_prefill(model_config, prefill_only: bool, prefill_seq_len: Optional[int]) -> bool:
+    is_glm_moe_dsa = (
+        getattr(model_config, "model_type", None) == "glm_moe_dsa"
+        or "GlmMoeDsaForCausalLM" in (getattr(model_config, "architectures", None) or [])
+    )
+    is_multitoken_prefill = prefill_seq_len is None or prefill_seq_len > 1
+    return is_glm_moe_dsa and prefill_only is True and is_multitoken_prefill
+
+
 def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
     """
     Setup ONNX subfunction export environment.
@@ -553,6 +563,19 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
 
     if LocalizeFunctionReduceSumAxesTransform not in qeff_model._onnx_transforms:
         qeff_model._onnx_transforms.append(LocalizeFunctionReduceSumAxesTransform)
+
+    model_config = getattr(qeff_model.model, "config", None)
+    is_glm_multitoken_prefill = _is_glm_multitoken_prefill(
+        model_config,
+        kwargs.get("prefill_only"),
+        kwargs.get("prefill_seq_len"),
+    )
+    if (
+        dynamo
+        and is_glm_multitoken_prefill
+        and InlineV4CtxGatherRowsDynamoWrapperTransform not in qeff_model._onnx_transforms
+    ):
+        qeff_model._onnx_transforms.append(InlineV4CtxGatherRowsDynamoWrapperTransform)
 
     # TODO: Handle this in the modelling class QEFFTransformersBase, remove from here.
     decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)

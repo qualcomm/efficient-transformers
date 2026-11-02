@@ -85,6 +85,34 @@ def _maybe_clone(t: Optional[torch.Tensor], clone: bool) -> Optional[torch.Tenso
     return t.detach().clone() if clone else t.detach()
 
 
+def pack_expert_parallel_tensor(
+    tensor: Optional[torch.Tensor],
+    *,
+    num_pipeline_stages: int,
+    num_parallelized_experts: int,
+    clone: bool = False,
+) -> Optional[torch.Tensor]:
+    """Pack a canonical tensor's expert axis into the EP ``[P, S, ...]`` layout."""
+    if tensor is None:
+        return None
+    if num_pipeline_stages <= 0 or num_parallelized_experts <= 0:
+        raise ValueError("expert-parallel stage and parallel-expert counts must be positive")
+    expected_experts = num_pipeline_stages * num_parallelized_experts
+    if tensor.ndim == 0 or tensor.shape[0] != expected_experts:
+        actual_experts = tensor.shape[0] if tensor.ndim else 0
+        raise ValueError(
+            "expert-parallel packing expected the leading dimension to equal "
+            f"num_pipeline_stages * num_parallelized_experts ({expected_experts}), got {actual_experts}"
+        )
+    packed = (
+        tensor.view(num_pipeline_stages, num_parallelized_experts, *tensor.shape[1:])
+        .transpose(0, 1)
+        .contiguous()
+        .detach()
+    )
+    return packed.clone() if clone else packed
+
+
 def _validate_matching_optional_shape(
     *,
     name: str,
@@ -185,12 +213,11 @@ def _pack_expert_parallel_tensor(
 ) -> Optional[nn.Parameter]:
     if tensor is None:
         return None
-    packed = (
-        tensor.view(num_pipeline_stages, num_parallelized_experts, *tensor.shape[1:])
-        .transpose(0, 1)
-        .contiguous()
-        .detach()
-        .clone()
+    packed = pack_expert_parallel_tensor(
+        tensor,
+        num_pipeline_stages=num_pipeline_stages,
+        num_parallelized_experts=num_parallelized_experts,
+        clone=True,
     )
     return nn.Parameter(packed, requires_grad=False)
 

@@ -290,13 +290,20 @@ class GlmMoeDsaReducedCheckpointTransform(BaseCheckpointTransform):
                 quantization_config, "quant_type", None
             )
         quant_method = quant_method.value if hasattr(quant_method, "value") else quant_method
+        has_preserved_fp8_metadata = getattr(model_config, "_glm_moe_dsa_weight_block_size", None) is not None
+        is_fp8_checkpoint = quant_method == "fp8" or (quant_method is None and has_preserved_fp8_metadata)
         has_q_b_proj = any(
             key.endswith(cls._Q_B_PROJ_SUFFIX) and f"{key}{cls._SCALE_SUFFIX}" in weight_map for key in weight_map
         )
         dense_mlp_suffixes = (".mlp.gate_proj.weight", ".mlp.up_proj.weight", ".mlp.down_proj.weight")
         has_dense_mlp = all(any(key.endswith(suffix) for key in weight_map) for suffix in dense_mlp_suffixes)
         has_per_expert_mlp = any(cls._EXPERT_RE.match(key) for key in weight_map)
-        return is_glm_config and quant_method == "fp8" and has_q_b_proj and has_dense_mlp and has_per_expert_mlp
+        # Weight-free GLM export clears config.quantization_config before
+        # tracing, but the source checkpoint still carries the FP8 tensors and
+        # scale-inverse entries.  Select the reduced-layer transform from the
+        # checkpoint structure in that case as well; otherwise the generic
+        # expert stacker scans every layer in the full checkpoint.
+        return is_glm_config and is_fp8_checkpoint and has_q_b_proj and has_dense_mlp and has_per_expert_mlp
 
     @staticmethod
     def _weight_block_size(model_config) -> tuple[int, int]:
@@ -305,6 +312,11 @@ class GlmMoeDsaReducedCheckpointTransform(BaseCheckpointTransform):
             block_size = quantization_config.get("weight_block_size")
         else:
             block_size = getattr(quantization_config, "weight_block_size", None)
+        # The weight-free GLM tracing flow clears quantization_config before
+        # constructing the QEff model.  Preserve/use the source FP8 metadata
+        # when that happens instead of losing the dequantization block shape.
+        if block_size is None:
+            block_size = getattr(model_config, "_glm_moe_dsa_weight_block_size", None)
         if not isinstance(block_size, (list, tuple)) or len(block_size) != 2:
             raise ValueError("GLM-MoE-DSA weight-free export requires a two-dimensional FP8 weight_block_size.")
         return tuple(int(size) for size in block_size)
@@ -493,6 +505,23 @@ class GlmMoeDsaReducedCheckpointTransform(BaseCheckpointTransform):
                 canonical_kind = kind.removesuffix("_proj")
                 canonical_key = f"model.layers.{layer_idx}.mlp.moe_weights.{canonical_kind}"
                 out_name = f"model_glm_experts_layer_{layer_idx:05d}_{kind_index:02d}.safetensors"
+                expert_parallel_layout = kwargs.get("expert_parallel_layout")
+                if expert_parallel_layout is not None:
+                    from QEfficient.transformers.moe.weights import pack_expert_parallel_tensor
+
+                    num_pipeline_stages = int(expert_parallel_layout["num_pipeline_stages"])
+                    num_parallelized_experts = int(expert_parallel_layout["num_parallelized_experts"])
+                    if num_experts != num_pipeline_stages * num_parallelized_experts:
+                        raise ValueError(
+                            "GLM EP checkpoint layout is inconsistent with the checkpoint: "
+                            f"{num_experts} experts != {num_pipeline_stages} stages * "
+                            f"{num_parallelized_experts} parallel experts"
+                        )
+                    stacked = pack_expert_parallel_tensor(
+                        stacked,
+                        num_pipeline_stages=num_pipeline_stages,
+                        num_parallelized_experts=num_parallelized_experts,
+                    )
                 atomic_save({canonical_key: stacked}, out / out_name)
                 new_weight_map[canonical_key] = out_name
                 del stacked

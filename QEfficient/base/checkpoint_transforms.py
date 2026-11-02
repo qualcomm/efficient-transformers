@@ -232,6 +232,11 @@ class CheckpointTransformPipeline:
                 "model_type": getattr(model_config, "model_type", None),
                 "num_hidden_layers": getattr(model_config, "num_hidden_layers", None),
             }
+        checkpoint_transform_context = kwargs.get("checkpoint_transform_context")
+        if checkpoint_transform_context:
+            if manifest_context is None:
+                manifest_context = {}
+            manifest_context["checkpoint_transform_context"] = checkpoint_transform_context
         expected_manifest = _checkpoint_manifest(
             src,
             source_dir,

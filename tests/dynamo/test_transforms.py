@@ -257,6 +257,14 @@ def test_export_wrapper_disables_grad_for_dynamo_subfunction_exports(monkeypatch
     assert grad_states == [False]
 
 
+@pytest.mark.parametrize("prefill_seq_len, expected", [(None, True), (128, True), (1, False)])
+def test_glm_multitoken_subfunction_detection_handles_unspecified_prefill_length(prefill_seq_len, expected):
+    from QEfficient.utils.export_utils import _is_glm_multitoken_prefill
+
+    config = type("Config", (), {"model_type": "glm_moe_dsa", "architectures": []})()
+    assert _is_glm_multitoken_prefill(config, True, prefill_seq_len) is expected
+
+
 def _make_minimal_onnx_with_repeated_subgraphs(num_layers: int = 2, scatter_count_per_fn: int = 2):
     """
     Build a minimal ONNX ModelProto that mimics dynamo's repeated-subgraph output:

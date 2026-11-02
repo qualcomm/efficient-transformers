@@ -10,12 +10,14 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
 from QEfficient.blocking.blocked_attention_forwards import blocked_kv_mla_attention_forward
+from QEfficient.customop import v4_ctx_gather_rows
 from QEfficient.transformers.cache_utils import glm_dsa_gather_cache
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 
@@ -150,6 +152,153 @@ def blocked_glm_dsa_prefill_topk(
     batch_local = batch_size // dp
     local_context = folded_key_cache.shape[2]
     block_width = local_context // num_blocks
+
+    # Benchmark-compatible parallel prefill path.  The standalone benchmark
+    # first contracts the index-head dimension with the per-head weights and
+    # then scores that weighted query against the keys.  Keep the complete
+    # candidate context for each query block before applying Top-K; this is
+    # important when the indexer context is split into multiple KV blocks.
+    # The production path below is retained for the non-parallel topology.
+    if parallel:
+        if block_width % num_cores_per_device:
+            raise ValueError(
+                "GLM DSA prefill indexer block width must be divisible by "
+                "num_cores_per_device."
+            )
+        tokens_per_core = block_width // num_cores_per_device
+        keys = folded_key_cache.view(
+            batch_local,
+            dp,
+            cp,
+            num_blocks,
+            num_cores_per_device,
+            tokens_per_core,
+            head_dim,
+        )
+        query = query.view(
+            batch_local, dp, query_length, num_heads, head_dim
+        ).float()
+        head_weights = head_weights.view(
+            batch_local, dp, query_length, num_heads
+        ).float()
+        position_ids = position_ids.view(batch_local, dp, query_length)
+        if attention_mask is not None:
+            attention_mask = attention_mask.view(
+                batch_local, dp, query_length, -1
+            )
+
+        weighted_query = (query * head_weights.unsqueeze(-1)).sum(dim=3)
+        cp_ids = torch.arange(
+            cp, device=query.device, dtype=torch.int64
+        ).view(1, 1, 1, cp, 1, 1)
+        core_offsets = torch.arange(
+            num_cores_per_device, device=query.device, dtype=torch.int64
+        ).view(1, 1, 1, 1, num_cores_per_device, 1)
+        token_offsets = torch.arange(
+            tokens_per_core, device=query.device, dtype=torch.int64
+        ).view(1, 1, 1, 1, 1, tokens_per_core)
+
+        output_chunks = []
+        topk = min(final_topk, local_context * cp)
+        for query_chunk_start in range(0, query_length, query_chunk_size):
+            query_chunk_end = min(
+                query_chunk_start + query_chunk_size, query_length
+            )
+            query_chunk = query_chunk_end - query_chunk_start
+            query_blocks = []
+            for query_block_start in range(
+                query_chunk_start, query_chunk_end, query_block_size
+            ):
+                query_block_end = query_block_start + query_block_size
+                query_block = query_block_end - query_block_start
+                q_block = weighted_query[
+                    :, :, query_block_start:query_block_end
+                ]
+                position_block = position_ids[
+                    :, :, query_block_start:query_block_end
+                ]
+                score_blocks = []
+                index_blocks = []
+                for block_idx in range(num_blocks):
+                    block_keys = keys[:, :, :, block_idx].reshape(
+                        batch_local,
+                        dp,
+                        cp,
+                        block_width,
+                        head_dim,
+                    ).float()
+                    scores = torch.einsum(
+                        "bpqd,bpctd->bpqct", q_block, block_keys
+                    ) * scale
+                    local_ids = (
+                        block_idx * block_width
+                        + core_offsets * tokens_per_core
+                        + token_offsets
+                    )
+                    global_ids = (local_ids * cp + cp_ids).expand(
+                        batch_local,
+                        dp,
+                        query_block,
+                        cp,
+                        num_cores_per_device,
+                        tokens_per_core,
+                    )
+                    scores = scores.reshape(
+                        batch_local,
+                        dp,
+                        query_block,
+                        -1,
+                    )
+                    flat_ids = global_ids.reshape(
+                        batch_local, dp, query_block, -1
+                    )
+                    invalid = flat_ids > position_block.unsqueeze(-1)
+                    if attention_mask is not None:
+                        invalid = invalid | torch.gather(
+                            attention_mask[
+                                :, :, query_block_start:query_block_end
+                            ],
+                            -1,
+                            flat_ids,
+                        )
+                    score_blocks.append(
+                        scores.masked_fill(invalid, float("-inf"))
+                    )
+                    index_blocks.append(flat_ids)
+
+                candidate_scores = torch.cat(score_blocks, dim=-1)
+                candidate_indices = torch.cat(index_blocks, dim=-1)
+                sub_blocks = topk_blocking
+                if query_block % sub_blocks:
+                    raise ValueError(
+                        "GLM DSA parallel prefill query block must be "
+                        "divisible by topk_blocking."
+                    )
+                query_sub_block_size = query_block // sub_blocks
+                selected_blocks = []
+                for sub_block_idx in range(sub_blocks):
+                    sub_start = sub_block_idx * query_sub_block_size
+                    sub_end = sub_start + query_sub_block_size
+                    selected = torch.topk(
+                        candidate_scores[:, :, sub_start:sub_end],
+                        k=topk,
+                        dim=-1,
+                    ).indices
+                    selected_blocks.append(
+                        torch.gather(
+                            candidate_indices[:, :, sub_start:sub_end],
+                            -1,
+                            selected,
+                        )
+                    )
+                query_blocks.append(torch.cat(selected_blocks, dim=2))
+            output_chunks.append(torch.cat(query_blocks, dim=2))
+
+        output = torch.cat(output_chunks, dim=2)
+        return output.permute(1, 0, 2, 3).reshape(
+            batch_size, query_length, topk
+        ).to(torch.int32)
+
     if block_width % num_cores_per_device:
         raise ValueError("GLM DSA prefill indexer block width must be divisible by num_cores_per_device.")
     tokens_per_core = block_width // num_cores_per_device
@@ -660,6 +809,147 @@ def _glm_tiled_sparse_mla_attention_prefill(
     return torch.cat(output_chunks, dim=1), None
 
 
+def _glm_tiled_sparse_mla_attention_prefill_benchmark_dataflow(
+    *,
+    module,
+    query_latent: torch.Tensor,
+    query_rope: torch.Tensor,
+    ckv_cache: torch.Tensor,
+    k_pe_cache: torch.Tensor,
+    topk_indices: torch.Tensor,
+    valid_topk: torch.Tensor,
+    layer_config,
+) -> tuple[torch.Tensor, None]:
+    """Exact benchmark-style sparse MLA prefill dataflow.
+
+    This path intentionally mirrors ``dsa_parallel_sparse_mla_attention_prefill``
+    in the standalone benchmark: KV blocks remain streamed, Q/K are flattened
+    before ``bmm``, cKV is kept shared across heads for the value matmul, and
+    online softmax state is updated block by block.
+
+    The benchmark comparison configuration is DP=CP=1.  The shape checks make
+    that scope explicit rather than silently applying the layout to another
+    distributed topology.
+    """
+    batch_size, num_query_heads, query_length, latent_dim = query_latent.shape
+    dp = layer_config.attn_dp
+    cp = layer_config.attn_cp
+    cores = layer_config.num_cores_per_device
+    if dp != 1 or cp != 1:
+        raise ValueError("Benchmark dataflow currently requires attn_dp=1 and attn_cp=1.")
+    if query_length % cores:
+        raise ValueError("Sparse prefill Q length must be divisible by num_cores_per_device.")
+
+    selected_per_query = topk_indices.shape[-1]
+    rope_dim = query_rope.shape[-1]
+    output_chunks = []
+    mask_value = MIN_MASKED_ATTENTION_VALUE
+
+    for query_start in range(0, query_length, layer_config.sparse_q_block_size):
+        query_end = min(query_start + layer_config.sparse_q_block_size, query_length)
+        query_chunk = query_end - query_start
+        if query_chunk % cores:
+            raise ValueError("Every sparse prefill Q chunk must be divisible by num_cores_per_device.")
+        queries_per_core = query_chunk // cores
+
+        q_latent_core = query_latent[:, :, query_start:query_end].reshape(
+            batch_size, num_query_heads, cores, queries_per_core, latent_dim
+        ).permute(0, 2, 3, 1, 4).float()
+        q_rope_core = query_rope[:, :, query_start:query_end].reshape(
+            batch_size, num_query_heads, cores, queries_per_core, rope_dim
+        ).permute(0, 2, 3, 1, 4).float()
+        q_abs = torch.cat((q_latent_core, q_rope_core), dim=-1)
+        q_head_width = queries_per_core * num_query_heads
+        work_dtype = q_abs.dtype
+        running_max = torch.full(
+            (batch_size, cores, q_head_width), -65504.0,
+            dtype=work_dtype, device=q_abs.device,
+        )
+        running_sum = torch.zeros_like(running_max)
+        running_output = torch.zeros(
+            batch_size, cores, q_head_width, latent_dim,
+            dtype=work_dtype, device=q_abs.device,
+        )
+
+        for kv_block_idx in range(layer_config.sparse_kv_num_blocks):
+            kv_start = selected_per_query * kv_block_idx // layer_config.sparse_kv_num_blocks
+            kv_end = selected_per_query * (kv_block_idx + 1) // layer_config.sparse_kv_num_blocks
+            topk_block = topk_indices[:, query_start:query_end, kv_start:kv_end]
+            valid_block = valid_topk[:, query_start:query_end, kv_start:kv_end]
+            # Match the standalone benchmark: gather the query-specific rows
+            # directly from [B, 1, T, D] with V4CtxGatherRows.  This path is
+            # intentionally CP=1 (checked above); keep the general folded-row
+            # mapper for decode and the non-benchmark prefill paths.
+            gather_indices = topk_block.unsqueeze(1)
+            ckv_block = v4_ctx_gather_rows(ckv_cache, gather_indices).squeeze(1).float()
+            rope_block = v4_ctx_gather_rows(k_pe_cache, gather_indices).squeeze(1).float()
+
+            block_width = kv_end - kv_start
+            # [B, 1, 1, Q, K, D] -> [B, C, Q/C, K, D]
+            ckv_block = ckv_block.reshape(
+                batch_size, cores, queries_per_core, block_width, latent_dim
+            ).float()
+            rope_block = rope_block.reshape(
+                batch_size, cores, queries_per_core, block_width, rope_dim
+            ).float()
+            key_block = torch.cat((ckv_block, rope_block), dim=-1)
+
+            # Exact benchmark score layout: flatten matching batch/core/query
+            # axes and use BMM instead of high-rank broadcasted MatMul.
+            q_score_work = q_abs.reshape(
+                batch_size * cores * queries_per_core,
+                num_query_heads,
+                q_abs.shape[-1],
+            )
+            k_score_work = key_block.reshape(
+                batch_size * cores * queries_per_core,
+                block_width,
+                key_block.shape[-1],
+            ).transpose(1, 2)
+            scores = torch.bmm(q_score_work, k_score_work).reshape(
+                batch_size, cores, queries_per_core, num_query_heads, block_width
+            ) * module.scaling
+            # Restore the core/query split before broadcasting validity over
+            # heads: [B, Q, K] -> [B, C, Q/C, 1, K].
+            valid_mask = valid_block.reshape(
+                batch_size, cores, queries_per_core, block_width
+            ).unsqueeze(3)
+            scores = scores.masked_fill(~valid_mask, mask_value).reshape(
+                batch_size, cores, q_head_width, block_width
+            )
+
+            current_max = torch.maximum(running_max, scores.max(dim=-1).values)
+            delta_max = running_max - current_max
+            current_exp = torch.exp(scores - current_max.unsqueeze(-1))
+            current_sum = current_exp.sum(dim=-1)
+            running_sum = running_sum * torch.exp(delta_max) + current_sum
+
+            # Keep cKV shared across heads.  This is the benchmark's critical
+            # value path and avoids materializing [B,C,Q/C,H,K,R].
+            current_exp_grouped = current_exp.reshape(
+                batch_size, cores, queries_per_core, num_query_heads, block_width
+            )
+            value_update = torch.matmul(current_exp_grouped, ckv_block).reshape(
+                batch_size, cores, q_head_width, latent_dim
+            )
+            running_output = running_output * torch.exp(delta_max.unsqueeze(-1)) + value_update
+            running_max = current_max
+
+        latent_output = running_output / running_sum.clamp_min(1.0).unsqueeze(-1)
+        latent_output = latent_output.reshape(
+            batch_size, cores, queries_per_core, num_query_heads, latent_dim
+        )
+        latent_output = latent_output.permute(0, 3, 1, 2, 4).reshape(
+            batch_size, num_query_heads, query_chunk, latent_dim
+        )
+        output_flat = torch.matmul(
+            latent_output.to(module.per_head_v_up.dtype), module.per_head_v_up[0]
+        )
+        output_chunks.append(output_flat.transpose(1, 2).reshape(batch_size, query_chunk, -1))
+
+    return torch.cat(output_chunks, dim=1), None
+
+
 def _project_inputs(module, hidden_states, position_embeddings):
     batch_size, seq_len = hidden_states.shape[:2]
     if seq_len > 256:
@@ -849,7 +1139,24 @@ def glm_attention_strategy(
         cache_layer = compressed_kvs.layers[module.layer_idx]
         query_latent = torch.einsum("bsd,hdk->bhsk", q_resid, module.fusedqk[0])
         if topk_indices.shape[1] > 1:
-            output, weights = _glm_tiled_sparse_mla_attention_prefill(
+            benchmark_dataflow_setting = os.environ.get("QEFF_GLM_PREFILL_BENCHMARK_DATAFLOW")
+            if benchmark_dataflow_setting not in (None, "0", "1"):
+                raise ValueError("QEFF_GLM_PREFILL_BENCHMARK_DATAFLOW must be 0 or 1 when set.")
+            # The standalone benchmark is CP=1/DP=1. Make that validated
+            # benchmark dataflow the GLM DSA prefill default for its supported
+            # topology. Preserve an explicit =0 A/B escape hatch, and leave
+            # other distributed topologies on the established implementation.
+            use_benchmark_dataflow = (
+                benchmark_dataflow_setting == "1"
+                if benchmark_dataflow_setting is not None
+                else layer_config.attn_dp == 1 and layer_config.attn_cp == 1
+            )
+            prefill_fn = (
+                _glm_tiled_sparse_mla_attention_prefill_benchmark_dataflow
+                if use_benchmark_dataflow
+                else _glm_tiled_sparse_mla_attention_prefill
+            )
+            output, weights = prefill_fn(
                 module=module,
                 query_latent=query_latent,
                 query_rope=q_rope,

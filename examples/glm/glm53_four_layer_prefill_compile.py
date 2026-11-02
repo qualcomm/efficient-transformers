@@ -20,12 +20,20 @@ from typing import Any
 
 import numpy as np
 import torch
-from glm53_four_layer_decode_compile_generate import (
-    DEFAULT_HF_CACHE,
-    DEFAULT_QEFF_HOME,
-    MODEL_ID,
-    install_partial_fp8_dequant_patch,
-)
+if __package__:
+    from .glm53_four_layer_decode_compile_generate import (
+        DEFAULT_HF_CACHE,
+        DEFAULT_QEFF_HOME,
+        MODEL_ID,
+        install_partial_fp8_dequant_patch,
+    )
+else:
+    from glm53_four_layer_decode_compile_generate import (
+        DEFAULT_HF_CACHE,
+        DEFAULT_QEFF_HOME,
+        MODEL_ID,
+        install_partial_fp8_dequant_patch,
+    )
 from transformers import AutoConfig, AutoModelForCausalLM
 
 PREFILL_ATTENTION_PRESETS = {
@@ -58,7 +66,42 @@ PREFILL_ATTENTION_PRESETS = {
         "sparse_q_block_size": 128,
         "sparse_kv_num_blocks": 1,
     },
+    # Configuration used by glm_attention_benchmark for the 1-device,
+    # sequence-512 / context-65536 prefill case.  The benchmark's parallel
+    # selector is implemented in QEfficient.blocking.glm_attention.
+    "dsa_benchmark_prefill": {
+        "mla_absorption": {"absorption": True, "online": False, "cache_compressed": True},
+        "indexer_dp": 1,
+        "indexer_cp": 1,
+        "indexer_kvp": 1,
+        "attn_dp": 1,
+        "attn_cp": 1,
+        "attn_kvp": 1,
+        "indexer_num_blocks": 8,
+        "num_cores_per_device": 1,
+        "indexer_ql_chunk": 512,
+        "indexer_q_block_size": 512,
+        "indexer_topk_blocking": 4,
+        "indexer_prefill_parallel": True,
+        "sparse_q_block_size": 16,
+        "sparse_kv_num_blocks": 8,
+    },
 }
+
+
+def resolve_prefill_torch_dtype(dtype_name: str) -> torch.dtype:
+    """Resolve the prefill CLI dtype using the same choices as the decode example."""
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    try:
+        return dtype_map[dtype_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported dtype {dtype_name!r}; choose from {tuple(dtype_map)}."
+        ) from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +115,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-devices", type=int, default=1)
     parser.add_argument("--num-cores", type=int, default=16)
+    parser.add_argument(
+        "--dtype",
+        choices=("float32", "float16", "bfloat16"),
+        default="float32",
+        help="Target floating-point dtype for the model and prepared weights.",
+    )
     parser.add_argument("--compile-dir", default=None)
     parser.add_argument("--export-dir", default=None)
     parser.add_argument("--seed", type=int, default=1234)
@@ -81,7 +130,9 @@ def parse_args() -> argparse.Namespace:
         "--attention-preset", choices=sorted(PREFILL_ATTENTION_PRESETS), default="dense_prefill_parallel"
     )
     parser.add_argument("--attention-qaic-json", default=None, help="JSON object merged over the selected preset.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.torch_dtype = resolve_prefill_torch_dtype(args.dtype)
+    return args
 
 
 def validate_prefill_dimensions(qaic_config: dict[str, Any], *, prefill_seq_len: int, ctx_len: int) -> None:
@@ -101,12 +152,13 @@ def validate_prefill_dimensions(qaic_config: dict[str, Any], *, prefill_seq_len:
 
 def main() -> None:
     args = parse_args()
-    if args.num_layers != 4:
-        raise ValueError("This GLM-5.3 prefill example currently supports exactly four layers.")
     ctx_len = args.ctx_len if args.ctx_len is not None else args.prefill_seq_len
     qaic_config = copy.deepcopy(PREFILL_ATTENTION_PRESETS[args.attention_preset])
     if args.attention_qaic_json:
         qaic_config.update(json.loads(args.attention_qaic_json))
+    # This entry point builds a GLM prefill graph; keep EP local to prefill and
+    # allow an explicit caller flavour to override it for A/B experiments.
+    qaic_config.setdefault("moe_config", {}).setdefault("flavour", "expert_parallel")
     validate_prefill_dimensions(qaic_config, prefill_seq_len=args.prefill_seq_len, ctx_len=ctx_len)
 
     os.environ.setdefault("HF_HUB_CACHE", args.hf_cache)
@@ -128,8 +180,8 @@ def main() -> None:
         config.layer_types = list(config.layer_types[: args.num_layers])
         config.indexer_types = list(config.indexer_types[: args.num_layers])
     config.use_cache = True
-    config.torch_dtype = torch.float32
-    config.dtype = torch.float32
+    config.torch_dtype = args.torch_dtype
+    config.dtype = args.torch_dtype
 
     print(
         json.dumps(
@@ -137,7 +189,7 @@ def main() -> None:
                 "event": "config",
                 "model_id": args.model_id,
                 "num_layers": args.num_layers,
-                "dtype": "torch.float32",
+                "dtype": str(args.torch_dtype),
                 "batch_size": args.batch_size,
                 "prefill_seq_len": args.prefill_seq_len,
                 "ctx_len": ctx_len,
@@ -155,7 +207,7 @@ def main() -> None:
         args.model_id,
         config=config,
         cache_dir=args.hf_cache,
-        torch_dtype=torch.float32,
+        torch_dtype=args.torch_dtype,
         device_map="cpu",
     ).eval()
     qeff_model = QEFFAutoModelForCausalLM(
@@ -196,6 +248,7 @@ def main() -> None:
         num_cores=args.num_cores,
         prefill_only=True,
         offload_pt_weights=False,
+        user_tiled=True,
     )
     print(json.dumps({"event": "compile_done", "qpc_path": str(qpc_path)}), flush=True)
 

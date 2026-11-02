@@ -21,6 +21,26 @@ def GlmFoldedRowGather(data: onnxscript.FLOAT, indices: onnxscript.INT32) -> onn
 
 
 @qeff_custom_op("com.qti.aisw.onnx", 1)
+def V4CtxGatherRows(data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32) -> onnxscript.FLOAT:
+    """Benchmark-compatible direct gather from [B, R, T, D] cache rows."""
+    return ops.GatherND(data, ops.Unsqueeze(ctx_indices, [-1]), batch_dims=2)
+
+
+# Dynamo's custom_translation_table inlines an ONNXScript function's body.
+# Keep the translation as an ONNXScript function in the standard domain whose
+# body calls the QTI custom op, so the exported graph retains the vendor op node
+# and CustomOpTransform can attach its function prototype afterward.
+_qti_ops = onnxscript.values.Opset("com.qti.aisw.onnx", 1)
+
+
+@onnxscript.script()
+def V4CtxGatherRowsDynamoTranslation(
+    data: onnxscript.FLOAT, ctx_indices: onnxscript.INT32
+) -> onnxscript.FLOAT:
+    return _qti_ops.V4CtxGatherRows(data, ctx_indices)
+
+
+@qeff_custom_op("com.qti.aisw.onnx", 1)
 def GlmPagedScatter(
     data: onnxscript.FLOAT,
     block_id: onnxscript.INT32,
@@ -72,6 +92,42 @@ class GlmFoldedRowGatherFunc(torch.autograd.Function):
     @staticmethod
     def symbolic(g, data, indices):
         return g.onnxscript_op(GlmFoldedRowGather, data, indices).setTypeAs(data)
+
+
+class V4CtxGatherRowsFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+        if ctx_indices.ndim < 3:
+            raise ValueError("ctx_indices must have shape [B, rows, ...].")
+        batch_indices = torch.arange(data.shape[0], device=data.device).view(
+            data.shape[0], *(1,) * (ctx_indices.ndim - 1)
+        )
+        row_indices = torch.arange(data.shape[1], device=data.device).view(
+            1, data.shape[1], *(1,) * (ctx_indices.ndim - 2)
+        )
+        safe_indices = torch.where(
+            ctx_indices == torch.iinfo(torch.int32).max,
+            torch.zeros_like(ctx_indices),
+            ctx_indices,
+        )
+        return data[batch_indices, row_indices, safe_indices.long()]
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        pass
+
+    @staticmethod
+    def symbolic(g, data, ctx_indices):
+        data_sizes = data.type().sizes()
+        index_sizes = ctx_indices.type().sizes()
+        output_type = data.type()
+        if data_sizes is not None and index_sizes is not None and data_sizes:
+            # The gather preserves every index dimension and appends the cache
+            # row's feature dimension: [..., indices..., D].  Reusing data's
+            # type here incorrectly describes the cache [B, R, T, D] as the
+            # gathered result (which is rank-dependent on ctx_indices).
+            output_type = data.type().with_sizes((*index_sizes, data_sizes[-1]))
+        return g.onnxscript_op(V4CtxGatherRows, data, ctx_indices).setType(output_type)
 
 
 class GlmPagedScatterFunc(torch.autograd.Function):
@@ -145,6 +201,25 @@ def glm_folded_row_gather(data: torch.Tensor, indices: torch.Tensor) -> torch.Te
     if torch._dynamo.is_compiling():
         return torch.ops.qefficient.glm_folded_row_gather(data, indices)
     return GlmFoldedRowGatherFunc.apply(data, indices)
+
+
+def v4_ctx_gather_rows(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    # In Dynamo export, use the registered custom op so the translation table
+    # can emit the QTI node even inside nested subfunction capture. Calling
+    # torch.onnx.ops.symbolic directly is not traceable in invoke_subgraph.
+    if torch._dynamo.is_compiling():
+        return torch.ops.qefficient.v4_ctx_gather_rows(data, ctx_indices)
+    if torch.compiler.is_exporting():
+        output_shape = (*ctx_indices.shape, data.shape[-1])
+        return torch.onnx.ops.symbolic(
+            "com.qti.aisw.onnx::V4CtxGatherRows",
+            (data, ctx_indices),
+            {},
+            dtype=data.dtype,
+            shape=output_shape,
+            version=1,
+        )
+    return V4CtxGatherRowsFunc.apply(data, ctx_indices)
 
 
 def glm_paged_scatter(data, block_id, address, updates):
