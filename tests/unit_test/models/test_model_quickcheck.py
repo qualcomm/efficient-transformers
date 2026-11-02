@@ -80,6 +80,7 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4CompressorWeightAttributeTransform,
     QEffDeepseekV4Attention,
     QEffDeepseekV4Cache,
+    QEffDeepseekV4ForCausalLM,
     QEffDeepseekV4UnweightedRMSNorm,
 )
 from QEfficient.transformers.models.modeling_auto import (
@@ -352,6 +353,153 @@ def test_deepseek_v4_example_parallel_layout_controls():
     assert config.qeff_hca_folded_row_cache is True
 
 
+def test_deepseek_v4_example_dynamo_npi_selects_named_non_matmul_outputs(tmp_path):
+    from examples.text_generation.deepseek_v4_flash_decode import generate_npi_file
+
+    target_ops = {
+        "mlp/gate/score_fn/Softplus_output_0": "Softplus",
+        "mlp/gate/score_fn/Sqrt_output_0": "Sqrt",
+        "mlp/gate/Add_output_0": "Add",
+        "mlp/gate/Reshape_output_0": "Reshape",
+        "mlp/gate/GatherElements_output_0": "GatherElements",
+        "mlp/gate/Einsum_output_0": "Einsum",
+        "mlp/gate/Unsqueeze_output_0": "Unsqueeze",
+        "mlp/gate/Div_output_0": "Div",
+        "mlp/gate/Mul_output_0": "Mul",
+    }
+    nodes = [
+        onnx.helper.make_node(
+            op_type,
+            ["hidden_states", "hidden_states"]
+            if op_type in {"Add", "GatherElements", "Div", "Mul"}
+            else ["hidden_states"],
+            [f"/model/layers.0/{target}"],
+        )
+        for target, op_type in target_ops.items()
+    ]
+    nodes.extend(
+        [
+            onnx.helper.make_node(
+                "MatMul",
+                ["hidden_states", "expert_weight"],
+                ["/model/layers.0/mlp/gate/MatMul_output_0"],
+            ),
+            onnx.helper.make_node("Add", ["hidden_states", "hidden_states"], ["unrelated_add_output"]),
+        ]
+    )
+    graph = onnx.helper.make_graph(
+        nodes,
+        "deepseek_v4_dynamo_npi_test",
+        [
+            onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT, [1, 1]),
+            onnx.helper.make_tensor_value_info("expert_weight", onnx.TensorProto.FLOAT, [1, 1]),
+        ],
+        [onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT, [1, 1])],
+    )
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 18)])
+    onnx_path = tmp_path / "deepseek_v4_dynamo_npi.onnx"
+    onnx.save(model, onnx_path)
+
+    npi_path = generate_npi_file(onnx_path, tmp_path, num_hidden_layers=1)
+    npi_contents = Path(npi_path).read_text(encoding="utf-8")
+
+    for target in target_ops:
+        assert f"/model/layers.0/{target}" in npi_contents
+    assert "/model/layers.0/mlp/gate/MatMul_output_0" not in npi_contents
+    assert "unrelated_add_output" not in npi_contents
+
+
+def test_deepseek_v4_example_subfunction_npi_maps_only_gate_non_matmul_outputs():
+    from examples.text_generation.deepseek_v4_flash_decode import generate_subfunction_npi_outputs
+
+    function_nodes = [
+        onnx.helper.make_node(
+            "Reshape", ["hidden_states", "shape"], ["gate_input"], name="node_gate_input_reshape"
+        ),
+        onnx.helper.make_node("MatMul", ["gate_input", "gate_weight"], ["logits"], name="node_gate_matmul"),
+        onnx.helper.make_node("Softplus", ["logits"], ["softplus"], name="node_gate_softplus"),
+        onnx.helper.make_node("Sqrt", ["softplus"], ["sqrt"], name="node_gate_sqrt"),
+        onnx.helper.make_node(
+            "Reshape", ["gate_indices", "shape"], ["reshaped_gate_indices"], name="node_gate_reshape"
+        ),
+        onnx.helper.make_node(
+            "GatherElements", ["sqrt", "reshaped_gate_indices"], ["gather"], name="node_gate_gather"
+        ),
+        onnx.helper.make_node("Einsum", ["gather"], ["sum"], name="node_gate_einsum"),
+        onnx.helper.make_node("Unsqueeze", ["sum", "axes"], ["expanded"], name="node_gate_unsqueeze"),
+        onnx.helper.make_node("Add", ["expanded", "eps"], ["denominator"], name="node_gate_add"),
+        onnx.helper.make_node("Div", ["gather", "denominator"], ["normalized"], name="node_gate_div"),
+        onnx.helper.make_node("Mul", ["normalized", "scale"], ["scaled"], name="node_gate_mul"),
+        onnx.helper.make_node("MatMul", ["hidden_states", "expert_weight"], ["expert_down"], name="node_expert_down"),
+        onnx.helper.make_node("Add", ["hidden_states", "hidden_states"], ["unrelated_add"], name="node_unrelated_add"),
+    ]
+    function = onnx.helper.make_function(
+        "pkg.torch.__subgraph__",
+        "QEffDeepseekV4DecoderLayer",
+        [
+            "hidden_states",
+            "shape",
+            "gate_weight",
+            "gate_indices",
+            "axes",
+            "eps",
+            "scale",
+            "expert_weight",
+        ],
+        ["scaled"],
+        function_nodes,
+        [onnx.helper.make_opsetid("", 18), onnx.helper.make_opsetid("com.qti.aisw.onnx", 1)],
+    )
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node(
+                "QEffDeepseekV4DecoderLayer",
+                [
+                    "hidden_states",
+                    "shape",
+                    "model.layers.0.mlp.gate.weight",
+                    "model.layers.0.mlp.gate.tid2eid",
+                    "axes",
+                    "eps",
+                    "scale",
+                    "model.layers.0.mlp.moe_weights.down",
+                ],
+                ["layer_output"],
+                name="layer_call",
+                domain="pkg.torch.__subgraph__",
+            )
+        ],
+        "deepseek_v4_subfunction_npi_test",
+        [
+            onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT, [1, 1]),
+            onnx.helper.make_tensor_value_info("model.layers.0.mlp.gate.weight", onnx.TensorProto.FLOAT, [1, 1]),
+            onnx.helper.make_tensor_value_info("shape", onnx.TensorProto.INT64, [1]),
+            onnx.helper.make_tensor_value_info("model.layers.0.mlp.gate.tid2eid", onnx.TensorProto.INT64, [1, 1]),
+            onnx.helper.make_tensor_value_info("axes", onnx.TensorProto.INT64, [1]),
+            onnx.helper.make_tensor_value_info("eps", onnx.TensorProto.FLOAT, [1]),
+            onnx.helper.make_tensor_value_info("scale", onnx.TensorProto.FLOAT, [1]),
+            onnx.helper.make_tensor_value_info("model.layers.0.mlp.moe_weights.down", onnx.TensorProto.FLOAT, [1, 1]),
+        ],
+        [onnx.helper.make_tensor_value_info("layer_output", onnx.TensorProto.FLOAT, [1, 1])],
+    )
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 18)])
+    model.functions.append(function)
+
+    outputs = generate_subfunction_npi_outputs(model, num_hidden_layers=1)
+
+    assert outputs == [
+        "/model/layers.0/node_gate_softplus_output_0",
+        "/model/layers.0/node_gate_sqrt_output_0",
+        "/model/layers.0/node_gate_add_output_0",
+        "/model/layers.0/node_gate_reshape_output_0",
+        "/model/layers.0/node_gate_gather_output_0",
+        "/model/layers.0/node_gate_einsum_output_0",
+        "/model/layers.0/node_gate_unsqueeze_output_0",
+        "/model/layers.0/node_gate_div_output_0",
+        "/model/layers.0/node_gate_mul_output_0",
+    ]
+
+
 def test_deepseek_v4_folded_csa_dp_matches_batch_major_decode():
     config = _tiny_deepseek_v4_config()
     config.qeff_csa_attention_dp = 2
@@ -494,6 +642,49 @@ def test_deepseek_v4_csa_prefill_matches_token_decode():
         )
 
     torch.testing.assert_close(prefill_output.logits, decode_output.logits, atol=2e-4, rtol=2e-4)
+
+
+def test_deepseek_v4_csa_joint_attention_uses_one_softmax():
+    local_kv = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
+    local_valid = torch.tensor([[[True, True], [True, False]]])
+    compressed_cache = torch.tensor([[[0.5, 0.5], [1.0, 1.0], [-1.0, 0.5]]])
+    compressed_indices = torch.tensor([[[0, 1], [2, 0]]], dtype=torch.int32)
+    compressed_valid = torch.tensor([[[True, True], [True, False]]])
+    query = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]], [[0.5, 1.0], [1.0, 0.5]]]])
+    sinks = torch.tensor([0.25, -0.5])
+    scale = torch.tensor(0.75)
+    masked_logit = torch.tensor(-3.0e4)
+
+    output = torch.ops.qefficient.csa_joint_attention(
+        local_kv,
+        local_valid,
+        compressed_cache,
+        compressed_indices,
+        compressed_valid,
+        query,
+        sinks,
+        scale,
+        masked_logit,
+    )
+
+    compressed_kv = compressed_cache[0, compressed_indices[0].long()].unsqueeze(0)
+    local_scores = torch.einsum("bshd,btd->bsht", query, local_kv) * scale
+    local_scores = torch.where(local_valid.unsqueeze(2), local_scores, masked_logit)
+    compressed_scores = torch.einsum("bshd,bskd->bshk", query, compressed_kv) * scale
+    compressed_scores = torch.where(compressed_valid.unsqueeze(2), compressed_scores, masked_logit)
+    sink_scores = sinks.view(1, 1, -1, 1).expand(query.shape[0], query.shape[1], -1, -1)
+    scores = torch.cat((local_scores, sink_scores, compressed_scores), dim=-1)
+    values = torch.cat(
+        (
+            local_kv.unsqueeze(1).expand(-1, query.shape[1], -1, -1),
+            torch.zeros(query.shape[0], query.shape[1], 1, local_kv.shape[-1]),
+            compressed_kv,
+        ),
+        dim=2,
+    )
+    expected = torch.einsum("bsht,bstd->bshd", torch.softmax(scores, dim=-1), values)
+
+    torch.testing.assert_close(output, expected)
 
 
 def test_deepseek_v4_prefill_subfunction_outputs_match_decode_cache_names(tmp_path):
@@ -740,6 +931,68 @@ def test_deepseek_v4_hca_prefill_preserves_rank_four_compressed_cache():
     assert output.past_key_values[0][0].shape == (1, 1, config.sliding_window, config.head_dim)
     assert output.past_key_values[0][3].shape == (1, 1, 2, config.head_dim)
     assert torch.isfinite(output.logits).all()
+
+
+def test_deepseek_v4_npi_scopes_subfunction_nodes(tmp_path):
+    function = onnx.helper.make_function(
+        "pkg.torch.__subgraph__",
+        "QEffDeepseekV4DecoderLayer",
+        ["hidden_states", "scale"],
+        ["layer_output"],
+        [
+            onnx.helper.make_node("Add", ["hidden_states", "hidden_states"], ["added"], name="node_add"),
+            onnx.helper.make_node(
+                "CustomRMSNorm",
+                ["added", "scale"],
+                ["layer_output"],
+                name="node_rms_norm",
+                domain="com.qti.aisw.onnx",
+            ),
+            onnx.helper.make_node("Softmax", ["added"], ["softmax_output"], name="node_softmax"),
+        ],
+        [onnx.helper.make_opsetid("", 18), onnx.helper.make_opsetid("com.qti.aisw.onnx", 1)],
+    )
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node(
+                "QEffDeepseekV4DecoderLayer",
+                ["hidden_states", "scale"],
+                ["layer_output_0"],
+                name="layer_call_0",
+                domain="pkg.torch.__subgraph__",
+            ),
+            onnx.helper.make_node(
+                "QEffDeepseekV4DecoderLayer",
+                ["hidden_states", "scale"],
+                ["layer_output_1"],
+                name="layer_call_1",
+                domain="pkg.torch.__subgraph__",
+            ),
+            onnx.helper.make_node("Add", ["layer_output_1", "hidden_states"], ["graph_add"], name="outer_add"),
+        ],
+        "deepseek_v4_npi_test",
+        [
+            onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT, [1, 4]),
+            onnx.helper.make_tensor_value_info("scale", onnx.TensorProto.FLOAT, [4]),
+        ],
+        [onnx.helper.make_tensor_value_info("graph_add", onnx.TensorProto.FLOAT, [1, 4])],
+    )
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 18)])
+    model.functions.append(function)
+    onnx_path = tmp_path / "deepseek_v4.onnx"
+    onnx.save(model, onnx_path)
+
+    npi_path = QEffDeepseekV4ForCausalLM.generate_npi_file(onnx_path)
+    npi_names = Path(npi_path).read_text(encoding="utf-8").splitlines()
+
+    assert "  - /model/layers.0/node_add_output_0" in npi_names
+    assert "  - /model/layers.0/node_rms_norm_output_0" in npi_names
+    assert "  - /model/layers.1/node_add_output_0" in npi_names
+    assert "  - /model/layers.1/node_rms_norm_output_0" in npi_names
+    assert "  - /model/layers.0/node_softmax_output_0" in npi_names
+    assert "  - /model/layers.1/node_softmax_output_0" in npi_names
+    assert "  - graph_add" in npi_names
+    assert "  - node_add_output_0" not in npi_names
 
 
 def test_deepseek_v4_folded_hca_dp_matches_batch_major_decode():

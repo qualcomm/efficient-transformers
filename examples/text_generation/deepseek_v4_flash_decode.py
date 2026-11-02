@@ -21,13 +21,10 @@ DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_ARTIFACT_ROOT = "/local/mnt/workspace/abhishek/qeff_artifacts"
 PREFILL_PROMPT = "Hello, how are you?"
-GATE_PREFIX_OUTPUTS = (
-    "mlp/gate/MatMul_output_0",
+GATE_NON_MATMUL_OUTPUTS = (
     "mlp/gate/score_fn/Softplus_output_0",
     "mlp/gate/score_fn/Sqrt_output_0",
     "mlp/gate/Add_output_0",
-)
-GATE_SUFFIX_OUTPUTS = (
     "mlp/gate/Reshape_output_0",
     "mlp/gate/GatherElements_output_0",
     "mlp/gate/Einsum_output_0",
@@ -35,21 +32,31 @@ GATE_SUFFIX_OUTPUTS = (
     "mlp/gate/Div_output_0",
     "mlp/gate/Mul_output_0",
 )
-TARGETED_LAYER_OUTPUTS = ("attn_hc/MatMul_output_0",)
-TARGETED_ROUTED_EXPERT_OUTPUT = "mlp/experts/MatMul_2_output_0"
-TARGETED_SHARED_EXPERT_OUTPUT = "mlp/shared_experts/down_proj/MatMul_output_0"
-TARGETED_ATTENTION_OUTPUTS = (
-    "self_attn/kv_proj_1/MatMul_output_0",
-    "self_attn/gate_proj/MatMul_output_0",
-    "self_attn/kv_proj_2/MatMul_output_0",
-    "self_attn/gate_proj_1/MatMul_output_0",
-    "self_attn/q_b_proj_1/MatMul_output_0",
-    "self_attn/scorer/weights_proj/MatMul_output_0",
-)
-TARGETED_HEAD_OUTPUTS = (
-    "/model/hc_head/MatMul_output_0",
-    "/lm_head/MatMul_output_0",
-)
+MATMUL_OP_TYPES = {"Gemm", "MatMul"}
+WEIGHT_TRANSFORM_OP_TYPES = {
+    "Add",
+    "Cast",
+    "CastLike",
+    "Concat",
+    "Constant",
+    "ConstantOfShape",
+    "DequantizeLinear",
+    "Div",
+    "Expand",
+    "Gather",
+    "Identity",
+    "Mul",
+    "Neg",
+    "QuantizeLinear",
+    "Reshape",
+    "Slice",
+    "Split",
+    "Squeeze",
+    "Sub",
+    "Transpose",
+    "Unsqueeze",
+    "Where",
+}
 HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
 MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
 
@@ -59,175 +66,208 @@ def parse_device_group(value: str) -> list[int]:
 
 
 def generate_npi_file(onnx_path: Path, artifact_root: Path, num_hidden_layers: int) -> Path:
-    """Generate the DeepSeek-V4-Flash FP32 node list from the exported graph.
-
-    Reduced parity models can promote the large expert down projections and LM head. Extending those promotions to
-    the 43-layer model exceeds AI100's 3.625 GiB per-core VA limit, so full-model NPI keeps the attention projections
-    and HC head that fit alongside the existing router, ffn_hc, and layernorm promotions.
-    """
+    """Generate NPI entries for non-MatMul outputs in the earlier gate target lists."""
     model = onnx.load(onnx_path, load_external_data=False)
-    graph_outputs = [output for node in model.graph.node for output in node.output]
-    graph_output_set = set(graph_outputs)
-
-    if not any(output.startswith("/model/layers.") for output in graph_outputs):
+    function_keys = {(function.domain, function.name) for function in model.functions}
+    if any(
+        (node.domain, node.op_type) in function_keys
+        and "DeepseekV4DecoderLayer" in node.op_type
+        for node in model.graph.node
+    ):
         return generate_dynamo_npi_file(model, artifact_root, num_hidden_layers)
 
-    fp32_outputs = []
-
-    for layer_idx in range(num_hidden_layers):
-        layer_prefix = f"/model/layers.{layer_idx}/"
-        required_outputs = [layer_prefix + output for output in GATE_PREFIX_OUTPUTS]
-        optional_topk = layer_prefix + "mlp/gate/TopK_output_0"
-        if optional_topk in graph_output_set:
-            required_outputs.append(optional_topk)
-
-        ffn_prefix = layer_prefix + "ffn_hc/"
-        ffn_outputs = [output for output in graph_outputs if output.startswith(ffn_prefix)]
-        if not ffn_outputs:
-            raise ValueError(f"No ffn_hc outputs found for layer {layer_idx} in {onnx_path}.")
-        required_outputs.extend(ffn_outputs)
-
-        required_outputs.append(layer_prefix + "Cast_4_output_0")
-        post_layernorm_prefix = layer_prefix + "post_attention_layernorm/"
-        post_layernorm_outputs = [output for output in graph_outputs if output.startswith(post_layernorm_prefix)]
-        if not post_layernorm_outputs:
-            raise ValueError(f"No post-attention layernorm outputs found for layer {layer_idx} in {onnx_path}.")
-        required_outputs.extend(post_layernorm_outputs)
-        required_outputs.append(layer_prefix + "Cast_5_output_0")
-        required_outputs.extend(layer_prefix + output for output in GATE_SUFFIX_OUTPUTS)
-
-        optional_gate_add = layer_prefix + "mlp/gate/Add_1_output_0"
-        if optional_gate_add in graph_output_set:
-            required_outputs.append(optional_gate_add)
-
-        required_outputs.extend(layer_prefix + output for output in TARGETED_LAYER_OUTPUTS)
-        if num_hidden_layers <= 4:
-            required_outputs.extend(
-                layer_prefix + output for output in (TARGETED_ROUTED_EXPERT_OUTPUT, TARGETED_SHARED_EXPERT_OUTPUT)
-            )
-        required_outputs.extend(
-            layer_prefix + output for output in TARGETED_ATTENTION_OUTPUTS if layer_prefix + output in graph_output_set
+    gate_targets = tuple(target for target in GATE_NON_MATMUL_OUTPUTS)
+    fp32_outputs = list(
+        dict.fromkeys(
+            output
+            for node in model.graph.node
+            if node.op_type not in MATMUL_OP_TYPES
+            for output in node.output
+            if any(output.endswith(target) for target in gate_targets)
         )
+    )
+    if not fp32_outputs:
+        raise ValueError(f"No requested gate non-MatMul outputs were found in {onnx_path}.")
 
-        missing_outputs = [output for output in required_outputs if output not in graph_output_set]
-        if missing_outputs:
-            raise ValueError(f"Cannot generate NPI for layer {layer_idx}; missing ONNX outputs: {missing_outputs}")
-        fp32_outputs.extend(required_outputs)
-
-    targeted_heads = TARGETED_HEAD_OUTPUTS if num_hidden_layers <= 4 else TARGETED_HEAD_OUTPUTS[:1]
-    missing_heads = [output for output in targeted_heads if output not in graph_output_set]
-    if missing_heads:
-        raise ValueError(f"Cannot generate NPI; missing ONNX head outputs: {missing_heads}")
-    fp32_outputs.extend(targeted_heads)
-
-    npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
+    npi_path = artifact_root / f"deepseek_v4_gate_non_matmul_fp32_{num_hidden_layers}layer.yaml"
     npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
     npi_path.write_text(npi_contents, encoding="utf-8")
     return npi_path
 
 
 def generate_dynamo_npi_file(model: onnx.ModelProto, artifact_root: Path, num_hidden_layers: int) -> Path:
-    """Generate the NPI file for Dynamo ONNX exports.
-
-    Dynamo does not preserve module paths in intermediate tensor names. It does retain qualified initializer names,
-    so identify the module-owned graph regions from those initializers instead of relying on tensor name prefixes.
-    """
-    parameter_consumers: dict[str, list[int]] = defaultdict(list)
-    tensor_consumers: dict[str, list[int]] = defaultdict(list)
-    for node_idx, node in enumerate(model.graph.node):
-        for node_input in node.input:
-            tensor_consumers[node_input].append(node_idx)
-    parameter_names = {initializer.name for initializer in model.graph.initializer}
-    parameter_names.update(graph_input.name for graph_input in model.graph.input)
-    for parameter_name in parameter_names:
-        parameter_consumers[parameter_name] = tensor_consumers[parameter_name]
-
-    def require_consumer(parameter_name: str) -> int:
-        consumer_indices = parameter_consumers[parameter_name]
-        if not consumer_indices:
-            raise ValueError(f"Cannot generate Dynamo NPI; missing consumer for parameter {parameter_name}.")
-        return min(consumer_indices)
-
-    def add_outputs(output_indices: list[int], start_idx: int, stop_idx: int) -> None:
-        if start_idx >= stop_idx:
-            raise ValueError(f"Cannot generate Dynamo NPI; invalid node range [{start_idx}, {stop_idx}).")
-        for node in model.graph.node[start_idx:stop_idx]:
-            output_indices.extend(node.output)
-
-    def add_linear_outputs(output_indices: list[int], parameter_name: str) -> None:
-        for consumer_idx in parameter_consumers[parameter_name]:
-            consumer = model.graph.node[consumer_idx]
-            if consumer.op_type in {"Gemm", "MatMul"}:
-                output_indices.extend(consumer.output)
-                continue
-
-            for parameter_output in consumer.output:
-                for next_idx in tensor_consumers[parameter_output]:
-                    next_node = model.graph.node[next_idx]
-                    if next_node.op_type in {"Gemm", "MatMul"}:
-                        output_indices.extend(next_node.output)
-
-    fp32_outputs = []
-    for layer_idx in range(num_hidden_layers):
-        layer_prefix = f"model.layers.{layer_idx}"
-        ffn_parameters = [
-            f"{layer_prefix}.ffn_hc.fn",
-            f"{layer_prefix}.ffn_hc.base",
-            f"{layer_prefix}.ffn_hc.scale",
-        ]
-        ffn_start = min(require_consumer(parameter_name) for parameter_name in ffn_parameters)
-        post_layernorm_parameter = f"{layer_prefix}.post_attention_layernorm.weight"
-        post_layernorm_idx = require_consumer(post_layernorm_parameter)
-        add_outputs(fp32_outputs, ffn_start, post_layernorm_idx)
-        fp32_outputs.extend(model.graph.node[post_layernorm_idx].output)
-
-        gate_parameter = f"{layer_prefix}.mlp.gate.weight"
-        gate_start = require_consumer(gate_parameter)
-        expert_parameters = (
-            f"{layer_prefix}.mlp.experts.gate_proj",
-            f"{layer_prefix}.mlp.experts.up_proj",
-            f"{layer_prefix}.mlp.experts.down_proj",
-            f"{layer_prefix}.mlp.shared_experts.gate_proj.weight",
-            f"{layer_prefix}.mlp.shared_experts.up_proj.weight",
-            f"{layer_prefix}.mlp.shared_experts.down_proj.weight",
-        )
-        expert_start = min(
-            require_consumer(parameter_name)
-            for parameter_name in expert_parameters
-            if parameter_consumers[parameter_name]
-        )
-        add_outputs(fp32_outputs, gate_start, expert_start)
-
-        add_linear_outputs(fp32_outputs, f"{layer_prefix}.attn_hc.fn")
-        if num_hidden_layers <= 4:
-            add_linear_outputs(fp32_outputs, f"{layer_prefix}.mlp.experts.down_proj")
-            add_linear_outputs(fp32_outputs, f"{layer_prefix}.mlp.shared_experts.down_proj.weight")
-
-        attention_parameters = (
-            f"{layer_prefix}.self_attn.kv_proj.weight",
-            f"{layer_prefix}.self_attn.compressor.kv_proj.weight",
-            f"{layer_prefix}.self_attn.compressor.indexer.kv_proj.weight",
-            f"{layer_prefix}.self_attn.compressor.indexer.gate_proj.weight",
-            f"{layer_prefix}.self_attn.q_b_proj.weight",
-            f"{layer_prefix}.self_attn.compressor.indexer.q_b_proj.weight",
-            f"{layer_prefix}.self_attn.compressor.indexer.scorer.weights_proj.weight",
-        )
-        for parameter_name in attention_parameters:
-            if parameter_consumers[parameter_name]:
-                add_linear_outputs(fp32_outputs, parameter_name)
-
-    add_linear_outputs(fp32_outputs, "model.hc_head.hc_fn")
-    if num_hidden_layers <= 4:
-        add_linear_outputs(fp32_outputs, "lm_head.weight")
+    """Generate NPI outputs mapped from the non-MatMul gate targets in Dynamo subfunctions."""
+    fp32_outputs = generate_subfunction_npi_outputs(model, num_hidden_layers)
 
     if not fp32_outputs:
-        raise ValueError(f"Cannot generate Dynamo NPI; no FP32 outputs were found in {model.graph.name}.")
+        raise ValueError(f"Cannot generate Dynamo NPI; no gate non-MatMul outputs were found in {model.graph.name}.")
 
-    fp32_outputs = list(dict.fromkeys(fp32_outputs))
-    npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
+    npi_path = artifact_root / f"deepseek_v4_gate_non_matmul_fp32_{num_hidden_layers}layer.yaml"
     npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
     npi_path.write_text(npi_contents, encoding="utf-8")
     return npi_path
+
+
+def generate_subfunction_npi_outputs(model: onnx.ModelProto, num_hidden_layers: int) -> list[str]:
+    functions = {(function.domain, function.name): function for function in model.functions}
+    fp32_outputs = []
+    decoder_layer_idx = 0
+
+    for call_node in model.graph.node:
+        function = functions.get((call_node.domain, call_node.op_type))
+        if function is None or "DeepseekV4DecoderLayer" not in function.name:
+            continue
+
+        layer_idx = decoder_layer_idx
+        decoder_layer_idx += 1
+        if layer_idx >= num_hidden_layers:
+            break
+
+        output_instance_prefix = f"/model/layers.{layer_idx}/"
+        layer_outputs = _map_gate_non_matmul_outputs(function, call_node, layer_idx)
+        fp32_outputs.extend(f"{output_instance_prefix}{node.name}_output_0" for node in layer_outputs)
+
+    return fp32_outputs
+
+
+def _input_depends_on_weight(
+    tensor_name: str,
+    weight_inputs: set[str],
+    producers: dict[str, onnx.NodeProto],
+    visited: set[str] | None = None,
+) -> bool:
+    if tensor_name in weight_inputs:
+        return True
+    if visited is None:
+        visited = set()
+    if tensor_name in visited:
+        return False
+    visited.add(tensor_name)
+    producer = producers.get(tensor_name)
+    if producer is None or producer.op_type not in WEIGHT_TRANSFORM_OP_TYPES:
+        return False
+    return any(_input_depends_on_weight(node_input, weight_inputs, producers, visited) for node_input in producer.input)
+
+
+def _require_one_node(nodes: list[onnx.NodeProto], target_name: str, layer_idx: int) -> onnx.NodeProto:
+    if len(nodes) != 1:
+        raise ValueError(f"Expected one {target_name} node for layer {layer_idx}, found {len(nodes)}.")
+    return nodes[0]
+
+
+def _find_upstream_nodes(
+    tensor_name: str,
+    target_op_type: str,
+    producers: dict[str, onnx.NodeProto],
+) -> list[onnx.NodeProto]:
+    matches = {}
+    visited = set()
+    pending = [(tensor_name, 0)]
+    closest_distance = None
+    while pending:
+        current, distance = pending.pop(0)
+        if closest_distance is not None and distance > closest_distance:
+            break
+        if current in visited:
+            continue
+        visited.add(current)
+        producer = producers.get(current)
+        if producer is None:
+            continue
+        if producer.op_type == target_op_type:
+            matches[producer.name] = producer
+            closest_distance = distance
+        else:
+            pending.extend((node_input, distance + 1) for node_input in producer.input)
+    return list(matches.values())
+
+
+def _map_gate_non_matmul_outputs(
+    function: onnx.FunctionProto,
+    call_node: onnx.NodeProto,
+    layer_idx: int,
+) -> list[onnx.NodeProto]:
+    producers = {output: node for node in function.node for output in node.output}
+    consumers: dict[str, list[onnx.NodeProto]] = defaultdict(list)
+    for node in function.node:
+        for node_input in node.input:
+            consumers[node_input].append(node)
+
+    gate_weight_inputs = {
+        function_input
+        for function_input, call_input in zip(function.input, call_node.input)
+        if call_input == f"model.layers.{layer_idx}.mlp.gate.weight"
+    }
+    if not gate_weight_inputs:
+        raise ValueError(f"Cannot map gate NPI for layer {layer_idx}; gate weight input is absent.")
+
+    gate_matmuls = [
+        node
+        for node in function.node
+        if node.op_type in MATMUL_OP_TYPES
+        and len(node.input) > 1
+        and _input_depends_on_weight(node.input[1], gate_weight_inputs, producers)
+    ]
+    gate_matmul = _require_one_node(gate_matmuls, "gate projection MatMul", layer_idx)
+
+    softplus = _require_one_node(
+        [
+            node
+            for output in gate_matmul.output
+            for node in consumers[output]
+            if node.op_type in {"Softplus", "aten_softplus"}
+        ],
+        "gate Softplus",
+        layer_idx,
+    )
+    sqrt = _require_one_node(
+        [node for output in softplus.output for node in consumers[output] if node.op_type == "Sqrt"],
+        "gate Sqrt",
+        layer_idx,
+    )
+    gather = _require_one_node(
+        [node for node in function.node if node.op_type == "GatherElements" and node.input[0] in sqrt.output],
+        "gate GatherElements",
+        layer_idx,
+    )
+    gate_scores = _require_one_node(
+        [node for output in gather.output for node in consumers[output] if node.op_type == "Einsum"],
+        "gate Einsum",
+        layer_idx,
+    )
+    normalize = _require_one_node(
+        [node for output in gather.output for node in consumers[output] if node.op_type == "Div"],
+        "gate Div",
+        layer_idx,
+    )
+    unsqueeze = _require_one_node(
+        [node for output in gate_scores.output for node in consumers[output] if node.op_type == "Unsqueeze"],
+        "gate Unsqueeze",
+        layer_idx,
+    )
+    denominator_add = _require_one_node(
+        [
+            node
+            for output in unsqueeze.output
+            for node in consumers[output]
+            if node.op_type == "Add" and any(output in normalize.input for output in node.output)
+        ],
+        "gate denominator Add",
+        layer_idx,
+    )
+    scale = _require_one_node(
+        [node for output in normalize.output for node in consumers[output] if node.op_type == "Mul"],
+        "gate scaling Mul",
+        layer_idx,
+    )
+
+    index_reshape = _require_one_node(
+        _find_upstream_nodes(gather.input[1], "Reshape", producers),
+        "gate index Reshape",
+        layer_idx,
+    )
+
+    return [softplus, sqrt, denominator_add, index_reshape, gather, gate_scores, unsqueeze, normalize, scale]
 
 
 def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
@@ -351,6 +391,16 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--automation", action="store_true")
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--compile-only", action="store_true")
+    parser.add_argument(
+        "--enable-residual-npi",
+        action="store_true",
+        help="Generate and compile with BF16 NPI for graph-mapped non-MatMul gate outputs.",
+    )
+    parser.add_argument(
+        "--no-mxfp6-matmul",
+        action="store_true",
+        help="Disable MXFP6 MatMul weight compression during QAIC compilation.",
+    )
     if defaults:
         parser.set_defaults(**defaults)
     return parser.parse_args()
@@ -524,11 +574,32 @@ def main(defaults: dict[str, object] | None = None) -> None:
             prefill_only=args.prefill_only,
             num_cores=args.num_cores,
         )
+    elif args.enable_residual_npi:
+        qeff_model.transform(
+            ctx_len=args.ctx_len,
+            seq_len=args.prefill_seq_len,
+            bs=batch_size,
+            num_devices=len(args.device_group),
+            qaic_config=qaic_config,
+            prefill_only=args.prefill_only,
+            num_cores=args.num_cores,
+            prefill_seq_len=args.prefill_seq_len,
+            mdp_num_partitions=args.mdp_num_partitions,
+        )
 
     graph_kind = "blocked DeepSeek V4 prefill" if args.prefill_only else "one-token decode"
     onnx_path = None
-    if not pipeline_parallel:
+    if not pipeline_parallel or args.enable_residual_npi:
         print(f"Exporting the {graph_kind} graph through qeff_model.export()")
+        export_kwargs = {}
+        if pipeline_parallel:
+            export_kwargs = {
+                "enable_chunking": True,
+                "retain_full_kv": True,
+                "split_model_io": True,
+                "mdp_num_partitions": args.mdp_num_partitions,
+                "mdp_strategy": args.mdp_strategy,
+            }
         onnx_path = Path(
             qeff_model.export(
                 export_dir=str(export_root),
@@ -539,12 +610,19 @@ def main(defaults: dict[str, object] | None = None) -> None:
                 export_batch_size=batch_size,
                 cache_ctx_len=args.ctx_len,
                 qaic_config=qaic_config,
+                **export_kwargs,
             )
         )
         print(f"ONNX_PATH={onnx_path}")
 
-    # npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
-    # print(f"NPI_PATH={npi_path}")
+    npi_path = None
+    if args.enable_residual_npi:
+        if args.model_dtype != "bfloat16":
+            raise ValueError("--enable-residual-npi is intended for --model-dtype bfloat16.")
+        if onnx_path is None:
+            raise ValueError("ONNX path is required to generate residual NPI.")
+        npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
+        print(f"NPI_PATH={npi_path}")
 
     if args.export_only:
         return
@@ -564,12 +642,13 @@ def main(defaults: dict[str, object] | None = None) -> None:
         "prefill_only": args.prefill_only,
         "use_onnx_subfunctions": args.use_onnx_subfunctions,
         "mxint8_kv_cache": False,
-        "mxfp6_matmul": True,
+        "mxfp6_matmul": not args.no_mxfp6_matmul,
         "user_tiled": True,
         "qaic_config": qaic_config,
-        # node_precision_info=str(npi_path),
         "dynamo": True,
     }
+    if args.enable_residual_npi:
+        compile_kwargs["node_precision_info"] = npi_path
     if args.mdp_num_partitions > 1:
         compile_kwargs.update(
             enable_chunking=True,
