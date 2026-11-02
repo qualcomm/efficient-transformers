@@ -31,6 +31,8 @@ import yaml
 ONNX_DTYPES = {
     onnx.TensorProto.FLOAT: np.float32,
     onnx.TensorProto.FLOAT16: np.float16,
+    # NumPy has no native BF16 dtype; raw BF16 values occupy two bytes.
+    onnx.TensorProto.BFLOAT16: np.uint16,
     onnx.TensorProto.DOUBLE: np.float64,
     onnx.TensorProto.INT64: np.int64,
     onnx.TensorProto.INT32: np.int32,
@@ -60,6 +62,7 @@ def _custom_io_dtypes(custom_io_path: Path | None) -> dict[str, np.dtype]:
         "float": np.float32,
         "float16": np.float16,
         "float32": np.float32,
+        "bfloat16": np.uint16,
         "int32": np.int32,
         "int64": np.int64,
     }
