@@ -3638,11 +3638,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
 
             qaic_config = getattr(self, "qaic_config", None) or {}
             msa_impl = getattr(blocking_config, "msa_impl", None) or qaic_config.get("msa_impl")
-            if (
-                msa_impl == "msa_indexer_attention_GP_unified"
-                and not is_prefill
-                and not paged
-            ):
+            if msa_impl == "msa_indexer_attention_GP_unified" and not is_prefill and not paged:
                 attn_output, _, _ = self._msa_indexer_attention_gp_unified(
                     hidden_states,
                     query_states,
