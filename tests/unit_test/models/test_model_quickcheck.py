@@ -6323,6 +6323,56 @@ def test_chatterbox_t3_subfunction_export(tmp_path):
     assert np.allclose(hf_logits, ort_logits, atol=1e-4)
 
 
+def _chatterbox_compile_config() -> Dict:
+    import QEfficient
+
+    return json.loads((Path(QEfficient.__file__).parent / "tts/pipelines/configs/chatterbox_config.json").read_text())
+
+
+@pytest.mark.cpu_only
+def test_chatterbox_bucket_config_check():
+    from QEfficient.tts.pipelines.pipeline_utils import check_bucket_config
+
+    config = _chatterbox_compile_config()
+    check_bucket_config(config)  # the shipped config is consistent
+    edits = {
+        "flow_encoder": lambda modules: modules["flow_encoder"]["specializations"][0].update(n_frames=500),
+        "flow_estimator": lambda modules: modules["flow_estimator"]["specializations"][0].update(n_frames=640),
+        "hift_f0": lambda modules: modules["hift_f0"]["specializations"][0].update(n_mel=300),
+        "hift_decoder": lambda modules: modules["hift_decoder"]["specializations"][0].update(n_samples=1000),
+    }
+    for module_name, edit in edits.items():
+        broken = deepcopy(config)
+        edit(broken["modules"])
+        with pytest.raises(ValueError, match=module_name):
+            check_bucket_config(broken)
+
+
+@pytest.mark.cpu_only
+def test_chatterbox_compile_closes_old_sessions(monkeypatch):
+    pytest.importorskip("chatterbox")
+    from QEfficient.tts.pipelines.chatterbox import pipeline_chatterbox
+
+    class Session:
+        deactivated = False
+
+        def deactivate(self):
+            self.deactivated = True
+
+    pipeline = object.__new__(pipeline_chatterbox.QEffChatterboxMultilingualTTS)
+    pipeline.custom_config = _chatterbox_compile_config()
+    sessions = {name: Session() for name in pipeline.custom_config["modules"]}
+    pipeline.modules = {
+        name: SimpleNamespace(qpc_session=session, qpc_path=f"{name}.qpc", onnx_path=f"{name}.onnx")
+        for name, session in sessions.items()
+    }  # already compiled: compile() only has to drop the sessions bound to the previous QPCs
+    monkeypatch.setattr(pipeline_chatterbox, "config_manager", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_chatterbox, "set_execute_params", lambda *args, **kwargs: None)
+    pipeline.compile()
+    assert all(session.deactivated for session in sessions.values())
+    assert all(module.qpc_session is None for module in pipeline.modules.values())
+
+
 @pytest.mark.llm_model
 @pytest.mark.parametrize("use_onnx_subfunctions", [False, True])
 @pytest.mark.parametrize("mxint8_kv_cache", [False, True])
@@ -6363,3 +6413,66 @@ def test_chatterbox_t3_compile_custom_io(tmp_path, monkeypatch, use_onnx_subfunc
     custom_io = {as_compiled(name): dtype for name, dtype in captured["custom_io"].items()}
     assert custom_io == {name: kv_dtype for name in io_names if name.startswith("past_")}
     assert captured["convert_to_fp16"] is True and captured["retained_state"] is True
+
+
+@pytest.mark.cpu_only
+def test_chatterbox_broken_install_warns(tmp_path):
+    """Chatterbox installed but failing to import (e.g. a missing runtime dependency): `import QEfficient` still works
+    and says why the TTS pipeline is unavailable."""
+    import subprocess
+    import sys
+
+    (tmp_path / "chatterbox").mkdir()
+    (tmp_path / "chatterbox" / "__init__.py").write_text('raise ImportError("no module named perth")\n')
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), os.environ.get("PYTHONPATH", "")])}
+    code = "import QEfficient; print('symbol:', QEfficient.QEffChatterboxMultilingualTTS)"
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr
+    assert "symbol: None" in result.stdout
+    assert "no module named perth" in result.stdout + result.stderr
+
+
+@pytest.mark.cpu_only
+def test_chatterbox_activate_opens_every_session(monkeypatch):
+    """generate() loads all five QPCs before it starts timing; T3's KV-cache buffers stay on the device."""
+    pytest.importorskip("chatterbox")
+    from QEfficient.tts.pipelines.chatterbox import pipeline_chatterbox
+
+    class Session:
+        input_names, output_names = ["inputs_embeds", "past_key.0"], ["logits", "past_key.0_RetainedState"]
+
+        def __init__(self, qpc_path, device_ids):
+            self.qpc_path, self.device_ids, self.skipped = qpc_path, device_ids, []
+
+        def skip_buffers(self, names):
+            self.skipped = names
+
+    monkeypatch.setattr(pipeline_chatterbox, "QAICInferenceSession", Session)
+    pipeline = object.__new__(pipeline_chatterbox.QEffChatterboxMultilingualTTS)
+    names = ["t3", "flow_encoder", "flow_estimator", "hift_f0", "hift_decoder"]
+    pipeline.modules = {
+        name: SimpleNamespace(qpc_session=None, qpc_path=f"{name}.qpc", device_ids=[0]) for name in names
+    }
+    pipeline._activate()
+    assert [pipeline.modules[name].qpc_session.qpc_path for name in names] == [f"{name}.qpc" for name in names]
+    assert pipeline.modules["t3"].qpc_session.skipped == ["past_key.0", "past_key.0_RetainedState"]
+
+
+@pytest.mark.cpu_only
+def test_chatterbox_failed_run_drops_the_session():
+    """A failed device run unloads the program: the next call must open a fresh session, not reuse the dead one."""
+    pytest.importorskip("chatterbox")
+    from QEfficient.tts.pipelines.chatterbox import pipeline_chatterbox
+
+    class Session:
+        def set_buffers(self, buffers):
+            pass
+
+        def run(self, inputs):
+            raise RuntimeError("device error")
+
+    pipeline = object.__new__(pipeline_chatterbox.QEffChatterboxMultilingualTTS)
+    pipeline.modules = {"hift_f0": SimpleNamespace(qpc_session=Session(), qpc_path="f0.qpc", device_ids=[0])}
+    with pytest.raises(RuntimeError, match="device error"):
+        pipeline._run("hift_f0", {"f0": (1, 10)}, mel=np.zeros((1, 80, 10), np.float32))
+    assert pipeline.modules["hift_f0"].qpc_session is None
