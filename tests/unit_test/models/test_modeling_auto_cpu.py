@@ -1310,7 +1310,36 @@ class TestTLMMultiSpecSpecializations:
         )
         assert spec is not None
 
-    # ---- compile() specialization count via mock ----
+    @pytest.mark.parametrize("arch", ["gpt_oss", "mixtral"])
+    def test_moe_target_decode_spec_seq_len_matches_num_logits_to_keep(self, arch):
+        """MoE target decode specs must run K+1 tokens, even when the model defines get_specializations."""
+        from transformers import GptOssConfig, GptOssForCausalLM, MixtralConfig, MixtralForCausalLM
+
+        common = dict(
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            hidden_size=64,
+            intermediate_size=128,
+            vocab_size=VOCAB_SIZE,
+            num_local_experts=4,
+            num_experts_per_tok=2,
+        )
+        if arch == "gpt_oss":
+            model = GptOssForCausalLM(GptOssConfig(head_dim=32, sliding_window=8, **common))
+        else:
+            model = MixtralForCausalLM(MixtralConfig(**common))
+        qeff = QEFFAutoModelForCausalLM(model.eval(), qaic_config={"speculative_model_type": "target"})
+        assert qeff.is_tlm
+
+        for k in [1, 3]:
+            spec = qeff.build_decode_specialization(
+                num_speculative_tokens=k, ctx_len=128, batch_size=1, kv_cache_batch_size=1, prefill_seq_len=32
+            )
+            assert spec["seq_len"] == k + 1
+            assert spec["num_logits_to_keep"] == k + 1
+            assert spec["batch_size"] == 1
+            assert spec["ctx_len"] == 128
 
     def test_compile_list_produces_correct_spec_count(self):
         """compile(num_speculative_tokens=[0, 3]) → 1 prefill + 2 decode specializations."""

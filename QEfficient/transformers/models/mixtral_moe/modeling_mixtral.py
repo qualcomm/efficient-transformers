@@ -50,6 +50,7 @@ from QEfficient.transformers.moe import (
     silu_glu_mlp,
     stack_expert_linears,
 )
+from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 
 
@@ -558,6 +559,7 @@ class QEffMixtralForCausalLM(MixtralForCausalLM):
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        num_logits_to_keep: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         output_router_logits = (
@@ -587,11 +589,14 @@ class QEffMixtralForCausalLM(MixtralForCausalLM):
             **kwargs,
         )
 
-        # Cast to int32 to avoid ONNXRT issue
-        logit_idx = position_ids.to(torch.int32).argmax(1, keepdim=True)
-        hidden_states = outputs.last_hidden_state[
-            torch.arange(position_ids.shape[0], device=position_ids.device).view(-1, 1), logit_idx
-        ]
+        if num_logits_to_keep is not None:
+            hidden_states = filter_hidden_states(outputs.last_hidden_state, position_ids, num_logits_to_keep)
+        else:
+            # Cast to int32 to avoid ONNXRT issue
+            logit_idx = position_ids.to(torch.int32).argmax(1, keepdim=True)
+            hidden_states = outputs.last_hidden_state[
+                torch.arange(position_ids.shape[0], device=position_ids.device).view(-1, 1), logit_idx
+            ]
         lm_head_dtype = self.lm_head.weight.dtype
         logits = self.lm_head(hidden_states.to(lm_head_dtype)).float()
 
