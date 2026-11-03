@@ -302,7 +302,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         self._qsa_config = None
         self._qsa_use_benchmark_path = False
 
-    def configure_qsa(self, qsa_config=None, *, ctx_len=None, seq_len=None):
+    def configure_qsa(self, qsa_config=None, *, ctx_len=None, seq_len=None, prefill_only=False):
         config = self.config
         deployment = dict(qsa_config or {})
         self._qsa_config = {
@@ -319,7 +319,8 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             "sparse_kv_num_blocks": int(deployment.get("sparse_kv_num_blocks", 8)),
             "skip_kv": bool(deployment.get("skip_kv", False)),
             "ctx_len": int(deployment.get("ctx_len", ctx_len or config.max_position_embeddings)),
-            "seq_len": seq_len,
+            "seq_len": seq_len if prefill_only else None,
+            "prefill_only": bool(prefill_only),
         }
         self._qsa_use_benchmark_path = bool(qsa_config)
 
@@ -532,6 +533,228 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             self.num_key_value_groups, dim=1
         )
 
+    @staticmethod
+    def _qsa_scatter_sequence(cache, positions, updates, deployment, *, dp_key, rows_per_way):
+        """Write a prefill sequence into the DP-row retained-cache layout."""
+        dp, cp = deployment[dp_key], deployment["attn_cp" if dp_key == "attn_dp" else "indexer_cp"]
+        if cp != 1:
+            raise ValueError("QSA aligned prefill currently requires cache CP=1")
+        batch, seq_len = positions.shape
+        if batch % dp:
+            raise ValueError(f"QSA batch must be divisible by {dp_key}")
+        batch_local = batch // dp
+        if updates.ndim != 4 or updates.shape[:2] != (batch, seq_len):
+            raise ValueError("QSA sequence updates must have shape [B, Q, rows_per_way, D]")
+        if updates.shape[2] != rows_per_way:
+            raise ValueError("QSA sequence update row count does not match cache layout")
+
+        update_rows = (
+            updates.reshape(batch_local, dp, seq_len, rows_per_way, updates.shape[-1])
+            .permute(0, 1, 3, 2, 4)
+            .reshape(batch_local, dp * rows_per_way, seq_len, updates.shape[-1])
+        )
+        addresses = (
+            positions.reshape(batch_local, dp, seq_len)
+            .unsqueeze(2)
+            .expand(batch_local, dp, rows_per_way, seq_len)
+            .reshape(batch_local, dp * rows_per_way, seq_len)
+        )
+        block_ids = torch.arange(batch_local, device=positions.device, dtype=torch.int32)
+        block_ids = block_ids[:, None, None].expand_as(addresses)
+        return ctx_paged_scatter(cache, block_ids, addresses.to(torch.int32), update_rows)
+
+    def _qsa_prefill_topk(self, index_query, positions, index_cache, deployment):
+        """Select causal pooled-index blocks with the handoff's split-Q blocking."""
+        ratio = self.indexer.compress_ratio
+        pooled_context = deployment["ctx_len"] // ratio
+        num_blocks = deployment["indexer_num_blocks"]
+        num_cores = deployment["num_cores"]
+        q_block_size = deployment["indexer_q_block_size"]
+        ql_chunk = deployment["indexer_ql_chunk"]
+        topk_blocking = deployment["indexer_topk_blocking"]
+        if pooled_context % num_blocks:
+            raise ValueError("pooled context must divide evenly into indexer_num_blocks")
+        if (
+            index_query.shape[1] % q_block_size
+            or ql_chunk % q_block_size
+            or q_block_size % num_cores
+            or q_block_size % topk_blocking
+        ):
+            raise ValueError("invalid split-Q prefill indexer blocking")
+        if index_cache.shape[1] != pooled_context:
+            raise ValueError("QSA index cache context does not match configured ctx_len")
+
+        batch, query_len, index_heads, index_dim = index_query.shape
+        q_per_core = q_block_size // num_cores
+        kv_block_size = pooled_context // num_blocks
+        topk = min(self.indexer.block_topk, pooled_context)
+        complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
+        local_offsets = torch.arange(kv_block_size, device=positions.device, dtype=torch.int32).view(1, 1, 1, -1)
+        selected_ids, selected_valid = [], []
+        sub_block_size = q_block_size // topk_blocking
+
+        for q_chunk_start in range(0, query_len, ql_chunk):
+            q_chunk_end = min(q_chunk_start + ql_chunk, query_len)
+            for q_start in range(q_chunk_start, q_chunk_end, q_block_size):
+                q_end = q_start + q_block_size
+                query_core = index_query[:, q_start:q_end].reshape(batch, num_cores, q_per_core, index_heads, index_dim)
+                complete_core = complete[:, q_start:q_end].reshape(batch, num_cores, q_per_core)
+                score_parts, index_parts = [], []
+
+                for block_idx in range(num_blocks):
+                    block_start = block_idx * kv_block_size
+                    block_end = block_start + kv_block_size
+                    key_block = index_cache[:, block_start:block_end].float()
+                    key_core = key_block.unsqueeze(1).expand(batch, num_cores, kv_block_size, index_dim)
+                    scores = F.relu(torch.matmul(query_core.float(), key_core[:, :, None].transpose(-1, -2))).sum(
+                        -2
+                    ) / math.sqrt(index_dim)
+                    block_positions = (block_start + local_offsets).expand(batch, num_cores, q_per_core, kv_block_size)
+                    scores = scores.masked_fill(block_positions >= complete_core.unsqueeze(-1), -3.0e4)
+                    score_parts.append(scores.reshape(batch, q_block_size, kv_block_size))
+                    index_parts.append(block_positions.reshape(batch, q_block_size, kv_block_size))
+
+                candidate_scores = torch.cat(score_parts, dim=-1)
+                candidate_indices = torch.cat(index_parts, dim=-1)
+                for sub_block in range(topk_blocking):
+                    query_start = sub_block * sub_block_size
+                    query_end = query_start + sub_block_size
+                    scores = candidate_scores[:, query_start:query_end]
+                    values, indices = torch.topk(scores, topk, dim=-1, sorted=True)
+                    selected_ids.append(candidate_indices[:, query_start:query_end].gather(-1, indices))
+                    selected_valid.append(values > -3.0e4)
+
+        return torch.cat(selected_ids, dim=1), torch.cat(selected_valid, dim=1)
+
+    def _qsa_gather_gqa_grouped_prefill(self, retained_cache, positions, valid, deployment):
+        """Gather KV rows for one disjoint query-core group per KV head."""
+        if positions.ndim != 5 or valid.shape != positions.shape:
+            raise ValueError("grouped QSA gather positions must have shape [B, Hkv, G, Q/G, K]")
+        batch, kv_heads, core_groups, q_per_core, gather_len = positions.shape
+        dp = deployment["attn_dp"]
+        batch_local = batch // dp
+        if batch % dp or kv_heads != self.config.num_key_value_heads:
+            raise ValueError("grouped QSA gather shape does not match the configured batch/KV heads")
+        if retained_cache.shape[:2] != (batch_local, dp * kv_heads):
+            raise ValueError("QSA key/value cache rows do not match attention DP layout")
+
+        indices = positions.reshape(batch_local, dp, kv_heads, core_groups, q_per_core, gather_len)
+        indices = indices.reshape(batch_local, dp * kv_heads, core_groups, q_per_core, gather_len)
+        valid_rows = valid.reshape(batch_local, dp * kv_heads, core_groups, q_per_core, gather_len)
+        indices = torch.where(valid_rows, indices, torch.full_like(indices, torch.iinfo(torch.int32).max))
+        gathered = ctx_gather_rows(
+            retained_cache,
+            indices.reshape(batch_local, dp * kv_heads, -1).to(torch.int32),
+        )
+        gathered = gathered.reshape(
+            batch_local,
+            dp * kv_heads,
+            core_groups,
+            q_per_core,
+            gather_len,
+            retained_cache.shape[-1],
+        )
+        gathered = gathered.reshape(batch, kv_heads, core_groups, q_per_core, gather_len, retained_cache.shape[-1])
+        return torch.where(valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
+
+    def _qsa_sparse_prefill_attention(
+        self, query, key_cache, value_cache, selected_blocks, selected_valid, positions, deployment
+    ):
+        """Apply sparse GQA with selected blocks and chunked online softmax."""
+        batch, query_len, kv_heads, heads_per_kv, dim = query.shape
+        num_cores = deployment["num_cores"]
+        ratio = self.indexer.compress_ratio
+        sparse_q_block_size = deployment["sparse_q_block_size"]
+        sparse_kv_num_blocks = deployment["sparse_kv_num_blocks"]
+        if num_cores % kv_heads:
+            raise ValueError("num_cores must be divisible by the number of QSA KV heads")
+        core_groups = num_cores // kv_heads
+        if query_len % sparse_q_block_size or sparse_q_block_size % core_groups:
+            raise ValueError("invalid KV-head-grouped sparse Q/core blocking")
+
+        logical_block_count = selected_blocks.shape[-1] + 1
+        if sparse_kv_num_blocks > logical_block_count:
+            raise ValueError("sparse_kv_num_blocks exceeds the selected logical KV blocks")
+        pooled_context = deployment["ctx_len"] // ratio
+        complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
+        tail_valid = complete < pooled_context
+        tail_blocks = complete.clamp(max=pooled_context - 1)
+        logical_blocks = torch.cat((selected_blocks, tail_blocks.unsqueeze(-1)), dim=-1)
+        logical_valid = torch.cat((selected_valid, tail_valid.unsqueeze(-1)), dim=-1)
+        block_offsets = torch.arange(ratio, device=query.device, dtype=selected_blocks.dtype)
+        output_chunks = []
+
+        for q_start in range(0, query_len, sparse_q_block_size):
+            q_end = q_start + sparse_q_block_size
+            q_chunk = q_end - q_start
+            q_per_core = q_chunk // core_groups
+            query_work = (
+                query[:, q_start:q_end]
+                .permute(0, 2, 1, 3, 4)
+                .reshape(batch, kv_heads, core_groups, q_per_core, heads_per_kv, dim)
+            )
+            block_ids = logical_blocks[:, q_start:q_end]
+            block_valid = logical_valid[:, q_start:q_end]
+            query_positions = positions[:, q_start:q_end]
+            running_max = torch.full(query_work.shape[:-1], -3.0e4, dtype=query_work.dtype, device=query.device)
+            denominator = torch.zeros_like(running_max)
+            output = torch.zeros(*running_max.shape, dim, dtype=query_work.dtype, device=query.device)
+
+            for kv_block_idx in range(sparse_kv_num_blocks):
+                logical_start = logical_block_count * kv_block_idx // sparse_kv_num_blocks
+                logical_end = logical_block_count * (kv_block_idx + 1) // sparse_kv_num_blocks
+                current_ids = block_ids[..., logical_start:logical_end]
+                current_valid = block_valid[..., logical_start:logical_end]
+                token_positions = (current_ids.unsqueeze(-1) * ratio + block_offsets).flatten(-2)
+                token_valid = current_valid.unsqueeze(-1).expand(*current_valid.shape, ratio).flatten(-2)
+                token_valid = token_valid & (token_positions <= query_positions.unsqueeze(-1))
+                token_count = token_positions.shape[-1]
+                grouped_positions = token_positions.reshape(batch, core_groups, q_per_core, token_count)
+                grouped_positions = grouped_positions.unsqueeze(1).expand(
+                    batch, kv_heads, core_groups, q_per_core, token_count
+                )
+                grouped_valid = token_valid.reshape(batch, core_groups, q_per_core, token_count)
+                grouped_valid = grouped_valid.unsqueeze(1).expand_as(grouped_positions)
+
+                if deployment["skip_kv"]:
+                    skip_rows = ~grouped_valid.any(dim=-1)
+                    if not torch.onnx.is_in_onnx_export() and bool(skip_rows.all().item()):
+                        continue
+                else:
+                    skip_rows = None
+
+                key_block = self._qsa_gather_gqa_grouped_prefill(
+                    key_cache, grouped_positions, grouped_valid, deployment
+                )
+                value_block = self._qsa_gather_gqa_grouped_prefill(
+                    value_cache, grouped_positions, grouped_valid, deployment
+                )
+                work_rows = batch * kv_heads * core_groups * q_per_core
+                logits = torch.bmm(
+                    query_work.reshape(work_rows, heads_per_kv, dim),
+                    key_block.reshape(work_rows, token_count, dim).transpose(1, 2),
+                ).reshape(batch, kv_heads, core_groups, q_per_core, heads_per_kv, token_count) / math.sqrt(dim)
+                mask = grouped_valid.unsqueeze(-2)
+                logits = logits.masked_fill(~mask, -3.0e4)
+                block_max = logits.max(dim=-1).values
+                next_max = torch.maximum(running_max, block_max)
+                previous_scale = torch.exp(running_max - next_max)
+                probabilities = torch.exp(logits - next_max.unsqueeze(-1)) * mask.to(logits.dtype)
+                next_denominator = denominator * previous_scale + probabilities.sum(dim=-1)
+                next_output = output * previous_scale.unsqueeze(-1) + torch.matmul(probabilities, value_block)
+                if skip_rows is None:
+                    running_max, denominator, output = next_max, next_denominator, next_output
+                else:
+                    running_max = torch.where(skip_rows.unsqueeze(-1), running_max, next_max)
+                    denominator = torch.where(skip_rows.unsqueeze(-1), denominator, next_denominator)
+                    output = torch.where(skip_rows.unsqueeze(-1).unsqueeze(-1), output, next_output)
+
+            denominator = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
+            output = output / denominator.unsqueeze(-1)
+            output_chunks.append(output.permute(0, 2, 3, 1, 4, 5).reshape(batch, q_chunk, -1).to(query.dtype))
+
+        return torch.cat(output_chunks, dim=1)
+
     def _qsa_prefill(self, hidden_states, position_embeddings, past_key_values):
         if past_key_values is None:
             raise ValueError("Qwen4-Exp QSA prefill requires retained cache state")
@@ -545,6 +768,8 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         positions = positions[..., :query_len].to(torch.long)
         if positions.shape != (batch, query_len) or query_len % self.indexer.compress_ratio:
             raise ValueError("QSA prefill requires aligned [batch, seq_len] positions")
+        if query_len % deployment["indexer_q_block_size"]:
+            raise ValueError("QSA prefill sequence length must divide into configured indexer Q blocks")
         cos, sin = position_embeddings[:2]
         query_gate = self.q_proj(hidden_states).view(batch, query_len, -1, self.head_dim * 2)
         query, gate = query_gate.chunk(2, dim=-1)
@@ -560,34 +785,100 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         value_cache = past_key_values.qsa_value_states[self.layer_idx]
         index_cache = past_key_values.qsa_index_states[self.layer_idx]
         partial = past_key_values.qsa_partial_states[self.layer_idx]
-        # Aligned prefill completes pooling groups; retain the same four-state ABI.
+        if any(value is None for value in (key_cache, value_cache, index_cache, partial)):
+            raise ValueError(f"Missing QSA retained state for layer {self.layer_idx}")
         ratio = self.indexer.compress_ratio
-        raw = self.indexer.index_qk_proj(hidden_states).split(
-            [self.indexer.index_n_heads * self.indexer.index_head_dim, self.indexer.index_head_dim], dim=-1
-        )[1]
-        pooled = self.indexer.k_layernorm(raw.reshape(batch, -1, ratio, raw.shape[-1]).float().mean(2).to(raw.dtype))
-        pooled_pos = positions[:, ::ratio]
-        index_cache = index_cache.scatter(
-            1,
-            torch.div(pooled_pos, ratio, rounding_mode="trunc").unsqueeze(-1).expand(-1, -1, index_cache.shape[-1]),
-            pooled,
+        if key_cache.shape[-2] < deployment["ctx_len"] or value_cache.shape[-2] < deployment["ctx_len"]:
+            raise ValueError("QSA retained key/value cache is smaller than configured ctx_len")
+
+        next_key = self._qsa_scatter_sequence(
+            key_cache,
+            positions,
+            key,
+            deployment,
+            dp_key="attn_dp",
+            rows_per_way=self.config.num_key_value_heads,
         )
-        key_cache = key_cache.scatter(
-            2,
-            positions[:, :, None, None].expand(batch, query_len, key.shape[2], key.shape[3]).transpose(1, 2),
-            key.transpose(1, 2),
+        next_value = self._qsa_scatter_sequence(
+            value_cache,
+            positions,
+            value,
+            deployment,
+            dp_key="attn_dp",
+            rows_per_way=self.config.num_key_value_heads,
         )
-        value_cache = value_cache.scatter(
-            2,
-            positions[:, :, None, None].expand(batch, query_len, value.shape[2], value.shape[3]).transpose(1, 2),
-            value.transpose(1, 2),
+
+        qk = self.indexer.index_qk_proj(hidden_states)
+        index_query, raw_key = torch.split(
+            qk,
+            (self.indexer.index_n_heads * self.indexer.index_head_dim, self.indexer.index_head_dim),
+            dim=-1,
         )
-        scores = torch.einsum("bqhd,bkhd->bhqk", query.float(), key.float()) / math.sqrt(self.head_dim)
-        causal = positions[:, None, None, :] <= positions[:, None, :, None]
-        probs = scores.masked_fill(~causal, MIN_MASKED_ATTENTION_VALUE).softmax(-1).to(query.dtype)
-        output = torch.einsum("bhqk,bkhd->bqhd", probs, value).reshape(batch, query_len, -1)
-        past_key_values.update_qsa_state(self.layer_idx, key_cache, value_cache, index_cache, partial)
-        return self.o_proj(output * gate.reshape_as(output).sigmoid()), None
+        index_query = self.indexer.q_layernorm(
+            index_query.view(batch, query_len, self.indexer.index_n_heads, self.indexer.index_head_dim)
+        )
+        index_query = apply_rotary_pos_emb(index_query, cos=cos, sin=sin, unsqueeze_dim=2)
+
+        pooled_count = query_len // ratio
+        pooled_raw = raw_key.reshape(batch, pooled_count, ratio, -1).float().mean(2).to(raw_key.dtype)
+        pooled = self.indexer.k_layernorm(pooled_raw)
+        pooled_cos_cached, pooled_sin_cached = position_embeddings[6:]
+        pooled_positions = position_embeddings[4][0, :, ::ratio].reshape(-1).to(torch.long)
+        pooled_cos = pooled_cos_cached.index_select(0, pooled_positions).reshape(batch, pooled_count, -1)
+        pooled_sin = pooled_sin_cached.index_select(0, pooled_positions).reshape(batch, pooled_count, -1)
+        pooled = apply_rotary_pos_emb(pooled.unsqueeze(2), cos=pooled_cos, sin=pooled_sin, unsqueeze_dim=2).squeeze(2)
+        pooled_positions = torch.div(positions[:, ::ratio], ratio, rounding_mode="trunc")
+        pooled_updates = pooled.unsqueeze(2)
+        if index_cache.ndim == 3:
+            index_cache = index_cache.unsqueeze(1)
+            squeeze_index_cache = True
+        elif index_cache.ndim == 4:
+            squeeze_index_cache = False
+        else:
+            raise ValueError("QSA retained index cache must have rank 3 or 4")
+        next_index = self._qsa_scatter_sequence(
+            index_cache,
+            pooled_positions,
+            pooled_updates,
+            deployment,
+            dp_key="indexer_dp",
+            rows_per_way=1,
+        )
+        if squeeze_index_cache:
+            next_index = next_index.squeeze(1)
+            index_for_attention = next_index
+        else:
+            batch_local = batch // deployment["indexer_dp"]
+            index_for_attention = next_index.reshape(
+                batch_local * deployment["indexer_dp"], next_index.shape[2], next_index.shape[3]
+            )
+
+        selected_blocks, selected_valid = self._qsa_prefill_topk(
+            index_query,
+            positions,
+            index_for_attention,
+            deployment,
+        )
+        output = self._qsa_sparse_prefill_attention(
+            query.reshape(
+                batch,
+                query_len,
+                self.config.num_key_value_heads,
+                self.num_key_value_groups,
+                self.head_dim,
+            ),
+            next_key,
+            next_value,
+            selected_blocks,
+            selected_valid,
+            positions,
+            deployment,
+        )
+        output = self.o_proj(output * gate.reshape_as(output).sigmoid())
+        # Aligned prefill completes every pooling group; retain the input partial
+        # unchanged so the four-state ABI remains connected for decode handoff.
+        past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, partial)
+        return output, None
 
 
 class QEffQwen4ExpTextDecoderLayer(Qwen4ExpTextDecoderLayer):
@@ -940,13 +1231,7 @@ class QEffQwen4ExpDecodeExportMixin:
         return ["logits", *[f"{name}_RetainedState" for name in self._iter_retained_state_names()]]
 
     def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs):
-        """Return decode-only specializations for the retained-state graph.
-
-        The exported graph accepts one token at a time. ``prefill_seq_len`` is
-        retained as a compile API input for the nominal PL, but it must not be
-        used as the graph sequence length because this wrapper has no prefill
-        implementation. The QSA index state uses the compressed context axis.
-        """
+        """Return the explicitly configured graph shape, preserving decode by default."""
         del prefill_seq_len, kwargs
         batch_size = batch_size or 1
         pooled_ctx_len = -(-ctx_len // self.config.indexer_compress_ratio)
@@ -985,7 +1270,7 @@ class QEffQwen4ExpDecodeExportMixin:
         for layer in self.model.layers:
             attention = getattr(layer, "self_attn", None)
             qsa_config = getattr(attention, "_qsa_config", None)
-            if qsa_config is not None and qsa_config.get("seq_len") is not None:
+            if qsa_config is not None and qsa_config.get("prefill_only") and qsa_config.get("seq_len") is not None:
                 return int(qsa_config["seq_len"])
         return 1
 

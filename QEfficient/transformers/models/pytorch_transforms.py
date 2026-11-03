@@ -1546,7 +1546,9 @@ class BlockingAttentionTransform:
     _skip_classes = {}
 
     @classmethod
-    def apply(cls, model: nn.Module, attn_blocking_config) -> tuple[nn.Module, bool]:
+    def apply(
+        cls, model: nn.Module, attn_blocking_config, *, prefill_only: bool = False, seq_len: int | None = None
+    ) -> tuple[nn.Module, bool]:
         transformed = False
         model_config = getattr(model, "config", None) or getattr(getattr(model, "model", None), "config", None)
         model_architectures = getattr(model_config, "architectures", None) or []
@@ -1570,7 +1572,8 @@ class BlockingAttentionTransform:
                     module.configure_qsa(
                         getattr(attn_blocking_config, "qsa_config", None),
                         ctx_len=getattr(attn_blocking_config, "ctx_len", None),
-                        seq_len=getattr(attn_blocking_config, "seq_len", None),
+                        seq_len=seq_len,
+                        prefill_only=prefill_only,
                     )
                     module.forward = MethodType(QEffQwen4ExpTextAttention.qsa_forward, module)
                 elif isinstance(module, QEffQwen3_5GatedDeltaNet):

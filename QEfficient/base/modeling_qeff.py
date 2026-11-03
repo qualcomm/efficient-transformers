@@ -1079,7 +1079,12 @@ class QEFFBaseModel(ABC):
                     )
                     if key in qaic_config
                 }
-            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
+            self.model, _ = BlockingAttentionTransform.apply(
+                self.model,
+                attn_blocking_config=blocking_config,
+                prefill_only=bool(compiler_options.get("prefill_only", False)),
+                seq_len=seq_len,
+            )
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
             self.hash_params.pop("blocking_kwargs", None)

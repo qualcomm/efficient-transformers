@@ -546,3 +546,29 @@ class TestBlockingWrapperFallbackAndParity:
             f"Logits diverged beyond tolerance for blocking_cfg.mode={blocking_cfg.mode} "
             f"(max abs diff={(original_logits - transformed_logits).abs().max().item()})"
         )
+
+    def test_qwen4_exp_prefill_configuration_preserves_decode_specialization_and_cache_io(self):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
+            QEffQwen4ExpDecodeExportMixin,
+            QEffQwen4ExpTextAttention,
+        )
+
+        attention = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=128))
+        QEffQwen4ExpTextAttention.configure_qsa(attention, {"attn_dp": 1}, ctx_len=128, seq_len=32)
+        wrapper = SimpleNamespace(
+            config=SimpleNamespace(indexer_compress_ratio=4),
+            model=SimpleNamespace(layers=[SimpleNamespace(self_attn=attention)]),
+        )
+        wrapper.get_export_seq_len = lambda: QEffQwen4ExpDecodeExportMixin.get_export_seq_len(wrapper)
+        wrapper._iter_retained_state_names = lambda: ["qsa_partial_state.0"]
+
+        decode_specialization = QEffQwen4ExpDecodeExportMixin.get_specializations(wrapper, 1, 32, 128)[0]
+        custom_io = QEffQwen4ExpDecodeExportMixin.get_custom_io(wrapper, dtype="float16", mxint8_kv_cache=True)
+        assert decode_specialization["seq_len"] == 1
+        assert custom_io["qsa_partial_state.0"] == "mxint8"
+
+        QEffQwen4ExpTextAttention.configure_qsa(attention, {"attn_dp": 1}, ctx_len=128, seq_len=32, prefill_only=True)
+        prefill_specialization = QEffQwen4ExpDecodeExportMixin.get_specializations(wrapper, 1, 32, 128)[0]
+        assert prefill_specialization["seq_len"] == 32
