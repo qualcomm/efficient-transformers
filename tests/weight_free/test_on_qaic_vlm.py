@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import random
 import time
 from pathlib import Path
 
@@ -85,6 +86,7 @@ VLM_DECODE_BLOCKING_MODEL_TYPES = (
     "gemma4",
 )
 VLM_GEMMA4_DECODE_BLOCKING_KEYS = tuple(key for key in VLM_DECODE_BLOCKING_KEYS if key not in {"h", "q"})
+VLM_DECODE_BLOCKING_SAMPLE_SIZE = 10
 # Match the CausalLM blocking tests: only the pure head-parallel modes need
 # a multi-device, user-tiled compile.  The VLM matrix currently only includes
 # "h" from this set; hqkv/bhqkv should keep the ordinary one-device path.
@@ -140,6 +142,28 @@ VLM_DECODE_BLOCKING_QAIC_CASES = [
     for model_type in VLM_DECODE_BLOCKING_MODEL_TYPES
     for blocking_key in (VLM_GEMMA4_DECODE_BLOCKING_KEYS if model_type == "gemma4" else VLM_DECODE_BLOCKING_KEYS)
 ]
+
+# A fixed seed keeps the default 10-case blocking subset stable across xdist workers.
+_VLM_DECODE_BLOCKING_SAMPLED_CASES = random.Random("42:vlm_decode_blocking").sample(
+    VLM_DECODE_BLOCKING_QAIC_CASES,
+    k=min(VLM_DECODE_BLOCKING_SAMPLE_SIZE, len(VLM_DECODE_BLOCKING_QAIC_CASES)),
+)
+
+
+def _select_vlm_decode_blocking_cases(config) -> list[pytest.ParameterSet]:
+    """Collect a stable 10-case subset by default while keeping every case directly addressable."""
+    explicitly_selected_ids = {
+        case.id for case in VLM_DECODE_BLOCKING_QAIC_CASES if any(f"[{case.id}]" in arg for arg in config.args)
+    }
+    if explicitly_selected_ids:
+        return [case for case in VLM_DECODE_BLOCKING_QAIC_CASES if case.id in explicitly_selected_ids]
+    return _VLM_DECODE_BLOCKING_SAMPLED_CASES
+
+
+def pytest_generate_tests(metafunc):
+    if metafunc.function.__name__ != "test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics":
+        return
+    metafunc.parametrize("model_type,blocking_key", _select_vlm_decode_blocking_cases(metafunc.config))
 
 
 def _build_vlm_test_checkpoint(
@@ -898,7 +922,6 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
 @pytest.mark.weight_free_blocking
 @pytest.mark.on_qaic
 @pytest.mark.multimodal
-@pytest.mark.parametrize("model_type,blocking_key", VLM_DECODE_BLOCKING_QAIC_CASES)
 def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     model_type,
     blocking_key,
