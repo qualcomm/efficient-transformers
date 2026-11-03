@@ -32,7 +32,6 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
-from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
@@ -64,7 +63,7 @@ VLM_PREFILL_SEQ_LEN = 64
 VLM_CTX_LEN = 512
 VLM_IMAGE_HEIGHT = 354
 VLM_IMAGE_WIDTH = 536
-VLM_NUM_CORES = DEFAULT_AIC_NUM_CORES
+VLM_NUM_CORES = 4
 VLM_NUM_DEVICES = 1
 MDP_NUM_PARTITIONS = 2
 VLM_GENERATION_LEN = 2
@@ -136,7 +135,7 @@ PREFILL_NUM_DEVICES = 2
 GPT_OSS_PARITY_CTX_LEN = 256
 GPT_OSS_PARITY_GENERATION_LEN = 40
 GPT_OSS_PARITY_FULL_BATCH_SIZE = 2
-GPT_OSS_PARITY_NUM_CORES = DEFAULT_AIC_NUM_CORES
+GPT_OSS_PARITY_NUM_CORES = 4
 GPT_OSS_PARITY_NUM_HIDDEN_LAYERS = 2
 GPT_OSS_PARITY_PROMPTS = [
     "Explain quantum computing in simple terms.",
@@ -155,7 +154,7 @@ GPT_OSS_PARITY_DMA_CONFIG = pytest.param(
 QWEN3_MOE_PARITY_CTX_LEN = 256
 QWEN3_MOE_PARITY_GENERATION_LEN = 40
 QWEN3_MOE_PARITY_FULL_BATCH_SIZE = 1
-QWEN3_MOE_PARITY_NUM_CORES = DEFAULT_AIC_NUM_CORES
+QWEN3_MOE_PARITY_NUM_CORES = 4
 QWEN3_MOE_PARITY_PROMPT_IDS = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int64)
 QWEN3_MOE_PARITY_DMA_CONFIG = pytest.param(
     {
@@ -617,7 +616,7 @@ def test_weight_free_disaggregated_prefill_and_decode(model_type, model_id, tmp_
     decode_moe_config = _build_moe_decode_qaic_config()
     common = {
         "ctx_len": CTX_LEN,
-        "num_cores": DEFAULT_AIC_NUM_CORES,
+        "num_cores": 4,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
         "use_onnx_subfunctions": True,
@@ -805,7 +804,7 @@ def test_weight_free_disaggregated_continuous_batching(model_type, model_id, tmp
     common = {
         "ctx_len": CTX_LEN,
         "full_batch_size": full_batch_size,
-        "num_cores": DEFAULT_AIC_NUM_CORES,
+        "num_cores": 4,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
         "split_retained_state_io": True,
@@ -875,7 +874,7 @@ def test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics(
     common = {
         "ctx_len": CTX_LEN,
         "full_batch_size": full_batch_size,
-        "num_cores": DEFAULT_AIC_NUM_CORES,
+        "num_cores": 4,
         "mxfp6_matmul": False,
         "mxint8_kv_cache": False,
         "split_retained_state_io": True,
