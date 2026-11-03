@@ -29,6 +29,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5VisionAttention,
     Qwen3_5VisionModel,
     apply_rotary_pos_emb_vision,
+    create_recurrent_attention_mask,
     repeat_kv,
     rotate_half,
 )
@@ -42,10 +43,6 @@ from QEfficient.blocking.attention_blocking import (
     recurrent_gdn_decode_forward,
 )
 from QEfficient.customop import (
-    # CtxGatherFuncCB,
-    # CtxGatherFuncCB3D,
-    # CtxScatterFuncCB,
-    # CtxScatterFuncCB3D,
     ctx_gather_cb,
     ctx_gather_cb_3d,
     ctx_scatter_cb,
@@ -1208,11 +1205,13 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
 class QEffQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
     def __qeff_init__(self):
-        if self.layer_type == "linear_attention":
+        layer_type = getattr(self, "layer_type", getattr(self, "block_type", None))
+        self.layer_type = layer_type
+        if layer_type == "linear_attention":
             self.__class__ = QEffQwen3_5LinearAttentionDecoderLayer
             self.linear_attn.__class__ = QEffQwen3_5GatedDeltaNet
             self.linear_attn.__qeff_init__()
-        elif self.layer_type == "full_attention":
+        elif layer_type == "full_attention":
             self.__class__ = QEffQwen3_5FullAttentionDecoderLayer
             self.self_attn.__class__ = QEffQwen3_5Attention
             self.self_attn.__qeff_init__()
@@ -1411,7 +1410,12 @@ class QEffQwen3_5TextModel(Qwen3_5TextModel):
         causal_mask = _create_causal_mask(
             position_ids=text_position_ids, target_length=target_length, sliding_window=None
         )
-        linear_attn_mask = self._update_linear_attn_mask(attention_mask, past_key_values)
+        linear_attn_mask = create_recurrent_attention_mask(
+            config=self.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+        )
 
         hidden_states = inputs_embeds
 
@@ -1692,7 +1696,7 @@ class QEffQwen3_5VisionModel(Qwen3_5VisionModel):
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         merge_size = self.spatial_merge_size
         bs, num_frames, height, width = grid_thw.shape
-        inv_freq = self.rotary_pos_emb.inv_freq
+        inv_freq = self.rotary_pos_emb.inv_freq.to(device=grid_thw.device)
         device = inv_freq.device
 
         merged_h, merged_w = height // merge_size, width // merge_size

@@ -115,6 +115,7 @@ def _load_gemma4_qeff_model_for_compile_only(
         hf_config.text_config.torch_dtype = torch.float32
         if not include_sliding_attention:
             hf_config.text_config.layer_types = ["full_attention"] * num_hidden_layers
+            hf_config.text_config.per_layer_config = None
     hf_config.dtype = "float32"
     hf_config.torch_dtype = torch.float32
 
