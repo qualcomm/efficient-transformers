@@ -29,8 +29,8 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -55,8 +55,8 @@ from transformers import (
     Qwen2ForCausalLM,
 )
 
-import QEfficient.transformers.models.pytorch_transforms as pytorch_transforms
 from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.transformers.models import pytorch_transforms
 from QEfficient.transformers.models.clip.modeling_clip import QEffCLIPTextModel
 from QEfficient.transformers.models.pytorch_transforms import (
     CustomOpsTransform,
@@ -534,7 +534,7 @@ class TestCustomOpsTransformReplacement:
     def test_gpt2_not_transformed(self):
         """GPT2 uses LayerNorm, not RMSNorm. CustomOpsTransform must not apply."""
         model = make_tiny_gpt2()
-        transformed, applied = CustomOpsTransform.apply(model)
+        _transformed, applied = CustomOpsTransform.apply(model)
         assert not applied, "CustomOpsTransform must not apply to GPT2 (no RMSNorm)"
 
     def test_module_mapping_contains_expected_types(self):
@@ -991,7 +991,7 @@ class TestPoolingTransformCorrectness:
             max_position_embeddings=64,
         )
         model = BertModel(cfg).eval()
-        pooled, applied = PoolingTransform.apply(model, pooling="mean")
+        pooled, _applied = PoolingTransform.apply(model, pooling="mean")
         assert isinstance(pooled, PooledModel)
 
     def test_cls_pooling_wraps_model(self):
@@ -1008,7 +1008,7 @@ class TestPoolingTransformCorrectness:
             max_position_embeddings=64,
         )
         model = BertModel(cfg).eval()
-        pooled, applied = PoolingTransform.apply(model, pooling="cls")
+        pooled, _applied = PoolingTransform.apply(model, pooling="cls")
         assert isinstance(pooled, PooledModel)
 
     def test_invalid_pooling_raises_error(self):
@@ -1201,7 +1201,7 @@ class TestSamplerTransformBehavior:
         assert not applied
 
     def test_unsupported_model_raises_not_implemented(self):
-        import torch.nn as nn
+        from torch import nn
 
         class UnsupportedModel(nn.Module):
             def forward(self, x):
@@ -2116,8 +2116,8 @@ class TestSplitOptimizedMoETransform:
             model = DummyInner()
             model_architecture = None
             model_name = "DummyQEff"
-            hash_params = {}
-            _onnx_transforms = []
+            hash_params = {}  # noqa: RUF012
+            _onnx_transforms = []  # noqa: RUF012
 
             @export_wrapper
             def export(
@@ -2182,8 +2182,8 @@ class TestSplitOptimizedMoETransform:
                 )
 
         class DummyQEff(QEFFBaseModel):
-            _pytorch_transforms = []
-            _onnx_transforms = []
+            _pytorch_transforms = []  # noqa: RUF012
+            _onnx_transforms = []  # noqa: RUF012
 
             @property
             def get_model_config(self):
@@ -2244,8 +2244,8 @@ class TestSplitOptimizedMoETransform:
             config = SimpleNamespace(architectures=[], torch_dtype=torch.float32)
 
         class DummyQEff(QEFFBaseModel):
-            _pytorch_transforms = []
-            _onnx_transforms = []
+            _pytorch_transforms = []  # noqa: RUF012
+            _onnx_transforms = []  # noqa: RUF012
 
             @property
             def get_model_config(self):
@@ -2306,7 +2306,7 @@ class TestMoETransformReplacement:
 
         from QEfficient.transformers.models.mixtral_moe.modeling_mixtral import QEffMixtralSparseMoeBlock
 
-        model, cfg = self._make_tiny_mixtral()
+        model, _cfg = self._make_tiny_mixtral()
         assert any(isinstance(m, MixtralSparseMoeBlock) for m in model.modules())
 
         transformed, kv_applied = KVCacheTransform.apply(model)
@@ -2323,7 +2323,7 @@ class TestMoETransformReplacement:
     def test_mixtral_for_causal_lm_replaced(self):
         from QEfficient.transformers.models.mixtral_moe.modeling_mixtral import QEffMixtralForCausalLM
 
-        model, cfg = self._make_tiny_mixtral()
+        model, _cfg = self._make_tiny_mixtral()
         transformed, _ = KVCacheTransform.apply(model)
         assert isinstance(transformed, QEffMixtralForCausalLM)
 
@@ -2415,7 +2415,7 @@ class TestT5ModelTransform:
 
         from QEfficient.transformers.models.pytorch_transforms import T5ModelTransform
 
-        model, cfg = self._make_tiny_t5()
+        model, _cfg = self._make_tiny_t5()
         assert any(isinstance(m, T5Attention) for m in model.modules())
 
         transformed, applied = T5ModelTransform.apply(model)
@@ -2433,7 +2433,7 @@ class TestT5ModelTransform:
 
         from QEfficient.transformers.models.pytorch_transforms import T5ModelTransform
 
-        model, cfg = self._make_tiny_t5()
+        model, _cfg = self._make_tiny_t5()
         transformed, applied = T5ModelTransform.apply(model)
         assert applied
         qeff_t5_ln_cls = T5ModelTransform._module_mapping[T5LayerNorm]
@@ -2497,8 +2497,8 @@ class TestTextClassificationTransformDirect:
         from QEfficient.transformers.models.pytorch_transforms import TextClassificationTransform
 
         try:
-            model, cfg = self._make_tiny_deberta()
-        except Exception as e:
+            model, _cfg = self._make_tiny_deberta()
+        except Exception as e:  # noqa: BLE001
             pytest.skip(f"DeBERTa-v2 not available: {e}")
 
         assert any(isinstance(m, DisentangledSelfAttention) for m in model.modules())
@@ -2550,7 +2550,7 @@ class TestBlockedAttentionTransform:
         model = make_tiny_llama()
         kv_model, _ = KVCacheTransform.apply(model)
         blocking_config = AttentionBlockingConfig(mode="kv", num_kv_blocks=4, ctx_len=CTX_LEN)
-        transformed, applied = BlockingAttentionTransform.apply(kv_model, attn_blocking_config=blocking_config)
+        _transformed, applied = BlockingAttentionTransform.apply(kv_model, attn_blocking_config=blocking_config)
         assert applied, "BlockingAttentionTransform must apply to KV-transformed Llama"
 
     def test_blocked_transform_patches_forward(self):
@@ -2866,8 +2866,8 @@ class TestKVCacheExternalModuleMapperTransform:
             return self.flag
 
         class DummyExternalMapper(ExternalModuleMapperTransform):
-            _match_class_replace_method = {}
-            _match_string_replace_method = {
+            _match_class_replace_method = {}  # noqa: RUF012
+            _match_string_replace_method = {  # noqa: RUF012
                 "DummyExternal": {
                     "flag": True,
                     "label": "mapped",
@@ -2916,6 +2916,25 @@ class TestKVCacheExternalModuleMapperTransform:
         monkeypatch.setenv("FFN_W_BLOCK_SIZE", "16")
         model = _make_deepseek_external_moe()
         _, transformed = OptimizedMoETransform.apply(model, prefill_only=True)
+        calls = []
+
+        def fake_execute(self, x, routing):
+            calls.append(routing)
+            return x
+
+        model.execute_moe_flavour = MethodType(fake_execute, model)
+
+        out = model(torch.ones(1, 2, 4))
+
+        assert transformed
+        assert calls
+        assert torch.isfinite(out).all()
+
+    def test_prefill_deepseek_uses_mixin_with_moe_config_num_ffn_blocks(self):
+        model = _make_deepseek_external_moe()
+        _, transformed = OptimizedMoETransform.apply(
+            model, prefill_only=True, qaic_config={"moe_config": {"num_ffn_blocks": 2}}
+        )
         calls = []
 
         def fake_execute(self, x, routing):
