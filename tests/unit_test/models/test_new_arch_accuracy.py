@@ -1128,7 +1128,7 @@ class TestK2HorizonTransformStructure:
         mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method
         assert callable(mapping["K2HorizonModel"]["__qeff_init__"])
         assert callable(mapping["K2HorizonAttention"]["__qeff_init__"])
-        assert callable(mapping["K2HorizonRMSNorm"]["__qeff_init__"])
+        assert "__qeff_init__" not in mapping["K2HorizonRMSNorm"]  # the norm has no per-module state
 
     def test_k2_horizon_model_init_refuses_experts(self):
         from types import SimpleNamespace
@@ -1204,8 +1204,6 @@ class TestK2HorizonTransformStructure:
         norm = torch.nn.Module()
         norm.weight = torch.nn.Parameter(torch.rand(hidden_size) + 0.5)
         norm.hidden_size, norm.n_groups, norm.variance_epsilon = hidden_size, n_groups, eps
-        QEffK2HorizonRMSNorm.__qeff_init__(norm)
-        assert hasattr(norm, "_qeff_unit_weight") == (n_groups > 1)
 
         x = torch.randn(2, 5, hidden_size)
         grouped = x.reshape(2, 5, n_groups, hidden_size // n_groups)

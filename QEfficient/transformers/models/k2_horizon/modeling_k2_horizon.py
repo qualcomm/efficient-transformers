@@ -75,8 +75,10 @@ def eager_attention_forward(
 
     attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
     if attention_mask is not None:
-        masked_fill = torch.full_like(attn_weights, constants.MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype)
-        attn_weights = torch.where(attention_mask, masked_fill, attn_weights)
+        # scalar fill (as gemma3/gemma4) so the exporter emits no full-size ConstantOfShape per layer
+        attn_weights = torch.where(
+            attention_mask, torch.tensor(constants.MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype), attn_weights
+        )
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -91,20 +93,17 @@ class QEffK2HorizonRMSNorm(nn.Module):
     over each of the n_groups slices of the last dim, then the full weight is applied.
     """
 
-    def __qeff_init__(self):
-        # unit scale for the grouped op, built once instead of on every forward (same as gemma4)
-        if self.n_groups > 1 and not hasattr(self, "_qeff_unit_weight"):
-            self.register_buffer(
-                "_qeff_unit_weight", torch.ones_like(self.weight[: self.hidden_size // self.n_groups]), persistent=False
-            )
-
     def forward(self, hidden_states):
         rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
         if self.n_groups == 1:
             return rms_interface(hidden_states, self.weight, self.variance_epsilon)
         group_size = self.hidden_size // self.n_groups
         grouped = hidden_states.reshape(*hidden_states.shape[:-1], self.n_groups, group_size)
-        normed = rms_interface(grouped, self._qeff_unit_weight, self.variance_epsilon)
+        # unit scale derived from this layer's own weight: a shared ones buffer gets pooled into one
+        # constant by the exporter, which makes layer 0 export it as a subfunction output and
+        # every other layer take it as an extra input (two decoder-layer function variants)
+        unit_weight = torch.ones_like(self.weight[:group_size])
+        normed = rms_interface(grouped, unit_weight, self.variance_epsilon)
         return self.weight * normed.reshape(hidden_states.shape)
 
 

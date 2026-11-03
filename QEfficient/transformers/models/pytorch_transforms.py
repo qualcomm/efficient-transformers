@@ -1434,7 +1434,6 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
         },
         "K2HorizonRMSNorm": {
             "forward": QEffK2HorizonRMSNorm.forward,
-            "__qeff_init__": QEffK2HorizonRMSNorm.__qeff_init__,
         },
         "KimiK25ForConditionalGeneration": {
             "_qeff_merge_input_ids_with_image_features": QEffKimiK25ForConditionalGeneration._qeff_merge_input_ids_with_image_features,
