@@ -4353,7 +4353,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                         if not csa_prefill_layout and not folded_row_cache:
                             state_axes[2] = "ctx_len"
                     elif "sliding_window_kv" in state_name:
-                        if not folded_row_cache and not hca_prefill_layout:
+                        if layer_type == "sliding_attention" or (not folded_row_cache and not hca_prefill_layout):
                             state_axes[2] = "ctx_len"
                     elif state_name.startswith(("compressed_kv_cache", "indexer_kv_cache")):
                         if csa_prefill_layout:
@@ -5072,7 +5072,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         is_deepseek_v4 = getattr(self.model.config, "model_type", None) == "deepseek_v4"
         if is_deepseek_v4:
             if mxint8_kv_cache:
-                raise ValueError("DeepSeek V4 retained-state caches must remain floating-point; mxint8 is not supported.")
+                raise ValueError(
+                    "DeepSeek V4 retained-state caches must remain floating-point; mxint8 is not supported."
+                )
             _add_onnx_retained_state_custom_io(custom_io, onnx_path, dtype=kv_cache_dtype)
         elif not cache_compressed:
             kv_infix = f"_{kv_cache_prefix}" if kv_cache_prefix else ""

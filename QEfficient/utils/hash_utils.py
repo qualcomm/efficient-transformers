@@ -22,6 +22,8 @@ def json_serializable(obj):
         return asdict(obj)
     if obj.__class__.__name__ == "Dim":
         return str(obj)
+    if obj.__class__.__name__ == "_DerivedDim":
+        return str(obj)
     if obj.__class__.__name__ == "_DimHint":
         return str(obj)
     if obj.__class__.__name__ == "_DimHintType":

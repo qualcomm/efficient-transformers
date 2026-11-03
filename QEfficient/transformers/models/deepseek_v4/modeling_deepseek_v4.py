@@ -106,14 +106,12 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
         cumulative_length: int = 0,
     ) -> None:
         self._folded_row_cache = bool(getattr(config, "qeff_sliding_folded_row_cache", True))
-        logical_cache_len = int(
-            getattr(config, "qeff_sliding_cache_ctx_len", getattr(config, "max_position_embeddings", 0))
+        logical_cache_len = sliding_window_kv.shape[2]
+        self.sliding_window = (
+            config.sliding_window if _is_export_capture() else min(config.sliding_window, logical_cache_len)
         )
-        if logical_cache_len <= 0:
-            logical_cache_len = sliding_window_kv.shape[2]
-        self.sliding_window = min(config.sliding_window, logical_cache_len)
         expected = (
-            (1, sliding_window_kv.shape[1], self.sliding_window, config.head_dim)
+            (1, sliding_window_kv.shape[1], logical_cache_len, config.head_dim)
             if self._folded_row_cache
             else (
                 sliding_window_kv.shape[0],
@@ -122,7 +120,7 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
                 config.head_dim,
             )
         )
-        if sliding_window_kv.ndim != 4 or tuple(sliding_window_kv.shape) != expected:
+        if not _is_export_capture() and (sliding_window_kv.ndim != 4 or tuple(sliding_window_kv.shape) != expected):
             raise ValueError(f"sliding_window_kv must have shape {expected}.")
         if not 0 <= cumulative_length <= logical_cache_len:
             raise ValueError("cumulative_length is outside the cache capacity.")
@@ -173,43 +171,51 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
         if key_states.shape[-1] != self.sliding_window_kv.shape[-1]:
             raise ValueError("KV update head_dim does not match the allocated cache.")
         if not (_is_export_capture()):
-            expected = position_ids[:, :1] + torch.arange(
+            valid_positions = position_ids >= 0
+            first_valid_position = (
+                position_ids.masked_fill(~valid_positions, torch.iinfo(position_ids.dtype).max)
+                .min(dim=1, keepdim=True)
+                .values
+            )
+            expected = first_valid_position + torch.arange(
                 position_ids.shape[1], device=position_ids.device, dtype=position_ids.dtype
             )
-            if not torch.equal(position_ids, expected):
+            if not torch.equal(position_ids[valid_positions], expected.expand_as(position_ids)[valid_positions]):
                 raise ValueError("QEffSlidingCache requires contiguous position_ids within each batch row.")
-            expected_start = torch.full_like(position_ids[:, 0], self.cumulative_length)
-            if not torch.equal(position_ids[:, 0], expected_start):
-                raise ValueError("position_ids must begin at the cache's cumulative_length.")
-            if position_ids.numel() and (
-                position_ids.min().item() < 0 or position_ids.max().item() >= self.max_cache_len
+            expected_start = torch.full_like(first_valid_position[:, 0], self.cumulative_length)
+            rows_with_valid_positions = valid_positions.any(dim=1)
+            if not torch.equal(
+                first_valid_position[:, 0][rows_with_valid_positions], expected_start[rows_with_valid_positions]
             ):
+                raise ValueError("position_ids must begin at the cache's cumulative_length.")
+            if valid_positions.any() and position_ids[valid_positions].max().item() >= self.max_cache_len:
                 raise ValueError("position_ids exceed the allocated QEff sliding cache capacity.")
+        invalid_index = torch.iinfo(torch.int32).max
+        scatter_positions = position_ids.to(torch.int32)
+        scatter_positions = torch.where(scatter_positions < 0, invalid_index, scatter_positions)
         if self._folded_row_cache:
             self.sliding_window_kv = ctx_scatter_folded_rows(
                 self.sliding_window_kv,
-                torch.remainder(position_ids, self.sliding_window).to(torch.int32),
+                scatter_positions,
                 key_states,
             )
         else:
-            self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, position_ids, key_states)
+            self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
-        invalid_index = torch.iinfo(torch.int32).max if _is_export_capture() else 0
+        context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
+        gather_limit = position_ids.max(dim=1, keepdim=True).values.to(torch.int32).unsqueeze(1)
+        valid = valid & (context_indices <= gather_limit)
+        safe_context_indices = torch.where(valid, context_indices, torch.full_like(context_indices, invalid_index))
         if self._folded_row_cache:
-            context_indices, valid = _folded_sliding_window_context_indices(position_ids, self.sliding_window)
-            safe_indices = torch.where(
-                valid,
-                context_indices,
-                torch.full_like(context_indices, invalid_index),
-            )
-            gathered = ctx_gather_folded_rows(self.sliding_window_kv, safe_indices).squeeze(0).unsqueeze(1)
-            valid = valid.unsqueeze(1)
+            gathered = ctx_gather_folded_rows(self.sliding_window_kv, safe_context_indices.squeeze(1))
+            gathered = gathered.squeeze(0).unsqueeze(1)
+            valid = valid.squeeze(1).unsqueeze(1)
         else:
-            context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
             context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
             valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
-            gathered = ctx_gather_blocked_kv(self.sliding_window_kv, torch.where(valid, context_indices, invalid_index))
+            safe_context_indices = torch.where(valid, context_indices, torch.full_like(context_indices, invalid_index))
+            gathered = ctx_gather_blocked_kv(self.sliding_window_kv, safe_context_indices)
         gathered = torch.where(valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
         return gathered, gathered
 
@@ -1384,31 +1390,52 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         kv = self.kv_norm(self.kv_proj(hidden_states)).to(hidden_states.dtype).view(*hidden_shape).transpose(1, 2)
         kv = qeff_apply_rotary_pos_emb(kv, cos, sin)
 
-        offsets = torch.arange(self.sliding_window, device=hidden_states.device, dtype=position_ids.dtype).view(1, -1)
-        carry_positions = position_ids[:, :1] - self.sliding_window + offsets
-        carry_valid = carry_positions >= 0
-        carry_slots = torch.remainder(carry_positions.clamp(min=0), self.sliding_window).to(torch.int32)
-        carry_kv = ctx_gather_folded_rows(cache_layer.sliding_window_kv, carry_slots).squeeze(0).unsqueeze(1)
+        invalid_index = torch.iinfo(torch.int32).max
+        scatter_positions = position_ids.to(torch.int32)
+        scatter_positions = torch.where(scatter_positions < 0, invalid_index, scatter_positions)
+        sliding_window_kv = ctx_scatter_folded_rows(
+            cache_layer.sliding_window_kv,
+            scatter_positions,
+            kv,
+        )
+
+        valid_positions = position_ids >= 0
+        first_valid_position = (
+            position_ids.masked_fill(~valid_positions, torch.iinfo(position_ids.dtype).max)
+            .min(dim=1, keepdim=True)
+            .values
+        )
+        carry_offsets = torch.arange(self.sliding_window, device=hidden_states.device, dtype=position_ids.dtype).view(
+            1, -1
+        )
+        carry_positions = first_valid_position - self.sliding_window + carry_offsets
+        carry_valid = (carry_positions >= 0) & valid_positions.any(dim=1, keepdim=True)
+        carry_indices = torch.where(
+            carry_valid,
+            carry_positions.to(torch.int32),
+            torch.full_like(carry_positions, invalid_index, dtype=torch.int32),
+        )
+        carry_kv = ctx_gather_folded_rows(sliding_window_kv, carry_indices).squeeze(0).unsqueeze(1)
         carry_kv = torch.where(carry_valid.unsqueeze(1).unsqueeze(-1), carry_kv, torch.zeros_like(carry_kv))
+        kv = torch.where(valid_positions.unsqueeze(1).unsqueeze(-1), kv, torch.zeros_like(kv))
+        key_states = torch.cat((carry_kv, kv), dim=2)
 
         query_positions = position_ids.unsqueeze(-1)
-        carry_query_valid = carry_valid.unsqueeze(1) & (
-            (query_positions - carry_positions.unsqueeze(1)) < self.sliding_window
+        carry_query_valid = (
+            carry_valid.unsqueeze(1)
+            & (query_positions >= carry_positions.unsqueeze(1))
+            & (query_positions - carry_positions.unsqueeze(1) < self.sliding_window)
         )
-        token_indices = torch.arange(sequence_length, device=hidden_states.device)
-        in_chunk_valid = (token_indices.view(1, 1, -1) <= token_indices.view(1, -1, 1)) & (
-            token_indices.view(1, -1, 1) - token_indices.view(1, 1, -1) < self.sliding_window
+        in_chunk_valid = (
+            (query_positions >= 0)
+            & (position_ids.unsqueeze(1) >= 0)
+            & (position_ids.unsqueeze(1) <= query_positions)
+            & ((query_positions - position_ids.unsqueeze(1)) < self.sliding_window)
         )
-        local_valid = torch.cat((carry_query_valid, in_chunk_valid.expand(batch_size, -1, -1)), dim=-1)
-        key_states = torch.cat((carry_kv, kv), dim=2)
+        local_valid = torch.cat((carry_query_valid, in_chunk_valid), dim=-1)
         attention_output, _ = self._attention_forward(query, key_states, ~local_valid.unsqueeze(1))
         attention_output = qeff_apply_rotary_pos_emb(attention_output.transpose(1, 2), cos, -sin).transpose(1, 2)
 
-        sliding_window_kv = ctx_scatter_folded_rows(
-            cache_layer.sliding_window_kv,
-            torch.remainder(position_ids, self.sliding_window).to(torch.int32),
-            kv,
-        )
         if not _is_export_capture():
             cache_layer.sliding_window_kv = sliding_window_kv
             cache_layer.cumulative_length += sequence_length
@@ -2602,7 +2629,7 @@ class QEffDeepseekV4Cache(Cache):
                 sliding = torch.zeros(
                     1,
                     batch_size,
-                    min(config.sliding_window, ctx_len),
+                    ctx_len,
                     config.head_dim,
                     **common,
                 )
@@ -2935,7 +2962,8 @@ class QEffDeepseekV4TopKRouter(DeepseekV4TopKRouter):
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
         scores = self.score_fn(logits)
-        indices = torch.topk(scores + self.e_score_correction_bias, self.top_k, dim=-1, sorted=False).indices
+        correction_bias = self.e_score_correction_bias.to(device=scores.device, dtype=scores.dtype)
+        indices = torch.topk(scores + correction_bias, self.top_k, dim=-1, sorted=False).indices
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
         return logits, weights * self.routed_scaling_factor, indices
@@ -2948,7 +2976,8 @@ class QEffDeepseekV4HashRouter(DeepseekV4HashRouter):
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
         scores = self.score_fn(logits)
-        indices = self.tid2eid[input_ids.reshape(-1)].reshape(-1, self.top_k).long()
+        tid2eid = self.tid2eid.to(device=input_ids.device)
+        indices = tid2eid[input_ids.reshape(-1)].reshape(-1, self.top_k).long()
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
         return logits, weights * self.routed_scaling_factor, indices
@@ -3258,6 +3287,28 @@ class QEffDeepseekV4ForCausalLM(DeepseekV4ForCausalLM):
 
     def get_onnx_transforms_for_export(self) -> list[type]:
         return [DeepseekV4CompressorWeightAttributeTransform]
+
+    def restore_onnx_dynamic_cache_axes(
+        self, onnx_model: onnx.ModelProto, dynamic_axes: dict[str, dict[int, str]]
+    ) -> None:
+        """Restore declared cache symbols on graph inputs and retained-state outputs."""
+        cache_axes = {
+            input_name: axes for input_name, axes in dynamic_axes.items() if input_name.startswith("past_") and axes
+        }
+        if not cache_axes:
+            return
+
+        axis_names = {input_name: axes for input_name, axes in cache_axes.items()}
+        axis_names.update({f"{input_name}_RetainedState": axes for input_name, axes in cache_axes.items()})
+        graph_values = (*onnx_model.graph.input, *onnx_model.graph.output, *onnx_model.graph.value_info)
+        for value in graph_values:
+            if value.name not in axis_names or not value.type.HasField("tensor_type"):
+                continue
+            dimensions = value.type.tensor_type.shape.dim
+            for axis, dim_name in axis_names[value.name].items():
+                if axis < len(dimensions):
+                    dimensions[axis].ClearField("dim_value")
+                    dimensions[axis].dim_param = dim_name
 
     def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs: Any) -> list[dict]:
         del kwargs

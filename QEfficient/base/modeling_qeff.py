@@ -830,6 +830,10 @@ class QEFFBaseModel(ABC):
                     if transform.apply(model, weight_spec_path=export_result.weight_spec_path):
                         export_transforms.append(transform.__name__)
 
+            restore_dynamic_cache_axes = getattr(self.model, "restore_onnx_dynamic_cache_axes", None)
+            if dynamo and callable(restore_dynamic_cache_axes):
+                restore_dynamic_cache_axes(model, dynamic_axes)
+
             # Keep this strictly layerwise-scoped so regular non-layerwise export
             # remains backward compatible.
             if QEFFBaseModel._layerwise_active:

@@ -12,6 +12,7 @@ import warnings
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from math import lcm
 from pathlib import Path
 from typing import Any, Dict
 
@@ -145,6 +146,28 @@ def convert_dynamic_axes_to_dynamic_shapes(
     batch_min = 1 if model_type == "gpt_oss" else 2
 
     dim_registry: Dict[str, Any] = {}
+    deepseek_v4_compression_rates = getattr(model_config, "compress_rates", None) or {}
+    deepseek_v4_layer_types = getattr(model_config, "layer_types", None) or ()
+    has_compressed_ctx_axes = model_type == "deepseek_v4" and any(
+        dim_name.startswith("compressed_ctx_len_")
+        for axes_map in dynamic_axes.values()
+        for dim_name in axes_map.values()
+    )
+    deepseek_v4_compression_scale = 1
+    deepseek_v4_ctx_unit_dim = None
+    if has_compressed_ctx_axes:
+        rates = {
+            rate
+            for layer_type in deepseek_v4_layer_types
+            if (rate := deepseek_v4_compression_rates.get(layer_type)) is not None and rate > 0
+        }
+        if rates:
+            deepseek_v4_compression_scale = lcm(*rates)
+            deepseek_v4_ctx_unit_dim = Dim(
+                "deepseek_v4_ctx_unit",
+                min=1,
+                max=max(1, max_seq_len // deepseek_v4_compression_scale),
+            )
 
     def resolve_dim(dim_name: str):
         if dim_name not in dim_registry:
@@ -158,9 +181,22 @@ def convert_dynamic_axes_to_dynamic_shapes(
             elif "comp_ctx_lengths" in dim_name:
                 dim_registry[dim_name] = Dim("comp_ctx_lengths", min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS, max=max_seq_len)
             elif dim_name.startswith("compressed_ctx_len_"):
-                dim_registry[dim_name] = Dim(dim_name, min=1, max=max_seq_len)
+                layer_idx_match = re.fullmatch(r"compressed_ctx_len_(\d+)", dim_name)
+                if deepseek_v4_ctx_unit_dim is not None and layer_idx_match:
+                    layer_idx = int(layer_idx_match.group(1))
+                    if layer_idx < len(deepseek_v4_layer_types):
+                        compression_rate = deepseek_v4_compression_rates.get(deepseek_v4_layer_types[layer_idx])
+                        if compression_rate:
+                            dim_registry[dim_name] = deepseek_v4_ctx_unit_dim * (
+                                deepseek_v4_compression_scale // compression_rate
+                            )
+                if dim_name not in dim_registry:
+                    dim_registry[dim_name] = Dim(dim_name, min=1, max=max_seq_len)
             elif "ctx_len" in dim_name:
-                dim_registry[dim_name] = Dim("ctx_len", min=2, max=max_seq_len)
+                if deepseek_v4_ctx_unit_dim is not None:
+                    dim_registry[dim_name] = deepseek_v4_ctx_unit_dim * deepseek_v4_compression_scale
+                else:
+                    dim_registry[dim_name] = Dim("ctx_len", min=2, max=max_seq_len)
             elif "sliding_window" in dim_name:
                 dim_registry[dim_name] = Dim(
                     "sliding_window",
