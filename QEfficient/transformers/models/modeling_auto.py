@@ -965,7 +965,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
 
     _hf_auto_class = AutoModelForSequenceClassification
     _pytorch_transforms = [CustomOpsTransform, TextClassificationTransform]
-    _onnx_transforms = []
+    _onnx_transforms = [FP16ClipTransform]
 
     def __init__(self, model: nn.Module, **kwargs):
         """
@@ -2255,6 +2255,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             kv_cache_batch_size=kv_cache_batch_size,
             full_batch_size=full_batch_size,
             vision_batch_size=vision_batch_size,
+            enable_chunking=enable_chunking,
             **compiler_options,
         )
 

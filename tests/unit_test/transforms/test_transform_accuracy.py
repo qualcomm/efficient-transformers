@@ -35,6 +35,8 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    CLIPTextConfig,
+    CLIPTextModel,
     FalconConfig,
     FalconForCausalLM,
     Gemma2Config,
@@ -55,6 +57,7 @@ from transformers import (
 
 import QEfficient.transformers.models.pytorch_transforms as pytorch_transforms
 from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.transformers.models.clip.modeling_clip import QEffCLIPTextModel
 from QEfficient.transformers.models.pytorch_transforms import (
     CustomOpsTransform,
     ExternalOptimizedMoEMapperTransform,
@@ -190,6 +193,48 @@ def make_tiny_falcon():
         multi_query=True,
     )
     return FalconForCausalLM(cfg).eval()
+
+
+@pytest.mark.transforms
+@pytest.mark.accuracy
+def test_qeff_clip_text_model_preserves_padded_input_mask_parity():
+    torch.manual_seed(0)
+    config = CLIPTextConfig(
+        vocab_size=8,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        max_position_embeddings=8,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    hf_model = CLIPTextModel(config).eval()
+    qeff_model = copy.deepcopy(hf_model).eval()
+    qeff_model.__class__ = QEffCLIPTextModel
+
+    input_ids = torch.tensor(
+        [
+            [0, 0, 1, 1, 2, 0],
+            [0, 1, 1, 2, 0, 0],
+        ],
+        dtype=torch.long,
+    )
+    attention_mask = torch.tensor(
+        [
+            [0, 0, 1, 1, 1, 0],
+            [0, 1, 1, 1, 0, 0],
+        ],
+        dtype=torch.long,
+    )
+
+    with torch.no_grad():
+        hf_outputs = hf_model(input_ids=input_ids, attention_mask=attention_mask)
+        qeff_outputs = qeff_model(input_ids=input_ids, attention_mask=attention_mask)
+
+    torch.testing.assert_close(qeff_outputs.last_hidden_state, hf_outputs.last_hidden_state, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(qeff_outputs.pooler_output, hf_outputs.pooler_output, rtol=1e-5, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -1421,9 +1466,9 @@ class TestSplitOptimizedMoETransform:
         from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeMoE, Glm4MoeTopkRouter
         from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts, GptOssMLP
         from transformers.models.granitemoe.modeling_granitemoe import (
+            GraniteMoeExperts,
             GraniteMoeMoE,
-            GraniteMoeParallelExperts,
-            GraniteMoeTopKGating,
+            GraniteMoeTopKRouter,
         )
         from transformers.models.llama4.modeling_llama4 import Llama4Router, Llama4TextExperts, Llama4TextMoe
         from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
@@ -1462,8 +1507,8 @@ class TestSplitOptimizedMoETransform:
             GptOssMLP,
             GptOssExperts,
             GraniteMoeMoE,
-            GraniteMoeParallelExperts,
-            GraniteMoeTopKGating,
+            GraniteMoeExperts,
+            GraniteMoeTopKRouter,
             MixtralSparseMoeBlock,
         }
 
