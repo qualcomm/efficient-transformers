@@ -57,6 +57,7 @@ from transformers.cache_utils import DynamicCache
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4ForCausalLM,
+    DeepseekV4RMSNorm,
     DeepseekV4UnweightedRMSNorm,
 )
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
@@ -81,6 +82,7 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Attention,
     QEffDeepseekV4Cache,
     QEffDeepseekV4ForCausalLM,
+    QEffDeepseekV4RMSNorm,
     QEffDeepseekV4UnweightedRMSNorm,
 )
 from QEfficient.transformers.models.modeling_auto import (
@@ -132,9 +134,25 @@ def _tiny_deepseek_v4_config() -> DeepseekV4Config:
     )
 
 
-def test_deepseek_v4_unweighted_rms_norm_uses_custom_op_mapping():
-    norm = DeepseekV4UnweightedRMSNorm(eps=1e-6)
-    hidden_states = torch.randn(2, 3, 16)
+def test_deepseek_v4_weighted_rms_norm_preserves_bf16_rounding():
+    torch.manual_seed(0)
+    norm = DeepseekV4RMSNorm(64, eps=1e-6).to(torch.bfloat16)
+    norm.weight.data.copy_(torch.rand_like(norm.weight) + 0.25)
+    hidden_states = torch.randn(2, 3, 64, dtype=torch.bfloat16)
+    expected = norm(hidden_states)
+
+    transformed_norm, transformed = CustomOpsTransform.apply(norm)
+    actual = transformed_norm(hidden_states)
+
+    assert transformed
+    assert type(transformed_norm) is QEffDeepseekV4RMSNorm
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_deepseek_v4_unweighted_rms_norm_uses_custom_op_mapping(dtype):
+    norm = DeepseekV4UnweightedRMSNorm(eps=1e-6).to(dtype)
+    hidden_states = torch.randn(2, 3, 16, dtype=dtype)
     expected = norm(hidden_states)
 
     transformed_norm, transformed = CustomOpsTransform.apply(norm)
@@ -1094,6 +1112,43 @@ def test_deepseek_v4_hca_prefill_preserves_rank_four_compressed_cache():
     assert output.past_key_values[0][0].shape == (1, 1, config.sliding_window, config.head_dim)
     assert output.past_key_values[0][3].shape == (1, 1, 2, config.head_dim)
     assert torch.isfinite(output.logits).all()
+
+
+def test_deepseek_v4_hca_prefill_matches_token_decode_with_compressed_attention():
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["heavily_compressed_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.sliding_window = 4
+
+    decode_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    prefill_config = deepcopy(config)
+    prefill_config.qeff_hca_prefill_only = True
+    prefill_config.qeff_hca_prefill_q_block_size = 4
+    prefill_config.qeff_hca_prefill_comp_kv_block_size = 2
+    prefill_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(prefill_config).eval()).model.eval()
+    prefill_model.load_state_dict(decode_model.state_dict())
+
+    input_ids = torch.tensor([[3, 7, 9, 15, 5, 11, 19, 21, 2, 6, 10, 14, 18]])
+    decode_cache = decode_model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=16)
+    with torch.no_grad():
+        for position in range(input_ids.shape[1]):
+            decode_output = decode_model(
+                input_ids=input_ids[:, position : position + 1],
+                position_ids=torch.tensor([[position]]),
+                past_key_values=decode_cache,
+                use_cache=True,
+            )
+            decode_cache = decode_output.past_key_values
+
+        prefill_output = prefill_model(
+            input_ids=input_ids,
+            position_ids=torch.arange(input_ids.shape[1]).unsqueeze(0),
+            past_key_values=prefill_model.get_dummy_pkv_cache(prefill_config, batch_size=1, ctx_len=16),
+            use_cache=True,
+        )
+
+    torch.testing.assert_close(prefill_output.logits, decode_output.logits, atol=2e-4, rtol=2e-4)
 
 
 def test_deepseek_v4_npi_scopes_subfunction_nodes(tmp_path):

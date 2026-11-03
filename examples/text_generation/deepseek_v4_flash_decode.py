@@ -563,6 +563,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
     model_dtype = MODEL_DTYPES[args.model_dtype]
     qeff_model.model.to(dtype=model_dtype)
     qeff_model.model.config.torch_dtype = model_dtype
+    qeff_model.model.eval()
     pipeline_parallel = args.mdp_num_partitions > 1
     if not pipeline_parallel:
         qeff_model.transform(
