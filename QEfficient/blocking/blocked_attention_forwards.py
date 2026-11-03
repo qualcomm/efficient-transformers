@@ -826,14 +826,24 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
                 )
 
         r_chunks = []
-        for acc in accs:
+        for acc, (r_start, r_end) in zip(accs, r_ranges):
             rc = acc["rc"]
             m = acc["m_acc"].view(batch_size, num_kv_heads, split, rc * tc)
             s = acc["s_acc"].view(batch_size, num_kv_heads, split, rc * tc)
             o = acc["o_acc"].view(batch_size, num_kv_heads, split, rc * tc, head_dim)
             split_max = m.max(dim=2).values
+            sink_logits = None
+            if sinks is not None:
+                sink_logits = (
+                    sinks.reshape(1, num_kv_heads, num_kv_groups, 1)
+                    .expand(batch_size, num_kv_heads, num_kv_groups, tc)[:, :, r_start:r_end, :]
+                    .reshape(batch_size, num_kv_heads, rc * tc)
+                )
+                split_max = torch.maximum(split_max, sink_logits)
             split_weight = torch.exp(m - split_max.unsqueeze(2))
             split_sum = (split_weight * s).sum(dim=2)
+            if sink_logits is not None:
+                split_sum = split_sum + torch.exp(sink_logits - split_max)
             split_out = (split_weight.unsqueeze(-1) * s.unsqueeze(-1) * o).sum(dim=2)
             r_chunks.append((split_out / split_sum.unsqueeze(-1)).view(batch_size, num_kv_heads, rc, tc, head_dim))
 

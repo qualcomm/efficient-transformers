@@ -1626,7 +1626,6 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         **kwargs,
     ):
         seq_len = kwargs.get("prefill_seq_len", None)
-        cache_seq_len = kwargs.get("ctx_len", None)
         bs = kwargs.get("batch_size", None)
         if seq_len is None:
             seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
@@ -1635,7 +1634,6 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
             # A one-token dummy cache constrains the dynamically annotated
             # KV-cache lengths to 1 during torch.export.
             seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
-        cache_seq_len = int(cache_seq_len) if cache_seq_len is not None else seq_len
         if bs is None:
             bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         bs = int(bs)
@@ -1675,7 +1673,7 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
             "past_key_values": self.get_dummy_pkv_cache(
                 config=self.model.language_model.config,
                 batch_size=fbs if continuous_batching else bs,
-                seq_len=cache_seq_len,
+                seq_len=seq_len,
             ),
         }
         if continuous_batching:

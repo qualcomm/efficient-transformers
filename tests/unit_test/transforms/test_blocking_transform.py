@@ -309,6 +309,7 @@ def test_generic_blocked_attention_infers_prefill_only_from_mode(monkeypatch):
 
         def write_only(self, key, value, layer_idx, cache_kwargs):
             self.write_only_calls.append((key, value, layer_idx, cache_kwargs))
+            return key, value
 
     cache = Cache()
     query = torch.ones(1, 1, 1, 1)

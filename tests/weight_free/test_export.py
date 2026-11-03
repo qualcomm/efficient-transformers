@@ -20,6 +20,7 @@ CPU-only. No QAIC hardware required.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import onnx
@@ -81,6 +82,24 @@ _PREFILL_BLOCKING_EXPORT_MODEL_CASES = (
     ("qwen3_5_moe", "tiny-random/qwen3.5-moe", True),
     ("qwen3_vl_moe", "tiny-random/qwen3-vl-moe", True),
 )
+
+
+@pytest.mark.parametrize("blocking_key", ["prefill_kv", "prefill_qkv"])
+def test_offline_prefill_export_requires_kv_read_and_write_ops(monkeypatch, tmp_path, blocking_key):
+    onnx_model = onnx.ModelProto()
+    monkeypatch.setattr(onnx, "load", lambda *args, **kwargs: onnx_model)
+    qeff_model = SimpleNamespace(model=SimpleNamespace())
+    onnx_path = tmp_path / "offline_prefill.onnx"
+
+    with pytest.raises(AssertionError, match="Expected an offline blocked-KV read op"):
+        assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
+
+    onnx_model.graph.node.add().op_type = "CtxGather"
+    with pytest.raises(AssertionError, match="Expected CtxScatter"):
+        assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
+
+    onnx_model.graph.node.add().op_type = "CtxScatter"
+    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
 
 def _load_prefill_blocking_config(model_id: str, is_vlm: bool):

@@ -378,7 +378,7 @@ def assert_blocked_kv_ops_for_mode(
         "kv_headpar": {"CtxGatherBlockedKV"},
     }
     expected_ops = marker_modes.get(blocking_key, set())
-    if not expected_ops:
+    if not expected_ops and blocking_key not in offline_prefill_modes:
         return
     if continuous_batching:
         expected_ops = {"CtxGatherBlockedKVCB"}

@@ -2713,6 +2713,52 @@ def test_blocked_prefill_qkv_accepts_n_rep_chunk(n_rep_chunk):
     assert attention_weights is None
 
 
+@pytest.mark.parametrize("num_q_blocks,num_kv_blocks", [(1, 1), (2, 2)])
+@pytest.mark.parametrize("configured_split,n_rep_chunk", [(1, None), (1, 1), (2, None), (2, 1)])
+def test_blocked_prefill_qkv_includes_attention_sinks(num_q_blocks, num_kv_blocks, configured_split, n_rep_chunk):
+    from QEfficient.blocking.blocked_attention_forwards import blocked_qkv_attention_forward_prefill_headpar_offline
+
+    torch.manual_seed(0)
+    batch_size, sequence_length, head_dim = 1, 4, 2
+    num_query_heads, num_kv_groups, ctx_len = 2, 2, 8
+    module = SimpleNamespace(num_key_value_groups=num_kv_groups)
+    query = torch.randn(batch_size, num_query_heads, sequence_length, head_dim)
+    cache = _BlockedPrefillCache(batch_size, 1, ctx_len, head_dim)
+    cache.key.copy_(torch.randn_like(cache.key))
+    cache.value.copy_(torch.randn_like(cache.value))
+    sinks = torch.tensor([0.7, -0.3])
+    position_ids = torch.arange(ctx_len - sequence_length, ctx_len).unsqueeze(0)
+
+    output, _ = blocked_qkv_attention_forward_prefill_headpar_offline(
+        module=module,
+        query=query,
+        key=None,
+        value=None,
+        attention_mask=None,
+        scaling=head_dim**-0.5,
+        num_q_blocks=num_q_blocks,
+        num_kv_blocks=num_kv_blocks,
+        cache_kwargs={"position_ids": position_ids},
+        layer_idx=0,
+        past_key_value=cache,
+        ctx_len=ctx_len,
+        configured_split=configured_split,
+        n_rep_chunk=n_rep_chunk,
+        sinks=sinks,
+    )
+
+    repeated_key = cache.key.repeat_interleave(num_kv_groups, dim=1)
+    repeated_value = cache.value.repeat_interleave(num_kv_groups, dim=1)
+    scores = torch.matmul(query, repeated_key.transpose(-1, -2)) * head_dim**-0.5
+    causal_mask = torch.arange(ctx_len).view(1, 1, 1, ctx_len) > position_ids.view(batch_size, 1, sequence_length, 1)
+    scores = scores.masked_fill(causal_mask, float("-inf"))
+    sink_logits = sinks.reshape(1, num_query_heads, 1, 1).expand(batch_size, -1, sequence_length, -1)
+    probabilities = torch.softmax(torch.cat((scores, sink_logits), dim=-1), dim=-1)[..., :-1]
+    expected = torch.matmul(probabilities, repeated_value).transpose(1, 2).contiguous()
+
+    torch.testing.assert_close(output, expected)
+
+
 def test_blocked_prefill_qkv_chunks_queries_by_seq_len(monkeypatch):
     from QEfficient.blocking import blocked_attention_forwards as blocked
 
@@ -3728,12 +3774,13 @@ def test_qwen3_vl_moe_dummy_inputs_use_weight_free_batch_size(weight_free, expec
 
 
 def test_gemma4_dummy_inputs_preserve_effective_sequence_length_for_kv_cache():
-    from QEfficient.utils import constants
     from QEfficient.transformers.models.gemma4.modeling_gemma4 import QEffGemma4ForConditionalGeneration
+    from QEfficient.utils import constants
 
     model = QEffGemma4ForConditionalGeneration.__new__(QEffGemma4ForConditionalGeneration)
     text_config = SimpleNamespace(
         layer_types=["full_attention"],
+        num_attention_heads=2,
         num_key_value_heads=2,
         head_dim=4,
         hidden_size=8,
