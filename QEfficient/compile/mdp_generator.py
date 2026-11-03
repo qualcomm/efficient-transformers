@@ -242,16 +242,18 @@ def _get_compiler_folded_nodes(graph) -> Set[str]:
     # Seed with initializer names (weights/constants known at compile time).
     const_values: Set[str] = {init.name for init in graph.initializer}
 
-    # Constant op outputs are trivially compile-time constants.
+    # Constant op nodes and outputs are trivially compile-time constants.
+    foldable_nodes: Set[str] = set()
     for node in graph.node:
         if node.op_type == "Constant":
+            if node.name:
+                foldable_nodes.add(node.name)
             const_values.update(out for out in node.output if out)
 
     # Never-folded op types (compiler explicitly skips these - ProtobufLoader.cpp:68).
     _NEVER_FOLD = frozenset({"Loop", "Const", "Identity", "If", "DequantizeLinear"})
 
     # Keep marking nodes foldable until no new ones are found.
-    foldable_nodes: Set[str] = set()
     while True:
         changed = False
         for node in graph.node:

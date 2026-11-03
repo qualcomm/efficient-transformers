@@ -24,6 +24,7 @@ All tests run on CPU only, using tiny in-memory models -- no checkpoints, no Hug
 """
 
 import copy
+import io
 
 import pytest
 import torch
@@ -173,7 +174,7 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
         )
     model = qeff.lang_model.model.language_model
     model.dflash_chunk_size = chunk_size
-    assert qeff.lang_model.hash_params["dflash_cache_protocol"].endswith("fused_replay_v1")
+    assert qeff.lang_model.hash_params["dflash_cache_protocol"].endswith("fused_replay_kv_commit_v2")
     for layer in model.layers:
         if layer.layer_type == "linear_attention":
             layer.linear_attn.dflash_matrix_solve = matrix_solve
@@ -205,6 +206,7 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
         for count in [accepted + 1, 1, chunk_size, 3]:
             ids = torch.randint(10, VOCAB_SIZE, (1, chunk_size))
             pos = torch.arange(history.shape[1], history.shape[1] + chunk_size).view(1, -1)
+            before = copy.deepcopy(cache)
             output = model(
                 input_ids=torch.cat([replay_ids, ids], dim=1),
                 position_ids=torch.cat([replay_positions, pos], dim=1),
@@ -224,8 +226,27 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
             )
             torch.testing.assert_close(output.hidden_states[:, -chunk_size:], projection, rtol=2e-4, atol=2e-4)
             if torch.all(replay_positions == -1):
-                for layer in (0, 2):
-                    torch.testing.assert_close(output.past_key_values[layer], cache[layer], rtol=0, atol=0)
+                for layer in range(len(cache)):
+                    torch.testing.assert_close(output.past_key_values[layer], before[layer], rtol=0, atol=0)
+            else:
+                # An independent prefix-only call is the retained-state oracle,
+                # not a second target call in the production decoding path.
+                committed = model(
+                    input_ids=torch.cat([replay_ids, ids], dim=1),
+                    position_ids=torch.cat([replay_positions, torch.full_like(pos, -1)], dim=1),
+                    past_key_values=copy.deepcopy(before),
+                    cache_commit=torch.ones(1, dtype=torch.long),
+                    use_cache=True,
+                )
+                for layer in range(len(cache)):
+                    torch.testing.assert_close(
+                        output.past_key_values[layer], committed.past_key_values[layer], rtol=2e-4, atol=2e-4
+                    )
+            for layer in (1, 3):
+                for actual_state, old_state in zip(output.past_key_values[layer], before[layer]):
+                    cache_positions = torch.arange(old_state.shape[2])
+                    updated = (cache_positions[None, :] == replay_positions.reshape(-1, 1)).any(dim=0)
+                    torch.testing.assert_close(actual_state[:, :, ~updated], old_state[:, :, ~updated], rtol=0, atol=0)
             cache = output.past_key_values
             replay_ids, replay_positions = ids, pos.clone()
             replay_positions[:, count:] = -1
@@ -241,6 +262,73 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
             torch.testing.assert_close(
                 restarted.past_key_values[layer], prefill.past_key_values[layer], rtol=2e-4, atol=2e-4
             )
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe):
+    import onnx
+
+    from QEfficient import QEFFAutoModelForImageTextToText
+    from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
+    from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5DynamicCache
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeDynamicCache
+
+    qeff = QEFFAutoModelForImageTextToText(
+        make_tiny_qwen3_5_vlm(moe=moe), kv_offload=True, qaic_config={"target_layer_ids": [1, 3]}
+    )
+    model = qeff.lang_model.model.language_model
+    cache_cls = QEffQwen3_5MoeDynamicCache if moe else QEffQwen3_5DynamicCache
+
+    class AttentionExport(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attention = model.layers[1].self_attn
+
+        def forward(self, hidden, past_key, past_value, positions, cache_commit):
+            cache = cache_cls(model.config)
+            cache.kv_layers[1].keys, cache.kv_layers[1].values = past_key, past_value
+            cos = hidden.new_ones((1, hidden.shape[1], self.attention.head_dim))
+            output, _ = self.attention(
+                hidden_states=hidden,
+                position_embeddings=(cos, torch.zeros_like(cos)),
+                attention_mask=_create_causal_mask(positions[0], past_key.shape[2]),
+                past_key_values=cache,
+                position_ids=positions,
+                dflash_chunk_size=16,
+                dflash_commit_final=cache_commit,
+            )
+            return output, *cache[1]
+
+    inputs = (
+        torch.randn(1, 32, 32),
+        torch.randn(1, 1, 64, 16),
+        torch.randn(1, 1, 64, 16),
+        torch.arange(32).reshape(1, 1, -1),
+        torch.ones(1, dtype=torch.long),
+    )
+    buffer = io.BytesIO()
+    torch.onnx.export(
+        AttentionExport().eval(),
+        inputs,
+        buffer,
+        opset_version=17,
+        dynamo=False,
+        input_names=["hidden", "past_key", "past_value", "positions", "cache_commit"],
+        output_names=["hidden_out", "past_key_out", "past_value_out"],
+    )
+    graph = onnx.load_from_string(buffer.getvalue())
+    onnx.checker.check_model(graph)
+    producers = {output: node for node in graph.graph.node for output in node.output}
+    for output in ("past_key_out", "past_value_out"):
+        assert producers[output].op_type == "Where"
+        pending = [producers[output].input[0]]
+        seen = set()
+        while pending:
+            name = pending.pop()
+            if name not in seen and name in producers:
+                pending.extend(producers[name].input)
+            seen.add(name)
+        assert "cache_commit" in seen
 
 
 @pytest.mark.parametrize(
@@ -633,6 +721,39 @@ def test_dflash_mask_crosses_sliding_window(start, sliding_window, is_causal):
 # ---------------------------------------------------------------------------
 # Tests: target (TLM) side -- DFlashTLMTransform
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model_kind", ["qwen3", "llama", "qwen3_5", "qwen3_5_moe"])
+def test_dflash_tlm_hash_includes_target_layer_selection(model_kind, monkeypatch):
+    from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+    from QEfficient.utils.hash_utils import create_export_hash
+
+    monkeypatch.setattr("QEfficient.transformers.models.pytorch_transforms.load_checkpoint_weights", lambda *args: {})
+
+    def wrap(target_layer_ids=None):
+        qaic_config = None
+        if target_layer_ids is not None:
+            qaic_config = {"target_layer_ids": target_layer_ids, "dflash_dlm_repo": "test/dflash-draft"}
+        torch.manual_seed(7)
+        if model_kind in {"qwen3", "llama"}:
+            model = make_tiny_qwen3() if model_kind == "qwen3" else make_tiny_llama()
+            return QEFFAutoModelForCausalLM(model, qaic_config=qaic_config)
+        model = make_tiny_qwen3_5_vlm(moe=model_kind == "qwen3_5_moe")
+        return QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config=qaic_config).lang_model
+
+    assert "target_layer_ids" not in wrap().hash_params
+    hashes = []
+    for selection in [(0,), (1,), (0, 1), (1, 0)]:
+        equivalent_hashes = []
+        for target_layer_ids in [list(selection), selection]:
+            params = wrap(target_layer_ids).hash_params
+            assert params["target_layer_ids"] == selection
+            assert isinstance(params["target_layer_ids"], tuple)
+            export_hash, _ = create_export_hash(model_params=copy.deepcopy(params))
+            equivalent_hashes.append(export_hash)
+        assert equivalent_hashes[0] == equivalent_hashes[1]
+        hashes.append(equivalent_hashes[0])
+    assert len(set(hashes)) == len(hashes)
 
 
 @pytest.mark.transforms

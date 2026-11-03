@@ -194,7 +194,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             "qwen3_vl_moe",
         ]:
             config.vision_config.depth = 9
-            config.text_config.num_hidden_layers = 1
+            config.text_config.num_hidden_layers = max(1, n_layer)
             config.vision_config.deepstack_visual_indexes = [8]
         if model_name in ModelConfig.INTERNVL_MODELS or model_name in ModelConfig.MOLMO_MODELS:
             config._attn_implementation = "eager"
@@ -524,6 +524,31 @@ def test_few_image_text_to_text_onnx_mdp_compile_only(model_name, kv_offload, ma
         compile_only=True,
         mdp_num_partitions=2,
         mdp_strategy="onnx",
+        use_onnx_subfunctions=True,
+    )
+
+
+@pytest.mark.few_layers
+@pytest.mark.on_qaic
+@pytest.mark.multimodal
+@pytest.mark.parametrize("model_name", test_mm_moe_models)
+@pytest.mark.parametrize("kv_offload", [True])  # VLMs only need dual-QPC coverage; single-QPC isn't exercised.
+def test_few_image_text_to_text_intersection_mdp_compile_only(model_name, kv_offload, manual_cleanup):
+    if model_name in ModelConfig.SKIPPED_MODELS:
+        pytest.skip("Test skipped for this model due to some issues.")
+    if model_name == "tiny-random/qwen3-vl-moe":
+        pytest.skip("Qwen3-VL MoE retained vision state outputs require the dedicated disaggregated MDP coverage.")
+
+    torch.manual_seed(42)
+    check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
+        model_name,
+        num_hidden_layers=max(2, model_config_dict[model_name]["num_layers"]),
+        kv_offload=kv_offload,
+        manual_cleanup=manual_cleanup,
+        compile_only=True,
+        num_devices=2,
+        mdp_num_partitions=2,
+        mdp_strategy="intersection",
         use_onnx_subfunctions=True,
     )
 

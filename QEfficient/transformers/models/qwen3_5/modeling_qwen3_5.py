@@ -29,6 +29,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5VisionAttention,
     Qwen3_5VisionModel,
     apply_rotary_pos_emb_vision,
+    create_recurrent_attention_mask,
     repeat_kv,
     rotate_half,
 )
@@ -42,10 +43,6 @@ from QEfficient.blocking.attention_blocking import (
     recurrent_gdn_decode_forward,
 )
 from QEfficient.customop import (
-    # CtxGatherFuncCB,
-    # CtxGatherFuncCB3D,
-    # CtxScatterFuncCB,
-    # CtxScatterFuncCB3D,
     ctx_gather_cb,
     ctx_gather_cb_3d,
     ctx_scatter_cb,
@@ -574,6 +571,8 @@ class QEffQwen3_5Attention(Qwen3_5Attention):
         comp_ctx_lengths: Optional[torch.LongTensor] = None,
         batch_index: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        dflash_chunk_size: int | None = None,
+        dflash_commit_final: torch.Tensor | None = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
@@ -599,6 +598,12 @@ class QEffQwen3_5Attention(Qwen3_5Attention):
         use_blocking = (
             past_key_values is not None and blocking_config is not None and (blocking_config.mode != BlockingMode.NONE)
         )
+
+        if past_key_values is not None and dflash_commit_final is not None:
+            kv_layer = past_key_values.kv_layers[self.layer_idx]
+            previous_keys, previous_values = kv_layer.keys, kv_layer.values
+            # Eager scatter mutates its input; verification needs a temporary cache.
+            kv_layer.keys, kv_layer.values = previous_keys.clone(), previous_values.clone()
 
         if use_blocking:
             attn_output, attn_weights = generic_blocked_attention_interface(
@@ -641,6 +646,20 @@ class QEffQwen3_5Attention(Qwen3_5Attention):
                 scaling=self.scaling,
                 **kwargs,
             )
+
+        if past_key_values is not None and dflash_commit_final is not None:
+            # Prefill commits all valid positions; fused verification commits
+            # only the prior accepted prefix, never the current proposal suffix.
+            text_positions = position_ids[0]
+            commit_end = torch.where(
+                dflash_commit_final.bool(),
+                text_positions.amax(dim=-1),
+                text_positions[:, :-dflash_chunk_size].amax(dim=-1),
+            )
+            cache_positions = torch.arange(previous_keys.shape[2], device=position_ids.device)
+            commit_mask = (cache_positions[None, :] <= commit_end[:, None])[:, None, :, None]
+            kv_layer.keys = torch.where(commit_mask, kv_layer.keys, previous_keys)
+            kv_layer.values = torch.where(commit_mask, kv_layer.values, previous_values)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = attn_output * torch.sigmoid(gate)
@@ -1296,11 +1315,13 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
 class QEffQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
     def __qeff_init__(self):
-        if self.layer_type == "linear_attention":
+        layer_type = getattr(self, "layer_type", getattr(self, "block_type", None))
+        self.layer_type = layer_type
+        if layer_type == "linear_attention":
             self.__class__ = QEffQwen3_5LinearAttentionDecoderLayer
             self.linear_attn.__class__ = QEffQwen3_5GatedDeltaNet
             self.linear_attn.__qeff_init__()
-        elif self.layer_type == "full_attention":
+        elif layer_type == "full_attention":
             self.__class__ = QEffQwen3_5FullAttentionDecoderLayer
             self.self_attn.__class__ = QEffQwen3_5Attention
             self.self_attn.__qeff_init__()
@@ -1353,6 +1374,8 @@ class QEffQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
                 batch_index=batch_index,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
+                dflash_chunk_size=dflash_chunk_size,
+                dflash_commit_final=dflash_commit_final,
                 **kwargs,
             )
             if return_cache_states:
@@ -1533,7 +1556,12 @@ class QEffQwen3_5TextModel(Qwen3_5TextModel):
         causal_mask = _create_causal_mask(
             position_ids=text_position_ids, target_length=target_length, sliding_window=None
         )
-        linear_attn_mask = self._update_linear_attn_mask(attention_mask, past_key_values)
+        linear_attn_mask = create_recurrent_attention_mask(
+            config=self.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+        )
 
         hidden_states = inputs_embeds
 
@@ -1830,7 +1858,7 @@ class QEffQwen3_5VisionModel(Qwen3_5VisionModel):
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         merge_size = self.spatial_merge_size
         bs, num_frames, height, width = grid_thw.shape
-        inv_freq = self.rotary_pos_emb.inv_freq
+        inv_freq = self.rotary_pos_emb.inv_freq.to(device=grid_thw.device)
         device = inv_freq.device
 
         merged_h, merged_w = height // merge_size, width // merge_size

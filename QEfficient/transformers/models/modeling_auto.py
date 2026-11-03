@@ -965,7 +965,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
 
     _hf_auto_class = AutoModelForSequenceClassification
     _pytorch_transforms = [CustomOpsTransform, TextClassificationTransform]
-    _onnx_transforms = []
+    _onnx_transforms = [FP16ClipTransform]
 
     def __init__(self, model: nn.Module, **kwargs):
         """
@@ -1616,13 +1616,14 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             qaic_config.setdefault("pretrained_model_name_or_path", kwargs.get("pretrained_model_name_or_path"))
             self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
             self.lang_model.hash_params["dflash_dlm_repo"] = qaic_config.get("dflash_dlm_repo")
+            self.lang_model.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
 
         # ---Sampling---
         if self.dflash_tlm and qaic_config.get("speculative_model_type") == "target":
             self.lang_model.hash_params["dflash_output_logits"] = True
         if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             prefix = "qwen35_moe" if self.model.config.model_type == "qwen3_5_moe" else "qwen35"
-            self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_v1"
+            self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_kv_commit_v2"
             self.lang_model.hash_params["dflash_chunk_size"] = 16
         if self.dflash_tlm and self.model.config.model_type == "gemma4":
             self.lang_model.hash_params["dflash_cache_protocol"] = "gemma4_block_window_v1"
@@ -2301,6 +2302,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             kv_cache_batch_size=kv_cache_batch_size,
             full_batch_size=full_batch_size,
             vision_batch_size=vision_batch_size,
+            enable_chunking=enable_chunking,
             **compiler_options,
         )
 
@@ -3943,6 +3945,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 self.hash_params["dflash_tlm_repo"] = qaic_config["dflash_tlm_repo"]
         if self.dflash_tlm:
             self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            self.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
             if self.model.config.model_type == "gpt_oss":
                 self.hash_params["dflash_hidden_norm"] = "custom_rms_norm_v1"
 

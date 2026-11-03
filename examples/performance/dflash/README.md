@@ -130,7 +130,8 @@ Use `--prompt "..."` instead of `--image --image_prompt ...` for text-only input
 Qwen3.5 dense and MoE targets use concatenated replay and verification. Each decode call takes
 `2 * block_size` positions: the previous accepted prefix (padded with position IDs
 of `-1`), followed by the next draft block. It commits the prefix's convolution
-and recurrent states while verifying the new block without committing it.
+and recurrent states, as well as full-attention KV, while verifying the new block
+without retaining that block's cache writes.
 Only the new block's token predictions and projected features are used by DFlash.
 The first decode call has an entirely masked replay half. After each verification,
 the runtime queues the seed plus accepted draft tokens for the next call; the new
@@ -146,6 +147,11 @@ older TLM ONNX/QPC artifacts cannot gain fused replay without rebuilding. The la
 export hash distinguishes the new cache protocol; existing artifacts are not deleted.
 Omit both `--tlm_qpc` and `--vision_qpc` to let this example select/compile compatible artifacts.
 The existing vision and DLM QPCs do not need to change for fused replay.
+
+The full-attention retained-KV fix uses the `fused_replay_kv_commit_v2` cache
+protocol. Earlier concatenated TLM artifacts also need re-export/recompilation
+to pick up this fix. Explicit `--tlm_qpc` paths must be replaced with rebuilt
+artifacts; their input shapes alone do not identify the retained-state behavior.
 
 The previous two-call TLM QPCs are no longer supported; the example rejects them
 with a recompilation message. There is no two-call fallback or mode switch.
