@@ -2065,7 +2065,9 @@ def test_proxy_toggle_onnx_transform_policy_for_sequence_classification():
     except Exception as exc:
         _skip_on_model_fetch_error(exc, model_id)
 
-    _assert_proxy_only_onnx_transform_policy(qeff_default, enable_proxy=False)
+    _assert_proxy_only_onnx_transform_policy(
+        qeff_default, enable_proxy=False, always_on_transforms={"FP16ClipTransform"}
+    )
     _assert_proxy_only_onnx_transform_policy(qeff_proxy, enable_proxy=True)
 
 
@@ -3084,6 +3086,231 @@ def test_qwen3_5_moe_full_state_update_matches_routed_state(prefill_only, seq_le
     assert "gated_delta_kwargs" not in full_state_model.lang_model.hash_params
 
 
+def _qwen3_5_moe_linear_attention_config():
+    config = _tiny_qwen3_5_moe_config()
+    config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
+    return config
+
+
+def _resize_qwen3_5_moe_lang_inputs(inputs, *, batch_size, linear_state_batch_size):
+    seq_len = inputs["input_ids"].shape[1]
+    hidden_size = inputs["vision_embeds"].shape[-1]
+    dtype = inputs["vision_embeds"].dtype
+    inputs["input_ids"] = torch.ones((batch_size, seq_len), dtype=inputs["input_ids"].dtype)
+    inputs["vision_embeds"] = torch.zeros((batch_size, inputs["vision_embeds"].shape[1], hidden_size), dtype=dtype)
+    inputs["position_ids"] = (
+        torch.arange(seq_len, dtype=inputs["position_ids"].dtype).view(1, 1, seq_len).repeat(4, batch_size, 1)
+    )
+    inputs["batch_index"] = torch.arange(batch_size, dtype=inputs["batch_index"].dtype).view(batch_size, 1)
+
+    for layer_state in inputs["past_key_values"]:
+        for state_idx, state in enumerate(layer_state):
+            if state.shape[0] != linear_state_batch_size:
+                layer_state[state_idx] = torch.zeros((linear_state_batch_size, *state.shape[1:]), dtype=state.dtype)
+
+    return inputs
+
+
+def _assert_qwen3_5_moe_outputs_and_states_close(routed_outputs, full_state_outputs, num_hidden_layers):
+    torch.testing.assert_close(full_state_outputs[0], routed_outputs[0])
+    routed_states = routed_outputs[3]
+    full_states = full_state_outputs[3]
+    assert len(routed_states) == len(full_states) == num_hidden_layers
+    for layer_idx, ((routed_conv, routed_recurrent), (full_conv, full_recurrent)) in enumerate(
+        zip(routed_states, full_states)
+    ):
+        torch.testing.assert_close(
+            full_conv,
+            routed_conv,
+            msg=lambda msg, layer_idx=layer_idx: f"conv_state.{layer_idx}: {msg}",
+        )
+        torch.testing.assert_close(
+            full_recurrent,
+            routed_recurrent,
+            msg=lambda msg, layer_idx=layer_idx: f"recurrent_state.{layer_idx}: {msg}",
+        )
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(
+    ("seq_len", "prefill_only", "batch_size", "gdn_full_state_update"),
+    [
+        (1, False, 2, False),
+        (1, False, 4, False),
+    ],
+    ids=["decode-bsz2", "decode-bsz4"],
+)
+def test_qwen3_5_moe_linear_attention_full_state_update_matches_routed_state(
+    seq_len,
+    prefill_only,
+    batch_size,
+    gdn_full_state_update,
+):
+    config = _qwen3_5_moe_linear_attention_config()
+    torch.manual_seed(0)
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    routed_model = QEFFAutoModelForImageTextToText(
+        deepcopy(hf_model),
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    full_state_model = QEFFAutoModelForImageTextToText(
+        deepcopy(hf_model),
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    inputs = full_state_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        gdn_full_state_update=gdn_full_state_update,
+        batch_size=batch_size,
+        prefill_seq_len=seq_len,
+    )["lang"]
+    inputs = _resize_qwen3_5_moe_lang_inputs(inputs, batch_size=batch_size, linear_state_batch_size=4)
+    assert inputs["batch_index"].tolist() == [[idx] for idx in range(batch_size)]
+
+    routed_model.transform(
+        ctx_len=8,
+        seq_len=seq_len,
+        bs=batch_size,
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
+    )
+    full_state_model.transform(
+        ctx_len=8,
+        seq_len=seq_len,
+        bs=batch_size,
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
+    )
+
+    with torch.no_grad():
+        routed_outputs = routed_model.lang_model.model(**deepcopy(inputs))
+        full_state_outputs = full_state_model.lang_model.model(**deepcopy(inputs))
+
+    _assert_qwen3_5_moe_outputs_and_states_close(
+        routed_outputs, full_state_outputs, config.text_config.num_hidden_layers
+    )
+
+
+@pytest.mark.llm_model
+def test_qwen3_5_moe_tiny_partial_batch_state_update_preserves_inactive_rows():
+    config = _qwen3_5_moe_linear_attention_config()
+    torch.manual_seed(0)
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(
+        hf_model,
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        batch_size=2,
+        prefill_seq_len=1,
+    )["lang"]
+    inputs["input_ids"].fill_(1)
+    inputs["batch_index"] = torch.tensor([[1], [3]], dtype=torch.int64)
+    inputs["position_ids"].fill_(1)
+
+    for layer_idx, layer_state in enumerate(inputs["past_key_values"]):
+        for state_idx, state in enumerate(layer_state):
+            layer_state[state_idx] = torch.arange(state.numel(), dtype=state.dtype).reshape(state.shape) + layer_idx
+
+    original_states = [[state.clone() for state in layer_state] for layer_state in inputs["past_key_values"]]
+    qeff_model.transform(ctx_len=8, seq_len=1, bs=2, prefill_only=False, prefill_seq_len=1)
+
+    with torch.no_grad():
+        outputs = qeff_model.lang_model.model(**deepcopy(inputs))
+
+    inactive_rows = torch.tensor([0, 2])
+    for layer_idx, (original_layer_state, updated_layer_state) in enumerate(zip(original_states, outputs[3])):
+        for state_name, original_state, updated_state in zip(
+            ("conv_state", "recurrent_state"), original_layer_state, updated_layer_state
+        ):
+            torch.testing.assert_close(
+                updated_state.index_select(0, inactive_rows),
+                original_state.index_select(0, inactive_rows),
+                msg=lambda msg, layer_idx=layer_idx, state_name=state_name: f"{state_name}.{layer_idx}: {msg}",
+            )
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(
+    ("prefill_only", "seq_len", "batch_size"),
+    [(True, 4, 4), (False, 1, 4)],
+    ids=["prefill", "decode"],
+)
+def test_qwen3_5_moe_full_state_export_has_no_retained_state_scatter(
+    tmp_path,
+    prefill_only,
+    seq_len,
+    batch_size,
+):
+    config = _qwen3_5_moe_linear_attention_config()
+    hf_model = AutoModelForImageTextToText.from_config(config).eval()
+    qeff_model = QEFFAutoModelForImageTextToText(
+        hf_model,
+        kv_offload=True,
+        continuous_batching=True,
+    )
+    qeff_model.transform(
+        ctx_len=8,
+        seq_len=seq_len,
+        bs=batch_size,
+        qaic_config={"gdn_full_state_update": True},
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
+    )
+
+    inputs = qeff_model.model.get_dummy_inputs(
+        kv_offload=True,
+        continuous_batching=True,
+        gdn_full_state_update=True,
+        batch_size=batch_size,
+        prefill_seq_len=seq_len,
+    )["lang"]
+    inputs = _resize_qwen3_5_moe_lang_inputs(inputs, batch_size=batch_size, linear_state_batch_size=batch_size)
+
+    export_result = qeff_model.export(
+        export_dir=tmp_path / f"qwen3-5-moe-full-state-no-scatter-{seq_len}",
+        skip_vision=True,
+        prefill_only=prefill_only,
+        prefill_seq_len=seq_len,
+        use_onnx_subfunctions=True,
+        offload_pt_weights=False,
+        qaic_config={"gdn_full_state_update": True},
+    )
+    onnx_model = onnx.load(_exported_onnx_path(export_result), load_external_data=False)
+    nodes = list(onnx_model.graph.node)
+    nodes.extend(node for function_proto in onnx_model.functions for node in function_proto.node)
+    state_indexing_ops = {"CtxGatherCB", "CtxGatherCB3D", "CtxScatterCB", "CtxScatterCB3D"}
+    assert not ({node.op_type for node in nodes} & state_indexing_ops)
+
+    with torch.no_grad():
+        pytorch_outputs = qeff_model.lang_model.model(**deepcopy(inputs))
+    session = _ort_session(_exported_onnx_path(export_result))
+    session_input_names = [item.name for item in session.get_inputs()]
+    session_output_names = [item.name for item in session.get_outputs()]
+    ort_inputs = _flatten_qwen_ort_inputs(inputs, session_input_names, qeff_model.lang_model.model)
+    ort_outputs = dict(zip(session_output_names, session.run(session_output_names, ort_inputs)))
+
+    assert np.allclose(pytorch_outputs[0].detach().numpy(), ort_outputs["logits"], atol=2e-3, rtol=1e-4)
+    for layer_idx, (conv_state, recurrent_state) in enumerate(pytorch_outputs[3]):
+        assert np.allclose(
+            conv_state.detach().numpy(),
+            ort_outputs[f"conv_state.{layer_idx}_RetainedState"],
+            atol=2e-3,
+            rtol=1e-4,
+        )
+        assert np.allclose(
+            recurrent_state.detach().numpy(),
+            ort_outputs[f"recurrent_state.{layer_idx}_RetainedState"],
+            atol=2e-3,
+            rtol=1e-4,
+        )
+
+
 @pytest.mark.llm_model
 def test_qwen3_5_moe_partial_batch_state_update_preserves_inactive_rows():
     config = _tiny_qwen3_5_moe_config()
@@ -3131,7 +3358,7 @@ def test_qwen3_5_moe_partial_batch_state_update_preserves_inactive_rows():
 
 @pytest.mark.llm_model
 @pytest.mark.parametrize(("prefill_only", "seq_len"), [(True, 4), (False, 1)], ids=["prefill", "decode"])
-def test_qwen3_5_moe_full_state_export_has_no_retained_state_scatter(tmp_path, prefill_only, seq_len):
+def test_qwen3_5_moe_tiny_full_state_export_has_no_retained_state_scatter(tmp_path, prefill_only, seq_len):
     config = _tiny_qwen3_5_moe_config()
     config.text_config.layer_types = ["linear_attention"] * config.text_config.num_hidden_layers
     hf_model = AutoModelForImageTextToText.from_config(config).eval()

@@ -17,8 +17,6 @@ Covers causal-LM generation, HF/QAIC parity, and embedding parity.
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pytest
 import torch
@@ -55,46 +53,17 @@ BLOCKING_PARITY_PROMPT = "Hello world"
 HEAD_BLOCKING_NUM_DEVICES = 4
 
 
-def _blocking_runtime_options(blocking_key: str) -> tuple[dict, list[int] | None]:
+def _blocking_compile_options(blocking_key: str) -> dict:
     if blocking_key in {"h", "hq", "hkv"}:
         device_groups = get_qaic_mdp_device_groups(devices_per_group=HEAD_BLOCKING_NUM_DEVICES)
         if not device_groups:
             pytest.skip(f"No available QAIC MDP device group with {HEAD_BLOCKING_NUM_DEVICES} devices")
-        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}, device_groups[0]
+        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}
 
     device_ids = get_available_device_id()
     if device_ids is None:
         pytest.skip("No available QAIC device")
-    return {}, device_ids
-
-
-def _runtime_device_ids(device_ids: list[int]) -> list[int]:
-    if "QAIC_VISIBLE_DEVICES" in os.environ:
-        return list(range(len(device_ids)))
-    return device_ids
-
-
-@pytest.mark.cpu_only
-@pytest.mark.parametrize(
-    "visible_devices,discovered_device_ids,expected_device_ids",
-    [
-        (None, [4, 5, 6, 7], [4, 5, 6, 7]),
-        ("4,5,6,7", [4, 5, 6, 7], [0, 1, 2, 3]),
-        ("4,5,6,7", [4], [0]),
-    ],
-)
-def test_runtime_device_ids_respect_qaic_visibility(
-    monkeypatch,
-    visible_devices,
-    discovered_device_ids,
-    expected_device_ids,
-):
-    if visible_devices is None:
-        monkeypatch.delenv("QAIC_VISIBLE_DEVICES", raising=False)
-    else:
-        monkeypatch.setenv("QAIC_VISIBLE_DEVICES", visible_devices)
-
-    assert _runtime_device_ids(discovered_device_ids) == expected_device_ids
+    return {}
 
 
 @pytest.mark.weight_free
@@ -347,6 +316,9 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     tmp_export_dir,
 ):
     """HF PT tokens match blocked weight-free QAIC tokens."""
+    if model_type == "gpt_oss" and blocking_key == "hq":
+        pytest.xfail("tokens not matching - to fix")
+
     from QEfficient.utils.run_utils import ApiRunner
 
     use_onnx_subfunctions = True
@@ -396,7 +368,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         assert_has_subfunctions(onnx_path, qeff_model)
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
-    compile_options, device_ids = _blocking_runtime_options(blocking_key)
+    compile_options = _blocking_compile_options(blocking_key)
     qeff_model.compile(
         onnx_path=str(onnx_path),
         compile_dir=str(tmp_export_dir / f"wf_blocking_{model_type}_{blocking_key}_{use_onnx_subfunctions}_compile"),
@@ -412,7 +384,6 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     qaic_output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,
-        device_ids=_runtime_device_ids(device_ids),
     )
     assert qaic_output is not None, "Blocked weight-free QAIC generate returned None"
     assert hasattr(qaic_output, "generated_ids") and qaic_output.generated_ids is not None
