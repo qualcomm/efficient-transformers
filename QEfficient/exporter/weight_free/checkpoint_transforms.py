@@ -384,11 +384,18 @@ class FusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
         block as ``.mlp.`` but the checkpoint stores it as ``.block_sparse_moe.``.
         Also handles GraniteMoE which uses canonical names after key remapping.
         """
-        if onnx_key in checkpoint_index:
-            return onnx_key
-        candidate = onnx_key.replace(".mlp.", ".block_sparse_moe.")
-        if candidate in checkpoint_index:
-            return candidate
+        base_candidates = [onnx_key, onnx_key.replace(".mlp.", ".block_sparse_moe.")]
+        candidates = [
+            *base_candidates,
+            *(
+                candidate.replace(".router.weight", ".router.layer.weight")
+                for candidate in base_candidates
+                if candidate.endswith(".router.weight")
+            ),
+        ]
+        for candidate in candidates:
+            if candidate in checkpoint_index:
+                return candidate
         return None
 
     @classmethod

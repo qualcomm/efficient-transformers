@@ -1100,6 +1100,24 @@ class TestQEFFAutoModelForSpeechSeq2Seq:
         assert qeff.export() == "exported"
         assert captured["dynamo"] is True
 
+    def test_get_onnx_path_defaults_to_dynamo_for_weight_free(self, monkeypatch, tmp_path):
+        """Weight-free Whisper export stays on the Dynamo path through get_onnx_path."""
+        model, _ = make_tiny_whisper()
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model, weight_free=True)
+        captured = {}
+
+        monkeypatch.setattr(qeff, "transform", lambda **kwargs: None)
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            qeff.onnx_path = tmp_path / "model.onnx"
+            return qeff.onnx_path
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.get_onnx_path() == tmp_path / "model.onnx"
+        assert captured["dynamo"] is True
+
     @pytest.mark.slow
     def test_get_model_config_returns_dict(self):
         """get_model_config returns the model's config as a dict."""
@@ -1193,6 +1211,25 @@ class TestQEFFAutoModelForCTC:
         monkeypatch.setattr(qeff, "_export", fake_export)
 
         assert qeff.export() == "exported"
+        assert captured["dynamo"] is True
+
+    def test_compile_defaults_to_dynamo_for_weight_free(self, monkeypatch, tmp_path):
+        """Weight-free Wav2Vec2 compile keeps the export on the Dynamo path."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model, weight_free=True)
+        captured = {}
+
+        monkeypatch.setattr(qeff, "transform", lambda **kwargs: None)
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            qeff.onnx_path = tmp_path / "model.onnx"
+            qeff.onnx_path.touch()
+            return qeff.onnx_path
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        qeff.compile(compile_dir=tmp_path / "compile", artifacts=True)
         assert captured["dynamo"] is True
 
     def test_init_stores_model(self):
