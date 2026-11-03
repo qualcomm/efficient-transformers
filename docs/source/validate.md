@@ -196,7 +196,7 @@ Models marked with `**` are currently not functional on the `main` and `release/
 
 ③ Pass `disable_sliding_window` for few family models when using vLLM.
 
-④ K2 Horizon dense sizes, validated on Cloud AI 100 Ultra against the Hugging Face model at the shipped shape (128-token prompt, 4096 context) and with a planted-fact recall at 32K and 64K context. The 3.7B, 7B and 32B take MXFP6 weights with MXINT8 KV cache; the 0.9B keeps fp16 weights with MXINT8 KV cache, MXFP6 degrades its output (first-layer sensitivity). The 32B needs all 4 devices of a card and, at 64K context, `prefill_seq_len` 256 (the 1024 variant does not finish compiling). The rotary tables are capped at 65536 positions (`K2_HORIZON_MAX_POSITION_EMBEDDINGS`), so `ctx_len` is limited to 64K; the configs declare up to 512K.
+④ K2 Horizon dense sizes, validated on Cloud AI 100 Ultra against the Hugging Face model at the shipped shape (128-token prompt, 4096 context) and with a planted-fact recall at 32K and 64K context. The 3.7B, 7B and 32B take MXFP6 weights with MXINT8 KV cache; the 0.9B keeps fp16 weights with MXINT8 KV cache, MXFP6 degrades its output (the first four layers are the sensitive ones). The 32B needs all 4 devices of a card and, at 64K context, `prefill_seq_len` 256 (the 1024 variant does not finish compiling). The rotary tables are capped at 65536 positions (`K2_HORIZON_MAX_POSITION_EMBEDDINGS`), so `ctx_len` is limited to 64K; the configs declare up to 512K.
 ```
 ---
 
