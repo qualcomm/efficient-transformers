@@ -569,52 +569,184 @@ def generate_disagg_mdp_partition_config(
     }
 
 
-def _repair_scoped_alias_partitioning(onnx_path: str, mdp_json: Dict[str, Any], compiler_dump: Dict[str, Any]) -> int:
-    """Align scoped aliases with the compiler dump partition."""
+def _create_equal_compiler_pp_dump(
+    compiler_dump: Dict[str, Any],
+    num_partitions: int,
+    output_path: Path,
+    mdp_layout: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Create an equally split compiler dump in the final MDP layout."""
+    compiler_partitions = compiler_dump.get("partitions", [])
+    ordered_nodes = [
+        node_name for partition in compiler_partitions for node_name in partition.get("nodeList", []) if node_name
+    ]
+    if not ordered_nodes:
+        raise ValueError("Compiler dump contains no nodes")
+    if num_partitions <= 0:
+        raise ValueError(f"Invalid target partition count: {num_partitions}")
+    if num_partitions > len(ordered_nodes):
+        raise ValueError(f"Cannot split {len(ordered_nodes)} compiler nodes into {num_partitions} non-empty partitions")
+
+    base, remainder = divmod(len(ordered_nodes), num_partitions)
+    equal_partitions = []
+    start = 0
+    for partition_idx in range(num_partitions):
+        size = base + (1 if partition_idx < remainder else 0)
+        partition = {
+            "name": f"Partition{partition_idx}",
+            "nodeList": ordered_nodes[start : start + size],
+        }
+        if mdp_layout is not None:
+            layout_partitions = mdp_layout.get("partitions", [])
+            if partition_idx < len(layout_partitions):
+                layout_partition = layout_partitions[partition_idx]
+                if "devices" in layout_partition:
+                    partition["devices"] = layout_partition["devices"]
+        equal_partitions.append(partition)
+        start += size
+
+    equal_dump = dict(compiler_dump)
+    if mdp_layout is not None and "connections" in mdp_layout:
+        equal_dump["connections"] = mdp_layout["connections"]
+    equal_dump["partitions"] = equal_partitions
+    create_json(str(output_path), equal_dump)
+    logger.warning(
+        "Compiler dump has %d partitions; wrote equally split compiler dump to %s with %d partitions and sizes %s",
+        len(compiler_partitions),
+        output_path,
+        num_partitions,
+        [len(partition["nodeList"]) for partition in equal_partitions],
+    )
+    return equal_dump
+
+
+def _repair_scoped_alias_partitioning(
+    onnx_path: str,
+    mdp_json: Dict[str, Any],
+    compiler_dump: Dict[str, Any],
+    compiler_dump_path: Optional[str] = None,
+) -> int:
+    """Align compiler-visible top-level nodes with the compiler dump partition.
+
+    If the compiler dump was generated with a different number of partitions,
+    first create ``tmp_compiler_pp_updated.json`` by flattening its node lists in
+    compiler order and splitting them evenly across the final MDP partitions.
+    The equalized dump then goes through the same repair path as a dump whose
+    partition count already matches the final MDP.
+    """
+    compiler_partitions = compiler_dump.get("partitions", [])
+    mdp_partitions = mdp_json.get("partitions", [])
+    if len(compiler_partitions) != len(mdp_partitions):
+        output_path = (
+            Path(compiler_dump_path).with_name("tmp_compiler_pp_updated.json")
+            if compiler_dump_path
+            else Path("tmp_compiler_pp_updated.json")
+        )
+        compiler_dump = _create_equal_compiler_pp_dump(
+            compiler_dump=compiler_dump,
+            num_partitions=len(mdp_partitions),
+            output_path=output_path,
+            mdp_layout=mdp_json,
+        )
+        compiler_partitions = compiler_dump["partitions"]
+
     model = onnx.load(onnx_path, load_external_data=False)
-    names = {n.name for n in model.graph.node if n.name}
-    inlined_node_map, _ = _get_inlined_node_map(model)
-    for expanded_names in inlined_node_map.values():
-        names.update(expanded_names)
-    compiler_partition, compiler_position, compiler_nodes = {}, {}, set()
-    for partition_idx, partition in enumerate(compiler_dump.get("partitions", [])):
+    compiler_partition, compiler_position = {}, {}
+    for partition_idx, partition in enumerate(compiler_partitions):
         for node_pos, node_name in enumerate(partition.get("nodeList", [])):
             if node_name:
-                compiler_nodes.add(node_name)
                 compiler_partition.setdefault(node_name, partition_idx)
                 compiler_position.setdefault(node_name, (partition_idx, node_pos))
     current_partition = {}
-    for partition_idx, partition in enumerate(mdp_json.get("partitions", [])):
+    for partition_idx, partition in enumerate(mdp_partitions):
         for node_name in partition.get("nodeList", []):
             if node_name:
                 current_partition[node_name] = partition_idx
     node_by_name = {node.name: node for node in model.graph.node if node.name}
+    producer_by_value = {}
     consumers_by_value = {}
     for node in model.graph.node:
         if not node.name:
             continue
+        for output_name in node.output:
+            if output_name:
+                producer_by_value[output_name] = node.name
         for input_name in node.input:
             if input_name:
                 consumers_by_value.setdefault(input_name, []).append(node.name)
+
+    def retained_producers(node_name: str) -> Set[str]:
+        """Find retained producers through ONNX nodes omitted from the MDP."""
+        retained: Set[str] = set()
+        visited_values: Set[str] = set()
+
+        def visit_value(value_name: str) -> None:
+            if not value_name or value_name in visited_values:
+                return
+            visited_values.add(value_name)
+            producer_name = producer_by_value.get(value_name)
+            if not producer_name:
+                return
+            if producer_name in current_partition:
+                retained.add(producer_name)
+                return
+            producer_node = node_by_name.get(producer_name)
+            if producer_node is not None:
+                for input_name in producer_node.input:
+                    visit_value(input_name)
+
+        node = node_by_name.get(node_name)
+        if node is not None:
+            for input_name in node.input:
+                visit_value(input_name)
+        return retained
+
+    def retained_consumers(node_name: str) -> Set[str]:
+        """Find retained consumers through ONNX nodes omitted from the MDP."""
+        retained: Set[str] = set()
+        visited_values: Set[str] = set()
+
+        def visit_value(value_name: str) -> None:
+            if not value_name or value_name in visited_values:
+                return
+            visited_values.add(value_name)
+            for consumer_name in consumers_by_value.get(value_name, []):
+                if consumer_name in current_partition:
+                    retained.add(consumer_name)
+                    continue
+                consumer_node = node_by_name.get(consumer_name)
+                if consumer_node is not None:
+                    for output_name in consumer_node.output:
+                        visit_value(output_name)
+
+        node = node_by_name.get(node_name)
+        if node is not None:
+            for output_name in node.output:
+                visit_value(output_name)
+        return retained
+
     repairs = []
     for node_name, source_idx in current_partition.items():
         if not node_name.startswith("/") or node_name.startswith("/language_model/"):
             continue
-        peer_name = "/language_model" + node_name
         target_idx = compiler_partition.get(node_name)
-        if peer_name not in names or peer_name in compiler_nodes or target_idx is None or target_idx == source_idx:
+        if target_idx is None or target_idx == source_idx:
             continue
         node = node_by_name.get(node_name)
         if node is not None:
-            consumer_partitions = {
-                current_partition[consumer_name]
-                for output_name in node.output
-                for consumer_name in consumers_by_value.get(output_name, [])
-                if consumer_name in current_partition
-            }
+            producer_partitions = {current_partition[producer_name] for producer_name in retained_producers(node_name)}
+            if any(producer_idx > target_idx for producer_idx in producer_partitions):
+                logger.warning(
+                    "Skipping compiler partition repair for %r: target Partition%d would "
+                    "precede an existing producer partition",
+                    node_name,
+                    target_idx,
+                )
+                continue
+            consumer_partitions = {current_partition[consumer_name] for consumer_name in retained_consumers(node_name)}
             if any(consumer_idx < target_idx for consumer_idx in consumer_partitions):
                 logger.warning(
-                    "Skipping MDP alias repair for %r: compiler target Partition%d would follow "
+                    "Skipping compiler partition repair for %r: target Partition%d would follow "
                     "an existing consumer partition",
                     node_name,
                     target_idx,
@@ -631,7 +763,7 @@ def _repair_scoped_alias_partitioning(onnx_path: str, mdp_json: Dict[str, Any], 
                 break
         target_nodes.insert(insert_at, node_name)
         logger.warning(
-            "MDP repaired compiler-scoped alias %r: moved from Partition%d to Partition%d",
+            "MDP repaired compiler-visible node %r: moved from Partition%d to Partition%d",
             node_name,
             source_idx,
             target_idx,
@@ -757,6 +889,7 @@ def generate_disagg_mdp_intersection_config(
         onnx_path=onnx_path,
         mdp_json=mdp_json,
         compiler_dump=dump,
+        compiler_dump_path=str(dump_path),
     )
 
     logger.info(

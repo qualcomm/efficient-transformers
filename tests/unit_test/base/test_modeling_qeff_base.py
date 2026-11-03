@@ -793,8 +793,8 @@ class TestMdpCompileIntegration:
         disagg_files = list(compile_dir.glob("mdp_disagg_4d_2p.json"))
         assert len(disagg_files) == 1, "Expected exactly one mdp_disagg_4d_2p.json in compile_dir"
 
-    def test_intersection_repairs_scoped_alias_to_compiler_partition(self, tmp_path: Path):
-        """Intersection moves an unscoped alias to the compiler-assigned partition."""
+    def test_intersection_relocates_top_level_node_to_compiler_partition(self, tmp_path: Path):
+        """The current repair relocates an eligible unscoped node to its dump partition."""
         onnx_path = tmp_path / "scoped_alias.onnx"
         model = helper.make_model(
             helper.make_graph(
@@ -857,18 +857,25 @@ class TestMdpCompileIntegration:
             num_layers=2,
         )
 
-        precheck_removed = precheck_and_autofix_mdp_partition_order(
+        selected_nodes = {
+            "/language_model/layers.0/hidden",
+            "/language_model/layers.1/hidden",
+            "/Gather_5",
+        }
+        precheck_changes = precheck_and_autofix_mdp_partition_order(
             onnx_path=str(onnx_path),
             mdp_json=mdp_json,
+            protected_nodes=selected_nodes,
         )
 
-        assert precheck_removed == 0
-        assert "/Gather_5" in mdp_json["partitions"][0]["nodeList"]
+        assert precheck_changes == 0
         assert mdp_json["partitions"][0]["nodeList"] == [
             "/language_model/layers.0/hidden",
             "/Gather_5",
         ]
-        assert mdp_json["partitions"][1]["nodeList"] == ["/language_model/layers.1/hidden"]
+        assert mdp_json["partitions"][1]["nodeList"] == [
+            "/language_model/layers.1/hidden",
+        ]
 
     def test_intersection_preserves_dual_aliases_required_by_compiler(self, tmp_path: Path):
         """Intersection keeps scoped and unscoped aliases when both exist in the compiler dump."""
@@ -959,7 +966,7 @@ class TestMdpCompileIntegration:
             ({"/Producer"}, 1, [[], ["/Producer"]]),
             ({"/Consumer", "/Producer"}, 0, [["/Consumer"], ["/Producer"]]),
         ],
-        ids=("unprotected", "consumer-protected", "producer-protected", "both-protected"),
+        ids=("empty-set", "consumer-listed", "producer-listed", "both-listed"),
     )
     def test_precheck_respects_protected_nodes(
         self,
@@ -968,7 +975,7 @@ class TestMdpCompileIntegration:
         expected_removed: int,
         expected_node_lists: list[list[str]],
     ):
-        """Ordering cleanup removes only candidates that are not compiler-required."""
+        """The pre-check drops the first unprotected endpoint of an ordering violation."""
         onnx_path = tmp_path / "ordering_violation.onnx"
         model = helper.make_model(
             helper.make_graph(
@@ -1000,23 +1007,31 @@ class TestMdpCompileIntegration:
         assert [partition["nodeList"] for partition in mdp_json["partitions"]] == expected_node_lists
 
     @pytest.mark.parametrize(
-        "protected_nodes, expected_removed, expected_top_level_nodes",
+        "protected_nodes, expected_removed, expected_node_lists",
         [
-            (set(), 1, []),
-            ({"/language_model/Gather_10"}, 1, []),
-            ({"/Gather_10"}, 0, ["/Gather_10"]),
-            ({"/language_model/Gather_10", "/Gather_10"}, 0, ["/Gather_10"]),
+            (set(), 1, [["/language_model/Gather_10"], []]),
+            ({"/language_model/Gather_10"}, 1, [["/language_model/Gather_10"], []]),
+            (
+                {"/Gather_10"},
+                0,
+                [["/language_model/Gather_10"], ["/Gather_10"]],
+            ),
+            (
+                {"/language_model/Gather_10", "/Gather_10"},
+                0,
+                [["/language_model/Gather_10"], ["/Gather_10"]],
+            ),
         ],
-        ids=("unprotected", "scoped-protected", "top-level-protected", "both-protected"),
+        ids=("empty-set", "scoped-listed", "top-level-listed", "both-listed"),
     )
     def test_precheck_alias_cleanup_respects_protected_nodes(
         self,
         tmp_path: Path,
         protected_nodes: set[str],
         expected_removed: int,
-        expected_top_level_nodes: list[str],
+        expected_node_lists: list[list[str]],
     ):
-        """Alias cleanup removes only top-level aliases not required by a compiler dump."""
+        """Alias cleanup removes the unscoped node only when it is not protected."""
         onnx_path = tmp_path / "unprotected_alias.onnx"
         model = helper.make_model(
             helper.make_graph(
@@ -1047,8 +1062,7 @@ class TestMdpCompileIntegration:
         )
 
         assert removed == expected_removed
-        assert mdp_json["partitions"][0]["nodeList"] == ["/language_model/Gather_10"]
-        assert mdp_json["partitions"][1]["nodeList"] == expected_top_level_nodes
+        assert [partition["nodeList"] for partition in mdp_json["partitions"]] == expected_node_lists
 
     def test_onnx_strategy_still_removes_unprotected_top_level_alias(self, tmp_path: Path):
         """The dispatcher must keep legacy alias cleanup for the ONNX strategy."""
@@ -1156,6 +1170,7 @@ class TestMdpCompileIntegration:
         precheck_removed = precheck_and_autofix_mdp_partition_order(
             onnx_path=str(onnx_path),
             mdp_json=mdp_json,
+            protected_nodes={name for partition in mdp_json["partitions"] for name in partition["nodeList"]},
         )
 
         assert precheck_removed == 0
