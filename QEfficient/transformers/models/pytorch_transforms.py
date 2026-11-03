@@ -1550,6 +1550,9 @@ def get_decoder_layer_classes_for_export(model: nn.Module) -> set:
 
 class BlockingAttentionTransform:
     _skip_classes = {}
+    # remote-code attention classes keep their Hub type (KVCacheExternalModuleMapperTransform only swaps methods),
+    # so the ones whose QEff forward reads attn_blocking_config are matched by class name
+    _external_attention_class_names = {"K2HorizonAttention"}
 
     @classmethod
     def apply(cls, model: nn.Module, attn_blocking_config) -> tuple[nn.Module, bool]:
@@ -1566,7 +1569,11 @@ class BlockingAttentionTransform:
             if type(module) in cls._skip_classes:
                 warnings.warn(f"Blocking is not yet supported for {type(module)}.")
                 continue
-            if type(module) in supported_attention_classes or "DeepseekV3ForCausalLM" in model_architectures:
+            if (
+                type(module) in supported_attention_classes
+                or module.__class__.__name__ in cls._external_attention_class_names
+                or "DeepseekV3ForCausalLM" in model_architectures
+            ):
                 module.attn_blocking_config = attn_blocking_config
                 transformed = True
             elif module.__class__.__name__.endswith("Attention") and type(module) not in supported_attention_classes:

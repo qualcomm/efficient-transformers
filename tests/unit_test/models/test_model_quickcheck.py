@@ -67,6 +67,7 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeVisionConfig,
 )
 
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
@@ -1152,6 +1153,56 @@ def test_k2_horizon_reduced_config_cpu_runtime_parity(model_id, tmp_path):
 
     assert np.array_equal(hf_tokens, kv_tokens.squeeze(0))
     assert np.array_equal(kv_tokens, ort_tokens)
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(
+    "blocking_cfg",
+    [
+        AttentionBlockingConfig(mode=BlockingMode.KV, num_kv_blocks=2, ctx_len=16),
+        AttentionBlockingConfig(mode=BlockingMode.HQKV, num_kv_blocks=2, num_q_blocks=2, head_block_size=1, ctx_len=16),
+    ],
+    ids=["kv", "hqkv"],
+)
+def test_k2_horizon_blocked_attention_matches_eager(blocking_cfg):
+    """The blocked path (attn_blocking_config set) must reproduce the eager path's logits on the 7B reduced config."""
+    from copy import deepcopy
+
+    from QEfficient.transformers.models.pytorch_transforms import BlockingAttentionTransform
+
+    torch.manual_seed(0)
+    model_id = "IFM/K2-Horizon-7B"
+    config = _reduced_k2_horizon_config(model_id)
+    model_hf = AutoModelForCausalLM.from_config(config, trust_remote_code=True, **MODEL_KWARGS)
+    model_hf.eval()
+    eager = QEFFAutoModelForCausalLM(model_hf, pretrained_model_name_or_path=model_id).model
+    blocked = deepcopy(eager)
+    blocked, applied = BlockingAttentionTransform.apply(blocked, blocking_cfg)
+    assert applied
+    assert all(
+        getattr(m, "attn_blocking_config", None) is blocking_cfg
+        for m in blocked.modules()
+        if type(m).__name__ == "K2HorizonAttention"
+    )
+
+    ctx_len = blocking_cfg.ctx_len
+    input_ids = torch.randint(0, config.vocab_size, (1, 8))
+    position_ids = torch.arange(8).unsqueeze(0)
+    kv_shape = (1, config.num_key_value_heads, ctx_len, config.head_dim)
+    inputs = {
+        "input_ids": input_ids,
+        "position_ids": position_ids,
+        "past_key_values": tuple(
+            (torch.zeros(kv_shape), torch.zeros(kv_shape)) for _ in range(config.num_hidden_layers)
+        ),
+    }
+    with torch.no_grad():
+        eager_logits = eager(**deepcopy(inputs)).logits
+        blocked_logits = blocked(**deepcopy(inputs)).logits
+
+    assert torch.allclose(eager_logits, blocked_logits, atol=1e-4, rtol=1e-4), (
+        f"max abs diff {(eager_logits - blocked_logits).abs().max().item()} for mode {blocking_cfg.mode}"
+    )
 
 
 @pytest.mark.llm_model

@@ -23,16 +23,66 @@ from torch import nn
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
-from QEfficient.blocking.attention_blocking import past_key_value_update
+from QEfficient.blocking.attention_blocking import (
+    BlockingMode,
+    generic_blocked_attention_interface,
+    past_key_value_update,
+)
 from QEfficient.customop.rms_norm import CustomRMSNormFunc
 from QEfficient.customop.utils import select_interface
 from QEfficient.transformers.cache_utils import QEffDynamicCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
-from QEfficient.transformers.models.llama.modeling_llama import eager_attention_forward, qeff_apply_rotary_pos_emb
 from QEfficient.utils import constants
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("MODEL")
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """Expands (batch, num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)."""
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+def qeff_apply_rotary_pos_emb(q, k, cos, sin):
+    """Applies the rotary embedding from the pre-gathered cos/sin tables and casts back to the input dtype."""
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed.to(q.dtype), k_embed.to(k.dtype)
+
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    **kwargs,
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        masked_fill = torch.full_like(attn_weights, constants.MIN_MASKED_ATTENTION_VALUE, dtype=attn_weights.dtype)
+        attn_weights = torch.where(attention_mask, masked_fill, attn_weights)
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
 
 
 class QEffK2HorizonRMSNorm(nn.Module):
@@ -64,7 +114,9 @@ class QEffK2HorizonRMSNorm(nn.Module):
 class QEffK2HorizonAttention(nn.Module):
     """
     Dense K2HorizonAttention with the QEff KV cache. Rotary tables come from the
-    model (cos_cached/sin_cached) instead of being recomputed per call.
+    model (cos_cached/sin_cached) instead of being recomputed per call. With an
+    attn_blocking_config (qaic_config["blocking_mode"]) attention runs through
+    generic_blocked_attention_interface, otherwise through the eager path.
     """
 
     def __qeff_init__(self):
@@ -105,19 +157,38 @@ class QEffK2HorizonAttention(nn.Module):
 
         query_states, key_states = qeff_apply_rotary_pos_emb(query_states, key_states, cos_cached, sin_cached)
 
-        key, value, attention_mask, _ = past_key_value_update(
-            module=self,
-            key=key_states,
-            value=value_states,
-            attention_mask=attention_mask,
-            past_key_value=past_key_values,
-            comp_ctx_lengths=comp_ctx_lengths,
-            batch_index=batch_index,
-            position_ids=position_ids,
-        )
-        attn_output, attn_weights = eager_attention_forward(
-            self, query_states, key, value, attention_mask, scaling=self.scaling, **kwargs
-        )
+        blocking_config = getattr(self, "attn_blocking_config", None)
+        if blocking_config is not None and blocking_config.mode != BlockingMode.NONE:
+            past_seen_tokens = past_key_values.get_seq_length(self.layer_idx) if past_key_values is not None else 0
+            attn_output, attn_weights = generic_blocked_attention_interface(
+                module=self,
+                query=query_states,
+                key=key_states,
+                value=value_states,
+                attention_mask=attention_mask,
+                scaling=self.scaling,
+                layer_idx=self.layer_idx,
+                past_key_value=past_key_values,
+                blocking_config=blocking_config,
+                comp_ctx_lengths=comp_ctx_lengths,
+                batch_index=batch_index,
+                position_ids=position_ids,
+                past_seen_tokens=past_seen_tokens,
+            )
+        else:
+            key, value, attention_mask, _ = past_key_value_update(
+                module=self,
+                key=key_states,
+                value=value_states,
+                attention_mask=attention_mask,
+                past_key_value=past_key_values,
+                comp_ctx_lengths=comp_ctx_lengths,
+                batch_index=batch_index,
+                position_ids=position_ids,
+            )
+            attn_output, attn_weights = eager_attention_forward(
+                self, query_states, key, value, attention_mask, scaling=self.scaling, **kwargs
+            )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
