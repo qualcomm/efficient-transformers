@@ -278,7 +278,7 @@ def test_minimax_m3_decode_qeff_pytorch_vs_aic(tmp_path):
     finally:
         session.deactivate()
 
-    np.testing.assert_allclose(aic_outputs["logits"], qeff_logits, atol=1e-2, rtol=1e-2)
+    np.testing.assert_allclose(aic_outputs["logits"], qeff_logits, atol=1e-3, rtol=1e-3)
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
 def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):
