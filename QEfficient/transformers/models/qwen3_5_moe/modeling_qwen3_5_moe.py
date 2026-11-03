@@ -89,6 +89,16 @@ QWEN3_5_MOE_ROPE_CACHE_EXPORT_CAP = 76800
 QWEN3_5_MOE_DFLASH_CHUNK_SIZE = 16
 
 
+def _safe_running_max(running_max: torch.Tensor) -> torch.Tensor:
+    """Use zero as the exp reference for rows that are fully masked so far."""
+    return torch.where(running_max == float("-inf"), torch.zeros_like(running_max), running_max)
+
+
+def _safe_denominator(denominator: torch.Tensor) -> torch.Tensor:
+    """Prevent fully masked rows from producing 0/0 during Softmax normalization."""
+    return torch.where(denominator == 0, torch.ones_like(denominator), denominator)
+
+
 def _expand_mrope_position_ids(position_ids, cache_position, batch_size):
     if position_ids is None:
         return cache_position.view(1, 1, -1).expand(4, batch_size, -1)
@@ -2048,6 +2058,8 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
             sin = emb.sin()
         else:
             cos, sin = position_embeddings
+        cos = cos.to(device=q.device)
+        sin = sin.to(device=q.device)
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
         if attention_mask is None:
@@ -2117,15 +2129,18 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
 
                 block_maximum = attention_scores.max(dim=-1).values
                 updated_maximum = torch.maximum(running_max, block_maximum)
-                rescale = torch.exp(running_max - updated_maximum)
-                block_exponential = torch.exp(attention_scores - updated_maximum.unsqueeze(-1))
+                safe_maximum = _safe_running_max(updated_maximum)
+                rescale = torch.exp(running_max - safe_maximum)
+                block_exponential = torch.exp(attention_scores - safe_maximum.unsqueeze(-1))
                 running_output = running_output * rescale.unsqueeze(-1) + torch.matmul(
                     block_exponential.to(value_block.dtype), value_block
                 )
                 running_denominator = running_denominator * rescale + block_exponential.sum(dim=-1)
                 running_max = updated_maximum
 
-            output_blocks.append((running_output / running_denominator.unsqueeze(-1)).to(query_block.dtype))
+            output_blocks.append(
+                (running_output / _safe_denominator(running_denominator).unsqueeze(-1)).to(query_block.dtype)
+            )
 
         attn_output = torch.cat(output_blocks, dim=-2).transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
