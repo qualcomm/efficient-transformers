@@ -575,7 +575,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
             prefill_only=args.prefill_only,
             num_cores=args.num_cores,
         )
-    elif args.enable_residual_npi:
+    else:
         qeff_model.transform(
             ctx_len=args.ctx_len,
             seq_len=args.prefill_seq_len,
@@ -589,32 +589,30 @@ def main(defaults: dict[str, object] | None = None) -> None:
         )
 
     graph_kind = "blocked DeepSeek V4 prefill" if args.prefill_only else "one-token decode"
-    onnx_path = None
-    if not pipeline_parallel or args.enable_residual_npi:
-        print(f"Exporting the {graph_kind} graph through qeff_model.export()")
-        export_kwargs = {}
-        if pipeline_parallel:
-            export_kwargs = {
-                "enable_chunking": True,
-                "retain_full_kv": True,
-                "split_model_io": True,
-                "mdp_num_partitions": args.mdp_num_partitions,
-                "mdp_strategy": args.mdp_strategy,
-            }
-        onnx_path = Path(
-            qeff_model.export(
-                export_dir=str(export_root),
-                prefill_only=args.prefill_only,
-                prefill_seq_len=args.prefill_seq_len,
-                use_onnx_subfunctions=args.use_onnx_subfunctions,
-                dynamo=True,
-                export_batch_size=batch_size,
-                cache_ctx_len=args.ctx_len,
-                qaic_config=qaic_config,
-                **export_kwargs,
-            )
+    print(f"Exporting the {graph_kind} graph through qeff_model.export()")
+    export_kwargs = {}
+    if pipeline_parallel:
+        export_kwargs = {
+            "enable_chunking": True,
+            "retain_full_kv": True,
+            "split_model_io": True,
+            "mdp_num_partitions": args.mdp_num_partitions,
+            "mdp_strategy": args.mdp_strategy,
+        }
+    onnx_path = Path(
+        qeff_model.export(
+            export_dir=str(export_root),
+            prefill_only=args.prefill_only,
+            prefill_seq_len=args.prefill_seq_len,
+            use_onnx_subfunctions=args.use_onnx_subfunctions,
+            dynamo=True,
+            export_batch_size=batch_size,
+            cache_ctx_len=args.ctx_len,
+            qaic_config=qaic_config,
+            **export_kwargs,
         )
-        print(f"ONNX_PATH={onnx_path}")
+    )
+    print(f"ONNX_PATH={onnx_path}")
 
     npi_path = None
     if args.enable_residual_npi:

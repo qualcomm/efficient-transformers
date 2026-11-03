@@ -4326,6 +4326,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 hca_prefill_layout = layer_type == "heavily_compressed_attention" and bool(
                     getattr(self.model.config, "qeff_hca_prefill_only", False)
                 )
+                swa_prefill_layout = layer_type == "sliding_attention" and bool(
+                    getattr(self.model.config, "qeff_swa_prefill_only", False)
+                )
                 hca_dp_layout = (
                     layer_type == "heavily_compressed_attention"
                     and not hca_prefill_layout
@@ -4353,7 +4356,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                         if not csa_prefill_layout and not folded_row_cache:
                             state_axes[2] = "ctx_len"
                     elif "sliding_window_kv" in state_name:
-                        if layer_type == "sliding_attention" or (not folded_row_cache and not hca_prefill_layout):
+                        if not swa_prefill_layout and (
+                            layer_type == "sliding_attention" or (not folded_row_cache and not hca_prefill_layout)
+                        ):
                             state_axes[2] = "ctx_len"
                     elif state_name.startswith(("compressed_kv_cache", "indexer_kv_cache")):
                         if csa_prefill_layout:

@@ -783,6 +783,47 @@ def test_deepseek_v4_swa_prefill_skips_invalid_positions(monkeypatch):
     assert output.past_key_values[0][0].shape == (1, 2, 16, config.head_dim)
 
 
+def test_deepseek_v4_swa_prefill_keeps_sliding_cache_context_axis_static(monkeypatch):
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 6
+    config.layer_types = [
+        "sliding_attention",
+        "sliding_attention",
+        "compressed_sparse_attention",
+        "heavily_compressed_attention",
+        "compressed_sparse_attention",
+        "heavily_compressed_attention",
+    ]
+    config.mlp_layer_types = ["hash_moe"] * config.num_hidden_layers
+    config.compress_rates = {"compressed_sparse_attention": 4, "heavily_compressed_attention": 128}
+    config.sliding_window = 128
+    config.max_position_embeddings = 262144
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    captured = {}
+
+    def fake_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["dynamic_axes"] = dynamic_axes
+        return "unused.onnx"
+
+    monkeypatch.setattr(qeff_model, "_export", fake_export)
+    qeff_model.export(
+        prefill_only=True,
+        prefill_seq_len=1024,
+        export_batch_size=2,
+        cache_ctx_len=32,
+        dynamo=True,
+    )
+
+    assert captured["dynamic_axes"]["past_sliding_window_kv.0"] == {1: "batch_size"}
+    assert captured["dynamic_axes"]["past_sliding_window_kv.1"] == {1: "batch_size"}
+    assert all(
+        axis_name != "ctx_len"
+        for input_name, axes in captured["dynamic_axes"].items()
+        if input_name.startswith("past_sliding_window_kv.")
+        for axis_name in axes.values()
+    )
+
+
 def test_deepseek_v4_compressed_cache_dynamic_shape_uses_compressed_capacity():
     from QEfficient.utils.export_utils import convert_dynamic_axes_to_dynamic_shapes
 
