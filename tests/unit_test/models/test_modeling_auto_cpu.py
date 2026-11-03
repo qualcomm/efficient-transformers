@@ -1544,6 +1544,27 @@ class TestTLMMultiSpecSpecializations:
 
 @pytest.mark.cpu_only
 class TestArtifactsGenerationAPIs:
+    def test_single_qpc_compile_generates_requested_npi_file(self, tmp_path):
+        onnx_path = tmp_path / "model.onnx"
+        npi_path = tmp_path / "model_minimax_npi.yaml"
+        model = SimpleNamespace(
+            config=SimpleNamespace(torch_dtype=torch.float32),
+            generate_npi_file=MagicMock(return_value=str(npi_path)),
+            get_output_names=MagicMock(return_value=[]),
+            get_specializations=MagicMock(side_effect=lambda **kwargs: ([{}], kwargs)),
+        )
+        qeff = object.__new__(_QEFFAutoModelForImageTextToTextSingleQPC)
+        qeff.model = model
+        qeff.ccl_enabled = False
+        qeff.comp_ctx_lengths_prefill = None
+        qeff.comp_ctx_lengths_decode = None
+        qeff._compile = MagicMock(return_value=tmp_path / "qpc")
+
+        qeff.compile(onnx_path=str(onnx_path), node_precision_info=True)
+
+        model.generate_npi_file.assert_called_once_with(str(onnx_path))
+        assert qeff._compile.call_args.kwargs["node_precision_info"] == str(npi_path)
+
     def test_causal_lm_compile_artifacts_reaches_base_compile(self, tmp_path):
         model, _ = make_tiny_gpt2()
         qeff = QEFFAutoModelForCausalLM(model)
