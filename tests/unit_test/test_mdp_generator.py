@@ -14,8 +14,12 @@ import pytest
 from onnx import TensorProto, helper
 
 from QEfficient.compile.mdp_generator import (
+    MdpStrategy,
     _find_mdp_partition_order_violations,
+    _get_layer_num_from_inputs,
+    _layer_partition_bounds,
     _repair_scoped_alias_partitioning,
+    generate_disagg_mdp_config,
     generate_disagg_mdp_intersection_config,
     precheck_and_autofix_mdp_partition_order,
 )
@@ -53,6 +57,221 @@ def _mdp(*node_lists):
         ],
         "root_metadata": "preserve-root",
     }
+
+
+def _bounds_to_layer_counts(bounds, total_layers):
+    """Convert exclusive upper bounds to per-partition layer counts."""
+    points = [0] + bounds + [total_layers]
+    return [points[index + 1] - points[index] for index in range(len(points) - 1)]
+
+
+@pytest.mark.cpu_only
+def test_intersection_relocates_top_level_node_to_compiler_partition(tmp_path):
+    onnx_path = _save_dependency_graph(
+        tmp_path / "scoped_alias.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["hidden0"], name="/language_model/layers.0/hidden"),
+            helper.make_node("Identity", ["input"], ["scoped_hidden"], name="/language_model/Gather_5"),
+            helper.make_node("Identity", ["input"], ["hidden1"], name="/language_model/layers.1/hidden"),
+            helper.make_node("Identity", ["input"], ["output"], name="/Gather_5"),
+        ],
+    )
+    compiler_dump_path = tmp_path / "compiler_dump.json"
+    compiler_dump_path.write_text(
+        json.dumps(
+            {
+                "partitions": [
+                    {"nodeList": ["/language_model/layers.0/hidden", "/Gather_5"]},
+                    {"nodeList": ["/language_model/layers.1/hidden"]},
+                ]
+            }
+        )
+    )
+
+    mdp_json = generate_disagg_mdp_intersection_config(
+        onnx_path=str(onnx_path),
+        compiler_dump_path=str(compiler_dump_path),
+        num_devices=2,
+        num_partitions=2,
+        num_layers=2,
+    )
+    selected = {name for partition in mdp_json["partitions"] for name in partition["nodeList"]}
+    assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json, protected_nodes=selected) == 0
+    assert mdp_json["partitions"][0]["nodeList"] == ["/language_model/layers.0/hidden", "/Gather_5"]
+    assert mdp_json["partitions"][1]["nodeList"] == ["/language_model/layers.1/hidden"]
+
+
+@pytest.mark.cpu_only
+def test_intersection_preserves_scoped_and_unscoped_nodes_selected_by_compiler(tmp_path):
+    onnx_path = _save_dependency_graph(
+        tmp_path / "dual_scoped_alias.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["hidden0"], name="/language_model/layers.0/hidden"),
+            helper.make_node("Identity", ["input"], ["scoped_hidden"], name="/language_model/Gather_10"),
+            helper.make_node("Identity", ["input"], ["hidden1"], name="/language_model/layers.1/hidden"),
+            helper.make_node("Identity", ["input"], ["output"], name="/Gather_10"),
+        ],
+    )
+    compiler_dump_path = tmp_path / "compiler_dump.json"
+    compiler_dump_path.write_text(
+        json.dumps(
+            {
+                "partitions": [
+                    {"nodeList": ["/language_model/layers.0/hidden", "/language_model/Gather_10"]},
+                    {"nodeList": ["/language_model/layers.1/hidden", "/Gather_10"]},
+                ]
+            }
+        )
+    )
+
+    _, mdp_json = generate_disagg_mdp_config(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path,
+        mdp_ts_num_devices=2,
+        mdp_num_partitions=2,
+        mdp_strategy=MdpStrategy.INTERSECTION,
+        mdp_compiler_dump_path=str(compiler_dump_path),
+        num_cores=16,
+        num_layers=2,
+    )
+
+    assert mdp_json["partitions"][0]["nodeList"] == [
+        "/language_model/layers.0/hidden",
+        "/language_model/Gather_10",
+    ]
+    assert mdp_json["partitions"][1]["nodeList"] == ["/language_model/layers.1/hidden", "/Gather_10"]
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    ("protected_nodes", "expected_removed", "expected_node_lists"),
+    [
+        (set(), 1, [[], ["/Producer"]]),
+        ({"/Consumer"}, 1, [["/Consumer"], []]),
+        ({"/Producer"}, 1, [[], ["/Producer"]]),
+        ({"/Consumer", "/Producer"}, 0, [["/Consumer"], ["/Producer"]]),
+    ],
+)
+def test_precheck_respects_protected_nodes(tmp_path, protected_nodes, expected_removed, expected_node_lists):
+    onnx_path = _save_dependency_graph(
+        tmp_path / "ordering_violation.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["middle"], name="/Producer"),
+            helper.make_node("Identity", ["middle"], ["output"], name="/Consumer"),
+        ],
+    )
+    mdp_json = _mdp(["/Consumer"], ["/Producer"])
+
+    removed = precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json, protected_nodes=protected_nodes)
+
+    assert removed == expected_removed
+    assert [partition["nodeList"] for partition in mdp_json["partitions"]] == expected_node_lists
+
+
+@pytest.mark.cpu_only
+def test_onnx_strategy_retains_legacy_alias_cleanup(tmp_path):
+    onnx_path = _save_dependency_graph(
+        tmp_path / "onnx_strategy_alias.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["scoped_output"], name="/language_model/Gather_10"),
+            helper.make_node("Identity", ["input"], ["output"], name="/Gather_10"),
+        ],
+    )
+
+    _, mdp_json = generate_disagg_mdp_config(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path,
+        mdp_ts_num_devices=2,
+        mdp_num_partitions=2,
+        mdp_strategy=MdpStrategy.ONNX,
+        mdp_compiler_dump_path=None,
+        num_cores=16,
+        num_layers=2,
+    )
+
+    assert mdp_json["partitions"][0]["nodeList"] == ["/language_model/Gather_10"]
+    assert mdp_json["partitions"][1]["nodeList"] == []
+
+
+@pytest.mark.cpu_only
+def test_intersection_skips_relocation_that_would_follow_consumer(tmp_path):
+    consumer = "/language_model/Gather_11"
+    onnx_path = _save_dependency_graph(
+        tmp_path / "relocation_dependency.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["hidden0"], name="/language_model/layers.0/hidden"),
+            helper.make_node("Identity", ["input"], ["scoped_alias"], name="/language_model/Gather_9"),
+            helper.make_node("Identity", ["input"], ["producer_output"], name="/Gather_9"),
+            helper.make_node("Identity", ["producer_output"], ["consumer_output"], name=consumer),
+            helper.make_node("Identity", ["input"], ["hidden1"], name="/language_model/layers.1/hidden"),
+        ],
+        output_names=("consumer_output",),
+    )
+    compiler_dump_path = tmp_path / "compiler_dump.json"
+    compiler_dump_path.write_text(
+        json.dumps(
+            {
+                "partitions": [
+                    {"nodeList": ["/language_model/layers.0/hidden", consumer]},
+                    {"nodeList": ["/Gather_9", "/language_model/layers.1/hidden"]},
+                ]
+            }
+        )
+    )
+
+    mdp_json = generate_disagg_mdp_intersection_config(
+        onnx_path=str(onnx_path),
+        compiler_dump_path=str(compiler_dump_path),
+        num_devices=2,
+        num_partitions=2,
+        num_layers=2,
+    )
+    selected = {name for partition in mdp_json["partitions"] for name in partition["nodeList"]}
+    assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json, protected_nodes=selected) == 0
+    assert "/Gather_9" in mdp_json["partitions"][0]["nodeList"]
+
+
+@pytest.mark.cpu_only
+@pytest.mark.mdp
+class TestMdpLayerPartitionBounds:
+    """Balanced layer allocation used by the ONNX MDP strategy."""
+
+    def test_generic_decoder_callsite_uses_model_layer_input(self):
+        assert (
+            _get_layer_num_from_inputs(
+                ["embedding", "model.layers.3.input_layernorm.weight", "model.layers.3.self_attn.q_proj.weight"]
+            )
+            == 3
+        )
+
+    def test_8_layers_3_partitions_counts(self):
+        assert _bounds_to_layer_counts(_layer_partition_bounds(8, 3), 8) == [3, 3, 2]
+
+    def test_10_layers_4_partitions_counts(self):
+        assert _bounds_to_layer_counts(_layer_partition_bounds(10, 4), 10) == [2, 3, 3, 2]
+
+    @pytest.mark.parametrize(("num_layers", "num_partitions"), [(8, 3), (10, 4)])
+    def test_layer_counts_are_balanced(self, num_layers, num_partitions):
+        counts = _bounds_to_layer_counts(_layer_partition_bounds(num_layers, num_partitions), num_layers)
+        assert max(counts) - min(counts) <= 1
+
+    def test_remainder_is_distributed_to_middle_partitions_when_possible(self):
+        assert _bounds_to_layer_counts(_layer_partition_bounds(10, 4), 10) == [2, 3, 3, 2]
+
+    def test_even_layer_count_distribution(self):
+        assert _bounds_to_layer_counts(_layer_partition_bounds(12, 4), 12) == [3, 3, 3, 3]
+
+    def test_two_partition_remainder_goes_to_first_partition(self):
+        assert _bounds_to_layer_counts(_layer_partition_bounds(5, 2), 5) == [3, 2]
+
+    @pytest.mark.parametrize(("num_layers", "num_partitions"), [(8, 3), (10, 4), (12, 4), (5, 2)])
+    def test_bounds_length_is_partition_count_minus_one(self, num_layers, num_partitions):
+        assert len(_layer_partition_bounds(num_layers, num_partitions)) == num_partitions - 1
+
+    @pytest.mark.parametrize(("num_layers", "num_partitions"), [(8, 3), (10, 4), (12, 4), (5, 2), (9, 4)])
+    def test_layer_counts_preserve_total(self, num_layers, num_partitions):
+        counts = _bounds_to_layer_counts(_layer_partition_bounds(num_layers, num_partitions), num_layers)
+        assert sum(counts) == num_layers
 
 
 @pytest.mark.cpu_only
