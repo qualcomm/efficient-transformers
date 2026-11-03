@@ -960,7 +960,7 @@
       "model_name": "IFM/K2-Horizon-7B",
       "model_type": "k2_horizon",
       "is_moe": false,
-      "supports_blocking": false,
+      "supports_blocking": true,
       "num_hidden_layers": 2,
       "config_overrides": {
         "vocab_size": 250624,

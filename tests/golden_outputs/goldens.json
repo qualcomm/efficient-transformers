@@ -666,6 +666,66 @@
         "timestamp": "2026-10-20T14:07:11.865406",
         "variant_key": "cb_float16_pl1024_cl2048_gl8_216e3cc0_1f78144a8258"
       },
+      "cb_float16_pl1024_cl2048_gl8_216e3cc0_993e086a3ae5": {
+        "config_fp": "216e3cc0",
+        "continuous_batching": true,
+        "ctx_len": 2048,
+        "dtype": "torch.float16",
+        "full_batch_size": 4,
+        "gen_len": 8,
+        "generation_len": 8,
+        "prompt_len": 1024,
+        "prompts": [
+          "My name is",
+          "The capital city of France is called",
+          "My name is",
+          "The capital city of France is called"
+        ],
+        "pytorch_hf_tokens": [
+          [
+            214454,
+            32706,
+            32706,
+            32706,
+            32706,
+            239007,
+            239007,
+            245006
+          ],
+          [
+            42833,
+            185421,
+            238858,
+            147763,
+            12800,
+            198092,
+            121208,
+            194905
+          ],
+          [
+            214454,
+            32706,
+            32706,
+            32706,
+            32706,
+            239007,
+            239007,
+            245006
+          ],
+          [
+            42833,
+            185421,
+            238858,
+            147763,
+            12800,
+            198092,
+            121208,
+            194905
+          ]
+        ],
+        "timestamp": "2026-11-01T18:10:01.533546",
+        "variant_key": "cb_float16_pl1024_cl2048_gl8_216e3cc0_993e086a3ae5"
+      },
       "cb_float32_pl1024_cl2048_gl8_216e3cc0_88c21a7b4ac3": {
         "config_fp": "216e3cc0",
         "continuous_batching": true,
