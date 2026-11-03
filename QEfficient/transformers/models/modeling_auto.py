@@ -4357,15 +4357,22 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                         # even when enable_chunking=True (handle_gpt_oss_env_variable_legacy_burden
                         # is unreachable in that branch and would otherwise leave the hash stale).
                         if "NUM_FFN_BLOCKS" not in self.hash_params:
-                            env_val = os.environ.get("NUM_FFN_BLOCKS", None)
-                            if env_val is not None:
-                                logger.warning(
-                                    "NUM_FFN_BLOCKS environment variable is deprecated. "
-                                    "Pass num_ffn_blocks via qaic_config['moe_config']['num_ffn_blocks'] instead."
-                                )
-                                self.hash_params["NUM_FFN_BLOCKS"] = int(env_val)
+                            # OptimizedMoEExportConfigTransform writes the lowercase key
+                            # "num_ffn_blocks"; check that before falling back to the env var
+                            # so the two paths use a consistent value.
+                            existing = self.hash_params.get("num_ffn_blocks")
+                            if existing is not None:
+                                self.hash_params["NUM_FFN_BLOCKS"] = existing
                             else:
-                                self.hash_params["NUM_FFN_BLOCKS"] = None
+                                env_val = os.environ.get("NUM_FFN_BLOCKS", None)
+                                if env_val is not None:
+                                    logger.warning(
+                                        "NUM_FFN_BLOCKS environment variable is deprecated. "
+                                        "Pass num_ffn_blocks via qaic_config['moe_config']['num_ffn_blocks'] instead."
+                                    )
+                                    self.hash_params["NUM_FFN_BLOCKS"] = int(env_val)
+                                else:
+                                    self.hash_params["NUM_FFN_BLOCKS"] = None
 
                 elif self.model.config.model_type == "gpt_oss":
                     seq_len = self.handle_gpt_oss_env_variable_legacy_burden(prefill_seq_len)
