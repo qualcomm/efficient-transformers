@@ -1297,3 +1297,50 @@ QID 8
 
         with pytest.raises(ValueError, match="cannot be assigned to multiple workers"):
             parse_qaic_device_groups("0,1;1,2")
+
+    @pytest.mark.parametrize("spacing", ["", " ", "\t"])
+    @pytest.mark.parametrize(
+        "free,total,expected",
+        [
+            (0, 16, []),
+            (14, 16, []),
+            (15, 16, []),
+            (16, 16, [[0]]),
+            (17, 18, [[0]]),
+            (16, None, [[0]]),
+            (None, 16, [[0]]),
+            (None, 15, []),
+            (None, None, []),
+        ],
+    )
+    def test_free_nsp_count_takes_precedence_over_total(self, spacing, free, total, expected):
+        from QEfficient.utils.device_utils import get_qaic_mdp_device_groups
+
+        output = "QID 0\n    Status:Ready\n    Device Capabilities: HybridBoot+ MDP+\n    Board serial:board-a\n"
+        if free is not None:
+            output += f"    Nsp Free:{spacing}{free}\n"
+        if total is not None:
+            output += f"    Nsp Total:{spacing}{total}\n"
+        result = MagicMock(returncode=0, stdout=output, stderr="")
+
+        with patch("QEfficient.utils.device_utils.subprocess.run", return_value=result):
+            assert get_qaic_mdp_device_groups(devices_per_group=1) == expected
+
+    @pytest.mark.parametrize("num_cores", [14, 16])
+    def test_weight_free_availability_uses_test_core_count(self, monkeypatch, num_cores):
+        from tests.weight_free import conftest as weight_free_config
+
+        monkeypatch.setattr(weight_free_config, "NUM_AIC_CORES", num_cores)
+        request = MagicMock()
+        request.node.originalname = "test_weight_free_generate_fp16"
+        output = (
+            "QID 0\n    Status:Ready\n    Device Capabilities: HybridBoot+ MDP+\n"
+            "    Nsp Free:14\n    Nsp Total:14\n    Board serial:board-a\n"
+        )
+        result = MagicMock(returncode=0, stdout=output, stderr="")
+        with patch("QEfficient.utils.device_utils.subprocess.run", return_value=result):
+            if num_cores == 14:
+                weight_free_config.skip_if_no_qaic_device.__wrapped__(request)
+            else:
+                with pytest.raises(pytest.skip.Exception, match="No available QAIC device"):
+                    weight_free_config.skip_if_no_qaic_device.__wrapped__(request)

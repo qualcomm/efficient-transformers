@@ -18,6 +18,7 @@ from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel
 from QEfficient.utils.constants import Constants
 from QEfficient.utils.test_utils import ModelConfig
+from tests import NUM_AIC_CORES
 
 from ..check_model_results import dump_and_compare_results
 
@@ -91,7 +92,7 @@ def check_embed_pytorch_vs_ort_vs_ai100(
     print("Mad for onnx and PyTorch is ", mad)
     assert mad <= 10**-5, f"MAD is too high for onnx and Pytorch: {mad}"
 
-    qeff_model.compile()
+    qeff_model.compile(num_cores=NUM_AIC_CORES)
     ai100_output = qeff_model.generate(inputs=inputs)
     qeff_ai100_embeddings = (
         ai100_output["output"] if pooling else ai100_output["output"][:, : inputs["input_ids"].shape[1], :]

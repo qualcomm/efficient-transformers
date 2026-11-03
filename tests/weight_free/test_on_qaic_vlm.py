@@ -35,6 +35,7 @@ from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.utils import constants
 from QEfficient.utils.test_utils import load_vlm_model_from_config
+from tests import NUM_AIC_CORES
 
 from ._helpers import (
     WEIGHT_FREE_VLM_MODEL_PARAMS,
@@ -681,7 +682,7 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
     common_compile_kwargs = {
         "ctx_len": model_config["ctx_len"],
         "num_devices": 1,
-        "num_cores": 16,
+        "num_cores": NUM_AIC_CORES,
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }
@@ -829,7 +830,7 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
         "prefill_seq_len": model_config.get("prompt_len"),
         "ctx_len": model_config.get("ctx_len"),
         "num_devices": 1,
-        "num_cores": 16,
+        "num_cores": NUM_AIC_CORES,
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }

@@ -37,8 +37,8 @@ def get_qaic_mdp_device_groups(min_nsp: int = 16, devices_per_group: int = 4) ->
     records = re.split(r"(?=^QID \d+\s*$)", result.stdout, flags=re.MULTILINE)
     for record in records:
         qid_match = re.search(r"^QID (\d+)\s*$", record, flags=re.MULTILINE)
-        nsp_free_match = re.search(r"^\s*Nsp Free:(\d+)\s*$", record, flags=re.MULTILINE)
-        nsp_total_match = re.search(r"^\s*Nsp Total:(\d+)\s*$", record, flags=re.MULTILINE)
+        nsp_free_match = re.search(r"^\s*Nsp Free:[ \t]*(\d+)\s*$", record, flags=re.MULTILINE)
+        nsp_total_match = re.search(r"^\s*Nsp Total:[ \t]*(\d+)\s*$", record, flags=re.MULTILINE)
         board_match = re.search(r"^\s*Board serial:(.+?)\s*$", record, flags=re.MULTILINE)
         if not qid_match or not (nsp_free_match or nsp_total_match) or not board_match:
             continue

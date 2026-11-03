@@ -20,6 +20,7 @@ from QEfficient.utils.config_utils import get_first_config_value
 from QEfficient.utils.constants import ATTENTION_HEAD_CONFIG_KEYS, KV_HEAD_CONFIG_KEYS, Constants
 from QEfficient.utils.run_utils import ApiRunner
 from QEfficient.utils.test_utils import ModelConfig, load_hf_causal_lm_model
+from tests import NUM_AIC_CORES
 from tests.two_phase import model_export_compile_lock
 
 from ..check_model_results import dump_and_compare_results
@@ -115,7 +116,7 @@ def check_causal_lm_pytorch_vs_kv_vs_ort_vs_ai100(
     comp_ctx_lengths_prefill: Optional[list[int]] = None,
     comp_ctx_lengths_decode: Optional[list[int]] = None,
     kv_cache_batch_size: Optional[int] = None,
-    num_cores: int = 16,
+    num_cores: int = NUM_AIC_CORES,
     aic_hw_version: Optional[str] = "ai100",
     compile_options: Optional[dict] = None,
     tokenizer_name: Optional[str] = None,

@@ -31,6 +31,7 @@ from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
+from tests import NUM_AIC_CORES
 
 from ._helpers import (
     BATCH_SIZE,
@@ -55,12 +56,12 @@ HEAD_BLOCKING_NUM_DEVICES = 4
 
 def _blocking_compile_options(blocking_key: str) -> dict:
     if blocking_key in {"h", "hq", "hkv"}:
-        device_groups = get_qaic_mdp_device_groups(devices_per_group=HEAD_BLOCKING_NUM_DEVICES)
+        device_groups = get_qaic_mdp_device_groups(min_nsp=NUM_AIC_CORES, devices_per_group=HEAD_BLOCKING_NUM_DEVICES)
         if not device_groups:
             pytest.skip(f"No available QAIC MDP device group with {HEAD_BLOCKING_NUM_DEVICES} devices")
         return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}
 
-    device_ids = get_available_device_id()
+    device_ids = get_available_device_id(min_nsp=NUM_AIC_CORES)
     if device_ids is None:
         pytest.skip("No available QAIC device")
     return {}
@@ -105,7 +106,7 @@ def test_weight_free_embedding_hw_hf_parity(model_type, model_id, pooling, tmp_e
         compile_dir=str(tmp_export_dir / f"{model_type}_compile"),
         seq_len=32,
         batch_size=1,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
     )
     qaic_output = qeff_model.generate(inputs=inputs)
 
@@ -142,7 +143,7 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
         compile_dir=str(tmp_export_dir / "wf_gen_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -200,7 +201,7 @@ def test_weight_free_hw_hf_parity(model_type, model_id, tmp_export_dir):
         compile_dir=str(tmp_export_dir / "wf_hw_parity_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -250,7 +251,7 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
         compile_dir=str(tmp_export_dir / "legacy_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -280,7 +281,7 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
         compile_dir=str(tmp_export_dir / "wf_vs_legacy_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -374,7 +375,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         compile_dir=str(tmp_export_dir / f"wf_blocking_{model_type}_{blocking_key}_{use_onnx_subfunctions}_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=NUM_AIC_CORES,
         batch_size=BATCH_SIZE,
         qaic_config=qaic_config,
         use_onnx_subfunctions=use_onnx_subfunctions,

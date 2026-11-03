@@ -28,6 +28,7 @@ from QEfficient.utils.device_utils import (  # noqa: E402
     parse_qaic_device_groups,
 )
 from QEfficient.utils.logging_utils import QEFFLogger  # noqa: E402
+from tests import NUM_AIC_CORES  # noqa: E402
 from tests.two_phase import is_compile_warm_phase, is_two_phase_session  # noqa: E402
 
 
@@ -368,7 +369,7 @@ def pytest_configure(config):
             device_groups = (
                 parse_qaic_device_groups(explicit_device_groups)
                 if explicit_device_groups
-                else get_qaic_mdp_device_groups(devices_per_group=devices_per_worker)
+                else get_qaic_mdp_device_groups(min_nsp=NUM_AIC_CORES, devices_per_group=devices_per_worker)
             )
         except ValueError as exc:
             raise pytest.UsageError(str(exc)) from exc
