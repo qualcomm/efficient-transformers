@@ -24,7 +24,15 @@ import onnx
 import onnxruntime
 import pytest
 import torch
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForCTC, AutoModelForSpeechSeq2Seq, AutoProcessor, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForCTC,
+    AutoModelForSpeechSeq2Seq,
+    AutoProcessor,
+    AutoTokenizer,
+)
 
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
@@ -80,6 +88,7 @@ def _embedding_test_param(model_type, model_id, pooling):
     if model_type in _WEIGHT_FREE_EMBEDDING_XFAILS:
         marks.append(pytest.mark.xfail(reason="Weight-free is not enabled for this embedding model yet", strict=False))
     return pytest.param(model_type, model_id, pooling, marks=marks, id=model_type)
+
 
 WEIGHT_FREE_ASR_MODEL_IDS = {
     "wav2vec2": "facebook/wav2vec2-base-960h",

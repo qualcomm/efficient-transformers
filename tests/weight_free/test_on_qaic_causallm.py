@@ -28,27 +28,26 @@ from transformers import (
 )
 
 from QEfficient.blocking.attention_blocking import BlockingMode
-from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
-from QEfficient.utils import get_num_layers_from_config
-from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
-
 from QEfficient.exporter.weight_free import resolve_weight_spec_path
+from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
     QEFFAutoModelForCTC,
     QEFFAutoModelForSpeechSeq2Seq,
 )
+from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.constants import WAV2VEC2_MAX_SEQ_LEN
+from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
 
 from ._helpers import (
     BATCH_SIZE,
     CTX_LEN,
     PROMPT_LEN,
+    WEIGHT_FREE_ASR_MODEL_IDS,
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_BLOCKING_QAIC_CASES,
     WEIGHT_FREE_EMBEDDING_MODEL_PARAMS,
-    WEIGHT_FREE_ASR_MODEL_IDS,
     WEIGHT_FREE_QAIC_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
@@ -431,6 +430,8 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         f"Blocked weight-free HW/HF parity failed for {model_id} mode={blocking_key}: "
         f"HF={hf_tokens_for_compare.tolist()}, QAIC={qaic_tokens.tolist()}"
     )
+
+
 def _load_weight_free_asr(model_type, model_id):
     try:
         model_hf, processor = load_hf_model(model_id, model_type=model_type)
