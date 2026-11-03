@@ -725,7 +725,8 @@ class TestPreserveNestedCacheRetainedStateTransform:
         model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
         model.functions.append(fn)
 
-        assert PreserveNestedCacheRetainedStateTransform.apply(model)
+        assert not PreserveNestedCacheRetainedStateTransform.apply(model)
+        assert PreserveNestedCacheRetainedStateTransform.apply(model, model_type="minimax_m3_vl")
 
         assert list(model.functions[0].output) == ["hidden_out", "key_scatter", "value_scatter", "index_scatter"]
         call_node = model.graph.node[0]

@@ -3405,7 +3405,15 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
             **compiler_options,
         )
 
-        if hasattr(self.model, "get_npi_file") and "node_precision_info" not in compiler_options:
+        if hasattr(self.model, "generate_npi_file") and "node_precision_info" in compiler_options:
+            if isinstance(compiler_options["node_precision_info"], bool) and compiler_options["node_precision_info"]:
+                compiler_options["node_precision_info"] = self.model.generate_npi_file(onnx_path)
+            elif (
+                isinstance(compiler_options["node_precision_info"], bool)
+                and not compiler_options["node_precision_info"]
+            ):
+                compiler_options.pop("node_precision_info", None)
+        elif hasattr(self.model, "get_npi_file") and "node_precision_info" not in compiler_options:
             compiler_options["node_precision_info"] = self.model.get_npi_file(self.model.name_or_path)
 
         custom_io = {}
