@@ -943,8 +943,7 @@ def test_dflash_split_tlm_handoff_includes_hybrid_state():
         DFlashTlmHandoff(source, target)
 
 
-@pytest.mark.parametrize("prefill_length", [16, 128])
-@pytest.mark.parametrize("block_size", [8, 16])
+@pytest.mark.parametrize("prefill_length,block_size", [(16, 8), (128, 8), (32, 16), (128, 16)])
 def test_dflash_split_tlm_qwen_moe_compile(monkeypatch, prefill_length, block_size):
     from examples.performance.dflash import utils
     from QEfficient.transformers.models import modeling_auto
@@ -981,7 +980,9 @@ def test_dflash_split_tlm_qwen_moe_compile(monkeypatch, prefill_length, block_si
     assert lang_qpcs == {"prefill": "test.qpc", "decode": "test.qpc"}
     assert vision_qpc == "vision.qpc"
     assert compile_mock.call_count == 2
-    for call, (length, num_logits) in zip(compile_mock.call_args_list, [(prefill_length, 1), (block_size, block_size)]):
+    for call, (length, num_logits) in zip(
+        compile_mock.call_args_list, [(prefill_length, 1), (2 * block_size, block_size)]
+    ):
         specs = call.kwargs["specializations"]
         assert len(specs) == 1
         assert specs[0]["num_logits_to_keep"] == num_logits
