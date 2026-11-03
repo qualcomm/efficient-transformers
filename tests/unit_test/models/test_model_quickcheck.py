@@ -1157,15 +1157,30 @@ def test_k2_horizon_reduced_config_cpu_runtime_parity(model_id, tmp_path):
 
 @pytest.mark.llm_model
 @pytest.mark.parametrize(
-    "blocking_cfg",
+    "blocking_cfg, extra_inputs",
     [
-        AttentionBlockingConfig(mode=BlockingMode.KV, num_kv_blocks=2, ctx_len=16),
-        AttentionBlockingConfig(mode=BlockingMode.HQKV, num_kv_blocks=2, num_q_blocks=2, head_block_size=1, ctx_len=16),
+        (AttentionBlockingConfig(mode=BlockingMode.KV, num_kv_blocks=2, ctx_len=16), {}),
+        (
+            AttentionBlockingConfig(
+                mode=BlockingMode.HQKV, num_kv_blocks=2, num_q_blocks=2, head_block_size=1, ctx_len=16
+            ),
+            {},
+        ),
+        (
+            AttentionBlockingConfig(
+                mode=BlockingMode.HQKV, num_kv_blocks=2, num_q_blocks=2, head_block_size=1, ctx_len=16
+            ),
+            {"comp_ctx_lengths": torch.arange(8), "batch_index": torch.tensor([[0]])},
+        ),
     ],
-    ids=["kv", "hqkv"],
+    ids=["kv", "hqkv", "hqkv_ccl_cb"],
 )
-def test_k2_horizon_blocked_attention_matches_eager(blocking_cfg):
-    """The blocked path (attn_blocking_config set) must reproduce the eager path's logits on the 7B reduced config."""
+def test_k2_horizon_blocked_attention_matches_eager(blocking_cfg, extra_inputs):
+    """The blocked path (attn_blocking_config set) must reproduce the eager path's logits on the 7B reduced config.
+
+    The third case also passes comp_ctx_lengths and batch_index so the CCL mask slice and the CB
+    cache kwargs go through past_key_value_update on both paths (CPU-only check of that plumbing).
+    """
     from copy import deepcopy
 
     from QEfficient.transformers.models.pytorch_transforms import BlockingAttentionTransform
@@ -1195,6 +1210,7 @@ def test_k2_horizon_blocked_attention_matches_eager(blocking_cfg):
         "past_key_values": tuple(
             (torch.zeros(kv_shape), torch.zeros(kv_shape)) for _ in range(config.num_hidden_layers)
         ),
+        **extra_inputs,
     }
     with torch.no_grad():
         eager_logits = eager(**deepcopy(inputs)).logits

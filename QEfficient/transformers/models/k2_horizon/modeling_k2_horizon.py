@@ -104,10 +104,7 @@ class QEffK2HorizonRMSNorm(nn.Module):
             return rms_interface(hidden_states, self.weight, self.variance_epsilon)
         group_size = self.hidden_size // self.n_groups
         grouped = hidden_states.reshape(*hidden_states.shape[:-1], self.n_groups, group_size)
-        unit_weight = getattr(self, "_qeff_unit_weight", None)
-        if unit_weight is None:
-            unit_weight = self.weight.new_ones(group_size)
-        normed = rms_interface(grouped, unit_weight, self.variance_epsilon)
+        normed = rms_interface(grouped, self._qeff_unit_weight, self.variance_epsilon)
         return self.weight * normed.reshape(hidden_states.shape)
 
 
