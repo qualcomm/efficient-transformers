@@ -13,7 +13,7 @@ import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import onnx
@@ -759,7 +759,9 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                 final_aliases = [
                     alias
                     for alias in aliases
-                    if not any(other is not alias and depends_on_data(other.input[0], alias.output[0]) for other in aliases)
+                    if not any(
+                        other is not alias and depends_on_data(other.input[0], alias.output[0]) for other in aliases
+                    )
                 ]
                 if len(final_aliases) == 1:
                     return final_aliases[0].output[0]
@@ -1016,9 +1018,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                         f"Nested function '{fn.name}' has no input at position {input_index} for "
                         f"index_key cache input '{cache_input}'."
                     )
-                scatter_output = cls._resolve_retained_state_output(
-                    fn, fn.input[input_index], allow_unchanged=True
-                )
+                scatter_output = cls._resolve_retained_state_output(fn, fn.input[input_index], allow_unchanged=True)
                 if scatter_output not in fn.output:
                     fn.output.append(scatter_output)
                     changed = True
