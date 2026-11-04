@@ -225,12 +225,157 @@ class QEffQwen4ExpTextSparseMoeBlock(QEffMoEBlockMixin, Qwen4ExpTextSparseMoeBlo
 
 
 class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
-    """GDN decode with separate input/output retained tensors."""
+    """GDN with a sequence prefill path and the existing one-token decode path."""
+
+    def __qeff_init__(self):
+        self.gdn_chunk_size = 64
+        device = self.in_proj_qkv.weight.device
+        chunk = self.gdn_chunk_size
+        self.register_buffer(
+            "_gdn_mask_causal",
+            torch.triu(torch.ones(chunk, chunk, dtype=torch.bool, device=device)),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_gdn_mask_strict",
+            torch.triu(torch.ones(chunk, chunk, dtype=torch.bool, device=device), diagonal=1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_gdn_ones_lower",
+            torch.tril(torch.ones(chunk, chunk, dtype=torch.float32, device=device)),
+            persistent=False,
+        )
+        self.register_buffer("_gdn_eye", torch.eye(chunk, dtype=torch.float32, device=device), persistent=False)
+
+    def _solve_gdn_chunk(self, attention):
+        """Invert the unit-lower-triangular chunk system by forward substitution."""
+        chunk_size = attention.shape[-1]
+        solved_rows = [attention[..., 0, :]]
+        for row_idx in range(1, chunk_size):
+            row = attention[..., row_idx, :row_idx]
+            solved = row + (row.unsqueeze(-1) * torch.stack(solved_rows, dim=-2)[..., :row_idx]).sum(dim=-2)
+            solved_rows.append(torch.cat((solved, attention[..., row_idx, row_idx:]), dim=-1))
+        return torch.stack(solved_rows, dim=-2) + self._gdn_eye.to(dtype=attention.dtype)
+
+    def _chunk_gated_delta_rule(self, query, key, value, decay, beta, initial_state, valid_mask=None):
+        """Run the benchmark's 64-token chunked delta rule and return its final state."""
+        output_dtype = query.dtype
+        query, key = (
+            query * torch.rsqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6),
+            key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6),
+        )
+        query, key, value = (tensor.transpose(1, 2).contiguous().float() for tensor in (query, key, value))
+        beta, decay = beta.transpose(1, 2).contiguous().float(), decay.transpose(1, 2).contiguous().float()
+
+        if valid_mask is not None:
+            token_mask = valid_mask.unsqueeze(1)
+            decay = torch.where(token_mask, decay, torch.zeros_like(decay))
+            query = torch.where(token_mask.unsqueeze(-1), query, torch.zeros_like(query))
+            key = torch.where(token_mask.unsqueeze(-1), key, torch.zeros_like(key))
+            value = torch.where(token_mask.unsqueeze(-1), value, torch.zeros_like(value))
+
+        sequence_len = query.shape[-2]
+        chunk_size = self.gdn_chunk_size
+        padding = (chunk_size - sequence_len % chunk_size) % chunk_size
+        query, key, value = (
+            F.pad(tensor, (0, 0, 0, padding), mode="constant", value=0.0) for tensor in (query, key, value)
+        )
+        beta, decay = (F.pad(tensor, (0, padding), mode="constant", value=0.0) for tensor in (beta, decay))
+        total_sequence_len = sequence_len + padding
+        query = query * (1.0 / math.sqrt(query.shape[-1]))
+
+        beta_value = value * beta.unsqueeze(-1)
+        beta_key = key * beta.unsqueeze(-1)
+        query, key, value, beta_key, beta_value = (
+            tensor.reshape(tensor.shape[0], tensor.shape[1], -1, chunk_size, tensor.shape[-1])
+            for tensor in (query, key, value, beta_key, beta_value)
+        )
+        decay = decay.reshape(decay.shape[0], decay.shape[1], -1, chunk_size)
+        cumulative_decay = decay @ self._gdn_ones_lower.T
+        decay_difference = (cumulative_decay.unsqueeze(-1) - cumulative_decay.unsqueeze(-2)) * (
+            ~self._gdn_mask_strict
+        ).to(cumulative_decay.dtype)
+        decay_mask = decay_difference.exp() * (~self._gdn_mask_strict).to(cumulative_decay.dtype)
+
+        chunk_system = -((beta_key @ key.transpose(-1, -2)) * decay_mask).masked_fill(self._gdn_mask_causal, 0)
+        chunk_inverse = self._solve_gdn_chunk(chunk_system)
+        updated_values = chunk_inverse @ beta_value
+        decayed_keys = chunk_inverse @ (beta_key * cumulative_decay.exp().unsqueeze(-1))
+
+        recurrent_state = initial_state.float()
+        chunk_decay = cumulative_decay[..., -1].exp()[..., None, None]
+        output_chunks = []
+        for chunk_idx in range(total_sequence_len // chunk_size):
+            query_chunk = query[:, :, chunk_idx]
+            key_chunk = key[:, :, chunk_idx]
+            value_chunk = updated_values[:, :, chunk_idx]
+            intra_attention = (query_chunk @ key_chunk.transpose(-1, -2) * decay_mask[:, :, chunk_idx]).masked_fill(
+                self._gdn_mask_strict, 0
+            )
+            corrected_values = value_chunk - decayed_keys[:, :, chunk_idx] @ recurrent_state
+            previous_output = (query_chunk * cumulative_decay[:, :, chunk_idx].exp().unsqueeze(-1)) @ recurrent_state
+            output_chunks.append(previous_output + intra_attention @ corrected_values)
+            recurrent_state = (
+                recurrent_state * chunk_decay[:, :, chunk_idx]
+                + (
+                    key_chunk
+                    * (cumulative_decay[:, :, chunk_idx, -1, None] - cumulative_decay[:, :, chunk_idx]).exp()[..., None]
+                ).transpose(-1, -2)
+                @ corrected_values
+            )
+
+        output = torch.stack(output_chunks, dim=2).reshape(query.shape[0], query.shape[1], -1, value.shape[-1])
+        output = output[:, :, :sequence_len].transpose(1, 2).contiguous().to(output_dtype)
+        return output, recurrent_state
+
+    def _qeff_prefill(self, hidden_states, cache_params, position_embeddings=None):
+        if cache_params is None:
+            raise ValueError("Qwen4-Exp GDN prefill requires retained cache state")
+        conv_state = cache_params.gdn_conv_states[self.layer_idx]
+        recurrent_state = cache_params.gdn_recurrent_states[self.layer_idx]
+        if conv_state is None or recurrent_state is None:
+            raise ValueError(f"Missing GDN retained state for layer {self.layer_idx}")
+
+        valid_mask = None
+        if position_embeddings is not None and len(position_embeddings) > 4:
+            valid_mask = position_embeddings[4][0] != -1
+            if valid_mask.shape != hidden_states.shape[:2]:
+                raise ValueError("Qwen4-Exp GDN position mask must match [batch, seq_len]")
+            hidden_states = torch.where(valid_mask.unsqueeze(-1), hidden_states, torch.zeros_like(hidden_states))
+
+        batch, sequence_len, _ = hidden_states.shape
+        projected = self.in_proj_qkv(hidden_states).transpose(1, 2)
+        conv_input = torch.cat((conv_state, projected), dim=-1)
+        next_conv_state = conv_input[..., -conv_state.shape[-1] :]
+        mixed_qkv = F.silu(F.conv1d(conv_input.to(self.conv1d.weight.dtype), self.conv1d.weight, groups=self.conv_dim))[
+            ..., -sequence_len:
+        ].to(hidden_states.dtype)
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+        query, key, value = torch.split(mixed_qkv, (self.key_dim, self.key_dim, self.value_dim), dim=-1)
+        query = query.reshape(batch, sequence_len, -1, self.head_k_dim)
+        key = key.reshape(batch, sequence_len, -1, self.head_k_dim)
+        value = value.reshape(batch, sequence_len, -1, self.head_v_dim)
+        if self.num_v_heads // self.num_k_heads > 1:
+            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+
+        beta = self.in_proj_b(hidden_states).sigmoid()
+        decay = -self.A_log.float().exp() * F.softplus(self.in_proj_a(hidden_states).float() + self.dt_bias)
+        attention_output, next_recurrent_state = self._chunk_gated_delta_rule(
+            query, key, value, decay, beta, recurrent_state, valid_mask
+        )
+        gate = self.in_proj_z(hidden_states).reshape(batch, sequence_len, -1, self.head_v_dim)
+        output = self.norm(attention_output.reshape(-1, self.head_v_dim), gate.reshape(-1, self.head_v_dim)).reshape(
+            batch, sequence_len, -1
+        )
+        cache_params.update_gdn_state(self.layer_idx, next_conv_state, next_recurrent_state)
+        return self.out_proj(output)
 
     def forward(self, hidden_states, cache_params=None, position_embeddings=None, **kwargs):
-        del position_embeddings, kwargs
+        del kwargs
         if hidden_states.shape[1] != 1:
-            raise ValueError("Qwen4-Exp QEfficient wrapper supports decode (seq_len=1) only")
+            return self._qeff_prefill(hidden_states, cache_params, position_embeddings)
         conv_state = cache_params.gdn_conv_states[self.layer_idx]
         recurrent_state = cache_params.gdn_recurrent_states[self.layer_idx]
         if conv_state is None or recurrent_state is None:
@@ -275,6 +420,8 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
     def forward(self, hidden_states, ngram_embeddings, cache_params):
         if ngram_embeddings is None or ngram_embeddings.shape[:2] != hidden_states.shape[:2]:
             raise ValueError("PLE requires ngram_embeddings shaped [batch, seq_len, ple_embed_dim]")
+        if hidden_states.shape[1] != 1:
+            return self._qeff_prefill(hidden_states, ngram_embeddings, cache_params)
         embeddings = ngram_embeddings.to(hidden_states.dtype)
         key = self.norm_key(self.key_proj(embeddings)).unflatten(-1, (self.hc_count, self.hidden_size))
         query = self.norm_query(hidden_states).unflatten(-1, (self.hc_count, self.hidden_size))
@@ -293,6 +440,27 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
         conv_output = torch.matmul(conv_input.unsqueeze(-2), conv_weight).squeeze(-1)
         conv_output = F.silu(conv_output).to(values.dtype)
         return values + conv_output[..., -1:].transpose(1, 2)
+
+    def _qeff_prefill(self, hidden_states, ngram_embeddings, cache_params):
+        """Apply PLE's dilated short convolution across a prefill sequence."""
+        embeddings = ngram_embeddings.to(hidden_states.dtype)
+        key = self.norm_key(self.key_proj(embeddings)).unflatten(-1, (self.hc_count, self.hidden_size))
+        query = self.norm_query(hidden_states).unflatten(-1, (self.hc_count, self.hidden_size))
+        gate = (key * query).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
+        gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+        values = (torch.sigmoid(gate) * self.value_proj(embeddings).unsqueeze(-2)).flatten(-2)
+        state = cache_params.ple_conv_states[self.layer_idx]
+        if state is None:
+            raise ValueError(f"Missing PLE retained state for layer {self.layer_idx}")
+        conv_values = self.norm_conv(values).transpose(1, 2)
+        combined = torch.cat((state, conv_values), dim=-1)
+        cache_params.update_ple_state(self.layer_idx, combined[..., -self.short_conv_state_len :])
+        windows = combined.unfold(-1, self.short_conv_state_len + 1, 1)
+        conv_input = windows.index_select(-1, self._qeff_conv_positions)
+        conv_weight = self.conv1d.weight.squeeze(1)
+        conv_output = (conv_input * conv_weight.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
+        conv_output = F.silu(conv_output).to(values.dtype).transpose(1, 2)
+        return values + conv_output
 
 
 class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
@@ -877,7 +1045,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         output = self.o_proj(output * gate.reshape_as(output).sigmoid())
         # Aligned prefill completes every pooling group; retain the input partial
         # unchanged so the four-state ABI remains connected for decode handoff.
-        past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, partial)
+        past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, partial.clone())
         return output, None
 
 
@@ -1172,10 +1340,6 @@ class QEffQwen4ExpDecodeExportMixin:
 
     def get_dummy_inputs(self, continuous_batching=False, **kwargs):
         requested_batch_size = kwargs.get("batch_size", constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE)
-        batch_size = min(requested_batch_size, 2)
-        # Folded QSA caches are partitioned by DP.  The generic export clamp
-        # to batch 2 would otherwise create zero-sized cache dimensions when
-        # attn/indexer DP is greater than 2 (for example, the Qwen DP16 path).
         qsa_dp = max(
             (
                 int((getattr(layer.self_attn, "_qsa_config", None) or {}).get(key, 1))
@@ -1185,7 +1349,7 @@ class QEffQwen4ExpDecodeExportMixin:
             ),
             default=1,
         )
-        batch_size = max(batch_size, qsa_dp)
+        batch_size = max(requested_batch_size, qsa_dp)
         seq_len = int(kwargs.get("seq_len", self.get_export_seq_len()))
         specs = self.get_onnx_retained_state_specs(batch_size, seq_len, continuous_batching=continuous_batching)
         inputs = {
@@ -1232,10 +1396,14 @@ class QEffQwen4ExpDecodeExportMixin:
 
     def get_specializations(self, batch_size: int, prefill_seq_len: int, ctx_len: int, **kwargs):
         """Return the explicitly configured graph shape, preserving decode by default."""
-        del prefill_seq_len, kwargs
         batch_size = batch_size or 1
         pooled_ctx_len = -(-ctx_len // self.config.indexer_compress_ratio)
-        export_seq_len = self.get_export_seq_len()
+        if kwargs.get("prefill_only"):
+            if prefill_seq_len is None or prefill_seq_len <= 1:
+                raise ValueError("Qwen4-Exp prefill-only export requires prefill_seq_len > 1")
+            export_seq_len = int(prefill_seq_len)
+        else:
+            export_seq_len = self.get_export_seq_len()
         specialization = {
             "batch_size": batch_size,
             "seq_len": export_seq_len,
@@ -1256,11 +1424,19 @@ class QEffQwen4ExpDecodeExportMixin:
         mxint8_kv_cache = kwargs.pop("mxint8_kv_cache", False)
         if kwargs:
             raise TypeError(f"Unexpected custom I/O options: {sorted(kwargs)}")
+        prefill_only = any(
+            (getattr(layer.self_attn, "_qsa_config", None) or {}).get("prefill_only", False)
+            for layer in self.model.layers
+            if hasattr(layer, "self_attn")
+        )
         custom_io = {}
         for state_name in self._iter_retained_state_names():
             if not state_name.startswith("qsa_"):
                 continue
-            state_dtype = "mxint8" if mxint8_kv_cache else dtype
+            if prefill_only and state_name.startswith("qsa_partial_state."):
+                state_dtype = "float"
+            else:
+                state_dtype = "mxint8" if mxint8_kv_cache else dtype
             for name in (state_name, f"{state_name}_RetainedState"):
                 custom_io[name] = state_dtype
         return custom_io

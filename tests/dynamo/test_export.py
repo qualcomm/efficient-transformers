@@ -112,9 +112,8 @@ def test_qwen4_exp_dynamo_export_and_ort_retained_state_parity(tmp_export_dir):
     QSA), so repeated-subgraph extraction is intentionally disabled. Dynamo
     export itself must still preserve the complete flattened ONNX ABI.
     """
-    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
-
     from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
 
     ort = pytest.importorskip("onnxruntime")
 
@@ -151,3 +150,36 @@ def test_qwen4_exp_dynamo_export_and_ort_retained_state_parity(tmp_export_dir):
     ]
     for expected, actual in zip(expected_outputs, ort_output, strict=True):
         np.testing.assert_allclose(expected, actual, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.dynamo
+@pytest.mark.dynamo_export
+@pytest.mark.parametrize("batch_size", [1, 2, 3])
+def test_dynamo_compile_export_uses_requested_batch_size(batch_size, tmp_export_dir, monkeypatch):
+    """Compile-driven Dynamo export must bind the batch selected by compile()."""
+    from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
+
+    model, _ = make_tiny_qwen4_exp()
+    model, applied = KVCacheTransform.apply(model)
+    assert applied
+    qeff_model = QEFFAutoModelForCausalLM(model)
+    captured = {}
+
+    def capture_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["batch_shape"] = tuple(example_inputs["input_ids"].shape)
+        captured["dynamic_axes"] = dynamic_axes
+        qeff_model.onnx_path = tmp_export_dir / "captured.onnx"
+        return str(qeff_model.onnx_path)
+
+    monkeypatch.setattr(qeff_model, "transform", lambda **kwargs: None)
+    monkeypatch.setattr(qeff_model, "_export", capture_export)
+    qeff_model.get_onnx_path(
+        prefill_only=False,
+        specializations=[{"batch_size": batch_size, "seq_len": 8, "ctx_len": 16}],
+        dynamo=True,
+        offload_pt_weights=False,
+    )
+
+    assert captured["batch_shape"][0] == batch_size
+    assert 0 not in captured["dynamic_axes"]["input_ids"]

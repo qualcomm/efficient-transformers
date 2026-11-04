@@ -62,8 +62,10 @@ def ctx_scatter_3d_generalized(data: torch.Tensor, position_ids: torch.Tensor, u
 def ctx_scatter_3d_int(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc3DInt
 
+    # The ONNX function builds INT32 ScatterND indices, so keep its position
+    # input aligned even when upstream cumsum/where expressions promote it.
     return select_interface(CtxScatterFunc3DInt.apply, torch.ops.qefficient.ctx_scatter_3d_int)(
-        data, position_ids, updates
+        data, position_ids.to(torch.int32), updates
     )
 
 

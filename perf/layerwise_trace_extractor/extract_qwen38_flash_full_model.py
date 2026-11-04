@@ -43,8 +43,7 @@ COMPILER = "/opt/qti-aic/exec/qaic-compile"
 RUNNER = "/opt/qti-aic/exec/qaic-runner"
 OPSTATS = "/opt/qti-aic/exec/qaic-opstats"
 COMPILER_OPTS_UNSUPPORTED = (
-    "-aic-hoist-vtcm-loads=false -aic-op-stats-verbosity 2 "
-    "-aic-userdma-async=0 -aic-hmx-async=0 -aic-sync-ts-starts"
+    "-aic-hoist-vtcm-loads=false -aic-op-stats-verbosity 2 -aic-userdma-async=0 -aic-hmx-async=0 -aic-sync-ts-starts"
 )
 LAYER_TYPES = ("linear_attention", "linear_attention", "linear_attention", "indexed_attention")
 RETAINED_NAMES = (
@@ -105,7 +104,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overwrite-qpc", action="store_true", help="Allow compile.sh to replace an existing QPC directory."
     )
-    parser.add_argument("--trace-glob", default="*-merged.qaic-opstats.trace.json")
+    parser.add_argument("--trace-glob", default="*qaic-opstats.trace.json")
+    parser.add_argument(
+        "--trace-time-unit-override",
+        choices=("ns", "us", "ms"),
+        default=None,
+        help="Override the trace header unit when QAIC event timestamps use another unit.",
+    )
     parser.add_argument(
         "--output-csv",
         type=Path,
@@ -116,6 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--io-precision", choices=("float16", "mxint8"), default="float16")
     parser.add_argument("--seq-len", type=int, default=1)
+    parser.add_argument("--start-position", type=int, default=0)
     parser.add_argument("--ctx-len", type=int, default=512)
     parser.add_argument("--pooled-ctx-len", type=int, default=128)
     parser.add_argument("--hidden-size", type=int, default=2560)
@@ -205,14 +211,15 @@ def compile_command(
         "-retained-state",
         "-convert-to-fp16",
         f"-aic-num-cores={args.compile_num_cores}",
-        f"-mdp-load-partition-config={mdp}",
         f"-network-specialization-config={specialization}",
         f"-custom-IO-list-file={custom_io}",
         f"-aic-binary-dir={qpc_dir}",
     ]
+    if args.num_devices > 1:
+        command.append(f"-mdp-load-partition-config={mdp}")
     if args.compile_profile == "qsa":
         command.insert(6, "-mxfp6-matmul")
-        command.extend(("-user-tiled", "-split-model-io"))
+        command.extend(("-user-tiled", "-split-model-io", "-allow-mxint8-mdp-io"))
     return command
 
 
@@ -233,7 +240,7 @@ def emit_assets(args: argparse.Namespace, device_ids: list[int]) -> dict[str, An
         {
             "specializations": [
                 {
-                    "name": "Decode",
+                    "name": "Prefill" if args.seq_len > 1 else "Decode",
                     "symbols": {
                         "batch_size": str(args.batch_size),
                         "ctx_len": str(args.ctx_len),
@@ -253,15 +260,17 @@ def emit_assets(args: argparse.Namespace, device_ids: list[int]) -> dict[str, An
                 {
                     "name": "Partition0",
                     "devices": [
-                        {"deviceId": index, "numCores": args.compile_num_cores}
-                        for index in range(args.num_devices)
+                        {"deviceId": index, "numCores": args.compile_num_cores} for index in range(args.num_devices)
                     ],
                 }
             ],
         },
     )
     custom_io = out / "custom_io.yaml"
+
     def retained_precision(name: str) -> str:
+        if name == "qsa_partial_state.3":
+            return "float"
         if args.io_precision == "mxint8" and name.startswith("qsa_"):
             return "mxint8"
         return "float16"
@@ -284,7 +293,10 @@ def emit_assets(args: argparse.Namespace, device_ids: list[int]) -> dict[str, An
         "input_ids": np.zeros((args.batch_size, args.seq_len), dtype=np.int64),
         # QSA/Qwen handoff contract: application-side ngram embeddings are FP32.
         "ngram_embeddings": np.zeros((args.batch_size, args.seq_len, args.hidden_size), dtype=np.float32),
-        "position_ids": np.zeros((4, args.batch_size, args.seq_len), dtype=np.int64),
+        "position_ids": np.broadcast_to(
+            np.arange(args.start_position, args.start_position + args.seq_len, dtype=np.int64)[None, None, :],
+            (4, args.batch_size, args.seq_len),
+        ).copy(),
     }
     visible_outputs = {
         "logits": np.zeros((args.batch_size, args.seq_len, args.vocab_size), dtype=np.float32),
@@ -311,8 +323,7 @@ def emit_assets(args: argparse.Namespace, device_ids: list[int]) -> dict[str, An
     clean_guard = ""
     if not args.overwrite_qpc:
         clean_guard = (
-            f'if [ -e {shlex.quote(str(qpc_dir))} ]; then '
-            'echo "QPC exists; pass --overwrite-qpc" >&2; exit 2; fi\n'
+            f'if [ -e {shlex.quote(str(qpc_dir))} ]; then echo "QPC exists; pass --overwrite-qpc" >&2; exit 2; fi\n'
         )
     write_executable(out / "compile.sh", env + clean_guard + shell_join(base_command))
 
@@ -455,9 +466,9 @@ def node_name_from_op(op_name: str, known_nodes: set[str]) -> str | None:
     for token in NODE_TOKEN_RE.findall(op_name):
         if token in known_nodes:
             return token
-    for token in known_nodes:
-        if f"/{token}/" in op_name or op_name.endswith("/" + token):
-            return token
+    # Trace names carry ONNX node tokens directly (possibly followed by a
+    # compiler split suffix). Scanning every scoped ONNX node for unmatched
+    # events makes large Qwen opstats traces quadratic in graph size.
     return None
 
 
@@ -556,9 +567,7 @@ def analyze_trace(
             "spans": [],
             "late_spans": [],
             "busy": 0.0,
-            "groups": {
-                group: {"spans": [], "late_spans": [], "busy": 0.0} for group in COMPONENTS
-            },
+            "groups": {group: {"spans": [], "late_spans": [], "busy": 0.0} for group in COMPONENTS},
         }
         for layer in selected_layers
     }
@@ -592,22 +601,14 @@ def analyze_trace(
     for layer in sorted(accumulators):
         accumulator = accumulators[layer]
         layer_wallclock = accumulator_union_length(accumulator)
-        all_layer_spans = [
-            span
-            for item in accumulators.values()
-            for span in item["spans"] + item["late_spans"]
-        ]
+        all_layer_spans = [span for item in accumulators.values() for span in item["spans"] + item["late_spans"]]
         row: dict[str, Any] = {
             "layer_index": layer,
             "layer_type": LAYER_TYPES[layer] if layer < len(LAYER_TYPES) else "unknown",
             "layer_wallclock_us": layer_wallclock,
             "layer_busy_us": accumulator["busy"],
             "pct_of_mapped_layers": (
-                100.0
-                * layer_wallclock
-                / union_length(all_layer_spans)
-                if layer_wallclock
-                else 0.0
+                100.0 * layer_wallclock / union_length(all_layer_spans) if layer_wallclock else 0.0
             ),
         }
         for group, values in accumulator["groups"].items():
@@ -621,11 +622,7 @@ def analyze_trace(
         "display_time_unit": time_unit,
         "all_event_wallclock_us": accumulator_union_length(all_events),
         "mapped_event_wallclock_us": union_length(
-            [
-                span
-                for item in accumulators.values()
-                for span in item["spans"] + item["late_spans"]
-            ]
+            [span for item in accumulators.values() for span in item["spans"] + item["late_spans"]]
         ),
         "mapped_event_count": mapped,
         "unresolved_event_count": unresolved,
@@ -644,9 +641,7 @@ def aggregate_trace_results(results: list[dict[str, Any]]) -> list[dict[str, Any
     for layer in sorted(grouped):
         values = grouped[layer]
         numeric_keys = [
-            key
-            for key, value in values[0].items()
-            if isinstance(value, (int, float)) and key != "layer_index"
+            key for key, value in values[0].items() if isinstance(value, (int, float)) and key != "layer_index"
         ]
         row: dict[str, Any] = {"layer_index": layer, "layer_type": values[0]["layer_type"], "samples": len(values)}
         for key in numeric_keys:
@@ -682,9 +677,7 @@ def resolve_opstats_dir(artifact_dir: Path, explicit: Path | None) -> Path:
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
-    raise FileNotFoundError(
-        f"No opstats directory found under {artifact_dir}; pass --opstats-dir explicitly."
-    )
+    raise FileNotFoundError(f"No opstats directory found under {artifact_dir}; pass --opstats-dir explicitly.")
 
 
 def parse_opstats_summaries(opstats_dir: Path) -> dict[str, Any]:
@@ -764,6 +757,8 @@ def export_and_prepare_compile(args: argparse.Namespace) -> tuple[Path, Path]:
 
 def main() -> int:
     args = parse_args()
+    if args.seq_len < 1 or args.start_position < 0 or args.start_position + args.seq_len > args.ctx_len:
+        raise ValueError("Require 0 <= start-position and start-position + seq-len <= ctx-len")
     if args.compile_num_cores is None:
         args.compile_num_cores = 16
     args.artifact_dir = args.artifact_dir.resolve()
@@ -794,8 +789,9 @@ def main() -> int:
             "compile_num_cores_per_device": args.compile_num_cores,
         },
         "profiling_policy": {
-            "mode": "decode-only",
-            "prefill_seq_len": 1,
+            "mode": "prefill-only" if args.seq_len > 1 else "decode-only",
+            "prefill_seq_len": args.seq_len,
+            "start_position": args.start_position,
             "runtime_iters": args.runtime_iters,
             "perf_num_iters": args.perf_num_iters,
             "perf_profile_start_iter": args.perf_profile_start_iter,
@@ -842,7 +838,10 @@ def main() -> int:
         trace_paths = sorted(opstats_dir.glob(args.trace_glob))
         if args.slice_index is not None:
             trace_paths = [path for path in trace_paths if f"slice{args.slice_index:02d}" in path.name]
-        trace_results = [analyze_trace(path, scope_map, set(args.layers)) for path in trace_paths]
+        trace_results = [
+            analyze_trace(path, scope_map, set(args.layers), time_unit_override=args.trace_time_unit_override)
+            for path in trace_paths
+        ]
         aggregate_rows = aggregate_trace_results(trace_results)
         output_csv = args.output_csv or args.artifact_dir / "module_timing.csv"
         report["onnx_analysis"] = {
@@ -859,8 +858,7 @@ def main() -> int:
             write_module_csv(aggregate_rows, output_csv)
         if not trace_paths and not report.get("blocker"):
             report["blocker"] = (
-                "No opstats trace JSON was found; provide a compiled/perf-run QPC or "
-                "run --run-perf on QAIC hardware."
+                "No opstats trace JSON was found; provide a compiled/perf-run QPC or run --run-perf on QAIC hardware."
             )
     write_json(report_path, report)
     print(report_path)

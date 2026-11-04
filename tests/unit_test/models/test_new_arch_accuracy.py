@@ -898,10 +898,7 @@ class TestQwen4ExpDecode:
                     Binding("input_ids", (1, 1), "int64"),
                     Binding("ngram_embeddings", (1, 1, 2560), "f16"),
                     Binding("position_ids", (4, 1, 1), "int64"),
-                    *[
-                        Binding(name, parity_app.QWEN4_QAIC_STATE_SHAPES[name], "f16")
-                        for name in two_layer_states
-                    ],
+                    *[Binding(name, parity_app.QWEN4_QAIC_STATE_SHAPES[name], "f16") for name in two_layer_states],
                     Binding("logits", parity_app.QWEN4_QAIC_LOGITS_SHAPE, "f32"),
                     *[Binding(name, (1,), "f16") for name in two_layer_outputs],
                 ]
@@ -1058,16 +1055,16 @@ class TestQwen4ExpDecode:
 
         custom_io = model.get_custom_io()
         retained_names = model.get_retained_state_names()
+        qsa_state_names = [name for name in retained_names if name.startswith("qsa_")]
         assert set(custom_io) == {
-            name for state_name in retained_names for name in (state_name, f"{state_name}_RetainedState")
+            name for state_name in qsa_state_names for name in (state_name, f"{state_name}_RetainedState")
         }
         assert set(custom_io.values()) == {"float16"}
 
         mxint8_custom_io = model.get_custom_io(dtype="mxint8", mxint8_kv_cache=True)
-        for state_name in retained_names:
-            expected_dtype = "mxint8" if state_name.startswith("qsa_") else "float16"
-            assert mxint8_custom_io[state_name] == expected_dtype
-            assert mxint8_custom_io[f"{state_name}_RetainedState"] == expected_dtype
+        for state_name in qsa_state_names:
+            assert mxint8_custom_io[state_name] == "mxint8"
+            assert mxint8_custom_io[f"{state_name}_RetainedState"] == "mxint8"
 
     def test_qwen4_exp_host_ngram_lookup_matches_reference_hash_and_tracks_history(self, tmp_path):
         """The host lookup follows upstream PLE IDs without retaining a table in QEff."""

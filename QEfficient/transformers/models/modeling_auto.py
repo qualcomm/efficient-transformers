@@ -4010,6 +4010,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         layerwise_window_size: int = 1,
         kv_cache_prefix: str | None = None,
         dynamo: bool = False,
+        *,
+        batch_size: int | None = None,
         **kwargs,
     ) -> str:
         """
@@ -4098,7 +4100,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     self.hash_params["retain_full_kv"] = True
         #######################################################################
 
-        bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
+        compile_batch_size = batch_size
+        bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE if batch_size is None else int(batch_size)
+        if bs < 1:
+            raise ValueError(f"batch_size must be positive, got {bs}")
         seq_len: int = (
             self.model.get_export_seq_len()
             if hasattr(self.model, "get_export_seq_len")
@@ -4125,14 +4130,19 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 -(-blocking_kwargs.ctx_len // num_kv_blocks) if supports_paged_attention else seq_len
             )
 
-        # TODO: Remove this hack ##################
-        if dynamo:
-            # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
+        # Direct Dynamo exports keep a batch-2 example for a dynamic batch axis.
+        # Compile-driven exports instead use the batch size selected by compile().
+        if dynamo and compile_batch_size is None:
             bs = max(2, bs)
-        ###########################################
 
         if hasattr(self.model, "get_export_batch_size"):
-            bs = self.model.get_export_batch_size(bs)
+            export_batch_size = self.model.get_export_batch_size(bs)
+            if compile_batch_size is not None and export_batch_size != compile_batch_size:
+                raise ValueError(
+                    f"The model's configured parallelism requires batch_size={export_batch_size}, "
+                    f"but compile() requested batch_size={compile_batch_size}"
+                )
+            bs = export_batch_size
 
         #### HANDLE KV CACHE SHAPE ################
         kv_cache_shape = get_padding_shape_from_config(
@@ -4425,6 +4435,15 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         if hasattr(self.model, "prepare_export_dynamic_axes"):
             dynamic_axes = self.model.prepare_export_dynamic_axes(dynamic_axes)
+
+        # A compiled batch-1 graph is a static specialization. Dynamo cannot
+        # mark an example dimension of 1 as dynamic, so remove only batch axes
+        # from its shape constraints; sequence and cache-context axes stay dynamic.
+        if dynamo and compile_batch_size == 1:
+            for axes in dynamic_axes.values():
+                for axis, dimension in list(axes.items()):
+                    if dimension == "batch_size":
+                        del axes[axis]
 
         if QEFFBaseModel._layerwise_active:
             return self._export_layerwise(
