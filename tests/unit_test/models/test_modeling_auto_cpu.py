@@ -281,6 +281,7 @@ class TestQEFFTransformersBase:
         qeff_model = QEFFAutoModelForCausalLM(make_tiny_llama()[0], weight_free=True)
 
         assert qeff_model._weight_free is True
+        assert qeff_model._use_original_checkpoint is True
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
 
     @pytest.mark.parametrize(
