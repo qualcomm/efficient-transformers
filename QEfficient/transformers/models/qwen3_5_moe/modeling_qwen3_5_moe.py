@@ -1785,6 +1785,30 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
             return [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
         return [f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}"]
 
+    def _get_compact_headpar_factors(self) -> Tuple[int, int]:
+        """Return the shared CP/DP topology for full-attention retained states.
+
+        CP/DP head-parallel decode stores native-GQA KV state as
+        ``[B / DP, DP * CP * Hkv, T / CP, D]``. Validate that every
+        full-attention layer uses the same topology before exporting retained
+        states with the compact cache signature.
+        """
+        factors = None
+        layers = getattr(getattr(self, "model", None), "layers", ())
+        for layer_idx, layer_type in enumerate(self.config.layer_types):
+            if layer_type != "full_attention" or layer_idx >= len(layers):
+                continue
+            blocking_config = getattr(getattr(layers[layer_idx], "self_attn", None), "attn_blocking_config", None)
+            if blocking_config is None or BlockingMode.resolve(blocking_config.mode) != BlockingMode.KV_HEADPAR:
+                continue
+            layer_factors = (int(blocking_config.attn_dp or 1), int(blocking_config.attn_cp or 1))
+            if layer_factors == (1, 1):
+                continue
+            if factors is not None and factors != layer_factors:
+                raise ValueError("All full-attention layers must use the same CP/DP kv_headpar factors.")
+            factors = layer_factors
+        return factors or (1, 1)
+
     def _retained_state_dtypes(self) -> dict:
         kv_dtype = _qeff_resolve_torch_dtype(getattr(self.config, "torch_dtype", torch.float32))
         recurrent_dtype = _qeff_resolve_torch_dtype(getattr(self.config, "mamba_ssm_dtype", None))
@@ -1814,6 +1838,21 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
     ) -> dict:
         del seq_len, retain_full_kv
         batch_axis_name = "full_batch_size" if continuous_batching else "batch_size"
+        attn_dp, attn_cp = self._get_compact_headpar_factors()
+        uses_compact_headpar_cache = (attn_dp, attn_cp) != (1, 1)
+        if uses_compact_headpar_cache and continuous_batching:
+            raise ValueError("CP/DP kv_headpar does not support continuous batching.")
+        if uses_compact_headpar_cache:
+            if len(kv_cache_shape) != 4:
+                raise ValueError("CP/DP kv_headpar requires rank-4 KV retained-state tensors.")
+            if batch_size % attn_dp:
+                raise ValueError(f"batch_size ({batch_size}) must be divisible by attn_dp ({attn_dp}).")
+            compact_kv_cache_shape = (
+                batch_size // attn_dp,
+                kv_cache_shape[1] * attn_dp * attn_cp,
+                -(-kv_cache_shape[2] // attn_cp),
+                kv_cache_shape[3],
+            )
         specs = {
             "past_key_values": [],
             "input_names": [],
@@ -1826,13 +1865,16 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
         for layer_idx, layer_type in enumerate(self.config.layer_types):
             if layer_type == "full_attention":
                 layer_names = [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
+                full_attention_cache_shape = compact_kv_cache_shape if uses_compact_headpar_cache else kv_cache_shape
                 layer_tensors = [
-                    torch.zeros(tuple(kv_cache_shape), dtype=state_dtypes[layer_names[0]]),
-                    torch.zeros(tuple(kv_cache_shape), dtype=state_dtypes[layer_names[1]]),
+                    torch.zeros(tuple(full_attention_cache_shape), dtype=state_dtypes[layer_names[0]]),
+                    torch.zeros(tuple(full_attention_cache_shape), dtype=state_dtypes[layer_names[1]]),
                 ]
+                full_attention_ctx_axis = "local_ctx_len" if uses_compact_headpar_cache else "ctx_len"
+                full_attention_batch_axis = "local_batch_size" if attn_dp > 1 else batch_axis_name
                 layer_axes = [
-                    {0: batch_axis_name, 2: "ctx_len"},
-                    {0: batch_axis_name, 2: "ctx_len"},
+                    {0: full_attention_batch_axis, 2: full_attention_ctx_axis},
+                    {0: full_attention_batch_axis, 2: full_attention_ctx_axis},
                 ]
             else:
                 layer = self.model.layers[layer_idx].linear_attn

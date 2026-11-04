@@ -216,6 +216,42 @@ class TestQEffDynamicLayerCorrectness:
             assert torch.equal(layer.keys[batch_idx, :, position], keys[batch_idx, :, 0])
             assert torch.equal(layer.values[batch_idx, :, position], values[batch_idx, :, 0])
 
+    def test_headpar_cpdp_write_uses_dp_cp_hkv_row_order(self):
+        """Compact headpar cache must place each token in its owning CP row only."""
+        batch, dp, cp, heads, ctx_len, head_dim = 4, 2, 2, 2, 8, 3
+        batch_local = batch // dp
+        layer = QEffDynamicLayer()
+        keys = torch.arange(batch * heads * head_dim, dtype=torch.float32).reshape(batch, heads, 1, head_dim)
+        values = keys + 1000
+        positions = torch.tensor([[1], [5], [2], [6]])
+
+        layer.write_only_headpar_cpdp(
+            keys,
+            values,
+            cache_kwargs={"position_ids": positions, "attn_dp": dp, "attn_cp": cp, "ctx_len": ctx_len},
+        )
+
+        assert layer.keys.shape == (batch_local, dp * cp * heads, ctx_len // cp, head_dim)
+        assert layer.values.shape == (batch_local, dp * cp * heads, ctx_len // cp, head_dim)
+        for batch_idx, position in enumerate(positions.flatten().tolist()):
+            dp_idx, local_batch_idx = divmod(batch_idx, batch_local)
+            cp_idx, local_position = divmod(position, ctx_len // cp)
+            row_start = (dp_idx * cp + cp_idx) * heads
+            assert torch.equal(
+                layer.keys[local_batch_idx, row_start : row_start + heads, local_position], keys[batch_idx, :, 0]
+            )
+            assert torch.equal(
+                layer.values[local_batch_idx, row_start : row_start + heads, local_position], values[batch_idx, :, 0]
+            )
+
+            other_cp_idx = 1 - cp_idx
+            other_cp_start = (dp_idx * cp + other_cp_idx) * heads
+            assert torch.count_nonzero(layer.keys[local_batch_idx, other_cp_start : other_cp_start + heads]) == 0
+
+        read_keys, read_values = layer.read_only_headpar_cpdp(0, ctx_len // cp, cache_kwargs={})
+        assert torch.equal(read_keys, layer.keys)
+        assert torch.equal(read_values, layer.values)
+
     def test_batch_fold_write_honors_continuous_batching_batch_index(self):
         batch, heads, ctx_len, head_dim = 4, 2, 8, 4
         layer = QEffDynamicLayer.from_tensors(

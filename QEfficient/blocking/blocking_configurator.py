@@ -569,6 +569,20 @@ def build_transformer_blocking_config_for_transform(
     if blocking_mode == BlockingMode.KV_BATCH_FOLD:
         blocking_config.batch_fold = True
 
+    attn_dp = int(qaic_config.get("attn_dp", 1) or 1)
+    attn_cp = int(qaic_config.get("attn_cp", 1) or 1)
+    if attn_dp < 1 or attn_cp < 1:
+        raise ValueError("attn_dp and attn_cp must be positive integers.")
+    if (attn_dp > 1 or attn_cp > 1) and blocking_mode != BlockingMode.KV_HEADPAR:
+        raise ValueError("attn_dp and attn_cp are currently supported only with blocking_mode='kv_headpar'.")
+    if blocking_mode == BlockingMode.KV_HEADPAR:
+        if ctx_len is not None and int(ctx_len) % attn_cp:
+            raise ValueError(f"ctx_len ({ctx_len}) must be divisible by attn_cp ({attn_cp}).")
+        if bs is not None and int(bs) % attn_dp:
+            raise ValueError(f"batch size ({bs}) must be divisible by attn_dp ({attn_dp}).")
+        blocking_config.attn_dp = attn_dp
+        blocking_config.attn_cp = attn_cp
+
     # optional blocking parameters to set if given in qaic_config
     for param in (
         "skip_kv",

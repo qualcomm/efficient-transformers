@@ -28,6 +28,7 @@ from QEfficient.blocking.blocked_attention_forwards import (
     _read_kv_block,
     blocked_bhqkv_attention_forward,
     blocked_hqkv_attention_forward,
+    blocked_kv_attention_forward_headpar_cpdp,
     blocked_qkv_attention_forward,
     repeat_kv,
 )
@@ -460,3 +461,54 @@ class TestSkipKvBreakPreserved:
             "Hoisted-gather hqkv output with skip_kv=True diverged from manual causal attention "
             f"(max abs diff={(attn_output - expected).abs().max().item()})"
         )
+
+
+@pytest.mark.cache
+@pytest.mark.parametrize(("dp", "cp"), [(1, 2), (2, 1), (2, 2)], ids=["cp", "dp", "cp-dp"])
+def test_headpar_cpdp_native_gqa_matches_causal_attention(dp, cp):
+    """CP/DP compact-cache headpar preserves native-GQA decode results."""
+    torch.manual_seed(0)
+    batch, hkv, n_rep, ctx_len, head_dim = 2 * dp, 2, 3, 8, 4
+    num_heads = hkv * n_rep
+    cache = QEffDynamicCache()
+    full_keys = torch.empty(batch, hkv, ctx_len, head_dim)
+    full_values = torch.empty_like(full_keys)
+
+    for position in range(ctx_len):
+        keys = torch.randn(batch, hkv, 1, head_dim)
+        values = torch.randn(batch, hkv, 1, head_dim)
+        positions = torch.full((batch, 1), position, dtype=torch.long)
+        cache.write_only_headpar_cpdp(
+            keys,
+            values,
+            layer_idx=0,
+            cache_kwargs={"position_ids": positions, "attn_dp": dp, "attn_cp": cp, "ctx_len": ctx_len},
+        )
+        full_keys[:, :, position] = keys[:, :, 0]
+        full_values[:, :, position] = values[:, :, 0]
+
+    module = _DummyModule(num_key_value_groups=n_rep)
+    query = torch.randn(batch, num_heads, 1, head_dim)
+    query_positions = torch.arange(ctx_len - 1, ctx_len - batch - 1, -1).view(batch, 1)
+    actual, _ = blocked_kv_attention_forward_headpar_cpdp(
+        module=module,
+        query=query,
+        scaling=SCALING,
+        num_kv_blocks=2,
+        cache_kwargs={"position_ids": query_positions},
+        layer_idx=0,
+        past_key_value=cache,
+        ctx_len=ctx_len,
+        configured_split=2,
+        attn_dp=dp,
+        attn_cp=cp,
+    )
+
+    keys = repeat_kv(full_keys, n_rep)
+    values = repeat_kv(full_values, n_rep)
+    scores = torch.matmul(query, keys.transpose(-1, -2)) * SCALING
+    key_positions = torch.arange(ctx_len).view(1, 1, 1, ctx_len)
+    scores = scores.masked_fill(key_positions > query_positions.view(batch, 1, 1, 1), float("-inf"))
+    expected = torch.matmul(torch.softmax(scores, dim=-1), values).transpose(1, 2).contiguous()
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

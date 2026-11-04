@@ -47,6 +47,35 @@ def test_dynamic_shapes_use_nested_text_config_max_position_embeddings():
     assert dynamic_shapes["past_key_values"][0][0][2].max == 32768
 
 
+@pytest.mark.cpu_only
+def test_dynamic_shapes_keep_singleton_local_context_dynamic():
+    """CP-sharded retained state must not collapse its local context to AUTO."""
+    config = SimpleNamespace(max_position_embeddings=128)
+    dynamic_axes = {"past_key.0": {2: "local_ctx_len"}}
+    example_inputs = {"past_key.0": torch.zeros(1, 4, 1, 8)}
+
+    dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(dynamic_axes, config, example_inputs)
+    local_ctx_len = dynamic_shapes["past_key_values"][0][0][2]
+
+    assert local_ctx_len.__name__ == "local_ctx_len"
+    assert local_ctx_len.min == 1
+    assert local_ctx_len.max == 128
+
+
+@pytest.mark.cpu_only
+def test_dynamic_shapes_keep_singleton_local_batch_dynamic():
+    """DP-sharded retained state must retain a separate local batch symbol."""
+    config = SimpleNamespace(max_position_embeddings=128)
+    dynamic_axes = {"past_key.0": {0: "local_batch_size"}}
+    example_inputs = {"past_key.0": torch.zeros(1, 4, 8, 8)}
+
+    dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(dynamic_axes, config, example_inputs)
+    local_batch_size = dynamic_shapes["past_key_values"][0][0][0]
+
+    assert local_batch_size.__name__ == "local_batch_size"
+    assert local_batch_size.min == 1
+
+
 # ---------------------------------------------------------------------------
 # Helpers: get_padding_shape_from_config
 # ---------------------------------------------------------------------------

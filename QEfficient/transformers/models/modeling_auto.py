@@ -4763,6 +4763,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             blocking_kwargs = self.hash_params["blocking_kwargs"]
             num_kv_blocks = blocking_kwargs.num_kv_blocks
             supports_paged_attention = blocking_kwargs.paged_attention
+            uses_compact_headpar_cache = blocking_kwargs.mode == BlockingMode.KV_HEADPAR and (
+                int(blocking_kwargs.attn_dp or 1) > 1 or int(blocking_kwargs.attn_cp or 1) > 1
+            )
+            if uses_compact_headpar_cache:
+                # CP/DP kv_headpar is decode-only. Keep the exported query
+                # length at one and avoid generic blocking padding.
+                seq_len = 1
             if supports_paged_attention:
                 seq_len = kv_block_size = -(-blocking_kwargs.ctx_len // num_kv_blocks)
 
@@ -4829,7 +4836,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         blocking_config = self.hash_params.get("blocking_kwargs", None)
         for_loop_number_forced_by_expert_parallel = self.hash_params.get("moe_prefill_num_packed_chunks", None)
         query_axis_blocking_enabled = _blocking_requires_query_axis_export_padding(blocking_config)
-        if query_axis_blocking_enabled:
+        uses_compact_headpar_cache = bool(
+            blocking_config is not None
+            and blocking_config.mode == BlockingMode.KV_HEADPAR
+            and (int(blocking_config.attn_dp or 1) > 1 or int(blocking_config.attn_cp or 1) > 1)
+        )
+        if query_axis_blocking_enabled and not uses_compact_headpar_cache:
             max_blocks = -1
             for key, num_blocks in blocking_config.__dict__.items():
                 if isinstance(num_blocks, int) and key in ["num_kv_blocks", "num_q_blocks"]:
@@ -4841,7 +4853,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             seq_len = (for_loop_number_forced_by_expert_parallel * seq_len) // math.gcd(
                 for_loop_number_forced_by_expert_parallel, seq_len
             )
-        if query_axis_blocking_enabled:
+        if query_axis_blocking_enabled and not uses_compact_headpar_cache:
             seq_len = (for_loop_number_forced_by_blocking * seq_len) // math.gcd(
                 for_loop_number_forced_by_blocking, seq_len
             )
@@ -5452,6 +5464,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             }
         if comp_ctx_lengths is not None:
             spec["comp_ctx_lengths"] = comp_ctx_lengths
+
+        blocking_kwargs = self.hash_params.get("blocking_kwargs")
+        qaic_config = getattr(self.model, "qaic_config", None) or {}
+        blocking_mode = blocking_kwargs.mode if blocking_kwargs is not None else qaic_config.get("blocking_mode")
+        attn_dp = int(getattr(blocking_kwargs, "attn_dp", qaic_config.get("attn_dp", 1)) or 1)
+        attn_cp = int(getattr(blocking_kwargs, "attn_cp", qaic_config.get("attn_cp", 1)) or 1)
+        if (
+            blocking_mode is not None
+            and BlockingMode.resolve(blocking_mode) == BlockingMode.KV_HEADPAR
+            and (attn_dp > 1 or attn_cp > 1)
+        ):
+            spec["local_ctx_len"] = ctx_len // attn_cp
+            if attn_dp > 1:
+                spec["local_batch_size"] = (full_batch_size if self.continuous_batching else batch_size) // attn_dp
 
         spec["num_logits_to_keep"] = (num_speculative_tokens + 1) if self.is_tlm else None
 

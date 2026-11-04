@@ -1,0 +1,329 @@
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
+"""Simple decode-only Dynamo example for Qwen3.8-2.4T-A95B."""
+
+import argparse
+import os
+import shutil
+from pathlib import Path
+
+import torch
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
+
+from QEfficient import QEFFAutoModelForCausalLM, cloud_ai_100_exec_kv
+
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
+MODEL_ID = "Qwen/Qwen3.8-2.4T-A95B"
+SYNTHETIC_CHECKPOINT_DIR = ".qeff/qwen3_8_decode/synthetic_tiny_checkpoint"
+RANDOM_SEED = 42
+DType = torch.dtype
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument("--hf-hub-cache", default=None)
+    parser.add_argument("--qeff-home", default=None)
+    parser.add_argument(
+        "--qpc-path",
+        type=Path,
+        default=None,
+        help="Existing QPC directory, or its parent compile-artifact directory. Skips export and compilation.",
+    )
+    parser.add_argument("--use-synthetic-tiny", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--synthetic-checkpoint-dir", default=SYNTHETIC_CHECKPOINT_DIR)
+    parser.add_argument("--torch-dtype", choices=("float32", "float16", "bfloat16"), default="float32")
+    parser.add_argument("--num-hidden-layers", type=int, default=4)
+    parser.add_argument("--weight-free", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-onnx-subfunctions", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--enable-blocking", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--replicate-kv-heads", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--blocking-mode", choices=("kv", "kv_headpar"), default="kv")
+    parser.add_argument("--num-kv-blocks", type=int, default=2)
+    parser.add_argument("--headpar-split", type=int, default=4)
+    parser.add_argument(
+        "--attn-cp",
+        type=int,
+        default=1,
+        help="Context-parallel factor for decode-only kv_headpar blocking.",
+    )
+    parser.add_argument(
+        "--attn-dp",
+        type=int,
+        default=1,
+        help="Data-parallel factor for decode-only kv_headpar blocking.",
+    )
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--prefill-seq-len", type=int, default=1)
+    parser.add_argument("--ctx-len", type=int, default=262144)
+    parser.add_argument("--generation-len", type=int, default=100)
+    parser.add_argument("--num-cores", type=int, default=4)
+    parser.add_argument("--num-devices", type=int, default=4)
+    parser.add_argument(
+        "--mdp-num-partitions",
+        type=int,
+        default=1,
+        help="Pipeline-parallel MDP partitions. QEff generates the MDP from ONNX when greater than one.",
+    )
+    parser.add_argument("--device-ids", type=int, nargs="*", default=None)
+    parser.add_argument("--mxfp6-matmul", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--aic-hw-version", default="ai200")
+    parser.add_argument("--prompt", default="Hello")
+    parser.add_argument("--random-seed", type=int, default=RANDOM_SEED)
+    return parser.parse_args()
+
+
+def torch_dtype(dtype_name: str) -> DType:
+    return getattr(torch, dtype_name)
+
+
+def layer_types(num_hidden_layers: int) -> list[str]:
+    return [
+        "full_attention" if (layer_idx + 1) % 4 == 0 else "linear_attention" for layer_idx in range(num_hidden_layers)
+    ]
+
+
+def tiny_tokenizer() -> PreTrainedTokenizerFast:
+    vocab = {"[PAD]": 0, "[UNK]": 1, "[EOS]": 2, "Hello": 3}
+    vocab.update({f"token_{idx}": idx for idx in range(len(vocab), 128)})
+    tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        pad_token="[PAD]",
+        unk_token="[UNK]",
+        eos_token="[EOS]",
+    )
+
+
+def load_tokenizer(args) -> PreTrainedTokenizerFast:
+    if args.use_synthetic_tiny:
+        return tiny_tokenizer()
+
+    hub_kwargs = {"cache_dir": args.hf_hub_cache} if args.hf_hub_cache else {}
+    return AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True, **hub_kwargs)
+
+
+def resolve_qpc_path(qpc_path: Path) -> Path:
+    """Return a QPC directory from either the QPC or compile-artifact path."""
+    resolved_path = qpc_path.expanduser().resolve()
+    if (resolved_path / "programqpc.bin").is_file():
+        return resolved_path
+    if (resolved_path / "qpc" / "programqpc.bin").is_file():
+        return resolved_path / "qpc"
+    raise FileNotFoundError(
+        f"No programqpc.bin found at {resolved_path} or {resolved_path / 'qpc'}. "
+        "Pass the QPC directory or its parent compile-artifact directory."
+    )
+
+
+def tiny_config(dtype: DType, num_hidden_layers: int) -> Qwen3_5MoeTextConfig:
+    return Qwen3_5MoeTextConfig(
+        vocab_size=128,
+        hidden_size=128,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        head_dim=32,
+        layer_types=layer_types(num_hidden_layers),
+        linear_conv_kernel_dim=4,
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+        num_experts=2,
+        num_experts_per_tok=1,
+        max_position_embeddings=128,
+        rope_parameters={
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.25,
+            "rope_type": "default",
+            "mrope_section": [2, 1, 1],
+        },
+        dtype=dtype,
+        pad_token_id=0,
+        eos_token_id=2,
+    )
+
+
+def ensure_synthetic_checkpoint(config: Qwen3_5MoeTextConfig, checkpoint_dir: Path, dtype: DType, seed: int) -> Path:
+    config_path = checkpoint_dir / "config.json"
+    if config_path.exists():
+        saved_config = Qwen3_5MoeTextConfig.from_pretrained(checkpoint_dir)
+        if saved_config.to_dict() != config.to_dict():
+            shutil.rmtree(checkpoint_dir)
+
+    if (checkpoint_dir / "model.safetensors").exists():
+        return checkpoint_dir
+
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    torch.manual_seed(seed)
+    model = Qwen3_5MoeForCausalLM(config).eval().to(dtype)
+    model.save_pretrained(checkpoint_dir, safe_serialization=True)
+    return checkpoint_dir
+
+
+def load_model_and_tokenizer(args=None, qaic_config: dict | None = None):
+    args = args or parse_args()
+    dtype = torch_dtype(args.torch_dtype)
+    torch.manual_seed(args.random_seed)
+    if args.use_synthetic_tiny:
+        config = tiny_config(dtype, args.num_hidden_layers)
+        tokenizer = load_tokenizer(args)
+        if args.weight_free:
+            checkpoint_dir = ensure_synthetic_checkpoint(
+                config,
+                Path(args.synthetic_checkpoint_dir),
+                dtype,
+                args.random_seed,
+            )
+            qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+                str(checkpoint_dir),
+                config=config,
+                weight_free=True,
+                dtype=dtype,
+                qaic_config=qaic_config,
+                trust_remote_code=True,
+            )
+        else:
+            model = Qwen3_5MoeForCausalLM(config).eval().to(dtype)
+            qeff_model = QEFFAutoModelForCausalLM(model, dtype=dtype, qaic_config=qaic_config)
+        qeff_model.model.config.dtype = dtype
+        qeff_model.model.config.torch_dtype = dtype
+        return qeff_model, tokenizer
+
+    hub_kwargs = {"cache_dir": args.hf_hub_cache} if args.hf_hub_cache else {}
+    config = AutoConfig.from_pretrained(args.model_id, trust_remote_code=True, **hub_kwargs)
+    if args.num_hidden_layers > 0:
+        config.num_hidden_layers = args.num_hidden_layers
+        if hasattr(config, "layer_types"):
+            config.layer_types = config.layer_types[: args.num_hidden_layers]
+    config.dtype = dtype
+    config.torch_dtype = dtype
+    tokenizer = load_tokenizer(args)
+    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+        args.model_id,
+        config=config,
+        weight_free=args.weight_free,
+        dtype=dtype,
+        qaic_config=qaic_config,
+        trust_remote_code=True,
+        **hub_kwargs,
+    )
+    return qeff_model, tokenizer
+
+
+def validate_parallelism_args(args) -> None:
+    """Validate the decode-only CP/DP constraints before exporting or compiling."""
+    if args.attn_cp < 1 or args.attn_dp < 1:
+        raise ValueError("--attn-cp and --attn-dp must be positive integers.")
+
+    uses_cpdp = args.attn_cp > 1 or args.attn_dp > 1
+    if not uses_cpdp:
+        return
+    if not args.enable_blocking or args.blocking_mode != "kv_headpar":
+        raise ValueError("CP/DP requires --enable-blocking --blocking-mode kv_headpar.")
+    if args.prefill_seq_len != 1:
+        raise ValueError("CP/DP kv_headpar is decode-only and requires --prefill-seq-len 1.")
+    if args.ctx_len % args.attn_cp:
+        raise ValueError("--ctx-len must be divisible by --attn-cp.")
+    if args.batch_size % args.attn_dp:
+        raise ValueError("--batch-size must be divisible by --attn-dp.")
+    if args.replicate_kv_heads:
+        raise ValueError("CP/DP kv_headpar uses native GQA; do not pass --replicate-kv-heads.")
+
+
+def build_qaic_config(args) -> dict | None:
+    """Build the shared model-export-compile QAIC configuration."""
+    if not (args.enable_blocking or args.replicate_kv_heads):
+        return None
+
+    qaic_config = {}
+    if args.enable_blocking:
+        qaic_config.update(
+            {
+                "blocking_mode": args.blocking_mode,
+                "num_kv_blocks": args.num_kv_blocks,
+                "ctx_len": args.ctx_len,
+            }
+        )
+        if args.blocking_mode == "kv_headpar":
+            qaic_config.update(
+                {
+                    "headpar_split": args.headpar_split,
+                    "attn_cp": args.attn_cp,
+                    "attn_dp": args.attn_dp,
+                }
+            )
+    if args.replicate_kv_heads:
+        qaic_config["replicate_kv_heads"] = True
+    return qaic_config
+
+
+def main():
+    args = parse_args()
+    if args.hf_hub_cache:
+        os.environ["HF_HUB_CACHE"] = args.hf_hub_cache
+    if args.qeff_home:
+        os.environ["QEFF_HOME"] = args.qeff_home
+
+    if args.qpc_path:
+        qpc_path = resolve_qpc_path(args.qpc_path)
+        tokenizer = load_tokenizer(args)
+        print(f"Using existing QPC path: {qpc_path}")
+        output = cloud_ai_100_exec_kv(
+            tokenizer=tokenizer,
+            qpc_path=str(qpc_path),
+            prompt=[args.prompt] * args.batch_size,
+            device_ids=args.device_ids,
+            generation_len=args.generation_len,
+        )
+    else:
+        validate_parallelism_args(args)
+        qaic_config = build_qaic_config(args)
+        qeff_model, tokenizer = load_model_and_tokenizer(args, qaic_config=qaic_config)
+        qeff_model.model.eval()
+        if args.mdp_num_partitions <= 0 or args.num_devices % args.mdp_num_partitions:
+            raise ValueError("--num-devices must be divisible by a positive --mdp-num-partitions value.")
+
+        qpc_path = qeff_model.compile(
+            batch_size=args.batch_size,
+            prefill_seq_len=args.prefill_seq_len,
+            ctx_len=args.ctx_len,
+            num_cores=args.num_cores,
+            num_devices=args.num_devices,
+            mdp_num_partitions=args.mdp_num_partitions,
+            mxfp6_matmul=args.mxfp6_matmul,
+            aic_hw_version=args.aic_hw_version,
+            dynamo=True,
+            use_onnx_subfunctions=args.use_onnx_subfunctions,
+            qaic_config=qaic_config,
+        )
+        print(f"Final QPC path: {qpc_path}")
+
+        output = qeff_model.generate(
+            tokenizer=tokenizer,
+            prompts=[args.prompt] * args.batch_size,
+            device_ids=args.device_ids,
+            generation_len=args.generation_len,
+        )
+    print(output.generated_ids)
+    print(output.generated_texts)
+    print(output)
+
+
+if __name__ == "__main__":
+    main()

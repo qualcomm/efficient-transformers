@@ -581,3 +581,41 @@ def test_dynamo_blocking_auto_hqkv_reduction_is_explicit(attention_cfg, expected
         )
 
     assert blocking_config.mode == expected_mode
+
+
+@pytest.mark.dynamo
+@pytest.mark.parametrize(
+    ("qaic_config", "ctx_len", "batch_size", "error"),
+    [
+        ({"blocking_mode": "kv", "num_kv_blocks": 2, "attn_dp": 2}, CTX_LEN, 2, "only with blocking_mode"),
+        ({"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "attn_cp": 3}, CTX_LEN, 2, "ctx_len"),
+        ({"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "attn_dp": 2}, CTX_LEN, 1, "batch size"),
+    ],
+)
+def test_cpdp_headpar_rejects_incompatible_blocking_config(qaic_config, ctx_len, batch_size, error):
+    with pytest.raises(ValueError, match=error):
+        build_transformer_blocking_config_for_transform(
+            _make_tiny_llama().config,
+            ctx_len=ctx_len,
+            seq_len=SEQ_LEN,
+            bs=batch_size,
+            num_devices=1,
+            qaic_config=qaic_config,
+            aic_num_cores=4,
+        )
+
+
+@pytest.mark.dynamo
+def test_legacy_headpar_defaults_to_non_compact_cache_layout():
+    blocking_config = build_transformer_blocking_config_for_transform(
+        _make_tiny_llama().config,
+        ctx_len=CTX_LEN,
+        seq_len=SEQ_LEN,
+        bs=BATCH_SIZE,
+        num_devices=1,
+        qaic_config={"blocking_mode": "kv_headpar", "num_kv_blocks": NUM_KV_BLOCKS},
+        aic_num_cores=4,
+    )
+
+    assert blocking_config.attn_dp == 1
+    assert blocking_config.attn_cp == 1
