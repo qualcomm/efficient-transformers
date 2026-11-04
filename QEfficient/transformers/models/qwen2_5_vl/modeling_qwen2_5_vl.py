@@ -230,29 +230,37 @@ class QEffQwen2_5_VLVisionBlock(Qwen2_5_VLVisionBlock):
 
 
 class QEffQwen2_5_VisionPatchEmbed(Qwen2_5_VisionPatchEmbed):
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        target_dtype = self.proj.weight.dtype
-        hidden_states = hidden_states.view(
-            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
-        )
-        hidden_states = hidden_states.to(dtype=target_dtype)
-        bias = torch.zeros((self.proj.out_channels,), dtype=hidden_states.dtype, device=hidden_states.device)
-        hidden_states = F.conv3d(
-            hidden_states,
-            self.proj.weight,
-            bias,
-            self.proj.stride,
-            self.proj.padding,
-            self.proj.dilation,
-            self.proj.groups,
-        )
-        return hidden_states.view(-1, self.embed_dim)
+    def __qeff_init__(self):
+        if self.proj.bias is None:
+            proj = self.proj
+            qeff_proj = nn.Conv3d(
+                proj.in_channels,
+                proj.out_channels,
+                proj.kernel_size,
+                stride=proj.stride,
+                padding=proj.padding,
+                dilation=proj.dilation,
+                groups=proj.groups,
+                bias=True,
+                padding_mode=proj.padding_mode,
+                device="meta",
+                dtype=proj.weight.dtype,
+            )
+            qeff_proj.weight = proj.weight
+            del qeff_proj.bias
+            bias_device = proj.weight.device if proj.weight.device.type != "meta" else torch.device("cpu")
+            qeff_proj.register_buffer(
+                "bias",
+                torch.zeros(proj.out_channels, dtype=proj.weight.dtype, device=bias_device),
+                persistent=False,
+            )
+            qeff_proj.train(proj.training)
+            self.proj = qeff_proj
 
 
 class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPretrainedModel):
     def __qeff_init__(self):
         self.attention_mask_builder = QEffQwen2_5_VLAttentionMask()
-        self.patch_embed.__class__ = QEffQwen2_5_VisionPatchEmbed
 
     def rot_pos_emb(self, grid_thw):
         bs, t, h, w = grid_thw.shape
