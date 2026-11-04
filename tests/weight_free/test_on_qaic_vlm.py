@@ -1373,7 +1373,7 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
                 skip_vision=True,
             )
             assert qeff_model.lang_model.hash_params.get("moe_prefill_flavour") == "expert_parallel"
-            qaic_ep_tokens = _run_qwen35_three_qpc(
+            qaic_ep_tokens = _run_vlm_three_qpc(
                 qeff_model,
                 qeff_inputs,
                 {
