@@ -149,6 +149,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
                 num_experts if quantized_experts else weights.gate.shape[0]
             )
             num_packed_chunks = self.expert_parallel_num_packed_chunks
+            
             if quantized_experts:
                 return moe_quantized_expert_parallel(
                     x,
@@ -159,6 +160,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
                     num_parallelized_experts=num_parallelized_experts,
                     num_packed_chunks=num_packed_chunks,
                 )
+            # breakpoint()
             return moe_expert_parallel(
                 x,
                 dense,
@@ -168,7 +170,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
                 num_parallelized_experts=num_parallelized_experts,
                 num_devices=getattr(self, "num_devices", 1),
                 experts_per_soc=getattr(self, "experts_per_soc", None),
-                tree_reduce=getattr(self, "tree_reduce", False),
+                tree_reduce=False,#getattr(self, "tree_reduce", False),
                 num_packed_chunks=num_packed_chunks,
             )
         if quantized_experts:

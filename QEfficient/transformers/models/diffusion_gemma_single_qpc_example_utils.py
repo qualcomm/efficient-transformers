@@ -926,8 +926,8 @@ def compile_unified_qpc(
     qaic_config_moe = {
         "moe_config": {
             "flavour": "expert_parallel",
-            "expert_parallel_chunk_size": 128,
-            "tree_reduce": True,
+            "expert_parallel_chunk_size": 256,
+            "tree_reduce": False,
         }
     }
     specializations, _ = unified.model.get_specializations(
@@ -942,8 +942,8 @@ def compile_unified_qpc(
         qaic_config=qaic_config_moe,
         aic_num_cores=num_cores,
     )
-    # npi_file_path = '/home/jsaisaga//home/jsaisaga/.cache/qeff_models/DiffusionGemmaForBlockDiffusion/DiffusionGemmaUnifiedWrapper-9c317201f1a690a7/npi_fp32_unified_accum.yaml'
-    npi_file_path = qeff_model.generate_npi_file(onnx_path)
+    npi_file_path = '/home/jsaisaga/.cache/qeff_models/DiffusionGemmaForBlockDiffusion/DiffusionGemmaDecoderWrapper-e945ca8acff52d7f/npi_fp32_unified_accum.yaml'
+    # npi_file_path = qeff_model.generate_npi_file(onnx_path)
 
     custom_io = {}
     if aic_hw_version != "ai200":
