@@ -8,11 +8,20 @@
 """
 Weight-free VLM tests on QAIC.
 
-All tests require QAIC hardware (marked @pytest.mark.on_qaic).
-All tests run with weight_free=True (set on the QEff model, which forces
+QAIC parity and compile tests require hardware (marked @pytest.mark.on_qaic).
+Tests run with weight_free=True (set on the QEff model, which forces
 dynamo=True internally) and use_onnx_subfunctions=True.
 
 Covers VLM export, multi-specialization compilation, and HF/QAIC parity.
+
+The decode-blocking matrix covers every model in
+``VLM_DECODE_BLOCKING_MODEL_TYPES`` with every key in
+``VLM_DECODE_BLOCKING_KEYS``; By default, collection selects one seeded pseudo-random
+mode per model (six cases total), stable across runs and xdist workers. To run
+that sample on QAIC:
+
+    HF_HUB_ENABLE_HF_TRANSFER=1 pytest -s -vv -rs \
+      tests/weight_free/test_on_qaic_vlm.py::test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics
 """
 
 from __future__ import annotations
@@ -67,7 +76,7 @@ WEIGHT_FREE_VLM_QAIC_MODEL_IDS = {
     "qwen3_5_moe": "tiny-random/qwen3.5-moe",
     "gemma4": "tiny-random/gemma-4-dense",
 }
-VLM_GENERATION_LEN = 2
+VLM_GENERATION_LEN = 10
 VLM_PREFILL_SEQ_LEN = 64
 VLM_CTX_LEN = 512
 VLM_IMAGE_HEIGHT = 354
@@ -75,7 +84,6 @@ VLM_IMAGE_WIDTH = 536
 VLM_NUM_CORES = constants.DEFAULT_AIC_NUM_CORES
 VLM_HEAD_BLOCKING_NUM_DEVICES = 4
 VLM_PROMPT = "Describe this image."
-VLM_DECODE_BLOCKING_GENERATION_LEN = 10
 VLM_DECODE_BLOCKING_KEYS = ("h", "q", "kv", "qkv", "hqkv", "bhqkv", "kv_headpar")
 VLM_DECODE_BLOCKING_MODEL_TYPES = (
     "qwen2_5_vl",
@@ -85,8 +93,7 @@ VLM_DECODE_BLOCKING_MODEL_TYPES = (
     "qwen3_5_moe",
     "gemma4",
 )
-VLM_GEMMA4_DECODE_BLOCKING_KEYS = tuple(key for key in VLM_DECODE_BLOCKING_KEYS if key not in {"h", "q"})
-VLM_DECODE_BLOCKING_SAMPLE_SIZE = 10
+VLM_DECODE_BLOCKING_CASES_PER_MODEL = 1
 # Match the CausalLM blocking tests: only the pure head-parallel modes need
 # a multi-device, user-tiled compile.  The VLM matrix currently only includes
 # "h" from this set; hqkv/bhqkv should keep the ordinary one-device path.
@@ -94,7 +101,7 @@ VLM_HEAD_BLOCKING_KEYS = {"h", "hq", "hkv"}
 
 
 def _vlm_blocking_compile_options(model_type: str, blocking_key: str) -> dict:
-    """Select compile options for a decode-blocking case."""
+    """Choose QAIC placement; Gemma4 uses one device, other head modes use four."""
     if blocking_key in VLM_HEAD_BLOCKING_KEYS and model_type != "gemma4":
         device_groups = get_qaic_mdp_device_groups(devices_per_group=VLM_HEAD_BLOCKING_NUM_DEVICES)
         if not device_groups:
@@ -125,33 +132,33 @@ def _build_moe_decode_qaic_config() -> dict:
     return {"moe_config": {"flavour": "decode_bmm"}}
 
 
-def _vlm_decode_blocking_marks(model_type: str, blocking_key: str):
-    marks = [pytest.mark.xdist_group(name=f"qaic-vlm-decode-blocking-{model_type}")]
-    if model_type == "gemma4":
-        marks.append(pytest.mark.xfail(reason="Gemma4 decode blocking parity is currently mismatching", strict=False))
-    return marks
-
-
 VLM_DECODE_BLOCKING_QAIC_CASES = [
     pytest.param(
         model_type,
         blocking_key,
-        marks=_vlm_decode_blocking_marks(model_type, blocking_key),
+        marks=pytest.mark.xdist_group(name=f"qaic-vlm-decode-blocking-{model_type}"),
         id=f"{model_type.replace('_', '-')}-{blocking_key}",
     )
     for model_type in VLM_DECODE_BLOCKING_MODEL_TYPES
-    for blocking_key in (VLM_GEMMA4_DECODE_BLOCKING_KEYS if model_type == "gemma4" else VLM_DECODE_BLOCKING_KEYS)
+    for blocking_key in VLM_DECODE_BLOCKING_KEYS
 ]
 
-# A fixed seed keeps the default 10-case blocking subset stable across xdist workers.
-_VLM_DECODE_BLOCKING_SAMPLED_CASES = random.Random("42:vlm_decode_blocking").sample(
-    VLM_DECODE_BLOCKING_QAIC_CASES,
-    k=min(VLM_DECODE_BLOCKING_SAMPLE_SIZE, len(VLM_DECODE_BLOCKING_QAIC_CASES)),
-)
+
+_VLM_DECODE_BLOCKING_SAMPLED_CASE_IDS = {
+    f"{model_type.replace('_', '-')}-{blocking_key}"
+    for model_type in VLM_DECODE_BLOCKING_MODEL_TYPES
+    for blocking_key in random.Random(f"42:{model_type}").sample(
+        VLM_DECODE_BLOCKING_KEYS,
+        k=min(VLM_DECODE_BLOCKING_CASES_PER_MODEL, len(VLM_DECODE_BLOCKING_KEYS)),
+    )
+}
+_VLM_DECODE_BLOCKING_SAMPLED_CASES = [
+    case for case in VLM_DECODE_BLOCKING_QAIC_CASES if case.id in _VLM_DECODE_BLOCKING_SAMPLED_CASE_IDS
+]
 
 
 def _select_vlm_decode_blocking_cases(config) -> list[pytest.ParameterSet]:
-    """Collect a stable 10-case subset by default while keeping every case directly addressable."""
+    """Use one stable sampled mode per model unless pytest specifies blocking node IDs."""
     explicitly_selected_ids = {
         case.id for case in VLM_DECODE_BLOCKING_QAIC_CASES if any(f"[{case.id}]" in arg for arg in config.args)
     }
@@ -161,6 +168,7 @@ def _select_vlm_decode_blocking_cases(config) -> list[pytest.ParameterSet]:
 
 
 def pytest_generate_tests(metafunc):
+    """Sample the blocking matrix by default while preserving explicit node-ID selection."""
     if metafunc.function.__name__ != "test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics":
         return
     metafunc.parametrize("model_type,blocking_key", _select_vlm_decode_blocking_cases(metafunc.config))
@@ -373,6 +381,7 @@ def _update_retained_states(target_inputs, source_outputs, layer_types):
 
 
 def _language_layer_types(qeff_model) -> list[str]:
+    """Map decoder layers to retained-state names used by split prefill/decode QPCs."""
     text_config = getattr(qeff_model.model.config, "text_config", qeff_model.model.config)
     # Gemma4 is a hybrid sliding/full-attention model, but both layer types
     # retain ordinary past_key/past_value tensors.  Only Qwen3.5 maps its
@@ -386,6 +395,7 @@ def _language_layer_types(qeff_model) -> list[str]:
 
 
 def _ensure_position_ids(inputs: dict[str, np.ndarray]) -> None:
+    """Supply position IDs for manually driven split-QPC inference when absent."""
     if "position_ids" in inputs:
         return
     attention_mask = inputs.get("attention_mask")
@@ -396,6 +406,7 @@ def _ensure_position_ids(inputs: dict[str, np.ndarray]) -> None:
 
 
 def _pad_position_ids(position_ids: np.ndarray, pad_len: int) -> np.ndarray:
+    """Pad sequence positions with -1 so padding does not advance position indices."""
     pad_width = [(0, 0)] * position_ids.ndim
     pad_width[-1] = (0, pad_len)
     return np.pad(position_ids, pad_width, constant_values=-1)
@@ -442,6 +453,7 @@ def _set_vision_output_buffers(session, vision_inputs: dict[str, np.ndarray]) ->
 
 
 def _update_retained_vision_inputs(target_inputs, source_outputs):
+    """Carry retained vision state and image index into the next language call."""
     for output_name, value in source_outputs.items():
         if not output_name.endswith("_RetainedState"):
             continue
@@ -459,6 +471,12 @@ def _run_vlm_three_qpc(
     layer_types,
     generation_len,
 ):
+    """Run vision, chunked prefill, and greedy decode with separate QAIC sessions.
+
+    Retained KV or recurrent states are copied between language calls, and all
+    sessions are deactivated even if a stage raises. This path is used for
+    head-blocked Qwen3-VL and split-QPC Qwen3.5 cases.
+    """
     vision_session = QAICInferenceSession(qpc_paths["vision_qpc_path"]) if qpc_paths.get("vision_qpc_path") else None
     prefill_session = None
     decode_session = None
@@ -473,7 +491,10 @@ def _run_vlm_three_qpc(
         vision_outputs = {}
         if vision_session is not None:
             vision_inputs = {name: inputs[name] for name in vision_session.input_names if name in inputs}
-            for name in ("pixel_values", "image_embeds"):
+            vision_fp16_inputs = {"pixel_values", "image_embeds"}
+            if model_type == "gemma4":
+                vision_fp16_inputs.add("image_masks")
+            for name in vision_fp16_inputs:
                 if name in vision_inputs:
                     vision_inputs[name] = vision_inputs[name].astype(np.float16)
             _set_vision_output_buffers(vision_session, vision_inputs)
@@ -576,7 +597,6 @@ def _run_vlm_three_qpc(
 @pytest.mark.parametrize("model_type", WEIGHT_FREE_VLM_QAIC_MODEL_PARAMS)
 def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tmp_export_dir):
     """Export every supported VLM from a synthesized checkpoint on CPU."""
-    model_config = _VLM_MODEL_CONFIGS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_cpu_checkpoint"
     tiny_model_types = {"qwen2_5_vl", "qwen3_vl"}
     dummy_model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS.get(model_type) if model_type in tiny_model_types else None
@@ -785,7 +805,6 @@ def test_weight_free_vlm_combined_compile(model_type, model_id, tmp_export_dir):
 @pytest.mark.parametrize("model_type", WEIGHT_FREE_VLM_QAIC_MODEL_PARAMS)
 def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
     """Validate one compact weight-free VLM export, compile, and HF/QAIC parity run."""
-    model_config = _VLM_MODEL_CONFIGS[model_type]
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_checkpoint"
 
@@ -930,14 +949,20 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     record_property,
     request,
 ):
-    """Compare HF and decode-blocked weight-free VLM QAIC tokens."""
-    model_config = _VLM_MODEL_CONFIGS[model_type]
+    """Check HF/QAIC parity and artifacts for weight-free VLM decode blocking.
+
+    Head-blocked Qwen3-VL uses separate vision, prefill, and decode QPCs;
+    Qwen3.5 variants split prefill and decode for retained recurrent state.
+    Other cases, including Gemma4, use the combined compile/generate path.
+    Every path verifies the selected blocking mode and ONNX artifacts before
+    comparing greedy generated tokens with the HF reference.
+    """
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_checkpoint"
     image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
     skip_vision = model_type == "qwen2_5_vl"
     qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
-    generation_len = VLM_DECODE_BLOCKING_GENERATION_LEN
+    generation_len = VLM_GENERATION_LEN
 
     try:
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
@@ -948,6 +973,9 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         )
     except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
+
+    if model_type == "gemma4":
+        qaic_config.update(ctx_len=model_config["ctx_len"], skip_kv=False)
 
     hf_inputs, _ = _prepare_vlm_test_inputs(
         processor,
@@ -1015,23 +1043,15 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         )
     if skip_vision:
         compile_kwargs["skip_vision"] = True
+    # Only Qwen3-VL head-blocking uses this split path: vision and prefill run
+    # on one device while the decode QPC uses four-device user tiling.
     head_blocked_single_qpc_vlm_with_vision = (
         blocking_key in VLM_HEAD_BLOCKING_KEYS and not skip_vision and model_type in {"qwen3_vl", "qwen3_vl_moe"}
     )
-    separate_qpcs = model_type in {"qwen3_5", "qwen3_5_moe", "gemma4"}
-    if model_type == "gemma4":
-        prefill_qaic_config = {}
-        decode_qaic_config = {**qaic_config, "ctx_len": model_config["ctx_len"], "skip_kv": True}
-        compile_kwargs.update(
-            mxfp6_matmul=True,
-            mxint8_kv_cache=True,
-            node_precision_info=False,
-            user_tiled=True,
-            use_onnx_subfunctions=True,
-        )
-    else:
-        prefill_qaic_config = {}
-        decode_qaic_config = qaic_config
+    # Qwen3-VL head blocking needs a one-device vision QPC; Qwen3.5 needs
+    # split prefill/decode QPCs. Gemma4 uses regular combined-QPC parity.
+    separate_qpcs = model_type in {"qwen3_5", "qwen3_5_moe"}
+    prefill_qaic_config = {}
     runtime_compile_options = _vlm_blocking_compile_options(model_type, blocking_key)
     decode_compile_kwargs = dict(compile_kwargs)
     decode_compile_kwargs.update(runtime_compile_options)
@@ -1097,8 +1117,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         vision_qpc = None
         if not skip_vision:
             vision_compile_kwargs = dict(compile_kwargs)
-            if model_type == "gemma4":
-                vision_compile_kwargs.update(mxfp6_matmul=False, mxint8_kv_cache=False, user_tiled=False)
             vision_qpc = qeff_model.compile(
                 compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_vision"),
                 **vision_compile_kwargs,
@@ -1108,23 +1126,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
                 skip_lang=True,
                 skip_vision=False,
             )
-        prefill_compile_model = qeff_model
-        decode_compile_model = qeff_model
-        if model_type == "gemma4":
-            prefill_compile_model = QEFFAutoModelForImageTextToText.from_pretrained(
-                str(checkpoint_dir),
-                kv_offload=True,
-                weight_free=True,
-                dtype=torch.float32,
-            )
-            decode_compile_model = QEFFAutoModelForImageTextToText.from_pretrained(
-                str(checkpoint_dir),
-                kv_offload=True,
-                weight_free=True,
-                dtype=torch.float32,
-                qaic_config=decode_qaic_config,
-            )
-        prefill_qpc = prefill_compile_model.compile(
+        prefill_qpc = qeff_model.compile(
             compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_prefill"),
             **compile_kwargs,
             retain_full_kv=True,
@@ -1136,7 +1138,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
             skip_vision=True,
             qaic_config=prefill_qaic_config,
         )
-        decode_qpc = decode_compile_model.compile(
+        decode_qpc = qeff_model.compile(
             compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_decode"),
             **decode_compile_kwargs,
             retain_full_kv=True,
@@ -1145,9 +1147,8 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
             prefill_seq_len=1,
             prefill_only=False,
             skip_vision=True,
-            qaic_config=decode_qaic_config,
+            qaic_config=qaic_config,
         )
-        qeff_model.lang_model = decode_compile_model.lang_model
         qpc_paths = {
             "vision_qpc_path": None if vision_qpc is None else vision_qpc["vision_qpc_path"],
             "lang_prefill_qpc_path": prefill_qpc["lang_prefill_qpc_path"],
@@ -1224,7 +1225,6 @@ def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_exp
         pytest.skip("Qwen 2.5-VL vision QPC is deferred because QAIC reports a Conv3D bias-shape error")
     if model_type == "gemma4":
         pytest.skip("Gemma 4 does not support multi-specialization yet")
-    model_config = _VLM_MODEL_CONFIGS[model_type]
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_multi_spec_checkpoint"
     image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
