@@ -18,6 +18,7 @@ token axis at ``dim=-2`` and therefore serves all three flavours unchanged:
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -102,6 +103,7 @@ def gptoss_clamp(
         max_tensor = torch.full_like(x, max_value)
         x = torch.minimum(x, max_tensor)
     return x
+
 
 def minimax_m3_clamped_glu_mlp(
     x: torch.Tensor,
