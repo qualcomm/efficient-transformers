@@ -24,7 +24,6 @@ from QEfficient.base.onnx_transforms import (
     CustomOpTransform,
     DeduplicateRepeatedSubgraphTransform,
     LocalizeFunctionReduceSumAxesTransform,
-    DeduplicateRepeatedSubgraphTransform,
     PreserveNestedCacheRetainedStateTransform,
     RenameFunctionOutputsTransform,
     RenameRepeatedSubgraphTransform,
@@ -83,6 +82,7 @@ def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
             "minimax_m3_vl",
             "minimax_m3_vl_text",
         }:
+
             def _concretize(spec, value):
                 if torch.is_tensor(value) and isinstance(spec, dict):
                     return {axis: int(value.shape[axis]) for axis in spec}
@@ -92,9 +92,7 @@ def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
                     return {key: _concretize(item, value.get(key)) for key, item in spec.items()}
                 return spec
 
-            reordered_shapes = {
-                key: _concretize(spec, reordered_inputs[key]) for key, spec in reordered_shapes.items()
-            }
+            reordered_shapes = {key: _concretize(spec, reordered_inputs[key]) for key, spec in reordered_shapes.items()}
         return reordered_inputs, reordered_shapes
     return reordered_inputs, None
 
@@ -189,7 +187,11 @@ def convert_dynamic_axes_to_dynamic_shapes(
             elif dim_name == "time" and observed_dim_values.get(dim_name) == {1}:
                 dim_registry[dim_name] = Dim("time")
             elif observed_dim_values.get(dim_name) == {1}:
-                dim_registry[dim_name] = Dim.AUTO
+                dim_registry[dim_name] = Dim.STATIC if model_type == "glm_moe_dsa" else Dim.AUTO
+            elif dim_name == "batch_size" and model_type == "glm_moe_dsa":
+                # GLM DSA can fold batch across attention-DP lanes. Dynamo may
+                # specialize it to the export batch for a concrete DP layout.
+                dim_registry[dim_name] = Dim.STATIC
             elif dim_name == "batch_size":
                 dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
             elif dim_name == "full_batch_size":
@@ -199,7 +201,12 @@ def convert_dynamic_axes_to_dynamic_shapes(
                     max=DYNAMO_DIM_MAX_BATCH_SIZE,
                 )
             elif "seq_len" in dim_name:
-                seq_min = 1 if model_type in {"qwen4_exp", "qwen4_exp_text", "glm_moe_dsa", "minimax_m3_vl", "minimax_m3_vl_text"} else 2
+                seq_min = (
+                    1
+                    if model_type
+                    in {"qwen4_exp", "qwen4_exp_text", "glm_moe_dsa", "minimax_m3_vl", "minimax_m3_vl_text"}
+                    else 2
+                )
                 dim_registry[dim_name] = Dim("seq_len", min=seq_min, max=max_seq_len)
             elif "comp_ctx_lengths" in dim_name:
                 dim_registry[dim_name] = Dim(
@@ -219,6 +226,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 dim_registry[dim_name] = Dim(dim_name, min=1, max=max_seq_len)
             elif model_type in {"minimax_m3_vl", "minimax_m3_vl_text"} and "ctx_len" in dim_name:
                 dim_registry[dim_name] = Dim(dim_name, min=1, max=max_seq_len)
+            elif model_type == "glm_moe_dsa" and "ctx_len" in dim_name:
+                dim_registry[dim_name] = Dim.STATIC
             elif "ctx_len" in dim_name:
                 dim_registry[dim_name] = Dim("ctx_len", min=1, max=max_seq_len)
             elif "sliding_window" in dim_name:
@@ -239,7 +248,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
     compressed_kv_layers: dict[int, Any] = {}
     k_pe_layers: dict[int, Any] = {}
     deepseek_v4_past_states: dict[int, list[Any]] = {}
-    indexer_key_layers: Dict[int, Any] = {}
+    indexer_key_layers: dict[int, Any] = {}
 
     for input_name, axes_map in dynamic_axes.items():
         # Dynamic axes metadata also contains retained-state outputs. They use
@@ -283,7 +292,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
     # required by torch.export from the layer suffixes, preserving the order in
     # which get_onnx_retained_state_specs emitted each layer's states.
     if model_type in {"qwen4_exp", "qwen4_exp_text"}:
-        retained_by_layer: Dict[int, list] = {}
+        retained_by_layer: dict[int, list] = {}
         retained_names = []
         for input_name in dynamic_axes:
             match = re.search(r"\.(\d+)$", input_name)
