@@ -75,6 +75,10 @@ def CtxScatter3D(data: onnxscript.FLOAT, position_ids: onnxscript.INT32, updates
     ctx_idx = ops.Expand(ops.Unsqueeze(ops.Cast(position_ids, to=onnxscript.INT64.dtype), [2]), exp_shape)
     indices = ops.Concat(batch_idx, ctx_idx, axis=2)
 
+    # BF16 exports can produce FP32 updates for a BF16 cache. ScatterND requires
+    # data and updates to have the same element type, so match updates to data.
+    updates = ops.CastLike(updates, data)
+
     return ops.ScatterND(data, indices, updates)
 
 
@@ -110,7 +114,9 @@ class CtxScatterFunc3DGeneralized(torch.autograd.Function):
         data = data.clone()
         valid = position_ids != torch.iinfo(torch.int32).max
         batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1).expand_as(position_ids)
-        data[batch_idx[valid], position_ids[valid].long()] = updates[valid]
+        # Keep eager PyTorch behavior aligned with the CtxScatter3D ONNX
+        # function, which casts updates to the cache dtype before ScatterND.
+        data[batch_idx[valid], position_ids[valid].long()] = updates[valid].to(data.dtype)
         return data
 
     @staticmethod

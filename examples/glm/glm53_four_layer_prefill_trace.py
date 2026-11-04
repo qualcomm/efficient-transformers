@@ -114,7 +114,14 @@ def _onnx_value_info(model, name: str):
 def _onnx_numpy_dtype(value_info) -> np.dtype:
     import onnx
 
-    return np.dtype(onnx.helper.tensor_dtype_to_np_dtype(value_info.type.tensor_type.elem_type))
+    elem_type = value_info.type.tensor_type.elem_type
+    if elem_type == onnx.TensorProto.BFLOAT16:
+        # ONNX 1.18 maps BFLOAT16 to float32 in tensor_dtype_to_np_dtype. Use
+        # ml_dtypes so QAIC profiling buffers retain BF16's 2-byte element size.
+        import ml_dtypes
+
+        return np.dtype(ml_dtypes.bfloat16)
+    return np.dtype(onnx.helper.tensor_dtype_to_np_dtype(elem_type))
 
 
 def build_synthetic_io(

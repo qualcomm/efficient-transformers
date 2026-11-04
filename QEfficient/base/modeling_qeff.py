@@ -1225,8 +1225,15 @@ class QEFFBaseModel(ABC):
             command.append("-sub-functions")
 
         model_in_bfloat16 = hasattr(self, "config") and (self.config.torch_dtype == torch.bfloat16)
+        glm_retained_state_prefixes = ("compressed_kv.", "k_pe.", "indexer_key.")
         pkv_in_bfloat16 = (custom_io is not None) and any(
-            ("past_" in key or "pixel_values" in key) and "bfloat16" in value for key, value in custom_io.items()
+            (
+                "past_" in key
+                or "pixel_values" in key
+                or key.startswith(glm_retained_state_prefixes)
+            )
+            and "bfloat16" in value
+            for key, value in custom_io.items()
         )
         custom_io_for_compiler = custom_io if not (model_in_bfloat16 and pkv_in_bfloat16) else None
 
