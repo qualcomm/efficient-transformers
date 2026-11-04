@@ -23,6 +23,7 @@ from transformers import (
 from urllib3.util.retry import Retry
 
 from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.run_utils import ApiRunnerInternVL, ApiRunnerMolmo, ApiRunnerVlm
 from QEfficient.utils.test_utils import (
     InternProcessor,
@@ -173,7 +174,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100_CB(
             continuous_batching=True,
         )
     compile_kwargs = {
-        "num_cores": 16,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "num_devices": num_devices,
         "prefill_seq_len": prompt_len,
         "ctx_len": ctx_len,

@@ -15,6 +15,7 @@ import pytest
 from transformers import AutoConfig
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 
 from ._helpers import (
     BATCH_SIZE,
@@ -64,7 +65,7 @@ def test_weight_free_ccl_compile_and_generate(model_type, model_id, tmp_export_d
         compile_dir=str(tmp_export_dir / "wf_normal_compile"),
         prefill_seq_len=CCL_PREFILL_SEQ_LEN,
         ctx_len=CCL_CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -83,7 +84,7 @@ def test_weight_free_ccl_compile_and_generate(model_type, model_id, tmp_export_d
         ctx_len=CCL_CTX_LEN,
         comp_ctx_lengths_prefill=CCL_LENGTHS,
         comp_ctx_lengths_decode=CCL_LENGTHS,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )

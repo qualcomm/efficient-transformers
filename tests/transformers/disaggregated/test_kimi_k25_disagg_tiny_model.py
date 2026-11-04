@@ -19,6 +19,7 @@ from PIL import Image
 
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.two_phase import model_export_compile_lock, resolve_two_phase_cleanup
 from tests.utils.load_kimi_utils import (
     KIMI_K25_MODEL_NAME,
@@ -135,7 +136,7 @@ def _compile_disagg_qpcs(qeff_model: QEFFAutoModelForImageTextToText, compile_di
     common_compile_kwargs = {
         "batch_size": BATCH_SIZE,
         "ctx_len": CTX_LEN,
-        "num_cores": 16,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "mxfp6_matmul": False,
         "split_model_io": True,
         "mos": 1,
