@@ -582,12 +582,22 @@ def _create_equal_compiler_pp_dump(
     ordered_nodes = [
         node_name for partition in compiler_partitions for node_name in partition.get("nodeList", []) if node_name
     ]
-    if not ordered_nodes:
-        raise ValueError("Compiler dump contains no nodes")
     if num_partitions <= 0:
-        raise ValueError(f"Invalid target partition count: {num_partitions}")
+        logger.info(
+            "Cannot equalize compiler dump with invalid target partition count %d; keeping original dump",
+            num_partitions,
+        )
+        return compiler_dump
+    if not ordered_nodes:
+        logger.info("Compiler dump contains no nodes; keeping original dump and continuing")
+        return compiler_dump
     if num_partitions > len(ordered_nodes):
-        raise ValueError(f"Cannot split {len(ordered_nodes)} compiler nodes into {num_partitions} non-empty partitions")
+        logger.info(
+            "Cannot split %d compiler nodes into %d non-empty partitions; keeping original dump and continuing",
+            len(ordered_nodes),
+            num_partitions,
+        )
+        return compiler_dump
 
     base, remainder = divmod(len(ordered_nodes), num_partitions)
     equal_partitions = []
@@ -630,11 +640,10 @@ def _repair_scoped_alias_partitioning(
 ) -> int:
     """Align compiler-visible top-level nodes with the compiler dump partition.
 
-    If the compiler dump was generated with a different number of partitions,
-    first create ``tmp_compiler_pp_updated.json`` by flattening its node lists in
-    compiler order and splitting them evenly across the final MDP partitions.
-    The equalized dump then goes through the same repair path as a dump whose
-    partition count already matches the final MDP.
+    When possible, a compiler dump with a different partition count is flattened
+    in compiler order and split across the final MDP partitions. If equalization
+    is not possible, the original dump continues through the repair flow; moves
+    targeting partitions outside the final MDP are skipped.
     """
     compiler_partitions = compiler_dump.get("partitions", [])
     mdp_partitions = mdp_json.get("partitions", [])
@@ -650,7 +659,7 @@ def _repair_scoped_alias_partitioning(
             output_path=output_path,
             mdp_layout=mdp_json,
         )
-        compiler_partitions = compiler_dump["partitions"]
+        compiler_partitions = compiler_dump.get("partitions", [])
 
     model = onnx.load(onnx_path, load_external_data=False)
     compiler_partition, compiler_position = {}, {}
@@ -733,6 +742,15 @@ def _repair_scoped_alias_partitioning(
             continue
         target_idx = compiler_partition.get(node_name)
         if target_idx is None or target_idx == source_idx:
+            continue
+        if not 0 <= target_idx < len(mdp_partitions):
+            logger.info(
+                "Skipping compiler partition repair for %r: target Partition%d is outside the generated MDP "
+                "which has %d partition(s); continuing with the original placement",
+                node_name,
+                target_idx,
+                len(mdp_partitions),
+            )
             continue
         node = node_by_name.get(node_name)
         if node is not None:
