@@ -50,26 +50,26 @@ logger = QEFFLogger.get_logger("MODEL")
 
 
 def qeff_apply_interleaved_mrope(freqs, mrope_section):
-    """Apply interleaved MRoPE to 3D rotary embeddings.
-    Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
-    interleaved [THWTHWTHW...TT], preserving frequency continuity.
+    """Apply the config-driven interleaving used by Hugging Face MRoPE.
+
+    The rotary channels are stored as chunks for each MRoPE axis.  Hugging
+    Face doubles ``mrope_section`` (because the rotary frequencies contain
+    both halves of the head dimension), then selects the axis for each chunk
+    cyclically.  Keeping that operation expressed with tensor ops is
+    important for both Dynamo/``torch.export`` and weight-free export.
+
     args:
-        x: (3, bs, seq_len, head_dim // 2)
-        mrope_section: (3,)
+        freqs: (num_axes, bs, seq_len, head_dim)
+        mrope_section: channel sections for each MRoPE axis
     returns:
-        x_t: (bs, seq_len, head_dim // 2)
+        Tensor of shape ``(bs, seq_len, head_dim)``.
     """
-    freqs_t = freqs[0]  # just overwrite the first dimension T
-    half_shape = freqs.shape[-1] // 2
-    for dim, offset in enumerate((1, 2), start=1):  # H, W
-        length = mrope_section[dim] * 3
-        idx = slice(offset, length, 3)
-        freqs_t[..., idx] = freqs[dim, ..., idx]
-        offset += half_shape
-        length += half_shape
-        idx = slice(offset, length, 3)
-        freqs_t[..., idx] = freqs[dim, ..., idx]
-    return freqs_t
+    num_axes = len(mrope_section)
+    split_sections = [int(section) for section in mrope_section] * 2
+    return torch.cat(
+        [chunk[i % num_axes] for i, chunk in enumerate(freqs.split(split_sections, dim=-1))],
+        dim=-1,
+    )
 
 
 def qeff_prepare_mrope_cos_sin(cos, sin, position_ids, mrope_section, dtype=None):
