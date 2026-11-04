@@ -68,6 +68,8 @@ from QEfficient.transformers.modeling_utils import (
 from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import override_gptoss_prefill_chunking
 from QEfficient.transformers.models.pytorch_transforms import (
     CustomOpsTransform,
+    DFlash2DLMTransform,
+    DFlash2TLMTransform,
     DFlashDLMTransform,
     DFlashTLMTransform,
     DFlashTransform,
@@ -1634,10 +1636,15 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         self.input_shapes, self.output_names = None, None
 
         # DFlash TLM: attach fc/hidden_norm and enable target-layer hidden-state collect.
-        self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
+        self.dflash_tlm = bool(
+            qaic_config and (qaic_config.get("dflash2_checkpoint") or qaic_config.get("target_layer_ids"))
+        )
         if self.dflash_tlm:
             qaic_config.setdefault("pretrained_model_name_or_path", kwargs.get("pretrained_model_name_or_path"))
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            if qaic_config.get("dflash2_checkpoint"):
+                self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+            else:
+                self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
             self.lang_model.hash_params["dflash_dlm_repo"] = qaic_config.get("dflash_dlm_repo")
             self.lang_model.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
 
@@ -1647,7 +1654,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             prefix = "qwen35_moe" if self.model.config.model_type == "qwen3_5_moe" else "qwen35"
             self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_kv_commit_v2"
-            self.lang_model.hash_params["dflash_chunk_size"] = 16
+            self.lang_model.hash_params["dflash_chunk_size"] = getattr(
+                self.model.model.language_model, "dflash_chunk_size", 16
+            )
         if self.dflash_tlm and self.model.config.model_type == "gemma4":
             self.lang_model.hash_params["dflash_cache_protocol"] = "gemma4_block_window_v1"
 
@@ -3822,6 +3831,38 @@ MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP = {
 }
 
 
+def _peek_architectures(pretrained_model_name_or_path, kwargs: dict) -> list[str]:
+    """Read checkpoint architecture metadata without loading its weights."""
+    config = kwargs.get("config")
+    if config is None:
+        from transformers import AutoConfig
+
+        hub_kwargs = {
+            key: kwargs[key]
+            for key in ("cache_dir", "revision", "token", "local_files_only", "subfolder", "force_download")
+            if key in kwargs
+        }
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path,
+            trust_remote_code=kwargs.get("trust_remote_code", False),
+            **hub_kwargs,
+        )
+    architectures = list(getattr(config, "architectures", None) or [])
+    dflash_config = getattr(config, "dflash_config", None)
+    if (
+        isinstance(dflash_config, dict)
+        and {"conv_group_size", "conv_kernel_size", "selector_rank"}.issubset(dflash_config)
+        and "DFlash2DraftModel" not in architectures
+    ):
+        raise ValueError(
+            "The checkpoint contains DFlash-2 convolution/selector metadata but does not declare "
+            "'DFlash2DraftModel' in config.architectures. Use a supported DFlash-2 checkpoint or "
+            "supply its corrected configuration explicitly; the HF AutoModel loader is not a fallback "
+            "for this native draft format."
+        )
+    return architectures
+
+
 class QEFFAutoModelForCausalLM(QEFFBaseModel):
     """
     QEfficient class for Causal Language Models from the HuggingFace hub (e.g., GPT-2, Llama).
@@ -3974,16 +4015,24 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         # DFlash changes the model structure and output contract, so apply it before
         # the generic speculative-decoding and sampler transforms wrap model.forward.
         self.dflash_dlm = bool(qaic_config and qaic_config.get("dflash_dlm", False))
-        self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
+        self.dflash_tlm = bool(
+            qaic_config and (qaic_config.get("dflash2_checkpoint") or qaic_config.get("target_layer_ids"))
+        )
         if self.dflash_dlm:
-            self.model, _ = DFlashTransform.apply(self.model, qaic_config)
-            self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
-            self.hash_params["dflash_attention"] = "per_layer_window_v1"
-            if qaic_config.get("dflash_tlm_embedding_key"):
-                self.hash_params["dflash_tlm_embedding_key"] = qaic_config["dflash_tlm_embedding_key"]
-                self.hash_params["dflash_tlm_repo"] = qaic_config["dflash_tlm_repo"]
+            if self.model.__class__.__name__ == "DFlash2ForCausalLM":
+                self.model, _ = DFlash2DLMTransform.apply(self.model, qaic_config)
+            else:
+                self.model, _ = DFlashTransform.apply(self.model, qaic_config)
+                self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
+                self.hash_params["dflash_attention"] = "per_layer_window_v1"
+                if qaic_config.get("dflash_tlm_embedding_key"):
+                    self.hash_params["dflash_tlm_embedding_key"] = qaic_config["dflash_tlm_embedding_key"]
+                    self.hash_params["dflash_tlm_repo"] = qaic_config["dflash_tlm_repo"]
         if self.dflash_tlm:
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            if qaic_config.get("dflash2_checkpoint"):
+                self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+            else:
+                self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
             self.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
             if self.model.config.model_type == "gpt_oss":
                 self.hash_params["dflash_hidden_norm"] = "custom_rms_norm_v1"
@@ -4138,6 +4187,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             # checkpoint weights are ever materialized here. The real weights
             # are supplied later at export time via pretrained_model_name_or_path.
             model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
+        elif "DFlash2DraftModel" in _peek_architectures(pretrained_model_name_or_path, kwargs):
+            from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+            model = DFlash2ForCausalLM.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         else:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         if qaic_config is not None:
@@ -4407,6 +4460,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     qaic_config=qaic_config,
                     aic_num_cores=num_cores,
                 )
+
+        if getattr(self, "dflash_dlm", None) and prefill_seq_len is not None:
+            seq_len = min(seq_len, prefill_seq_len)
+
+        if getattr(self, "dflash_tlm", None) and any(
+            layer_type == "linear_attention" for layer_type in getattr(self.model.config, "layer_types", ())
+        ):
+            text_model = getattr(self.model, "model", None)
+            chunk_size = int(getattr(text_model, "dflash_chunk_size", seq_len))
+            seq_len = min(seq_len, chunk_size)
 
         supports_paged_attention = False
         # increase seq_len if using a larger number of blocks and set PagedAttention params if required
@@ -4736,6 +4799,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             output_names = apply_kv_cache_prefix(output_names, kv_cache_prefix)
             self.hash_params["kv_cache_prefix"] = kv_cache_prefix
 
+        if getattr(self, "dflash_dlm", None) and getattr(self.model, "emit_selector_hidden", False):
+            output_names.append("selector_hidden")
+            dynamic_axes["selector_hidden"] = {0: "batch_size", 1: "seq_len"}
         if getattr(self, "dflash_tlm", None):
             output_names.append("hidden_states")
             dynamic_axes["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}
