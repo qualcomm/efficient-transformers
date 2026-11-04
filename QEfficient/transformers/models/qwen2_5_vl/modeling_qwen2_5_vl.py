@@ -18,6 +18,7 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
 )
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLAttention,
     Qwen2_5_VLConfig,
@@ -228,9 +229,30 @@ class QEffQwen2_5_VLVisionBlock(Qwen2_5_VLVisionBlock):
         return hidden_states
 
 
+class QEffQwen2_5_VisionPatchEmbed(Qwen2_5_VisionPatchEmbed):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        target_dtype = self.proj.weight.dtype
+        hidden_states = hidden_states.view(
+            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
+        )
+        hidden_states = hidden_states.to(dtype=target_dtype)
+        bias = torch.zeros((self.proj.out_channels,), dtype=hidden_states.dtype, device=hidden_states.device)
+        hidden_states = F.conv3d(
+            hidden_states,
+            self.proj.weight,
+            bias,
+            self.proj.stride,
+            self.proj.padding,
+            self.proj.dilation,
+            self.proj.groups,
+        )
+        return hidden_states.view(-1, self.embed_dim)
+
+
 class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPretrainedModel):
     def __qeff_init__(self):
         self.attention_mask_builder = QEffQwen2_5_VLAttentionMask()
+        self.patch_embed.__class__ = QEffQwen2_5_VisionPatchEmbed
 
     def rot_pos_emb(self, grid_thw):
         bs, t, h, w = grid_thw.shape

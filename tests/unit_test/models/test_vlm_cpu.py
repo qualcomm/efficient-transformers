@@ -16,6 +16,7 @@ Tests verify:
 All tests run on CPU only. No actual model loading or QAIC hardware execution.
 """
 
+import copy
 import logging
 from types import SimpleNamespace
 
@@ -109,6 +110,35 @@ class TestQEFFAutoModelForImageTextToTextStructure:
         from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
 
         assert hasattr(QEFFAutoModelForImageTextToText, "__new__")
+
+
+def test_qwen2_5_vl_patch_embed_exports_rank_one_conv_bias():
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionPatchEmbed
+
+    from QEfficient.transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+        QEffQwen2_5_VisionPatchEmbed,
+        QEffQwen2_5_VisionTransformerPretrainedModel,
+    )
+
+    patch_embed = Qwen2_5_VisionPatchEmbed(patch_size=2, temporal_patch_size=2, embed_dim=4)
+    expected_patch_embed = copy.deepcopy(patch_embed)
+    vision_model = nn.Module()
+    vision_model.patch_embed = patch_embed
+    QEffQwen2_5_VisionTransformerPretrainedModel.__qeff_init__(vision_model)
+    assert isinstance(vision_model.patch_embed, QEffQwen2_5_VisionPatchEmbed)
+
+    input_values = torch.randn(3, 3 * 2 * 2 * 2)
+    torch.testing.assert_close(vision_model.patch_embed(input_values), expected_patch_embed(input_values))
+
+    meta_patch_embed = copy.deepcopy(vision_model.patch_embed).to(device="meta").eval()
+    onnx_program = torch.onnx.export(
+        meta_patch_embed,
+        (torch.empty(3, 3 * 2 * 2 * 2, device="meta"),),
+        dynamo=True,
+        optimize=False,
+    )
+    conv_node = next(node for node in onnx_program.model.graph if node.op_type == "Conv")
+    assert conv_node.inputs[2].shape.rank() == 1
 
 
 def test_weight_free_vlm_rejects_single_qpc():
