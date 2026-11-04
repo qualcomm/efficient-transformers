@@ -2174,11 +2174,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             compiler_options["artifacts"] = True
         if skip_lang and skip_vision:
             raise ValueError("Expected at least one of 'skip_lang' or 'skip_vision' to be False")
+        reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         if self.dflash_tlm and dflash_block_size is None and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             dflash_block_size = getattr(self.model.model.language_model, "dflash_chunk_size", 16)
         if self.dflash_tlm and not skip_lang and (type(dflash_block_size) is not int or dflash_block_size < 2):
             raise ValueError("DFlash TLM requires an integer dflash_block_size >= 2.")
-        reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         _ignore_public_mdp_ts_num_devices(compiler_options)
         if qaic_config and qaic_config.get("gdn_full_state_update") is True:
             _get_gdn_full_state_update_kwargs(

@@ -723,8 +723,8 @@ def test_dflash_mask_crosses_sliding_window(start, sliding_window, is_causal):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("model_kind", ["qwen3", "llama", "qwen3_5", "qwen3_5_moe"])
-def test_dflash_tlm_hash_includes_target_layer_selection(model_kind, monkeypatch):
+@pytest.mark.parametrize("model_type", ["qwen3", "llama", "qwen3_5", "qwen3_5_moe"])
+def test_dflash_tlm_hash_includes_target_layer_selection(model_type, monkeypatch):
     from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
     from QEfficient.utils.hash_utils import create_export_hash
 
@@ -735,10 +735,10 @@ def test_dflash_tlm_hash_includes_target_layer_selection(model_kind, monkeypatch
         if target_layer_ids is not None:
             qaic_config = {"target_layer_ids": target_layer_ids, "dflash_dlm_repo": "test/dflash-draft"}
         torch.manual_seed(7)
-        if model_kind in {"qwen3", "llama"}:
-            model = make_tiny_qwen3() if model_kind == "qwen3" else make_tiny_llama()
+        if model_type in {"qwen3", "llama"}:
+            model = make_tiny_qwen3() if model_type == "qwen3" else make_tiny_llama()
             return QEFFAutoModelForCausalLM(model, qaic_config=qaic_config)
-        model = make_tiny_qwen3_5_vlm(moe=model_kind == "qwen3_5_moe")
+        model = make_tiny_qwen3_5_vlm(moe=model_type == "qwen3_5_moe")
         return QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config=qaic_config).lang_model
 
     assert "target_layer_ids" not in wrap().hash_params

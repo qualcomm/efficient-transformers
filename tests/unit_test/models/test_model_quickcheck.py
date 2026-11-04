@@ -1254,37 +1254,37 @@ def test_dflash_mixed_window_ort_parity(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "moe,prefill_length,verification_length,dflash_chunk_size",
+    "moe,prompt_length,block_size",
     [
-        (False, 8, 16, 64),
-        (False, 64, 16, 64),
-        (False, 8, 64, 64),
-        (False, 64, 64, 64),
-        (False, 8, 16, 16),
-        (False, 16, 16, 16),
-        (False, 128, 16, 16),
-        (False, 256, 16, 16),
-        (True, 16, 16, 16),
-        (True, 128, 16, 16),
-        (True, 128, 8, 8),
+        (False, 5, 64),
+        (False, 61, 64),
+        (False, 5, 16),
+        (False, 13, 16),
+        (False, 125, 16),
+        (False, 253, 16),
+        (True, 13, 16),
+        (True, 125, 16),
+        (True, 125, 8),
+        (False, 1, 8),
+        (True, 61, 64),
     ],
 )
 @pytest.mark.parametrize("matrix_solve", [False, True])
-def test_qwen3_5_dflash_ort_recurrent_commit(
-    tmp_path, prefill_length, verification_length, dflash_chunk_size, matrix_solve, moe
-):
+def test_qwen3_5_dflash_ort_concatenated_commit(tmp_path, prompt_length, block_size, matrix_solve, moe):
+    """One dynamic graph must preserve both KV and linear state across fused steps."""
     from tests.unit_test.transforms.test_dflash_transform import make_tiny_qwen3_5_vlm
 
     torch.manual_seed(11)
     model = make_tiny_qwen3_5_vlm(moe=moe)
-    ctx_len = max(256, prefill_length + verification_length)
+    ctx_len = max(256, prompt_length + 3 * block_size)
+    prefill_length = max(2 * block_size, ((prompt_length + 3 + block_size - 1) // block_size) * block_size)
     model.config.text_config.max_position_embeddings = ctx_len
     qeff = QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config={"target_layer_ids": [1, 3]})
-    qeff.lang_model.model.language_model.dflash_chunk_size = dflash_chunk_size
+    qeff.lang_model.model.language_model.dflash_chunk_size = block_size
     for layer in qeff.lang_model.model.language_model.layers:
         if layer.layer_type == "linear_attention":
             layer.linear_attn.dflash_matrix_solve = matrix_solve
-    inputs, output_names, dynamic_axes = _qwen_export_io(qeff, prefill_seq_len=8)
+    inputs, output_names, dynamic_axes = _qwen_export_io(qeff, prefill_seq_len=2 * block_size)
     inputs["num_logits_to_keep"] = torch.zeros(1, 1, dtype=torch.int64)
     dynamic_axes["num_logits_to_keep"] = {0: "num_logits_to_keep"}
     dynamic_axes["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}
@@ -1308,40 +1308,68 @@ def test_qwen3_5_dflash_ort_recurrent_commit(
     cache = deepcopy(inputs["past_key_values"])
     batch_size = inputs["input_ids"].shape[0]
     actual = {}
-    prompt_length = prefill_length - 3
-    verified_tokens = min(verification_length, 16)
-    # Keep one exported graph across different sequence lengths and acceptance lengths.
-    for start, length, valid, commit in [
-        (0, prefill_length, prompt_length, 1),
-        (prompt_length, verification_length, verified_tokens, 0),
-        (prompt_length, verification_length, 2, 1),
-        (prompt_length + 2, verification_length, verified_tokens, 0),
-        (prompt_length + 2, verification_length, 1, 1),
-        (prompt_length + 3, verification_length, verified_tokens, 0),
-    ]:
-        token = (10 + start) % model.config.text_config.vocab_size
-        inputs["input_ids"] = torch.full((batch_size, length), token, dtype=torch.int64)
-        positions = torch.arange(start, start + length).view(1, 1, -1).repeat(4, batch_size, 1)
-        positions[:, :, valid:] = -1
+    pending_ids = torch.zeros((batch_size, block_size), dtype=torch.int64)
+    committed_length = prompt_length
+    # Short prompts are padded to a supported prefill shape; decode always uses
+    # [previous accepted prefix + padding, current verification block].
+    for accepted in [None, 0, 2, 1, block_size, 3]:
+        prefill = accepted is None
+        if prefill:
+            ids = torch.randint(10, model.config.text_config.vocab_size, (batch_size, prefill_length))
+            positions = torch.arange(prefill_length).view(1, 1, -1).repeat(4, batch_size, 1)
+            positions[..., prompt_length:] = -1
+        else:
+            replay_positions = torch.arange(committed_length, committed_length + block_size)
+            replay_positions = replay_positions.view(1, 1, -1).repeat(4, batch_size, 1)
+            replay_positions[..., accepted:] = -1
+            committed_length += accepted
+            pending_next = torch.randint(10, model.config.text_config.vocab_size, (batch_size, block_size))
+            verify_positions = torch.arange(committed_length, committed_length + block_size)
+            verify_positions = verify_positions.view(1, 1, -1).repeat(4, batch_size, 1)
+            ids = torch.cat([pending_ids, pending_next], dim=1)
+            positions = torch.cat([replay_positions, verify_positions], dim=-1)
+            pending_ids = pending_next
+        inputs["input_ids"] = ids
         inputs["position_ids"] = positions
-        inputs["cache_commit"] = torch.tensor([commit])
-        num_logits = 1 if start == 0 else length
+        inputs["cache_commit"] = torch.tensor([int(prefill)])
+        num_logits = 1 if prefill else block_size
         inputs["num_logits_to_keep"] = torch.zeros(num_logits, 1, dtype=torch.int64)
         inputs["past_key_values"] = cache
         feed = {name: value.copy() for name, value in _flatten_qwen_ort_inputs(inputs, session_inputs, decoder).items()}
-        if start:
-            for name in session_inputs:
-                if name + "_RetainedState" in actual:
-                    feed[name] = actual[name + "_RetainedState"]
+        for name in session_inputs:
+            if name + "_RetainedState" in actual:
+                feed[name] = actual[name + "_RetainedState"]
         with torch.no_grad():
+            if not prefill:
+                # Test-only oracle: evaluate just the accepted prefix, with no
+                # live verification suffix, and compare every retained state.
+                prefix_inputs = deepcopy(inputs)
+                prefix_inputs["position_ids"][..., block_size:] = -1
+                prefix_inputs["cache_commit"] = torch.ones(1, dtype=torch.int64)
+                prefix_cache = decoder(**prefix_inputs)[-1]
             predicted, _vision, _image_idx, hidden, cache = decoder(**inputs)
         actual = dict(zip(output_names, session.run(output_names, feed)))
-        np.testing.assert_array_equal(actual["logits"][:, :valid], predicted.numpy()[:, :valid])
-        np.testing.assert_allclose(actual["hidden_states"][:, :valid], hidden.numpy()[:, :valid], atol=3e-4, rtol=3e-4)
+        np.testing.assert_array_equal(actual["logits"], predicted.numpy())
+        valid_hidden = slice(0, prompt_length) if prefill else slice(block_size, 2 * block_size)
+        np.testing.assert_allclose(
+            actual["hidden_states"][:, valid_hidden], hidden.numpy()[:, valid_hidden], atol=3e-4, rtol=3e-4
+        )
         for layer_idx, layer_state in enumerate(cache):
-            if qeff.model.config.text_config.layer_types[layer_idx] == "linear_attention":
-                for name, expected in zip(decoder.get_onnx_past_key_value_names(layer_idx), layer_state):
-                    np.testing.assert_allclose(actual[name + "_RetainedState"], expected.numpy(), atol=3e-4, rtol=3e-4)
+            for state_idx, (name, expected) in enumerate(
+                zip(decoder.get_onnx_past_key_value_names(layer_idx), layer_state)
+            ):
+                retained = actual[name + "_RetainedState"]
+                np.testing.assert_allclose(retained, expected.numpy(), atol=3e-4, rtol=3e-4)
+                if not prefill:
+                    np.testing.assert_allclose(
+                        retained, prefix_cache[layer_idx][state_idx].numpy(), atol=3e-4, rtol=3e-4
+                    )
+                    if accepted == 0:
+                        np.testing.assert_array_equal(retained, feed[name])
+                    elif qeff.model.config.text_config.layer_types[layer_idx] == "full_attention":
+                        untouched = np.ones(ctx_len, dtype=bool)
+                        untouched[committed_length - accepted : committed_length] = False
+                        np.testing.assert_array_equal(retained[:, :, untouched], feed[name][:, :, untouched])
 
 
 def _export_qwen_decoder_onnx(qeff_model, inputs, tmp_path, *, model_type: str, prefill_only: bool, layerwise: bool):
@@ -4006,6 +4034,7 @@ def test_vlm_compile_forwards_gdn_chunk_size_in_qaic_config_to_export_path():
     from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
 
     model = _QEffAutoModelForImageTextToTextDualQPC.__new__(_QEffAutoModelForImageTextToTextDualQPC)
+    model.dflash_tlm = False
     model._run_layerwise_compile = MagicMock(return_value="qpc_paths")
 
     result = model.compile(layerwise=True, qaic_config={"gdn_chunk_size": 512})
@@ -4246,7 +4275,7 @@ def test_qwen3_5_conv_replay_preserves_history_order(valid_tokens):
     hidden = 100 + torch.arange(6 * 64, dtype=torch.float32).reshape(1, 6, 64)
     positions = torch.full((4, 1, 64), -1, dtype=torch.int64)
     positions[..., :valid_tokens] = torch.arange(40, 40 + valid_tokens)
-    _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions)
+    _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions, dflash=True)
     expected = torch.cat([state.reshape(1, 6, 4), hidden[..., :valid_tokens]], dim=-1)[..., -4:]
     torch.testing.assert_close(actual, expected.reshape_as(state), rtol=0, atol=0)
 
@@ -5627,6 +5656,7 @@ def test_dual_qpc_decode_only_continuous_batching_returns_decode_qpc_key(monkeyp
     from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
 
     model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
+    model.dflash_tlm = False
     model.continuous_batching = True
     model.ccl_enabled = False
     model.comp_ctx_lengths_prefill = None
