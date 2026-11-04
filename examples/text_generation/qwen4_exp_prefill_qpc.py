@@ -1,17 +1,17 @@
 """Export, compile, and execute a prefill-only Qwen3.8-Flash-Next model.
 
-The default workload follows ``attention/qsa/HANDOFF_FOR_QEFF_MIGRATION.md``:
-batch 1, PL=1,024, CL=65,536, start position 64,512, one AI100, and four
-cores. Use ``--layers 4`` for the leading four layers or ``--layers 48`` for
-the full text model. A missing four-layer checkpoint is generated from the
-local Hugging Face snapshot.
+The default workload is batch 1, PL=1,024, CL=65,536, and four AI200 cores.
+Use ``--layers 4`` for the leading four layers or ``--layers 48`` for the full
+text model. A missing four-layer checkpoint is generated from the local
+Hugging Face snapshot. ``--opstats`` profiles the compiled QPC and requires a
+usable QAIC device.
 
 Example::
 
     HF_HUB_CACHE=/home/huggingface_hub \\
     /home/ochougul/envs/qwen38f/bin/python \\
         examples/text_generation/qwen4_exp_prefill_qpc.py \\
-        --model-name-or-path Qwen/Qwen3.8-Flash-Next --layers 4
+        --model-name-or-path Qwen/Qwen3.8-Flash-Next --layers 4 --opstats --device-list 0
 """
 
 from __future__ import annotations
@@ -32,10 +32,9 @@ DEFAULT_BATCH_SIZE = 1
 PREFILL_SEQ_LEN = 1024
 CONTEXT_LENGTH = 65_536
 START_POSITION = 64_512
-NUM_CORES = 4
-DEVICE_ID = 30
+DEFAULT_AI100_DEVICE_ID = 30
+DEFAULT_AI200_DEVICE_ID = 0
 DEFAULT_LAYERS = 4
-MODEL_DTYPE = torch.float32
 COMPILER_OPTS_UNSUPPORTED = (
     "-aic-hoist-vtcm-loads=false -aic-op-stats-verbosity 2 -aic-userdma-async=0 -aic-hmx-async=0 -aic-sync-ts-starts"
 )
@@ -44,7 +43,6 @@ QSA_CONFIG = {
     "indexer_cp": 1,
     "attn_dp": 1,
     "attn_cp": 1,
-    "num_cores_per_device": NUM_CORES,
     "indexer_num_blocks": 16,
     "indexer_ql_chunk": 512,
     "indexer_q_block_size": 128,
@@ -70,11 +68,11 @@ def _resolve_snapshot(model_name_or_path: str) -> Path:
     return Path(snapshot_download(repo_id=model_name_or_path, cache_dir=cache_dir)).resolve()
 
 
-def _window_config(snapshot: Path, layers: int):
+def _window_config(snapshot: Path, layers: int, dtype: str):
     from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
     raw = json.loads((snapshot / "config.json").read_text())["text_config"]
-    raw["dtype"] = "float32"
+    raw["dtype"] = dtype
     raw["num_hidden_layers"] = layers
     raw["layer_types"] = raw["layer_types"][:layers]
     raw["ple_layer_ids"] = [layer_id for layer_id in raw.get("ple_layer_ids", []) if layer_id <= layers]
@@ -100,29 +98,30 @@ def _ensure_four_layer_checkpoint(snapshot: Path, checkpoint: Path) -> None:
     subprocess.run(command, check=True)
 
 
-def _build_model(snapshot: Path, checkpoint: Path | None, layers: int):
+def _build_model(snapshot: Path, checkpoint: Path | None, layers: int, dtype: str, num_cores: int):
     sys.path.insert(0, str(REPO_ROOT))
     from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
-    config = _window_config(snapshot, layers)
+    config = _window_config(snapshot, layers, dtype)
+    qaic_config = {**QSA_CONFIG, "num_cores_per_device": num_cores}
     model_source = checkpoint if checkpoint is not None else snapshot
     model = QEFFAutoModelForCausalLM.from_pretrained(
         str(model_source),
         config=config,
-        qaic_config=QSA_CONFIG,
-        torch_dtype=MODEL_DTYPE,
+        qaic_config=qaic_config,
+        torch_dtype=torch.bfloat16 if dtype == "bfloat16" else torch.float32,
     )
     for layer in model.model.model.layers:
         attention = getattr(layer, "self_attn", None)
         if hasattr(attention, "configure_qsa"):
             attention.configure_qsa(
-                QSA_CONFIG,
+                qaic_config,
                 ctx_len=CONTEXT_LENGTH,
                 seq_len=PREFILL_SEQ_LEN,
                 prefill_only=True,
             )
     model.model.eval()
-    return model
+    return model, qaic_config
 
 
 def _make_position_ids(batch_size: int = DEFAULT_BATCH_SIZE) -> np.ndarray:
@@ -191,7 +190,12 @@ class Qwen4ExpPrefillRunner:
             binding = self.input_names[name]
             if tuple(value.shape) != self.input_shapes[name]:
                 raise ValueError(f"{name} binding shape is {self.input_shapes[name]}, expected {value.shape}")
-            bound_inputs[binding] = value.astype(self.input_dtypes[name], copy=False)
+            if name == "ngram_embeddings" and self.session.binding_is_bfloat16(binding):
+                bound_inputs[binding] = (
+                    torch.from_numpy(value).to(torch.bfloat16).view(torch.int16).numpy().view(np.float16)
+                )
+            else:
+                bound_inputs[binding] = value.astype(self.input_dtypes[name], copy=False)
 
         outputs = self.session.run(bound_inputs)
         logits = next((value for name, value in outputs.items() if self._basename(name) == "logits"), None)
@@ -205,6 +209,143 @@ class Qwen4ExpPrefillRunner:
         if logits.shape != self.logits_shape or not np.isfinite(logits).all():
             raise ValueError(f"Invalid prefill logits shape/values: shape={logits.shape}")
         return logits
+
+
+def _write_opstats_batch(onnx_path: Path, custom_io_path: Path, work_dir: Path, batch_size: int) -> Path:
+    import onnx
+    import yaml
+
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    custom_io = yaml.safe_load(custom_io_path.read_text()) or []
+    precision_map = {
+        entry["IOName"]: entry["Precision"] for entry in custom_io if entry.get("IOName") and entry.get("Precision")
+    }
+    numpy_precision = {
+        "float": np.float32,
+        "float16": np.float16,
+        "float32": np.float32,
+        "bfloat16": np.uint16,
+        "int32": np.int32,
+        "int64": np.int64,
+    }
+    onnx_precision = {
+        onnx.TensorProto.FLOAT: np.float32,
+        onnx.TensorProto.FLOAT16: np.float16,
+        onnx.TensorProto.BFLOAT16: np.uint16,
+        onnx.TensorProto.INT64: np.int64,
+        onnx.TensorProto.INT32: np.int32,
+    }
+    symbol_values = {
+        "batch_size": batch_size,
+        "full_batch_size": batch_size,
+        "seq_len": PREFILL_SEQ_LEN,
+        "ctx_len": CONTEXT_LENGTH,
+        "pooled_ctx_len": (CONTEXT_LENGTH + 3) // 4,
+    }
+    data_dir = work_dir / "data"
+    data_dir.mkdir(parents=True)
+    entries = []
+
+    def add_io(value_info, direction: str) -> None:
+        dims = []
+        for dim in value_info.type.tensor_type.shape.dim:
+            if dim.HasField("dim_value"):
+                dims.append(dim.dim_value)
+            elif dim.dim_param in symbol_values:
+                dims.append(symbol_values[dim.dim_param])
+            else:
+                raise ValueError(f"No opstats shape value for {value_info.name}: {dim.dim_param}")
+        precision = precision_map.get(value_info.name, precision_map.get(value_info.name.rsplit("/", 1)[-1]))
+        dtype = (
+            numpy_precision.get(precision) if precision else onnx_precision.get(value_info.type.tensor_type.elem_type)
+        )
+        if dtype is None:
+            raise TypeError(f"Unsupported opstats dtype for {value_info.name}")
+        basename = value_info.name.rsplit("/", 1)[-1]
+        data = np.zeros(tuple(dims), dtype=dtype)
+        if basename == "position_ids" and direction == "in":
+            data = _make_position_ids(batch_size).astype(dtype, copy=False)
+        path = data_dir / f"{basename}.raw"
+        data.tofile(path)
+        entries.append(
+            {
+                "path": str(path.relative_to(work_dir)),
+                "io-direction": direction,
+                "elem-size": np.dtype(dtype).itemsize,
+                "map-to": value_info.name,
+                "dims": dims,
+            }
+        )
+
+    host_inputs = set(HOST_INPUT_NAMES)
+    for value_info in model.graph.input:
+        if value_info.name.rsplit("/", 1)[-1] in host_inputs:
+            add_io(value_info, "in")
+    for value_info in model.graph.output:
+        if value_info.name.rsplit("/", 1)[-1] == "logits":
+            add_io(value_info, "out")
+    found_inputs = {entry["map-to"].rsplit("/", 1)[-1] for entry in entries if entry["io-direction"] == "in"}
+    if found_inputs != host_inputs:
+        raise ValueError(f"Unexpected prefill input set in ONNX: {sorted(found_inputs)}")
+    batch_path = work_dir / "aic_batch_io.json"
+    batch_path.write_text(json.dumps({"IO-files": [entries]}, indent=2) + "\n")
+    return batch_path
+
+
+def _run_opstats(args: argparse.Namespace, qpc_path: Path, onnx_path: Path) -> Path:
+    runner = Path("/opt/qti-aic/exec/qaic-runner")
+    opstats_tool = Path("/opt/qti-aic/exec/qaic-opstats")
+    for executable in (runner, opstats_tool):
+        if not executable.is_file():
+            raise FileNotFoundError(f"Required QAIC profiling tool not found: {executable}")
+    work_dir = args.compile_dir / "opstats_run"
+    if work_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite opstats output: {work_dir}")
+    work_dir.mkdir(parents=True)
+    custom_io = qpc_path.parent / "custom_io.yaml"
+    if not custom_io.is_file():
+        raise FileNotFoundError(f"Custom IO file not found: {custom_io}")
+    batch_path = _write_opstats_batch(onnx_path, custom_io, work_dir, args.batch_size)
+    raw_stats = work_dir / "raw_device_stats"
+    opstats_dir = work_dir / "opstats"
+    raw_stats.mkdir()
+    opstats_dir.mkdir()
+    qpc_binary = qpc_path if (qpc_path / "programqpc.bin").is_file() else qpc_path / "qpc"
+    runner_command = [
+        str(runner),
+        "-D",
+        args.device_list,
+        "-t",
+        str(qpc_binary),
+        "-n",
+        str(args.opstats_iterations),
+        "--aic-profiling-type",
+        "raw_device_stats",
+        "--aic-profiling-start-iter",
+        str(args.profile_start_iter),
+        "--aic-profiling-num-samples",
+        str(args.profile_samples),
+        "--aic-profiling-out-dir",
+        str(raw_stats),
+        "--aic-batch-json-input",
+        str(batch_path),
+    ]
+    print("$", " ".join(runner_command), flush=True)
+    subprocess.run(runner_command, check=True)
+    opstats_command = [
+        str(opstats_tool),
+        "--qpc",
+        str(qpc_binary / "programqpc.bin"),
+        "--input-dir",
+        str(raw_stats),
+        "--output-dir",
+        str(opstats_dir),
+        "--summary",
+        "--trace",
+    ]
+    print("$", " ".join(opstats_command), flush=True)
+    subprocess.run(opstats_command, check=True)
+    return opstats_dir
 
 
 def _validate_export(onnx_path: Path, retained_state_names: list[str], expected_batch_size: int) -> dict[str, int]:
@@ -252,7 +393,17 @@ def _compile_and_run(args: argparse.Namespace, snapshot: Path, checkpoint: Path 
     print(f"QEFF_HOME={os.environ['QEFF_HOME']}")
     print(f"QAIC_COMPILER_OPTS_UNSUPPORTED={os.environ['QAIC_COMPILER_OPTS_UNSUPPORTED']}")
 
-    model = _build_model(snapshot, checkpoint, args.layers)
+    model, qaic_config = _build_model(snapshot, checkpoint, args.layers, args.dtype, args.num_cores)
+    compiler_options = {}
+    if args.opstats:
+        compiler_options.update(
+            {
+                "stats_level": args.opstats_stats_level,
+                "ddr_stats": True,
+                "aic_pmu_recipe": "KernelUtil",
+                "aic_perf_metrics": True,
+            }
+        )
     qpc_path = Path(
         model.compile(
             compile_dir=str(compile_dir),
@@ -261,17 +412,19 @@ def _compile_and_run(args: argparse.Namespace, snapshot: Path, checkpoint: Path 
             prefill_seq_len=PREFILL_SEQ_LEN,
             prefill_only=True,
             num_devices=1,
-            num_cores=NUM_CORES,
-            mxfp6_matmul=True,
+            num_cores=args.num_cores,
+            mxfp6_matmul=False,
             mxint8_kv_cache=True,
             offload_pt_weights=False,
             dynamo=True,
             use_onnx_subfunctions=False,
-            aic_hw_version="ai100",
+            aic_hw_version=args.aic_hw_version,
+            aic_num_cores=args.num_cores,
             allow_mxint8_mdp_io=True,
             user_tiled=True,
             split_model_io=True,
-            qaic_config=QSA_CONFIG,
+            qaic_config=qaic_config,
+            **compiler_options,
         )
     )
     qpc_binary = qpc_path if (qpc_path / "programqpc.bin").is_file() else qpc_path / "qpc"
@@ -279,12 +432,16 @@ def _compile_and_run(args: argparse.Namespace, snapshot: Path, checkpoint: Path 
         raise FileNotFoundError(f"Compiled QPC binary not found under {qpc_path}")
 
     export_metrics = _validate_export(Path(model.onnx_path), model.model.get_retained_state_names(), args.batch_size)
+    if args.opstats:
+        opstats_dir = _run_opstats(args, qpc_path, Path(model.onnx_path).resolve())
+        print(f"opstats={opstats_dir}")
     runner = Qwen4ExpPrefillRunner(qpc_path, args.device_id)
     logits = runner.run(model.model.config.ple_embed_dim, args.batch_size)
     print(f"prefill_qpc={qpc_path}")
     print(f"onnx_path={model.onnx_path}")
     print(
-        f"layers={args.layers} batch_size_specialization={args.batch_size} "
+        f"layers={args.layers} dtype={args.dtype} hw={args.aic_hw_version} cores={args.num_cores} "
+        f"batch_size_specialization={args.batch_size} "
         f"qpc_input_batch_size={runner.input_batch_size} seq_len={PREFILL_SEQ_LEN} ctx_len={CONTEXT_LENGTH}"
     )
     print(
@@ -299,6 +456,9 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, help="optional checkpoint directory for the selected layer count")
     parser.add_argument("--layers", choices=(4, 48), type=int, default=DEFAULT_LAYERS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--aic-hw-version", choices=("ai100", "ai200"), default="ai200")
+    parser.add_argument("--num-cores", type=int, help="defaults to 4 for AI200 and 16 for AI100")
+    parser.add_argument("--dtype", choices=("bfloat16", "float32"), help="defaults to BF16 for AI200, FP32 for AI100")
     parser.add_argument(
         "--four-layer-checkpoint",
         type=Path,
@@ -310,13 +470,30 @@ def main() -> None:
         type=Path,
         help="fresh artifact directory (defaults to a timestamped directory under attention_benchmarks/)",
     )
-    parser.add_argument("--device-id", type=int, default=DEVICE_ID, help="physical QAIC device id")
+    parser.add_argument("--device-id", type=int, help="physical QAIC device id for the direct QPC run")
+    parser.add_argument("--opstats", action="store_true", help="profile this fresh compile and save QAIC opstats")
+    parser.add_argument("--device-list", help="QAIC device list for opstats; defaults to --device-id")
+    parser.add_argument("--opstats-iterations", type=int, default=30)
+    parser.add_argument("--profile-start-iter", type=int, default=20)
+    parser.add_argument("--profile-samples", type=int, default=2)
+    parser.add_argument("--opstats-stats-level", type=int, default=70)
     args = parser.parse_args()
+    if args.num_cores is None:
+        args.num_cores = 4 if args.aic_hw_version == "ai200" else 16
+    if args.dtype is None:
+        args.dtype = "bfloat16" if args.aic_hw_version == "ai200" else "float32"
+    if args.device_id is None:
+        args.device_id = DEFAULT_AI200_DEVICE_ID if args.aic_hw_version == "ai200" else DEFAULT_AI100_DEVICE_ID
+    if args.device_list is None:
+        args.device_list = str(args.device_id)
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
     if args.compile_dir is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.compile_dir = Path(f"attention_benchmarks/qwen38_flash_prefill_{args.layers}layer_cores4_{stamp}")
+        args.compile_dir = Path(
+            f"attention_benchmarks/qwen38_flash_prefill_{args.layers}layer_{args.aic_hw_version}_"
+            f"cores{args.num_cores}_{stamp}"
+        )
     args.compile_dir = args.compile_dir.resolve()
     snapshot = _resolve_snapshot(args.model_name_or_path)
 

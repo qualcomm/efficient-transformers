@@ -20,6 +20,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextGatedDeltaNet,
     Qwen4ExpTextModel,
     Qwen4ExpTextPLELayer,
+    Qwen4ExpTextRMSNorm,
     Qwen4ExpTextRMSNormGated,
     Qwen4ExpTextRotaryEmbedding,
     Qwen4ExpTextSparseMoeBlock,
@@ -46,21 +47,19 @@ from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 def _causal_conv1d_update(hidden_states, conv_state, weight):
     """Functional GDN state update adapted from linear_gdn_qwen35."""
     combined = torch.cat((conv_state, hidden_states), dim=-1)
-    output = F.conv1d(combined.to(weight.dtype), weight, groups=combined.shape[1])[..., -1:]
-    return F.silu(output).to(hidden_states.dtype), combined[..., -conv_state.shape[-1] :]
+    output = F.conv1d(combined, weight, groups=combined.shape[1])[..., -1:]
+    return F.silu(output), combined[..., -conv_state.shape[-1] :]
 
 
 def _gdn_recurrent_step(query, key, value, decay, beta, state):
     """Decode specialization of Transformers' ``torch_recurrent_gated_delta_rule``."""
-    initial_dtype = query.dtype
     query, key, value, beta, decay = [
-        tensor.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format)
-        for tensor in (query, key, value, beta, decay)
+        tensor.transpose(1, 2).contiguous() for tensor in (query, key, value, beta, decay)
     ]
+    recurrent_state = state
     query = query * torch.rsqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6)
     key = key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6)
     query = query / (query.shape[-1] ** 0.5)
-    recurrent_state = state.to(value)
     # Qwen4-Exp's QEfficient path is decode-only (one token).  Compute the
     # output directly, matching the linear-attention benchmark, instead of
     # writing it into a preallocated tensor with an indexed assignment.  The
@@ -73,7 +72,7 @@ def _gdn_recurrent_step(query, key, value, decay, beta, state):
     delta = (value_token - kv_mem) * beta_token
     recurrent_state = recurrent_state + key_token.unsqueeze(-1) * delta.unsqueeze(-2)
     output = (recurrent_state * query_token.unsqueeze(-1)).sum(dim=-2)
-    return output.unsqueeze(1).contiguous().to(initial_dtype), recurrent_state
+    return output.unsqueeze(1).contiguous(), recurrent_state
 
 
 class QEffQwen4ExpTextRotaryEmbedding(Qwen4ExpTextRotaryEmbedding):
@@ -89,7 +88,7 @@ class QEffQwen4ExpTextRotaryEmbedding(Qwen4ExpTextRotaryEmbedding):
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
         positions = torch.arange(seq_len, device=device, dtype=torch.float32)
-        frequencies = torch.outer(positions, self.inv_freq.float())
+        frequencies = torch.outer(positions, self.inv_freq)
         self.register_buffer("cos_cached", frequencies.cos().to(dtype), persistent=False)
         self.register_buffer("sin_cached", frequencies.sin().to(dtype), persistent=False)
 
@@ -119,8 +118,7 @@ def qeff_prepare_qwen4_exp_mrope(cos_cached, sin_cached, position_ids, mrope_sec
         rotary_width = min(sum(mrope_section), int(cos_cached.shape[-1]))
     cos = _qeff_recompose_mrope(cos, mrope_section, rotary_width)
     sin = _qeff_recompose_mrope(sin, mrope_section, rotary_width)
-    if dtype is not None:
-        cos, sin = cos.to(dtype=dtype), sin.to(dtype=dtype)
+    del dtype
     return cos, sin
 
 
@@ -143,8 +141,31 @@ def _build_qwen4_exp_pooled_mrope_cache(cos_cached, sin_cached, config, rotary_w
 
 class QEffQwen4ExpTextRMSNormGated(Qwen4ExpTextRMSNormGated):
     def forward(self, hidden_states, gate):
+        if hidden_states.dtype == torch.bfloat16:
+            variance = hidden_states.pow(2).mean(-1, keepdim=True)
+            epsilon = torch.tensor(self.variance_epsilon, dtype=variance.dtype)
+            normed = hidden_states * torch.rsqrt(variance + epsilon)
+            normed = self.weight * normed
+            return normed * F.silu(gate)
         normed = CustomRMSNormFunc.apply(hidden_states, self.weight, self.variance_epsilon)
-        return normed * F.silu(gate.float()).to(normed.dtype)
+        return normed * F.silu(gate)
+
+
+class QEffQwen4ExpTextRMSNorm(Qwen4ExpTextRMSNorm):
+    """Keep Qwen4 RMSNorm calculations in BF16 for AI200 export."""
+
+    def forward(self, x):
+        if x.dtype != torch.bfloat16:
+            return super().forward(x)
+        if self.group_size is not None:
+            x = x.reshape(*x.shape[:-1], -1, self.group_size)
+        variance = x.pow(2).mean(-1, keepdim=True)
+        epsilon = torch.tensor(self.eps, dtype=variance.dtype)
+        output = x * torch.rsqrt(variance + epsilon)
+        if self.group_size is not None:
+            output = output.flatten(-2)
+        one = torch.tensor(1.0, dtype=self.weight.dtype)
+        return output * (one + self.weight)
 
 
 class QEffQwen4ExpTextTopKRouter(Qwen4ExpTextTopKRouter):
@@ -153,11 +174,17 @@ class QEffQwen4ExpTextTopKRouter(Qwen4ExpTextTopKRouter):
     def forward(self, hidden_states):
         hidden_states = hidden_states.reshape(-1, self.hidden_dim)
         router_logits = F.linear(hidden_states, self.weight)
-        router_probs = F.softmax(router_logits, dtype=torch.float32, dim=-1)
+        router_probs = F.softmax(router_logits, dim=-1)
         top_weights, top_indices = torch.topk(router_probs, self.top_k, dim=-1)
         if self.norm_topk_prob:
-            top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
-        return router_logits, top_weights.to(router_logits.dtype), top_indices
+            if top_weights.dtype == torch.bfloat16:
+                weight_sum = top_weights[..., 0]
+                for index in range(1, self.top_k):
+                    weight_sum = weight_sum + top_weights[..., index]
+                top_weights = top_weights / weight_sum.unsqueeze(-1)
+            else:
+                top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+        return router_logits, top_weights, top_indices
 
 
 class QEffQwen4ExpTextExperts(Qwen4ExpTextExperts):
@@ -217,7 +244,7 @@ class QEffQwen4ExpTextSparseMoeBlock(QEffMoEBlockMixin, Qwen4ExpTextSparseMoeBlo
 
     def route(self, x: torch.Tensor):
         _, top_weights, top_indices = self.gate(x)
-        return (top_indices, top_weights.to(x.dtype)), None
+        return (top_indices, top_weights), None
 
     def apply_shared_experts(self, out: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
         shared = self.shared_expert(residual)
@@ -243,10 +270,14 @@ class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
         )
         self.register_buffer(
             "_gdn_ones_lower",
-            torch.tril(torch.ones(chunk, chunk, dtype=torch.float32, device=device)),
+            torch.tril(torch.ones(chunk, chunk, dtype=self.in_proj_qkv.weight.dtype, device=device)),
             persistent=False,
         )
-        self.register_buffer("_gdn_eye", torch.eye(chunk, dtype=torch.float32, device=device), persistent=False)
+        self.register_buffer(
+            "_gdn_eye",
+            torch.eye(chunk, dtype=self.in_proj_qkv.weight.dtype, device=device),
+            persistent=False,
+        )
 
     def _solve_gdn_chunk(self, attention):
         """Invert the unit-lower-triangular chunk system by forward substitution."""
@@ -256,17 +287,16 @@ class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
             row = attention[..., row_idx, :row_idx]
             solved = row + (row.unsqueeze(-1) * torch.stack(solved_rows, dim=-2)[..., :row_idx]).sum(dim=-2)
             solved_rows.append(torch.cat((solved, attention[..., row_idx, row_idx:]), dim=-1))
-        return torch.stack(solved_rows, dim=-2) + self._gdn_eye.to(dtype=attention.dtype)
+        return torch.stack(solved_rows, dim=-2) + self._gdn_eye
 
     def _chunk_gated_delta_rule(self, query, key, value, decay, beta, initial_state, valid_mask=None):
         """Run the benchmark's 64-token chunked delta rule and return its final state."""
-        output_dtype = query.dtype
         query, key = (
             query * torch.rsqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6),
             key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6),
         )
-        query, key, value = (tensor.transpose(1, 2).contiguous().float() for tensor in (query, key, value))
-        beta, decay = beta.transpose(1, 2).contiguous().float(), decay.transpose(1, 2).contiguous().float()
+        query, key, value = (tensor.transpose(1, 2).contiguous() for tensor in (query, key, value))
+        beta, decay = beta.transpose(1, 2).contiguous(), decay.transpose(1, 2).contiguous()
 
         if valid_mask is not None:
             token_mask = valid_mask.unsqueeze(1)
@@ -293,17 +323,19 @@ class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
         )
         decay = decay.reshape(decay.shape[0], decay.shape[1], -1, chunk_size)
         cumulative_decay = decay @ self._gdn_ones_lower.T
-        decay_difference = (cumulative_decay.unsqueeze(-1) - cumulative_decay.unsqueeze(-2)) * (
-            ~self._gdn_mask_strict
-        ).to(cumulative_decay.dtype)
-        decay_mask = decay_difference.exp() * (~self._gdn_mask_strict).to(cumulative_decay.dtype)
+        decay_difference = torch.where(
+            ~self._gdn_mask_strict,
+            cumulative_decay.unsqueeze(-1) - cumulative_decay.unsqueeze(-2),
+            torch.zeros_like(cumulative_decay.unsqueeze(-1) - cumulative_decay.unsqueeze(-2)),
+        )
+        decay_mask = torch.where(~self._gdn_mask_strict, decay_difference.exp(), torch.zeros_like(decay_difference))
 
         chunk_system = -((beta_key @ key.transpose(-1, -2)) * decay_mask).masked_fill(self._gdn_mask_causal, 0)
         chunk_inverse = self._solve_gdn_chunk(chunk_system)
         updated_values = chunk_inverse @ beta_value
         decayed_keys = chunk_inverse @ (beta_key * cumulative_decay.exp().unsqueeze(-1))
 
-        recurrent_state = initial_state.float()
+        recurrent_state = initial_state
         chunk_decay = cumulative_decay[..., -1].exp()[..., None, None]
         output_chunks = []
         for chunk_idx in range(total_sequence_len // chunk_size):
@@ -326,7 +358,7 @@ class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
             )
 
         output = torch.stack(output_chunks, dim=2).reshape(query.shape[0], query.shape[1], -1, value.shape[-1])
-        output = output[:, :, :sequence_len].transpose(1, 2).contiguous().to(output_dtype)
+        output = output[:, :, :sequence_len].transpose(1, 2).contiguous()
         return output, recurrent_state
 
     def _qeff_prefill(self, hidden_states, cache_params, position_embeddings=None):
@@ -348,9 +380,7 @@ class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
         projected = self.in_proj_qkv(hidden_states).transpose(1, 2)
         conv_input = torch.cat((conv_state, projected), dim=-1)
         next_conv_state = conv_input[..., -conv_state.shape[-1] :]
-        mixed_qkv = F.silu(F.conv1d(conv_input.to(self.conv1d.weight.dtype), self.conv1d.weight, groups=self.conv_dim))[
-            ..., -sequence_len:
-        ].to(hidden_states.dtype)
+        mixed_qkv = F.silu(F.conv1d(conv_input, self.conv1d.weight, groups=self.conv_dim))[..., -sequence_len:]
         mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(mixed_qkv, (self.key_dim, self.key_dim, self.value_dim), dim=-1)
         query = query.reshape(batch, sequence_len, -1, self.head_k_dim)
@@ -361,7 +391,7 @@ class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
         beta = self.in_proj_b(hidden_states).sigmoid()
-        decay = -self.A_log.float().exp() * F.softplus(self.in_proj_a(hidden_states).float() + self.dt_bias)
+        decay = -self.A_log.exp() * F.softplus(self.in_proj_a(hidden_states) + self.dt_bias)
         attention_output, next_recurrent_state = self._chunk_gated_delta_rule(
             query, key, value, decay, beta, recurrent_state, valid_mask
         )
@@ -392,7 +422,7 @@ class QEffQwen4ExpTextGatedDeltaNet(Qwen4ExpTextGatedDeltaNet):
         if repeat > 1:
             query, key = query.repeat_interleave(repeat, dim=2), key.repeat_interleave(repeat, dim=2)
         beta = self.in_proj_b(hidden_states).sigmoid()
-        decay = -self.A_log.float().exp() * F.softplus(self.in_proj_a(hidden_states).float() + self.dt_bias)
+        decay = -self.A_log.exp() * F.softplus(self.in_proj_a(hidden_states) + self.dt_bias)
         output, next_recurrent = _gdn_recurrent_step(query, key, value, decay, beta, recurrent_state)
         gate = self.in_proj_z(hidden_states).reshape(batch, 1, -1, self.head_v_dim)
         output = self.norm(output.reshape(-1, self.head_v_dim), gate.reshape(-1, self.head_v_dim)).reshape(batch, 1, -1)
@@ -422,7 +452,7 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
             raise ValueError("PLE requires ngram_embeddings shaped [batch, seq_len, ple_embed_dim]")
         if hidden_states.shape[1] != 1:
             return self._qeff_prefill(hidden_states, ngram_embeddings, cache_params)
-        embeddings = ngram_embeddings.to(hidden_states.dtype)
+        embeddings = ngram_embeddings
         key = self.norm_key(self.key_proj(embeddings)).unflatten(-1, (self.hc_count, self.hidden_size))
         query = self.norm_query(hidden_states).unflatten(-1, (self.hc_count, self.hidden_size))
         gate = (key * query).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
@@ -435,15 +465,15 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
             raise ValueError(f"Missing PLE retained state for layer {self.layer_idx}")
         combined = torch.cat((state, self.norm_conv(values).transpose(1, 2)), dim=-1)
         cache_params.update_ple_state(self.layer_idx, combined[..., -self.short_conv_state_len :])
-        conv_input = combined.to(self.conv1d.weight.dtype).index_select(-1, self._qeff_conv_positions)
+        conv_input = combined.index_select(-1, self._qeff_conv_positions)
         conv_weight = self.conv1d.weight.squeeze(1).unsqueeze(-1)
         conv_output = torch.matmul(conv_input.unsqueeze(-2), conv_weight).squeeze(-1)
-        conv_output = F.silu(conv_output).to(values.dtype)
+        conv_output = F.silu(conv_output)
         return values + conv_output[..., -1:].transpose(1, 2)
 
     def _qeff_prefill(self, hidden_states, ngram_embeddings, cache_params):
         """Apply PLE's dilated short convolution across a prefill sequence."""
-        embeddings = ngram_embeddings.to(hidden_states.dtype)
+        embeddings = ngram_embeddings
         key = self.norm_key(self.key_proj(embeddings)).unflatten(-1, (self.hc_count, self.hidden_size))
         query = self.norm_query(hidden_states).unflatten(-1, (self.hc_count, self.hidden_size))
         gate = (key * query).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
@@ -459,7 +489,7 @@ class QEffQwen4ExpTextPLELayer(Qwen4ExpTextPLELayer):
         conv_input = windows.index_select(-1, self._qeff_conv_positions)
         conv_weight = self.conv1d.weight.squeeze(1)
         conv_output = (conv_input * conv_weight.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
-        conv_output = F.silu(conv_output).to(values.dtype).transpose(1, 2)
+        conv_output = F.silu(conv_output).transpose(1, 2)
         return values + conv_output
 
 
@@ -554,7 +584,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         block = torch.div(positions, ratio, rounding_mode="trunc")
         complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
         boundary = positions + 1 == complete * ratio
-        total = partial + raw_key.float()
+        total = partial + raw_key
         if len(position_embeddings) == 8:
             pooled_cos_cached, pooled_sin_cached = position_embeddings[6:]
             pooled_positions = position_embeddings[4][0].reshape(-1).to(torch.long)
@@ -564,12 +594,10 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             pooled_sin = pooled_sin_cached.index_select(0, pooled_positions).reshape(
                 *position_embeddings[4][0].shape, -1
             )
-            pooled_cos = pooled_cos.to(hidden_states.dtype)
-            pooled_sin = pooled_sin.to(hidden_states.dtype)
         else:
             pooled_cos, pooled_sin = cos, sin
         pooled = apply_rotary_pos_emb(
-            self.indexer.k_layernorm((total / ratio).to(hidden_states.dtype)).unsqueeze(1),
+            self.indexer.k_layernorm(total / ratio).unsqueeze(1),
             cos=pooled_cos,
             sin=pooled_sin,
             unsqueeze_dim=2,
@@ -604,7 +632,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             local_context = next_index.shape[2]
             cache_grouped = next_index.reshape(batch_local, index_dp, index_cp, local_context, -1)
             query_grouped = index_query.reshape(batch_local, index_dp, -1, index_query.shape[-1])
-            scores = torch.einsum("badh,baclh->bacl", query_grouped.float(), cache_grouped.float())
+            scores = torch.einsum("badh,baclh->bacl", query_grouped, cache_grouped)
             ids = (
                 torch.arange(local_context, device=positions.device)[None, :] * index_cp
                 + torch.arange(index_cp, device=positions.device)[:, None]
@@ -612,7 +640,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             visible = ids[None, None] < complete.reshape(batch_local, index_dp, 1, 1)
             scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE).reshape(batch, -1)
         else:
-            scores = F.relu(index_query.float() @ index_attention.float().transpose(-1, -2)).sum(-2)
+            scores = F.relu(index_query @ index_attention.transpose(-1, -2)).sum(-2)
             visible = torch.arange(index_attention.shape[1], device=positions.device)[None, :] < complete[:, None]
             scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE)
         blocks = scores.topk(min(self.indexer.block_topk, scores.shape[-1]), dim=-1).indices
@@ -642,7 +670,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             logits,
             torch.full_like(logits, MIN_MASKED_ATTENTION_VALUE),
         )
-        probabilities = masked_logits.float().softmax(-1).to(query.dtype)
+        probabilities = masked_logits.softmax(-1)
         output = (probabilities @ selected_values).reshape(batch, 1, -1)
         output = output * torch.sigmoid(gate.reshape(batch, 1, -1))
         past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, next_partial)
@@ -772,9 +800,9 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
                 for block_idx in range(num_blocks):
                     block_start = block_idx * kv_block_size
                     block_end = block_start + kv_block_size
-                    key_block = index_cache[:, block_start:block_end].float()
+                    key_block = index_cache[:, block_start:block_end]
                     key_core = key_block.unsqueeze(1).expand(batch, num_cores, kv_block_size, index_dim)
-                    scores = F.relu(torch.matmul(query_core.float(), key_core[:, :, None].transpose(-1, -2))).sum(
+                    scores = F.relu(torch.matmul(query_core, key_core[:, :, None].transpose(-1, -2))).sum(
                         -2
                     ) / math.sqrt(index_dim)
                     block_positions = (block_start + local_offsets).expand(batch, num_cores, q_per_core, kv_block_size)
@@ -907,7 +935,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
                 block_max = logits.max(dim=-1).values
                 next_max = torch.maximum(running_max, block_max)
                 previous_scale = torch.exp(running_max - next_max)
-                probabilities = torch.exp(logits - next_max.unsqueeze(-1)) * mask.to(logits.dtype)
+                probabilities = torch.where(mask, torch.exp(logits - next_max.unsqueeze(-1)), torch.zeros_like(logits))
                 next_denominator = denominator * previous_scale + probabilities.sum(dim=-1)
                 next_output = output * previous_scale.unsqueeze(-1) + torch.matmul(probabilities, value_block)
                 if skip_rows is None:
@@ -919,7 +947,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
 
             denominator = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
             output = output / denominator.unsqueeze(-1)
-            output_chunks.append(output.permute(0, 2, 3, 1, 4, 5).reshape(batch, q_chunk, -1).to(query.dtype))
+            output_chunks.append(output.permute(0, 2, 3, 1, 4, 5).reshape(batch, q_chunk, -1))
 
         return torch.cat(output_chunks, dim=1)
 
@@ -988,7 +1016,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         index_query = apply_rotary_pos_emb(index_query, cos=cos, sin=sin, unsqueeze_dim=2)
 
         pooled_count = query_len // ratio
-        pooled_raw = raw_key.reshape(batch, pooled_count, ratio, -1).float().mean(2).to(raw_key.dtype)
+        pooled_raw = raw_key.reshape(batch, pooled_count, ratio, -1).mean(2)
         pooled = self.indexer.k_layernorm(pooled_raw)
         pooled_cos_cached, pooled_sin_cached = position_embeddings[6:]
         pooled_positions = position_embeddings[4][0, :, ::ratio].reshape(-1).to(torch.long)
@@ -1075,6 +1103,9 @@ class QEffQwen4ExpTextDecoderLayer(Qwen4ExpTextDecoderLayer):
 
 class QEffQwen4ExpTextModel(Qwen4ExpTextModel):
     def __qeff_init__(self):
+        for module in self.modules():
+            if type(module) is Qwen4ExpTextRMSNorm:
+                module.__class__ = QEffQwen4ExpTextRMSNorm
         self.rotary_emb = QEffQwen4ExpTextRotaryEmbedding(
             config=self.config,
             device=self.embed_tokens.weight.device,
@@ -1240,8 +1271,10 @@ class QEffQwen4ExpDecodeExportMixin:
     def get_onnx_retained_state_specs(
         self, batch_size, seq_len, kv_cache_shape=None, continuous_batching=False, retain_full_kv=False
     ):
-        del seq_len, kv_cache_shape, retain_full_kv
+        del kv_cache_shape, retain_full_kv
         config, dtype = self.config, self.lm_head.weight.dtype
+        decode_bf16 = dtype == torch.bfloat16 and seq_len == 1
+        recurrent_state_dtype = dtype if decode_bf16 else torch.float32
         batch_axis = "full_batch_size" if continuous_batching else "batch_size"
         specs = {"past_key_values": [], "input_names": [], "output_names": [], "dynamic_axes": {}}
         for index in range(config.num_hidden_layers):
@@ -1260,7 +1293,7 @@ class QEffQwen4ExpDecodeExportMixin:
                             config.linear_key_head_dim,
                             config.linear_value_head_dim,
                         ),
-                        dtype=torch.float32,
+                        dtype=recurrent_state_dtype,
                     ),
                 ]
                 axes = [{0: batch_axis}, {0: batch_axis}]
@@ -1323,7 +1356,7 @@ class QEffQwen4ExpDecodeExportMixin:
                     else torch.zeros(
                         (batch_size, context // config.indexer_compress_ratio, config.indexer_head_dim), dtype=dtype
                     ),
-                    torch.zeros((batch_size, 1, config.indexer_head_dim), dtype=torch.float32),
+                    torch.zeros((batch_size, 1, config.indexer_head_dim), dtype=recurrent_state_dtype),
                 ]
                 axes = [
                     {0: batch_axis, 2: "local_ctx_len"},
