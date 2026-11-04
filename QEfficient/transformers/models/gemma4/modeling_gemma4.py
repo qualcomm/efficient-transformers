@@ -50,6 +50,25 @@ from QEfficient.transformers.moe import (
 from QEfficient.transformers.spd.dflash import compute_dflash_target_hidden_states
 from QEfficient.utils import constants
 
+
+def _get_gemma4_config_attr(config, name, default=None, layer_idx=None):
+    if layer_idx is not None:
+        per_layer_config = getattr(config, "per_layer_config", None)
+        if per_layer_config is not None and layer_idx < len(per_layer_config):
+            try:
+                return getattr(per_layer_config[layer_idx], name)
+            except AttributeError:
+                pass
+    try:
+        return getattr(config, name)
+    except AttributeError:
+        return default
+    except Exception as exc:
+        if exc.__class__.__name__ != "AmbiguousGlobalPerLayerAttributeError":
+            raise
+        return getattr(config, "__dict__", {}).get(name, default)
+
+
 _FP16_CLAMP_MIN = -65504.0
 _FP16_CLAMP_MAX = 65504.0
 _DISABLE_EXPORT_FP16_CLAMP = False
@@ -498,6 +517,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
         token_value_states = None
         blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
         num_kv_shared_layers = int(getattr(self.config, "num_kv_shared_layers", 0) or 0)
+        shared_kv_key = self.layer_type
         disable_blocking_for_store_full_kv = self.store_full_length_kv and num_kv_shared_layers > 0
         has_valid_blocking_mode = blocking_config is not None and (blocking_config.mode != BlockingMode.NONE)
         # KV-sharing layers reuse KV from an earlier layer, so they should not run a blocked KV update path.
@@ -524,11 +544,11 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
         query_states = query_states.transpose(1, 2)
 
         if self.is_kv_shared_layer and past_key_values is not None:
-            key_states, value_states = past_key_values.shared_layers[self.kv_shared_layer_index]
+            key_states, value_states = past_key_values.shared_layers[shared_kv_key]
             key_states = key_states.to(query_states.device, dtype=target_dtype)
             value_states = value_states.to(query_states.device, dtype=target_dtype)
             if hasattr(past_key_values, "shared_layers_token"):
-                token_states = past_key_values.shared_layers_token.get(self.kv_shared_layer_index)
+                token_states = past_key_values.shared_layers_token.get(shared_kv_key)
                 if token_states is not None:
                     token_key_states, token_value_states = token_states
         else:
@@ -550,6 +570,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
             if (
                 mm_token_type_ids is not None
                 and hidden_states.shape[1] != 1
+                and self.sliding_window is not None
                 and getattr(self.config, "use_bidirectional_attention", None) == "vision"
             ):
                 attention_mask = _build_bidirectional_vision_attention_mask(
@@ -613,13 +634,14 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
                     past_key_values.shared_layers = {}
                 if not hasattr(past_key_values, "shared_layers_token"):
                     past_key_values.shared_layers_token = {}
-                past_key_values.shared_layers[self.layer_idx] = key_states, value_states
+                past_key_values.shared_layers[shared_kv_key] = key_states, value_states
                 if token_key_states is not None and token_value_states is not None:
-                    past_key_values.shared_layers_token[self.layer_idx] = token_key_states, token_value_states
+                    past_key_values.shared_layers_token[shared_kv_key] = token_key_states, token_value_states
 
         if (
             mm_token_type_ids is not None
             and hidden_states.shape[1] != 1
+            and self.sliding_window is not None
             and getattr(self.config, "use_bidirectional_attention", None) == "vision"
         ):
             attention_mask = _build_bidirectional_vision_attention_mask(
@@ -793,6 +815,7 @@ class QEffGemma4TextModel(Gemma4TextModel):
             use_mm_bidirectional_mask = (
                 kwargs.get("mm_token_type_ids") is not None
                 and inputs_embeds.shape[1] != 1
+                and layer_type == "sliding_attention"
                 and getattr(self.config, "use_bidirectional_attention", None) == "vision"
             )
             if isinstance(attention_mask, dict):
@@ -1105,19 +1128,30 @@ class QEffGemma4ForCausalLM(Gemma4ForCausalLM):
 
     def get_dummy_pkv_cache(self, config, batch_size, seq_len):
         past_key_values = []
-        for layer_type in config.layer_types:
+        for i, layer_type in enumerate(config.layer_types):
+            hidden_size = _get_gemma4_config_attr(config, "hidden_size", layer_idx=i)
+            num_attention_heads = _get_gemma4_config_attr(config, "num_attention_heads", layer_idx=i)
+            default_head_dim = hidden_size // num_attention_heads
+
             if layer_type == "sliding_attention":
-                n_heads = config.num_key_value_heads
-                d_head = config.head_dim
-                layer_seq_len = min(config.sliding_window, seq_len)
+                n_heads = _get_gemma4_config_attr(config, "num_key_value_heads", layer_idx=i)
+                d_head = _get_gemma4_config_attr(config, "head_dim", default_head_dim, i)
+                sliding_window = _get_gemma4_config_attr(config, "sliding_window", seq_len, i)
+                layer_seq_len = min(sliding_window or seq_len, seq_len)
             else:
-                use_alternative_attention = getattr(config, "attention_k_eq_v", False)
+                use_alternative_attention = _get_gemma4_config_attr(config, "attention_k_eq_v", False, i)
+                global_kv_heads = _get_gemma4_config_attr(config, "num_global_key_value_heads", None, i)
                 n_heads = (
-                    config.num_global_key_value_heads
-                    if use_alternative_attention and getattr(config, "num_global_key_value_heads", None) is not None
-                    else config.num_key_value_heads
+                    global_kv_heads
+                    if use_alternative_attention and global_kv_heads is not None
+                    else _get_gemma4_config_attr(config, "num_key_value_heads", layer_idx=i)
                 )
-                d_head = config.global_head_dim if getattr(config, "global_head_dim", None) else config.head_dim
+                d_head = _get_gemma4_config_attr(
+                    config,
+                    "global_head_dim",
+                    _get_gemma4_config_attr(config, "head_dim", default_head_dim, i),
+                    i,
+                )
                 layer_seq_len = seq_len
             cache_shape = [batch_size, n_heads, layer_seq_len, d_head]
             past_key_values.append(
@@ -1350,16 +1384,17 @@ class QEffGemma4EncoderWrapper(nn.Module):
             )
         hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0.0)
         if hidden_states.shape[1] != output_length:
-            hidden_states, pooler_mask = self._avg_pool_by_positions_static_kernel(
+            hidden_states, _ = self._avg_pool_by_positions_static_kernel(
                 hidden_states=hidden_states,
                 pixel_position_ids=image_position_ids,
                 length=output_length,
             )
-        hidden_states = hidden_states * vision_tower.pooler.root_hidden_size
         if vision_tower.config.standardize:
             std_bias = vision_tower.std_bias.to(hidden_states.device)
             std_scale = vision_tower.std_scale.to(hidden_states.device)
-            hidden_states = (hidden_states - std_bias) * std_scale
+            hidden_states = hidden_states * (vision_tower.pooler.root_hidden_size * std_scale) - std_bias * std_scale
+        else:
+            hidden_states = hidden_states * vision_tower.pooler.root_hidden_size
 
         vision_embeds = self.model.model.embed_vision(inputs_embeds=hidden_states)
         if vision_embeds.dim() == 2:
@@ -1369,7 +1404,6 @@ class QEffGemma4EncoderWrapper(nn.Module):
         # Gemma4 uses vision_config.default_output_length/image_seq_length
         # image placeholders (280), while the vision pooler may emit extra
         # padded bins for the max-patch canvas.
-        del pooler_mask
         return vision_embeds[:, : self.mm_tokens_per_image, :]
 
 
@@ -1434,6 +1468,9 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         # Preserve the legacy shape when callers do not request a separate vision batch.
         vision_batch_size = batch_size if vision_batch_size is None else vision_batch_size
         prefill_seq_len = prefill_seq_len if prefill_seq_len else 32
+        enable_chunking = compiler_options.pop("enable_chunking", False)
+        if not enable_chunking:
+            prefill_seq_len = max(prefill_seq_len, prefill_seq_len + self._get_mm_tokens_per_image())
         ctx_len = ctx_len if ctx_len else constants.INTERN_CTX_LEN
         max_patches = self._get_vision_max_patches()
         user_vision_size = compiler_options.pop("vision_size", None)
@@ -1538,18 +1575,29 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
     def get_dummy_pkv_cache(self, config, batch_size, seq_len):
         past_key_values = []
         for i, layer_type in enumerate(config.layer_types):
+            hidden_size = _get_gemma4_config_attr(config, "hidden_size", layer_idx=i)
+            num_attention_heads = _get_gemma4_config_attr(config, "num_attention_heads", layer_idx=i)
+            default_head_dim = hidden_size // num_attention_heads
+
             if layer_type == "sliding_attention":
-                n_heads = config.num_key_value_heads
-                d_head = config.head_dim
-                layer_seq_len = min(config.sliding_window, seq_len)
+                n_heads = _get_gemma4_config_attr(config, "num_key_value_heads", layer_idx=i)
+                d_head = _get_gemma4_config_attr(config, "head_dim", default_head_dim, i)
+                sliding_window = _get_gemma4_config_attr(config, "sliding_window", seq_len, i)
+                layer_seq_len = min(sliding_window or seq_len, seq_len)
             else:
-                use_alternative_attention = getattr(config, "attention_k_eq_v", False)
+                use_alternative_attention = _get_gemma4_config_attr(config, "attention_k_eq_v", False, i)
+                global_kv_heads = _get_gemma4_config_attr(config, "num_global_key_value_heads", None, i)
                 n_heads = (
-                    config.num_global_key_value_heads
-                    if use_alternative_attention and getattr(config, "num_global_key_value_heads", None) is not None
-                    else config.num_key_value_heads
+                    global_kv_heads
+                    if use_alternative_attention and global_kv_heads is not None
+                    else _get_gemma4_config_attr(config, "num_key_value_heads", layer_idx=i)
                 )
-                d_head = config.global_head_dim if getattr(config, "global_head_dim", None) else config.head_dim
+                d_head = _get_gemma4_config_attr(
+                    config,
+                    "global_head_dim",
+                    _get_gemma4_config_attr(config, "head_dim", default_head_dim, i),
+                    i,
+                )
                 layer_seq_len = seq_len
             cache_shape = [batch_size, n_heads, layer_seq_len, d_head]
             past_key_values.append(
@@ -1568,6 +1616,7 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         **kwargs,
     ):
         seq_len = kwargs.get("prefill_seq_len", None)
+        cache_seq_len = kwargs.get("ctx_len", None)
         bs = kwargs.get("batch_size", None)
         if seq_len is None:
             seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
@@ -1576,6 +1625,7 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
             # A one-token dummy cache constrains the dynamically annotated
             # KV-cache lengths to 1 during torch.export.
             seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+        cache_seq_len = int(cache_seq_len) if cache_seq_len is not None else seq_len
         if bs is None:
             bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         bs = int(bs)
@@ -1615,7 +1665,7 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
             "past_key_values": self.get_dummy_pkv_cache(
                 config=self.model.language_model.config,
                 batch_size=fbs if continuous_batching else bs,
-                seq_len=seq_len,
+                seq_len=cache_seq_len,
             ),
         }
         if continuous_batching:

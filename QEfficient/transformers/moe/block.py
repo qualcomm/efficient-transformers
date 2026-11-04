@@ -24,7 +24,6 @@ The flavour is assigned at export time by ``OptimizedMoETransform`` via
 """
 
 from abc import ABCMeta, abstractmethod
-from typing import Optional, Tuple
 
 import torch
 
@@ -54,12 +53,14 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     # Expert-parallel knobs, set by OptimizedMoETransform when flavour is EXPERT_PARALLEL.
     num_devices: int = 1
     cores_per_expert: int = 1
-    total_avl_cores: Optional[int] = None
-    num_pipeline_stages: Optional[int] = None
-    num_parallelized_experts: Optional[int] = None
-    experts_per_soc: Optional[int] = None
+    total_avl_cores: int | None = None
+    num_pipeline_stages: int | None = None
+    num_parallelized_experts: int | None = None
+    experts_per_soc: int | None = None
     tree_reduce: bool = False
     expert_parallel_num_packed_chunks: int = 1
+    expert_intermediate_block_size: int | None = None
+    expert_num_ffn_blocks: int | None = None
     # Set by OptimizedMoEWeightsTransform after model-local canonicalization.
     weights_transformed: bool = False
 
@@ -104,7 +105,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     def apply_shared_experts(self, out: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
         return out
 
-    def get_supported_moe_flavours(self) -> Tuple[MoEFlavour, ...]:
+    def get_supported_moe_flavours(self) -> tuple[MoEFlavour, ...]:
         if not hasattr(self, "supported_moe_flavours"):
             raise TypeError(f"{type(self).__name__} must explicitly define supported_moe_flavours")
         return tuple(self.supported_moe_flavours)
@@ -170,6 +171,7 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
                 experts_per_soc=getattr(self, "experts_per_soc", None),
                 tree_reduce=getattr(self, "tree_reduce", False),
                 num_packed_chunks=num_packed_chunks,
+                expert_intermediate_block_size=getattr(self, "expert_intermediate_block_size", None),
             )
         if quantized_experts:
             raise NotImplementedError(f"moe flavour {flavour.value!r} is not supported for quantized experts")

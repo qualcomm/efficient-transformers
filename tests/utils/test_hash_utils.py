@@ -9,7 +9,10 @@ import json
 import random
 
 import pytest
+import torch
+from torch.export import Dim
 
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.utils.constants import HASH_HEXDIGEST_STR_LEN
 from QEfficient.utils.hash_utils import hash_dict_params, json_serializable, to_hashable
 
@@ -33,6 +36,22 @@ def test_to_hashable_set():
     assert to_hashable(set(range(4))) == to_hashable(set(range(4 - 1, -1, -1)))
 
 
+def test_to_hashable_torch_export_dim_class():
+    dim = Dim("grid_height", min=1, max=1024)
+
+    assert to_hashable({"dynamic_shapes": {"pixel_values": {0: dim}}}) == (
+        b'{"dynamic_shapes":{"pixel_values":{"0":{"max":1024,"min":1,"name":"grid_height"}}}}'
+    )
+
+
+def test_to_hashable_torch_export_unbounded_dim_class():
+    dim = Dim("vision_size")
+
+    assert to_hashable({"dynamic_shapes": {"vision_embeds": {1: dim}}}) == (
+        b'{"dynamic_shapes":{"vision_embeds":{"1":{"max":"int_oo","min":0,"name":"vision_size"}}}}'
+    )
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_to_hashable_float_nan(value):
     with pytest.raises(ValueError):
@@ -45,6 +64,14 @@ def test_json_serializable():
     # Test with an unsupported type
     with pytest.raises(TypeError):
         json_serializable({1, 2, 3, {4, 5}})
+
+
+def test_json_serializable_supports_dataclass_and_torch_dtype():
+    blocking_config = AttentionBlockingConfig()
+
+    assert isinstance(json_serializable(blocking_config), dict)
+    assert to_hashable({"blocking_kwargs": blocking_config})
+    assert json_serializable(torch.bfloat16) == "torch.bfloat16"
 
 
 def test_to_hashable():

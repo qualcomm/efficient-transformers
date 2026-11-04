@@ -13,6 +13,10 @@ from typing import Dict
 from QEfficient.utils.constants import HASH_HEXDIGEST_STR_LEN
 
 
+def _json_dim_bound(bound):
+    return bound if isinstance(bound, int) else str(bound)
+
+
 def json_serializable(obj):
     if isinstance(obj, set):
         # Convert set to a sorted list of strings for consistent hashing
@@ -22,12 +26,21 @@ def json_serializable(obj):
         return asdict(obj)
     if obj.__class__.__name__ == "Dim":
         return str(obj)
+    if obj.__class__.__name__ == "_Dim":
+        return {"name": obj.__name__, "min": _json_dim_bound(obj.min), "max": _json_dim_bound(obj.max)}
+    if obj.__class__.__name__ == "IntInfinity":
+        return str(obj)
     if obj.__class__.__name__ == "_DimHint":
         return str(obj)
     if obj.__class__.__name__ == "_DimHintType":
         return str(obj)
     if hasattr(obj, "name") and hasattr(obj, "min") and hasattr(obj, "max"):
         return {"name": obj.name, "min": obj.min, "max": obj.max}
+    # torch.dtype (e.g. torch.bfloat16) — serialize as its string name
+    import torch
+
+    if isinstance(obj, torch.dtype):
+        return str(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
