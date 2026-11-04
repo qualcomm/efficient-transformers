@@ -92,6 +92,8 @@ def _resolve_weight_free_target_dtype(qeff_model) -> torch.dtype:
         dtype_config.torch_dtype = target_dtype
         dtype_config.dtype = target_dtype
     return target_dtype
+
+
 def _build_qeff_quantization_config(config_cls, quantization_config: dict):
     """Construct a QEff quantization config from checkpoint metadata."""
     config_kwargs = dict(quantization_config)
@@ -225,8 +227,6 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
     return qeff_model
 
 
-
-
 def _prune_unused_fake_initializers(onnx_program) -> None:
     """Remove FakeTensor initializers not referenced by any graph node.
 
@@ -284,6 +284,7 @@ def _materialize_lifted_attention_mask_zero_initializers(onnx_program) -> bool:
 
     onnx_program.apply_weights(replacements)
     return True
+
 
 def _materialize_computed_initializers(onnx_program, qeff_model) -> None:
     """Materialize model-generated constants before serializing a meta graph."""
@@ -356,7 +357,6 @@ def _prepare_checkpoint_for_weight_free_export(
         config=getattr(qeff_model.model, "config", None),
         hash_params=hash_params,
     )
-    moe_prefill_flavour = hash_params.get("moe_prefill_flavour", "none")
     model_config = getattr(qeff_model.model, "config", None)
     plan_payload = plan.fingerprint_payload()
     is_deepseek_v4 = getattr(model_config, "model_type", None) == "deepseek_v4"
@@ -375,17 +375,6 @@ def _prepare_checkpoint_for_weight_free_export(
         prepared_out = QEFF_CHECKPOINT_HOME.expanduser() / prepared_name
     else:
         prepared_out = source_dir.parent / prepared_name
-
-    if is_deepseek_v4:
-        from QEfficient.exporter.weight_free.checkpoint_transforms import DeepseekV4CheckpointTransform
-
-        DeepseekV4CheckpointTransform.apply(
-            src=source_dir,
-            out=prepared_out,
-            target_dtype=target_dtype,
-            num_hidden_layers=num_hidden_layers,
-        )
-        return str(prepared_out)
 
     return str(
         prep_pipeline.apply(

@@ -7,10 +7,10 @@
 
 import math
 import os
-import inspect
 import warnings
 from pathlib import Path
 from time import perf_counter
+from typing import Optional, Union
 
 import numpy as np
 import onnx
@@ -1304,7 +1304,6 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
-        ExpertParallelPackingCheckpointTransform,
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
@@ -1454,7 +1453,6 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
     _onnx_transforms = []
 
     _checkpoint_transforms = [
-        ExpertParallelPackingCheckpointTransform,
         GptOssMxfp4ExpertDequantSplitCheckpointTransform,
         MoEExpertStackingCheckpointTransform,
         MoEFusedExpertSplitCheckpointTransform,
@@ -4665,7 +4663,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         ##################################
 
         cache_context_length = seq_len
-        dynamic_seq_len = True
         if hasattr(self.model, "get_export_example_dimensions"):
             export_dimensions = self.model.get_export_example_dimensions(
                 batch_size=bs,
@@ -4677,7 +4674,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             seq_len = export_dimensions["seq_len"]
             fbs = export_dimensions["full_batch_size"]
             cache_context_length = export_dimensions["cache_context_length"]
-            dynamic_seq_len = export_dimensions.get("dynamic_seq_len", True)
 
         # Weight-free export only needs tensor metadata for the large retained
         # caches. Allocate those examples on meta so long-context/full-model
@@ -4687,6 +4683,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         def _get_dummy_cache(method, *args):
             import inspect
+
             if cache_device is not None and "device" in inspect.signature(method).parameters:
                 return method(*args, device=cache_device)
             return method(*args)
@@ -5029,7 +5026,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             import functools
             import inspect
 
-            from transformers.cache_utils import Cache, DynamicCache
+            from transformers.cache_utils import Cache
 
             model_forward = self.model.forward
             model_forward_sig = inspect.signature(model_forward)

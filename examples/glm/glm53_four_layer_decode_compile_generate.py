@@ -69,8 +69,8 @@ ATTENTION_PRESETS = {
         "num_cores_per_device": 16,
     },
     "dsa_ts16_smoke": {
-        "indexer_dp": 1,
-        "indexer_cp": 16,
+        "indexer_dp": 16,
+        "indexer_cp": 1,
         "indexer_kvp": 1,
         "attn_dp": 16,
         "attn_cp": 1,
