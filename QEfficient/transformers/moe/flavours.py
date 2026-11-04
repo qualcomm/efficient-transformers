@@ -16,6 +16,7 @@ return the routed expert output ``[T, H]``:
 
 from collections.abc import Callable, Iterable
 from enum import Enum
+from typing import Optional
 
 import torch
 
