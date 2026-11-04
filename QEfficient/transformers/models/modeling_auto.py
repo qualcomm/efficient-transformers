@@ -168,6 +168,17 @@ def _get_gdn_full_state_update_kwargs(
     )
 
 
+def _get_vlm_export_batch_size(model_type: str, dynamo: bool, qaic_config: Optional[dict] = None) -> int:
+    """Return the example batch used to capture a dual-QPC VLM export."""
+    batch_size = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
+    if dynamo and model_type != "minimax_m3_vl":
+        batch_size = max(2, batch_size)
+    if model_type == "minimax_m3_vl" and qaic_config:
+        dp_factors = [int(qaic_config.get(key, 1) or 1) for key in ("msa_indexer_dp", "msa_attn_dp", "attn_dp")]
+        batch_size = max(batch_size, max(dp_factors))
+    return batch_size
+
+
 TORCH_TO_NUMPY_DTYPE_MAP = {
     torch.float16: np.float16,
     torch.bfloat16: np.float16,  # Since numpy doesn't support bfloat16
@@ -1902,26 +1913,22 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 **kwargs,
             )
         dynamo = kwargs.get("dynamo", False) or getattr(self, "_weight_free", False)
-        bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
-        # TODO: Remove this hack ##################
-        if dynamo:
-            # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
-            bs = max(2, bs)
-        ###########################################
+        model_type = self.model.config.model_type
+        qaic_config = kwargs.get("qaic_config", getattr(self.lang_model.model, "qaic_config", None))
+        # Most Dynamo VLM exports require batch >= 2 for their dynamic-shape constraints. MiniMax supports
+        # batch 1 and must preserve it when its DP factors are 1 to keep the MSA cache broadcasts compilable.
+        bs = _get_vlm_export_batch_size(model_type, dynamo, qaic_config)
         seq_len: int = int(
             prefill_seq_len
             if prefill_seq_len is not None
             else kwargs.get("prefill_seq_len", constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
         )
-        qaic_config = kwargs.get("qaic_config", getattr(self.lang_model.model, "qaic_config", None))
-        if self.model.config.model_type == "minimax_m3_vl" and qaic_config:
+        if model_type == "minimax_m3_vl" and qaic_config:
             # MiniMax derives distributed cache layouts in get_dummy_inputs()
             # from the model-local QAIC configuration. Keep compile-time
             # overrides synchronized before constructing those inputs.
             self.model.qaic_config = qaic_config
             self.lang_model.model.qaic_config = qaic_config
-            dp_factors = [int(qaic_config.get(key, 1) or 1) for key in ("msa_indexer_dp", "msa_attn_dp", "attn_dp")]
-            bs = max(bs, max(dp_factors))
         gdn_export_kwargs = _get_gdn_full_state_update_kwargs(
             self.model,
             qaic_config,
