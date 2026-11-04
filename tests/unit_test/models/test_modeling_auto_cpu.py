@@ -1100,6 +1100,21 @@ class TestQEFFAutoModelForSpeechSeq2Seq:
         assert qeff.export() == "exported"
         assert captured["dynamo"] is True
 
+    def test_export_honors_explicit_dynamo(self, monkeypatch):
+        """A normally loaded Whisper model can explicitly select Dynamo export."""
+        model, _ = make_tiny_whisper()
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export(dynamo=True) == "exported"
+        assert captured["dynamo"] is True
+
     def test_get_onnx_path_defaults_to_dynamo_for_weight_free(self, monkeypatch, tmp_path):
         """Weight-free Whisper export stays on the Dynamo path through get_onnx_path."""
         model, _ = make_tiny_whisper()
@@ -1213,6 +1228,21 @@ class TestQEFFAutoModelForCTC:
         assert qeff.export() == "exported"
         assert captured["dynamo"] is True
 
+    def test_export_honors_explicit_dynamo(self, monkeypatch):
+        """A normally loaded CTC model can explicitly select Dynamo export."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export(dynamo=True) == "exported"
+        assert captured["dynamo"] is True
+
     def test_compile_defaults_to_dynamo_for_weight_free(self, monkeypatch, tmp_path):
         """Weight-free Wav2Vec2 compile keeps the export on the Dynamo path."""
         model, _ = make_tiny_wav2vec2()
@@ -1230,6 +1260,25 @@ class TestQEFFAutoModelForCTC:
         monkeypatch.setattr(qeff, "_export", fake_export)
 
         qeff.compile(compile_dir=tmp_path / "compile", artifacts=True)
+        assert captured["dynamo"] is True
+
+    def test_compile_honors_explicit_dynamo(self, monkeypatch, tmp_path):
+        """CTC compile forwards an explicit Dynamo flag for ordinary models."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model)
+        captured = {}
+
+        monkeypatch.setattr(qeff, "transform", lambda **kwargs: None)
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            qeff.onnx_path = tmp_path / "model.onnx"
+            qeff.onnx_path.touch()
+            return qeff.onnx_path
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        qeff.compile(compile_dir=tmp_path / "compile", artifacts=True, dynamo=True)
         assert captured["dynamo"] is True
 
     def test_init_stores_model(self):

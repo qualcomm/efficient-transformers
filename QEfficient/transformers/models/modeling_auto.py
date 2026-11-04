@@ -440,7 +440,7 @@ class QEFFTransformersBase(QEFFBaseModel):
 
     @classmethod
     @with_replaced_quantizers
-    def from_pretrained(cls, pretrained_model_name_or_path: str, weight_free: bool = False, *args, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path: str, *args, weight_free: bool = False, **kwargs):
         """
         Load a QEfficient transformer model from a pretrained HuggingFace model or local path.
 
@@ -5522,7 +5522,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         str
             Path to the generated ONNX graph file.
         """
-        dynamo = kwargs.get("dynamo", self._weight_free)
+        dynamo = dynamo or self._weight_free
         inputs = self.model.get_dummy_inputs(dynamo=dynamo)
         dynamic_axes = self.model.get_onnx_dynamic_axes(dynamo=dynamo)
         output_names = self.model.get_output_names()
@@ -5931,7 +5931,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
         bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         seq_len = constants.WAV2VEC2_MAX_SEQ_LEN
 
-        dynamo = kwargs.get("dynamo", self._weight_free)
+        dynamo = dynamo or self._weight_free
         if dynamo:
             # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
             bs = max(2, bs)
