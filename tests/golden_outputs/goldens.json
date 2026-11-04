@@ -5656,6 +5656,87 @@
         "variant_key": "cb_float32_pl1024_cl2048_gl8_f75d0bb9_b6a8536d2fcd"
       }
     },
+    "tiny-fp8-llama-channel": {
+      "nocb_float16_pl8_cl16_gl8_0f03df49_705561b04c67": {
+        "config_fp": "0f03df49",
+        "continuous_batching": false,
+        "ctx_len": 16,
+        "dtype": "torch.float16",
+        "full_batch_size": null,
+        "gen_len": 8,
+        "generation_len": 8,
+        "prompt_len": 8,
+        "prompts": [
+          "hello world"
+        ],
+        "pytorch_hf_tokens": [
+          49,
+          121,
+          41,
+          98,
+          20,
+          105,
+          51,
+          47
+        ],
+        "timestamp": "2026-10-22T11:58:11.256407",
+        "variant_key": "nocb_float16_pl8_cl16_gl8_0f03df49_705561b04c67"
+      }
+    },
+    "tiny-fp8-llama-tensor": {
+      "nocb_float16_pl8_cl16_gl8_0f03df49_705561b04c67": {
+        "config_fp": "0f03df49",
+        "continuous_batching": false,
+        "ctx_len": 16,
+        "dtype": "torch.float16",
+        "full_batch_size": null,
+        "gen_len": 8,
+        "generation_len": 8,
+        "prompt_len": 8,
+        "prompts": [
+          "hello world"
+        ],
+        "pytorch_hf_tokens": [
+          49,
+          121,
+          41,
+          98,
+          20,
+          105,
+          51,
+          47
+        ],
+        "timestamp": "2026-10-22T11:57:51.927572",
+        "variant_key": "nocb_float16_pl8_cl16_gl8_0f03df49_705561b04c67"
+      }
+    },
+    "tiny-fp8-qwen3-block": {
+      "nocb_float16_pl8_cl16_gl8_3ecb539c_06c8f3b7f472": {
+        "config_fp": "3ecb539c",
+        "continuous_batching": false,
+        "ctx_len": 16,
+        "dtype": "torch.float16",
+        "full_batch_size": null,
+        "gen_len": 8,
+        "generation_len": 8,
+        "prompt_len": 8,
+        "prompts": [
+          "hello world"
+        ],
+        "pytorch_hf_tokens": [
+          122,
+          48,
+          122,
+          69,
+          83,
+          68,
+          57,
+          67
+        ],
+        "timestamp": "2026-10-22T11:58:29.448387",
+        "variant_key": "nocb_float16_pl8_cl16_gl8_3ecb539c_06c8f3b7f472"
+      }
+    },
     "tiny-random/gemma-3": {
       "cb_float16_pl1024_cl2048_gl8_e9e2bac1_9e03ba4a81cb": {
         "config_fp": "e9e2bac1",

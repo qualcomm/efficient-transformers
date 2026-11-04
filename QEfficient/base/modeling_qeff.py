@@ -27,6 +27,7 @@ from QEfficient.base.onnx_transforms import (
     FP16ClipTransform,
     LocalizeFunctionReduceSumAxesTransform,
     OnnxTransformPipeline,
+    PruneFakeInitializersTransform,
     RenameFunctionOutputsTransform,
     SplitTensorsTransform,
 )
@@ -41,6 +42,7 @@ from QEfficient.compile.mdp_generator import (
     generate_mdp_partition_config,
 )
 from QEfficient.compile.qnn_compiler import compile as qnn_compile
+from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
 from QEfficient.exporter.weight_free.export import embed_weight_spec_as_metadata, link_prepared_checkpoint_dir
 from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path
 from QEfficient.generation.cloud_infer import QAICInferenceSession
@@ -239,6 +241,44 @@ def _copy_model_compiler_input(
             _copy_weight_free_spec(resolved_weight_spec_path, compile_dir)
         command[index] = f"-m={artifact_onnx_path}"
         return
+
+
+def _build_blocked_translation_table(model: "torch.nn.Module") -> dict:
+    """Build Dynamo translations for the blocked FP8 operators in *model*."""
+    from QEfficient.customop.fp8_dequantize import get_blocked_fn
+    from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8BlockWiseDequantLinear
+
+    block_sizes = set()
+    for module in model.modules():
+        if not isinstance(module, FP8BlockWiseDequantLinear):
+            continue
+        block_sizes.add(tuple(module.weight_block_size))
+
+    if not block_sizes:
+        return {}
+    if len(block_sizes) > 1:
+        raise ValueError(f"Mixed FP8 block sizes are not supported in one export: {sorted(block_sizes)}")
+
+    row_bs, col_bs = next(iter(block_sizes))
+    translation = get_blocked_fn(row_bs, col_bs)
+    return {torch.ops.qefficient.fp8_dequantize_blocked.default: translation}
+
+
+def _validate_legacy_fp8_export(model: "torch.nn.Module", dynamo: bool) -> None:
+    """Reject legacy export when retained FP8 dequantization would emit invalid ONNX."""
+    if dynamo:
+        return
+
+    from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
+        FP8BlockWiseDequantLinear,
+        FP8DeQuantLinear,
+    )
+
+    fp8_modules = (FP8DeQuantLinear, FP8BlockWiseDequantLinear)
+    if any(isinstance(module, fp8_modules) for module in model.modules()):
+        raise ValueError(
+            "Legacy TorchScript ONNX export is not supported for retained FP8 weights; use dynamo=True instead."
+        )
 
 
 def _rename_graph_value(graph: onnx.GraphProto, old_name: str, new_name: str) -> None:
@@ -630,6 +670,89 @@ class QEFFBaseModel(ABC):
             :str: Path of the compiled ``qpc`` package.
         """
 
+    def _export_via_legacy(
+        self,
+        onnx_path: Path,
+        example_inputs: Dict[str, torch.Tensor],
+        input_names: List[str],
+        output_names: List[str],
+        dynamic_axes: Dict,
+        export_kwargs: Dict,
+    ) -> None:
+        """Export via TorchScript symbolic tracing (dynamo=False)."""
+        with layerwise_safe_onnx_export_patches(enabled=bool(QEFFBaseModel._layerwise_active)):
+            torch.onnx.export(
+                self.model,
+                (),
+                str(onnx_path),
+                kwargs=example_inputs,
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=dynamic_axes,
+                dynamo=False,
+                opset_version=constants.ONNX_LEGACY_EXPORT_OPSET,
+                **export_kwargs,
+            )
+
+    def _export_via_dynamo(
+        self,
+        onnx_path: Path,
+        example_inputs: Dict[str, torch.Tensor],
+        input_names: List[str],
+        output_names: List[str],
+        dynamic_shapes: Optional[Dict],
+        export_kwargs: Dict,
+    ) -> None:
+        """Export via torch.export (dynamo=True) with custom op translation."""
+        # Reorder example_inputs and dynamic_shapes to match model.forward signature order,
+        # which torch.export requires for dynamic_shapes to bind correctly.
+        sig_keys = list(inspect.signature(self.model.forward).parameters.keys())
+        sig_key_set = set(sig_keys)
+        ordered_inputs, ordered_shapes = {}, {}
+        for k in sig_keys:
+            if k in example_inputs:
+                ordered_inputs[k] = example_inputs[k]
+            if dynamic_shapes is not None and k in dynamic_shapes:
+                ordered_shapes[k] = dynamic_shapes[k]
+        example_inputs = {**ordered_inputs, **{k: v for k, v in example_inputs.items() if k not in sig_key_set}}
+        if dynamic_shapes is not None:
+            dynamic_shapes = {**ordered_shapes, **{k: v for k, v in dynamic_shapes.items() if k not in sig_key_set}}
+
+        export_kwargs = dict(export_kwargs)
+        export_kwargs.setdefault("report", False)
+        export_kwargs.setdefault("optimize", False)
+        export_kwargs["dynamo"] = True
+        export_kwargs["custom_translation_table"] = {
+            **(export_kwargs.pop("custom_translation_table", None) or {}),
+            **DYNAMO_CUSTOM_OP_TABLE,
+            **_build_blocked_translation_table(self.model),
+        }
+
+        prev_invoke_fallback = os.environ.get("TORCH_INVOKE_ALLOW_CREATE_FALLBACK")
+        os.environ["TORCH_INVOKE_ALLOW_CREATE_FALLBACK"] = "1"
+        try:
+            onnx_program = torch.onnx.export(
+                self.model,
+                args=(),
+                f=None,
+                kwargs=example_inputs,
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=None,
+                dynamic_shapes=dynamic_shapes,
+                opset_version=constants.ONNX_DYNAMO_EXPORT_OPSET,
+                **export_kwargs,
+            )
+            if onnx_program is None:
+                raise RuntimeError("torch.onnx.export returned None for dynamo export")
+            PruneFakeInitializersTransform.apply(onnx_program)
+            onnx_program.save(str(onnx_path), external_data=True)
+        finally:
+            if prev_invoke_fallback is None:
+                os.environ.pop("TORCH_INVOKE_ALLOW_CREATE_FALLBACK", None)
+            else:
+                os.environ["TORCH_INVOKE_ALLOW_CREATE_FALLBACK"] = prev_invoke_fallback
+
     @export_wrapper
     def _export(
         self,
@@ -686,6 +809,8 @@ class QEFFBaseModel(ABC):
             return onnx_path
 
         export_dir.mkdir(parents=True, exist_ok=True)
+
+        _validate_legacy_fp8_export(self.model, dynamo)
 
         def _resolve_pkv_layers(pkv_obj):
             if isinstance(pkv_obj, (list, tuple)):
