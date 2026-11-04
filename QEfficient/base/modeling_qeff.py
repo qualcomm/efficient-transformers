@@ -371,6 +371,7 @@ def generate_mdp_compiler_dump(
     dump_command.append(f"-mdp-dump-partition-config={dump_path}")
 
     logger.info(f"Running compiler for MDP dump: {' '.join(dump_command)}")
+    print(f"Running compiler for MDP dump: {' '.join(dump_command)}")
     try:
         subprocess.run(dump_command, capture_output=True, check=True, env=compiler_env)
     except subprocess.CalledProcessError as e:
@@ -1432,6 +1433,9 @@ class QEFFBaseModel(ABC):
                 config (nodeList per partition) without requiring a compiler round-trip.
                 Ignored when ``mdp_load_partition_config`` is already provided in compiler_options.
                 Defaults to 1 (template / tensor-slice MDP, existing behaviour).
+            :connection_type (str): Generated disaggregated MDP connection topology. ``"p2p"``
+                (default) uses one all-device P2P group; ``"mix"`` uses two P2P groups joined by
+                a host connection at the device midpoint and requires an even ``num_devices``.
             :num_speculative_tokens (int | List[int], optional): Number of speculative tokens for TLM decode. A plain int K compiles one decode specialization (seq_len=K+1). A list [K0, K1, ...] compiles one specialization per value, enabling per-step dispatch to the cheapest kernel.
             :enable_qnn (bool): Enables QNN Compilation. ``Defaults to False.``
             :qnn_config (str): Path of QNN Config parameters file. Any extra parameters for QNN compilation can be passed via this file. ``Defaults to None.``
@@ -1455,6 +1459,7 @@ class QEFFBaseModel(ABC):
 
         mdp_ts_json_path = compiler_options.pop("mdp_load_partition_config", None)
         mdp_strategy = MdpStrategy(compiler_options.pop("mdp_strategy", MdpStrategy.ONNX))
+        connection_type = compiler_options.pop("connection_type", "p2p")
         mdp_compiler_dump_path = compiler_options.pop("mdp_compiler_dump_path", None)
         if mdp_compiler_dump_path is not None:
             logger.warning(
@@ -1626,6 +1631,7 @@ class QEFFBaseModel(ABC):
                 mdp_compiler_dump_path=mdp_compiler_dump_path,
                 num_cores=num_cores,
                 num_layers=num_layers,
+                connection_type=connection_type,
             )
             command.append(f"-mdp-load-partition-config={mdp_ts_json_path}")
         elif mdp_ts_num_devices > 1 and not compiler_options.get("mdp_dump_partition_config", None):
@@ -1642,6 +1648,7 @@ class QEFFBaseModel(ABC):
             "mdp_ts_num_devices": mdp_ts_num_devices,
             "mdp_num_partitions": mdp_num_partitions,
             "mdp_strategy": mdp_strategy.value,
+            "connection_type": connection_type,
             "mdp_ts_json": mdp_ts_json,
             "num_speculative_tokens": num_speculative_tokens,
             "prefill_only": prefill_only,
@@ -1719,6 +1726,8 @@ class QEFFBaseModel(ABC):
             logger.info(f"Writing compiler replay command: {' '.join(command)}")
         else:
             logger.info(f"Running compiler: {' '.join(command)}")
+
+        print(f"Running compiler: {' '.join(command)}")
 
         if artifacts:
             _copy_model_compiler_input(command, compile_dir, self.weight_spec_path)

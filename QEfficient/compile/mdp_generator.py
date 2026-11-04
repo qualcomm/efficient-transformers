@@ -436,6 +436,7 @@ def generate_disagg_mdp_partition_config(
     num_partitions: int,
     num_layers: int,
     num_cores: int = 16,
+    connection_type: str = "p2p",
 ) -> Dict[str, Any]:
     """Generate a pipeline-partitioned MDP config from an exported ONNX graph.
 
@@ -456,6 +457,8 @@ def generate_disagg_mdp_partition_config(
         num_partitions: Number of pipeline stages.
         num_layers:     Number of transformer layers.
         num_cores:      NSP cores per device (default 16).
+        connection_type: Device topology: ``"p2p"`` for one all-device P2P
+            group, or ``"mix"`` for two P2P groups joined by a host link.
 
     Returns:
         dict with keys 'connections' and 'partitions'.
@@ -468,6 +471,11 @@ def generate_disagg_mdp_partition_config(
         raise ValueError(
             f"Num of partitions should be <= number of devices. Found {num_partitions} partitions and {num_devices} devices"
         )
+
+    if connection_type not in {"p2p", "mix"}:
+        raise ValueError(f"Invalid connection_type: {connection_type!r}. Expected 'p2p' or 'mix'.")
+    if connection_type == "mix" and num_devices % 2 != 0:
+        raise ValueError(f"connection_type='mix' requires an even number of devices; found {num_devices}")
 
     partition_bounds = _layer_partition_bounds(num_layers, num_partitions)
     model = onnx.load(onnx_path, load_external_data=False)
@@ -565,8 +573,18 @@ def generate_disagg_mdp_partition_config(
             }
         )
 
+    if connection_type == "p2p":
+        connections = [{"devices": device_ids, "type": "p2p"}]
+    else:
+        midpoint = num_devices // 2
+        connections = [
+            {"devices": device_ids[:midpoint], "type": "p2p"},
+            {"devices": [midpoint - 1, midpoint], "type": "host"},
+            {"devices": device_ids[midpoint:], "type": "p2p"},
+        ]
+        print(f"connections: {connections}")
     return {
-        "connections": [{"devices": device_ids, "type": "p2p"}],
+        "connections": connections,
         "partitions": partition_objs,
     }
 
@@ -648,6 +666,7 @@ def generate_disagg_mdp_intersection_config(
     num_partitions: int,
     num_layers: int,
     num_cores: int = 16,
+    connection_type: str = "p2p",
 ) -> Dict[str, Any]:
     """Generate an MDP config by intersecting the QEff MDP with the compiler dump.
 
@@ -692,6 +711,7 @@ def generate_disagg_mdp_intersection_config(
     num_partitions     : pipeline stages (e.g. 2).
     num_layers         : transformer layers (e.g. 40, 94).
     num_cores          : NSP cores per device (default 16).
+    connection_type    : device topology, either ``"p2p"`` or ``"mix"``.
 
     Returns
     -------
@@ -712,6 +732,7 @@ def generate_disagg_mdp_intersection_config(
         num_partitions=num_partitions,
         num_layers=num_layers,
         num_cores=num_cores,
+        connection_type=connection_type,
     )
     create_json(str(dump_path.parent / f"tmp_mdp_onnx_generated_{num_devices}d_{num_partitions}p.json"), qeff_mdp)
 
@@ -785,6 +806,7 @@ def generate_disagg_mdp_config(
     mdp_compiler_dump_path: Optional[str],
     num_cores: int,
     num_layers: int,
+    connection_type: str = "p2p",
 ) -> Tuple[Path, Dict[str, Any]]:
     """Dispatch to the appropriate disaggregated MDP generator and persist the result.
 
@@ -803,6 +825,7 @@ def generate_disagg_mdp_config(
             this lower-level helper when *mdp_strategy* is ``INTERSECTION``.
         num_cores: NSP cores per device.
         num_layers: Number of transformer layers in the model.
+        connection_type: Device topology, either ``"p2p"`` or ``"mix"``.
 
     Returns:
         Tuple of ``(json_path, json_object)`` where *json_path* is the :class:`~pathlib.Path`
@@ -814,7 +837,7 @@ def generate_disagg_mdp_config(
     logger.info(
         f"Generating disagg MDP (strategy={mdp_strategy.value!r}): "
         f"num_devices={mdp_ts_num_devices}, num_partitions={mdp_num_partitions}, "
-        f"num_layers={num_layers}, num_cores={num_cores}"
+        f"num_layers={num_layers}, num_cores={num_cores}, connection_type={connection_type!r}"
     )
 
     if mdp_strategy is MdpStrategy.ONNX:
@@ -824,6 +847,7 @@ def generate_disagg_mdp_config(
             num_partitions=mdp_num_partitions,
             num_layers=num_layers,
             num_cores=num_cores,
+            connection_type=connection_type,
         )
     else:
         mdp_ts_json = generate_disagg_mdp_intersection_config(
@@ -833,6 +857,7 @@ def generate_disagg_mdp_config(
             num_partitions=mdp_num_partitions,
             num_layers=num_layers,
             num_cores=num_cores,
+            connection_type=connection_type,
         )
 
     # Every intersection node was observed in the compiler dump and must remain assigned.
