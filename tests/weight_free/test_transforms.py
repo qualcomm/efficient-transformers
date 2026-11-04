@@ -1940,6 +1940,40 @@ class TestWeightFreeExportHash:
         assert "weight_free" not in regular_params
         assert weight_free_params["weight_free"] is True
 
+    def test_minimax_capture_batch_changes_export_hash(self):
+        config = SimpleNamespace(
+            to_diff_dict=lambda: {"model_type": "minimax_m3_vl"},
+            model_type="minimax_m3_vl",
+        )
+        qeff_model = SimpleNamespace(
+            model=SimpleNamespace(config=config),
+            hash_params={"pretrained_model_name_or_path": "tiny"},
+            _use_onnx_subfunctions=True,
+            _weight_free=True,
+        )
+        common_kwargs = {
+            "output_names": ["logits"],
+            "dynamic_axes": {"input_ids": {}},
+            "dynamo": True,
+        }
+
+        batch_one_hash, batch_one_params = _generate_export_hash(
+            qeff_model,
+            (),
+            {**common_kwargs, "example_inputs": {"input_ids": torch.ones(1, 1, dtype=torch.int64)}},
+            _fake_export,
+        )
+        batch_two_hash, batch_two_params = _generate_export_hash(
+            qeff_model,
+            (),
+            {**common_kwargs, "example_inputs": {"input_ids": torch.ones(2, 1, dtype=torch.int64)}},
+            _fake_export,
+        )
+
+        assert batch_one_hash != batch_two_hash
+        assert batch_one_params["onnx_export_batch_size"] == 1
+        assert batch_two_params["onnx_export_batch_size"] == 2
+
 
 class TestWeightFreeExportDtype:
     def test_target_dtype_prefers_normalized_torch_dtype_over_dtype(self):

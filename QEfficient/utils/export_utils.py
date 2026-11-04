@@ -699,6 +699,10 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
         # their post-export normalization changes so cached generic-name ONNX
         # files are not reused.
         copy_of_hash_params["dynamo_node_name_version"] = 1
+        if getattr(qeff_model.model.config, "model_type", None) == "minimax_m3_vl":
+            input_ids = (all_args.get("example_inputs") or {}).get("input_ids")
+            if torch.is_tensor(input_ids):
+                copy_of_hash_params["onnx_export_batch_size"] = int(input_ids.shape[0])
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
