@@ -63,7 +63,6 @@ def main() -> None:
     model = QEFFAutoModelForCausalLM.from_pretrained(
         args.model_name,
         weight_free=True,
-        use_original_checkpoint=True,
         torch_dtype=target_dtype,
     )
 

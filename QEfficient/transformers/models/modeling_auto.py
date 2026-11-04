@@ -189,7 +189,7 @@ def _resolve_torch_dtype(
     kwargs: dict,
     *,
     weight_free: bool = False,
-    use_original_checkpoint: bool = False,
+    use_original_checkpoint: bool | None = None,
 ) -> None:
     """
     Resolve torch_dtype in kwargs before calling from_pretrained.
@@ -219,6 +219,9 @@ def _resolve_torch_dtype(
     are kept in sync on the way out so the loaded model and its config agree.
     """
     aic_hw_version = constants.DEFAULT_AIC_HW_VERSION
+    if use_original_checkpoint is None:
+        use_original_checkpoint = weight_free
+
     # Normalize the transformers-v5 ``dtype`` alias onto ``torch_dtype`` so a
     # single code path governs the HW dtype policy below.
     if kwargs.get("torch_dtype", None) is None and kwargs.get("dtype", None) is not None:

@@ -493,7 +493,6 @@ def test_weight_free_gemma4_decode_dummy_trace_length(tmp_export_dir, monkeypatc
         str(checkpoint_dir),
         kv_offload=True,
         weight_free=True,
-        use_original_checkpoint=True,
         dtype=torch.float32,
     )
     dummy_inputs = qeff_model.model.get_dummy_inputs(

@@ -43,7 +43,6 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 model = QEFFAutoModelForCausalLM.from_pretrained(
     os.environ["MODEL_ID"],
     weight_free=True,
-    use_original_checkpoint=True,
 )
 
 export_kwargs = {

@@ -280,7 +280,14 @@ class TestQEFFTransformersBase:
         qeff_model = QEFFAutoModelForCausalLM(make_tiny_llama()[0], weight_free=True)
 
         assert qeff_model._weight_free is True
+        assert qeff_model._use_original_checkpoint is True
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
+
+    def test_causal_lm_direct_init_can_opt_out_of_original_checkpoint(self):
+        qeff_model = QEFFAutoModelForCausalLM(make_tiny_llama()[0], weight_free=True, use_original_checkpoint=False)
+
+        assert qeff_model._weight_free is True
+        assert qeff_model._use_original_checkpoint is False
 
     @pytest.mark.parametrize(
         "wrapper_cls",
@@ -303,8 +310,12 @@ class TestQEFFTransformersBase:
     ):
         captured = {}
 
-        def fake_resolve_torch_dtype(kwargs, *, weight_free=False, use_original_checkpoint=False):
+        def fake_resolve_torch_dtype(kwargs, *, weight_free=False, use_original_checkpoint=None):
             captured["use_original_checkpoint"] = use_original_checkpoint
+
+        def fake_init(instance, model, *args, **kwargs):
+            instance._weight_free = kwargs.get("weight_free", False)
+            instance._use_original_checkpoint = kwargs.get("use_original_checkpoint", False)
 
         def fake_new(cls, model, *args, **kwargs):
             return SimpleNamespace(
@@ -316,7 +327,10 @@ class TestQEFFTransformersBase:
         monkeypatch.setattr(modeling_auto, "_resolve_torch_dtype", fake_resolve_torch_dtype)
         monkeypatch.setattr(modeling_auto, "_build_meta_model", lambda *_args, **_kwargs: object())
         monkeypatch.setattr(wrapper_cls._hf_auto_class, "from_pretrained", lambda *_args, **_kwargs: object())
-        monkeypatch.setattr(wrapper_cls, "__new__", staticmethod(fake_new))
+        if wrapper_cls is QEFFAutoModelForCausalLM:
+            monkeypatch.setattr(wrapper_cls, "__init__", fake_init)
+        else:
+            monkeypatch.setattr(wrapper_cls, "__new__", staticmethod(fake_new))
 
         model = wrapper_cls.from_pretrained(
             "dummy-model",

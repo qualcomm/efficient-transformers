@@ -59,8 +59,11 @@ def parse_args():
     parser.add_argument(
         "--use-original-checkpoint",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Reference the source safetensors directly instead of creating a prepared checkpoint.",
+        default=None,
+        help=(
+            "Reference source safetensors directly. Defaults to enabled for weight-free export; "
+            "pass --no-use-original-checkpoint to create a prepared checkpoint."
+        ),
     )
     return parser.parse_args()
 

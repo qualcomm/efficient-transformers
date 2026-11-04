@@ -2881,12 +2881,12 @@ def test_resolve_torch_dtype_normalizes_dtype_alias(caplog, monkeypatch):
     # The source BF16 tensor remains the external input and the exporter emits
     # the BF16-to-FP16 Cast node explicitly.
     kwargs = {}
-    _resolve_torch_dtype(kwargs, use_original_checkpoint=True)
+    _resolve_torch_dtype(kwargs, weight_free=True)
     assert kwargs["torch_dtype"] == torch.float16
 
     kwargs = {"torch_dtype": torch.bfloat16}
     with pytest.raises(ValueError, match="compilation will fail"):
-        _resolve_torch_dtype(kwargs, weight_free=True, use_original_checkpoint=True)
+        _resolve_torch_dtype(kwargs, weight_free=True)
 
     from QEfficient.utils.hardware_utils import get_default_weight_free_dtype, validate_weight_free_target_dtype
 

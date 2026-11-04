@@ -54,6 +54,15 @@ DISAGG_MODEL_IDS = (
 DISAGG_MODEL_PARAMS = [
     pytest.param(model_type, model_id, id=model_type.replace("_", "-")) for model_type, model_id in DISAGG_MODEL_IDS
 ]
+
+
+def test_original_checkpoint_kwargs_uses_weight_free_default_for_supported_models():
+    supported_model_types = frozenset({"qwen3_moe"})
+
+    assert original_checkpoint_kwargs("qwen3_moe", supported_model_types) == {}
+    assert original_checkpoint_kwargs("gpt_oss", supported_model_types) == {"use_original_checkpoint": False}
+
+
 WEIGHT_FREE_DISAGG_DECODE_BLOCKING_CASES = [
     pytest.param(model_type, model_id, blocking_key, id=f"{model_type.replace('_', '-')}-{blocking_key}")
     for model_type, model_id in DISAGG_MODEL_IDS
@@ -160,7 +169,7 @@ def _load_weight_free_model(
     model_id: str,
     continuous_batching: bool = False,
     num_hidden_layers: int | None = 2,
-    use_original_checkpoint: bool = False,
+    use_original_checkpoint: bool | None = None,
 ):
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     if num_hidden_layers is not None:
@@ -942,7 +951,6 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
         config=config,
         trust_remote_code=True,
         weight_free=True,
-        use_original_checkpoint=True,
         continuous_batching=True,
     )
 

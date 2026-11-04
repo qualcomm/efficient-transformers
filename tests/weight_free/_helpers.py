@@ -78,7 +78,10 @@ WEIGHT_FREE_ORIGINAL_CHECKPOINT_VLM_TYPES = frozenset(
 
 
 def original_checkpoint_kwargs(model_type: str, supported_model_types: frozenset[str]) -> dict[str, bool]:
-    return {"use_original_checkpoint": model_type in supported_model_types}
+    """Opt out only when a model requires its prepared checkpoint layout."""
+    if model_type not in supported_model_types:
+        return {"use_original_checkpoint": False}
+    return {}
 
 
 WEIGHT_FREE_EMBEDDING_MODELS = {
@@ -257,7 +260,9 @@ def load_tokenizer(model_id: str) -> AutoTokenizer:
     return tokenizer
 
 
-def load_weight_free_vlm_model(model_id: str, use_original_checkpoint: bool = False) -> QEFFAutoModelForImageTextToText:
+def load_weight_free_vlm_model(
+    model_id: str, use_original_checkpoint: bool | None = None
+) -> QEFFAutoModelForImageTextToText:
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     return QEFFAutoModelForImageTextToText.from_pretrained(
         model_id,
