@@ -55,6 +55,8 @@ from QEfficient.transformers.models.modeling_auto import (
     _QEffAutoModelForImageTextToTextDualQPC,
     _QEFFAutoModelForImageTextToTextSingleQPC,
 )
+from QEfficient.utils.constants import WAV2VEC2_MAX_SEQ_LEN
+from QEfficient.utils.export_utils import convert_dynamic_axes_to_dynamic_shapes
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -226,50 +228,6 @@ class TestQEFFTransformersBase:
         assert not hasattr(model.config, "quantization_config")
         qeff = QEFFAutoModelForCausalLM(model)
         assert qeff is not None
-
-    @pytest.mark.parametrize(
-        ("wrapper_cls", "model_factory"),
-        [
-            pytest.param(QEFFAutoModelForSequenceClassification, make_tiny_bert_seq_cls, id="sequence-classification"),
-            pytest.param(QEFFAutoModelForSpeechSeq2Seq, make_tiny_whisper, id="speech-seq2seq"),
-            pytest.param(QEFFAutoModelForCTC, make_tiny_wav2vec2, id="ctc"),
-        ],
-    )
-    def test_from_pretrained_disables_unsupported_weight_free(self, wrapper_cls, model_factory, monkeypatch, caplog):
-        """Non-CausalLM from_pretrained paths warn and do not forward weight_free."""
-        captured_kwargs = {}
-
-        def fake_from_pretrained(_model_id, *args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return model_factory()[0]
-
-        monkeypatch.setattr(wrapper_cls._hf_auto_class, "from_pretrained", fake_from_pretrained)
-        caplog.set_level(logging.WARNING, logger="QEfficient")
-
-        qeff_model = wrapper_cls.from_pretrained("dummy-model", weight_free=True)
-
-        assert "weight_free" not in captured_kwargs
-        assert qeff_model._weight_free is False
-        assert UNSUPPORTED_WEIGHT_FREE_WARNING in caplog.text
-        assert wrapper_cls.__name__ in caplog.text
-
-    @pytest.mark.parametrize(
-        ("wrapper_cls", "model_factory"),
-        [
-            pytest.param(QEFFAutoModelForSequenceClassification, make_tiny_bert_seq_cls, id="sequence-classification"),
-            pytest.param(QEFFAutoModelForSpeechSeq2Seq, make_tiny_whisper, id="speech-seq2seq"),
-            pytest.param(QEFFAutoModelForCTC, make_tiny_wav2vec2, id="ctc"),
-        ],
-    )
-    def test_direct_init_disables_unsupported_weight_free(self, wrapper_cls, model_factory, caplog):
-        """Direct construction disables weight-free mode for unsupported wrappers."""
-        caplog.set_level(logging.WARNING, logger="QEfficient")
-
-        qeff_model = wrapper_cls(model_factory()[0], weight_free=True)
-
-        assert qeff_model._weight_free is False
-        assert UNSUPPORTED_WEIGHT_FREE_WARNING in caplog.text
-        assert wrapper_cls.__name__ in caplog.text
 
     def test_causal_lm_direct_init_preserves_weight_free(self, caplog):
         """CausalLM remains the only wrapper that accepts weight_free=True."""
@@ -1119,6 +1077,62 @@ class TestQEFFAutoModelForSpeechSeq2Seq:
         assert qeff is not None
         assert qeff.model is not None
 
+    def test_direct_init_preserves_weight_free(self):
+        """Whisper accepts weight-free mode for Dynamo export."""
+        model, _ = make_tiny_whisper()
+
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model, weight_free=True)
+
+        assert qeff._weight_free is True
+
+    def test_export_defaults_to_dynamo_for_weight_free(self, monkeypatch):
+        """Weight-free Whisper export forwards the Dynamo flag by default."""
+        model, _ = make_tiny_whisper()
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model, weight_free=True)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export() == "exported"
+        assert captured["dynamo"] is True
+
+    def test_export_honors_explicit_dynamo(self, monkeypatch):
+        """A normally loaded Whisper model can explicitly select Dynamo export."""
+        model, _ = make_tiny_whisper()
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export(dynamo=True) == "exported"
+        assert captured["dynamo"] is True
+
+    def test_get_onnx_path_defaults_to_dynamo_for_weight_free(self, monkeypatch, tmp_path):
+        """Weight-free Whisper export stays on the Dynamo path through get_onnx_path."""
+        model, _ = make_tiny_whisper()
+        qeff = QEFFAutoModelForSpeechSeq2Seq(model, weight_free=True)
+        captured = {}
+
+        monkeypatch.setattr(qeff, "transform", lambda **kwargs: None)
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            qeff.onnx_path = tmp_path / "model.onnx"
+            return qeff.onnx_path
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.get_onnx_path() == tmp_path / "model.onnx"
+        assert captured["dynamo"] is True
+
     @pytest.mark.slow
     def test_get_model_config_returns_dict(self):
         """get_model_config returns the model's config as a dict."""
@@ -1162,11 +1176,110 @@ class TestQEFFAutoModelForSpeechSeq2Seq:
 class TestQEFFAutoModelForCTC:
     """Tests for QEFFAutoModelForCTC (Wav2Vec2 and similar CTC models)."""
 
+    def test_wav2vec2_audio_shape_uses_raw_sample_bound(self):
+        """Dynamo shape constraints must accept the 30-second raw audio example."""
+        _, wav2vec_config = make_tiny_wav2vec2()
+        dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes({"input_values": {1: "seq_len"}}, wav2vec_config)
+
+        assert dynamic_shapes["input_values"][1].max == WAV2VEC2_MAX_SEQ_LEN
+
+    def test_text_sequence_shape_keeps_model_position_bound(self):
+        """The audio special case must not widen ordinary model sequence dimensions."""
+        _, text_config = make_tiny_gpt2()
+        dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes({"input_ids": {1: "seq_len"}}, text_config)
+
+        assert dynamic_shapes["input_ids"][1].max == text_config.max_position_embeddings
+
+    def test_wav2vec2_positional_conv_weight_is_materialized(self):
+        """Dynamo export must not retain the parametrized positional-convolution weight."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model)
+        conv = qeff.model.wav2vec2.encoder.pos_conv_embed.conv
+
+        assert not hasattr(conv, "parametrizations")
+        assert qeff.hash_params["wav2vec2_export_version"] == 2
+
     def test_init_sets_use_cache_true(self):
         """__init__ sets model.base_model.config.use_cache=True."""
         model, cfg = make_tiny_wav2vec2()
         qeff = QEFFAutoModelForCTC(model)
         assert qeff.model.base_model.config.use_cache is True
+
+    def test_direct_init_preserves_weight_free(self):
+        """Wav2Vec2 CTC accepts weight-free mode for Dynamo export."""
+        model, _ = make_tiny_wav2vec2()
+
+        qeff = QEFFAutoModelForCTC(model, weight_free=True)
+
+        assert qeff._weight_free is True
+
+    def test_export_defaults_to_dynamo_for_weight_free(self, monkeypatch):
+        """Weight-free Wav2Vec2 export forwards the Dynamo flag by default."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model, weight_free=True)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export() == "exported"
+        assert captured["dynamo"] is True
+
+    def test_export_honors_explicit_dynamo(self, monkeypatch):
+        """A normally loaded CTC model can explicitly select Dynamo export."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model)
+        captured = {}
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            return "exported"
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        assert qeff.export(dynamo=True) == "exported"
+        assert captured["dynamo"] is True
+
+    def test_compile_defaults_to_dynamo_for_weight_free(self, monkeypatch, tmp_path):
+        """Weight-free Wav2Vec2 compile keeps the export on the Dynamo path."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model, weight_free=True)
+        captured = {}
+
+        monkeypatch.setattr(qeff, "transform", lambda **kwargs: None)
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            qeff.onnx_path = tmp_path / "model.onnx"
+            qeff.onnx_path.touch()
+            return qeff.onnx_path
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        qeff.compile(compile_dir=tmp_path / "compile", artifacts=True)
+        assert captured["dynamo"] is True
+
+    def test_compile_honors_explicit_dynamo(self, monkeypatch, tmp_path):
+        """CTC compile forwards an explicit Dynamo flag for ordinary models."""
+        model, _ = make_tiny_wav2vec2()
+        qeff = QEFFAutoModelForCTC(model)
+        captured = {}
+
+        monkeypatch.setattr(qeff, "transform", lambda **kwargs: None)
+
+        def fake_export(example_inputs, **kwargs):
+            captured.update(kwargs)
+            qeff.onnx_path = tmp_path / "model.onnx"
+            qeff.onnx_path.touch()
+            return qeff.onnx_path
+
+        monkeypatch.setattr(qeff, "_export", fake_export)
+
+        qeff.compile(compile_dir=tmp_path / "compile", artifacts=True, dynamo=True)
+        assert captured["dynamo"] is True
 
     def test_init_stores_model(self):
         """__init__ stores the model."""

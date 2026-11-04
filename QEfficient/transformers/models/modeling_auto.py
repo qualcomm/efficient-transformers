@@ -41,6 +41,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     GptOssMxfp4ExpertDequantSplitCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
+    Wav2Vec2PositionalConvWeightNormCheckpointTransform,
 )
 from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_state_name
 from QEfficient.generation.input_dump import resolve_runtime_dump_inputs_path
@@ -187,7 +188,15 @@ def _configure_fp8_retention(wrapper, kwargs):
 
 
 def _disable_unsupported_weight_free(kwargs: dict, qeff_auto_class_name: str) -> None:
-    """Remove unsupported weight-free mode from non-CausalLM wrappers."""
+    """Remove weight-free mode from wrappers that do not implement it."""
+
+    supported_classes = {
+        "QEFFAutoModelForSpeechSeq2Seq",
+        "QEFFAutoModelForCTC",
+    }
+
+    if qeff_auto_class_name in supported_classes:
+        return
 
     if not kwargs.pop("weight_free", False):
         return
@@ -431,7 +440,7 @@ class QEFFTransformersBase(QEFFBaseModel):
 
     @classmethod
     @with_replaced_quantizers
-    def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path: str, *args, weight_free: bool = False, **kwargs):
         """
         Load a QEfficient transformer model from a pretrained HuggingFace model or local path.
 
@@ -454,8 +463,9 @@ class QEFFTransformersBase(QEFFBaseModel):
         QEFFTransformersBase
             An instance of the specific QEFFAutoModel subclass, initialized with the pretrained weights.
         """
-        _disable_unsupported_weight_free(kwargs, cls.__name__)
         enable_proxy = kwargs.pop("enable_proxy", False)
+        if weight_free:
+            validate_dynamo_export_requirements("weight_free=True")
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
@@ -466,11 +476,19 @@ class QEFFTransformersBase(QEFFBaseModel):
         kwargs.update({"attn_implementation": "eager", "low_cpu_mem_usage": False})
 
         _resolve_torch_dtype(kwargs)
-        model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        if weight_free:
+            # Weight-free mode: build the model on the meta device so no
+            # checkpoint weights are ever materialized here. The real weights
+            # are supplied later at export time via pretrained_model_name_or_path.
+            model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
+        else:
+            model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
 
-        return cls(model, pretrained_model_name_or_path=pretrained_model_name_or_path, **kwargs)
+        return cls(
+            model, pretrained_model_name_or_path=pretrained_model_name_or_path, weight_free=weight_free, **kwargs
+        )
 
 
 class MultimodalUtilityMixin:
@@ -5482,7 +5500,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         """
         return self.model.config.__dict__
 
-    def export(self, export_dir: str | None = None, **kwargs) -> str:
+    def export(self, export_dir: str | None = None, dynamo: bool = False, **kwargs) -> str:
         """
         Export the model to ONNX format using ``torch.onnx.export``.
 
@@ -5496,20 +5514,24 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
             If not provided, the default export directory is used.
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
+        dynamo: bool, optional
+            whether to enable dynamo during export.
 
         Returns
         -------
         str
             Path to the generated ONNX graph file.
         """
-        inputs = self.model.get_dummy_inputs()
-        dynamic_axes = self.model.get_onnx_dynamic_axes()
+        dynamo = dynamo or self._weight_free
+        inputs = self.model.get_dummy_inputs(dynamo=dynamo)
+        dynamic_axes = self.model.get_onnx_dynamic_axes(dynamo=dynamo)
         output_names = self.model.get_output_names()
         return self._export(
             inputs,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
             export_dir=export_dir,
+            dynamo=dynamo,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
         )
 
@@ -5598,6 +5620,7 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
             batch_size,
             encoder_ctx_len,
             ctx_len,
+            weight_free=self._weight_free,
             **compiler_options,
         )
 
@@ -5726,7 +5749,12 @@ class QEFFAutoModelForSpeechSeq2Seq(QEFFTransformersBase, MultimodalUtilityMixin
         if streamer:
             streamer.put(next_token)
 
-        inputs["input_features"] = np.zeros((self.batch_size, self.model.config.num_mel_bins, 1)).astype(np.float16)
+        if not self._weight_free:
+            # Legacy path: the compiled QPC has a distinct feature_len=1 "Decode" specialization that
+            # skips cross-attention recompute (see QEffWhisperAttention.forward's torch.where). The
+            # weight-free/dynamo graph has no such specialization (see get_specializations), so it must
+            # keep receiving the real, fixed-size input_features on every decode call.
+            inputs["input_features"] = np.zeros((self.batch_size, self.model.config.num_mel_bins, 1)).astype(np.float16)
 
         loop_start = perf_counter()
         for num_tokens in range(generation_len):
@@ -5797,6 +5825,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
         GPTQToMatmulNbitsTransform,
     ]
     _onnx_transforms = []
+    _checkpoint_transforms = [Wav2Vec2PositionalConvWeightNormCheckpointTransform, DtypeConversionCheckpointTransform]
 
     def __init__(self, model: nn.Module, **kwargs):
         _disable_unsupported_weight_free(kwargs, self.__class__.__name__)
@@ -5804,10 +5833,12 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
         self.model.base_model.config.use_cache = True
 
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
+        if getattr(self.model.config, "model_type", None) == "wav2vec2":
+            self.hash_params["wav2vec2_export_version"] = 2
 
     @classmethod
     @with_replaced_quantizers
-    def from_pretrained(cls, pretrained_model_name_or_path, pooling=None, *args, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path, pooling=None, weight_free=False, *args, **kwargs):
         """
         This method serves as the easiest entry point into using QEfficient. The interface is designed to be similar to transformers.AutoModelForCTC.
         Once the model is initialized, you can use other methods such as export, compile, and generate on the same object.
@@ -5841,8 +5872,10 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
         # You can now execute the model
         out = model.generate(processor,inputs=input_audio)
         """
-        _disable_unsupported_weight_free(kwargs, cls.__name__)
         enable_proxy = kwargs.pop("enable_proxy", False)
+        if weight_free:
+            validate_dynamo_export_requirements("weight_free=True")
+
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
 
@@ -5852,7 +5885,13 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
         kwargs.update({"attn_implementation": "eager", "low_cpu_mem_usage": False})
 
         _resolve_torch_dtype(kwargs)
-        model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        if weight_free:
+            # Weight-free mode: build the model on the meta device so no
+            # checkpoint weights are ever materialized here. The real weights
+            # are supplied later at export time via pretrained_model_name_or_path.
+            model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
+        else:
+            model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
         # This is support models that should be classified to in a different auto class but transformers load them via this class
         kv_offload = kwargs.pop("kv_offload", None)
@@ -5861,16 +5900,22 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
 
         if model.__class__.__name__ in MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP:
             return MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP[model.__class__.__name__](
-                model, kv_offload=kv_offload, **kwargs
+                model, kv_offload=kv_offload, weight_free=weight_free, **kwargs
             )
 
-        return cls(model, pretrained_model_name_or_path=pretrained_model_name_or_path, pooling=pooling, **kwargs)
+        return cls(
+            model,
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            pooling=pooling,
+            weight_free=weight_free,
+            **kwargs,
+        )
 
     @property
     def get_model_config(self) -> dict:
         return self.model.config.__dict__
 
-    def export(self, export_dir: str | None = None, **kwargs) -> str:
+    def export(self, export_dir: str | None = None, dynamo: bool = False, **kwargs) -> str:
         """
         Exports the model to ``ONNX`` format using ``torch.onnx.export``.
 
@@ -5878,13 +5923,18 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
            :export_dir (str, optional): The directory path to store ONNX-graph.
            :use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
-
+           :dynamo: bool, optional
+            whether to enable dynamo during export.
         Returns:
             :str: Path of the generated ``ONNX`` graph.
         """
         bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         seq_len = constants.WAV2VEC2_MAX_SEQ_LEN
 
+        dynamo = dynamo or self._weight_free
+        if dynamo:
+            # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
+            bs = max(2, bs)
         example_inputs = {
             "input_values": torch.zeros((bs, seq_len), dtype=self.model.config.torch_dtype),
         }
@@ -5898,6 +5948,7 @@ class QEFFAutoModelForCTC(QEFFTransformersBase):
             output_names=output_names,
             dynamic_axes=dynamic_axes,
             export_dir=export_dir,
+            dynamo=dynamo,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
         )
 

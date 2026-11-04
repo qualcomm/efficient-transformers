@@ -416,6 +416,75 @@ class FusedExpertSplitCheckpointTransform(BaseCheckpointTransform):
 
 
 # ---------------------------------------------------------------------------
+# Transform 4: materialize Wav2Vec2 positional-convolution weight normalization
+# ---------------------------------------------------------------------------
+
+
+class Wav2Vec2PositionalConvWeightNormCheckpointTransform(BaseCheckpointTransform):
+    """Add the materialized Wav2Vec2 positional-convolution weight to a prepared checkpoint.
+
+    HF stores this weight as ``weight_g`` and ``weight_v``. The Dynamo model
+    exports the effective ``weight`` after QEff removes the parametrization, so
+    weight-free checkpoint preparation must generate the matching tensor.
+    """
+
+    TRANSFORM_ID = "wav2vec2_pos_conv_weight_norm_v1"
+    _PREFIX = "wav2vec2.encoder.pos_conv_embed.conv"
+
+    @classmethod
+    def is_applicable(cls, weight_map: Dict[str, str], **kwargs) -> bool:
+        # Apply only to HF checkpoints that store the parametrized form.
+        return all(f"{cls._PREFIX}.{suffix}" in weight_map for suffix in ("weight_g", "weight_v"))
+
+    @classmethod
+    def plan_tasks(cls, context: CheckpointPlanningContext) -> None:
+        weight_g_key = f"{cls._PREFIX}.weight_g"
+        weight_v_key = f"{cls._PREFIX}.weight_v"
+        weight_key = f"{cls._PREFIX}.weight"
+        input_refs = _task_refs((weight_g_key, weight_v_key))
+        output_ref = TensorRef(weight_key, "final")
+
+        def runner(get_tensor, target_dtype):
+            weight_g = get_tensor(TensorRef(weight_g_key))
+            weight_v = get_tensor(TensorRef(weight_v_key))
+            if weight_g.is_floating_point():
+                weight_g = weight_g.to(target_dtype)
+            if weight_v.is_floating_point():
+                weight_v = weight_v.to(target_dtype)
+
+            # HF's Conv1d weight_norm uses dim=2: normalize across output and
+            # input-channel dimensions while retaining the kernel dimension.
+            norm_dims = tuple(dim for dim in range(weight_v.ndim) if dim != 2)
+            weight = weight_g * weight_v / torch.linalg.vector_norm(weight_v, dim=norm_dims, keepdim=True)
+            return {output_ref: weight.contiguous()}
+
+        stage = CheckpointStage(
+            stage_id="materialize_weight_norm",
+            input_refs=input_refs,
+            output_refs=(output_ref,),
+            params=TaskParams(cls.TRANSFORM_ID, _task_values(target_dtype=str(context.target_dtype))),
+            runner=runner,
+            labels=("wav2vec2_pos_conv_weight_norm",),
+        )
+        task_plan = CheckpointTaskPlan(
+            task_id="wav2vec2_pos_conv_weight_norm",
+            input_refs=input_refs,
+            source_files=tuple(sorted({context.weight_map[ref.key] for ref in input_refs})),
+            output_file="wav2vec2-pos-conv.safetensors",
+            estimated_peak_bytes=_estimate_task_bytes(
+                context.source_dir,
+                context.weight_map,
+                [ref.key for ref in input_refs],
+                context.target_dtype,
+                output_copies=2,
+            ),
+            params=TaskParams(cls.TRANSFORM_ID, _task_values(output_key=weight_key)),
+        )
+        task_plan.append_stage(stage)
+        context.add_task_plan(task_plan)
+
+
+# ---------------------------------------------------------------------------
 # Independent stage transforms and task planning
 # ---------------------------------------------------------------------------
 

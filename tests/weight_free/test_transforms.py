@@ -60,6 +60,7 @@ from QEfficient.exporter.weight_free.checkpoint_transforms import (
     GraniteMoeFusedExpertSplitCheckpointTransform,
     MoEExpertStackingCheckpointTransform,
     MoEFusedExpertSplitCheckpointTransform,
+    Wav2Vec2PositionalConvWeightNormCheckpointTransform,
 )
 from QEfficient.exporter.weight_free.export import _materialize_lifted_attention_mask_zero_initializers
 from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_free_ort_inputs
@@ -274,6 +275,29 @@ class TestWeightFreeCheckpointTransforms:
         transform = detect_group_transform(SimpleNamespace(num_local_experts=2), weight_map)
 
         assert transform is GptOssMxfp4ExpertDequantSplitCheckpointTransform
+
+    def test_materializes_wav2vec2_positional_conv_weight(self, tmp_path):
+        src = tmp_path / "src"
+        out = tmp_path / "out"
+        src.mkdir()
+        prefix = "wav2vec2.encoder.pos_conv_embed.conv"
+        weight_g = torch.tensor([[[2.0, 3.0, 4.0]]])
+        weight_v = torch.arange(12, dtype=torch.float32).reshape(2, 2, 3) + 1
+        _write_safetensors_checkpoint(
+            src,
+            {
+                f"{prefix}.weight_g": weight_g,
+                f"{prefix}.weight_v": weight_v,
+            },
+        )
+
+        prepared = CheckpointTransformPipeline(
+            [Wav2Vec2PositionalConvWeightNormCheckpointTransform, DtypeConversionCheckpointTransform]
+        ).apply(src, out, target_dtype=torch.float32)
+
+        assert prepared == out
+        expected = weight_g * weight_v / torch.linalg.vector_norm(weight_v, dim=(0, 1), keepdim=True)
+        torch.testing.assert_close(_load_prepared_tensors(out)[f"{prefix}.weight"], expected)
 
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"

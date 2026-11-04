@@ -801,9 +801,16 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
         num_key_value_heads = self.config.decoder_attention_heads
         head_dim = self.config.d_model // num_key_value_heads
         num_layers = self.config.num_hidden_layers
+        # feature_len is kept static for the dynamo/weight-free export: torch.export can't certify it as dynamic, since
+        # QEffWhisperEncoder's positional-embedding addition only holds at exactly 1 or exactly the
+        # encoder's fixed size. Trace with the real encoder feature length so that static value is the
+        # one baked into the graph; this also means torch.where(input_features.shape[2] == 1, ...) in
+        # QEffWhisperAttention.forward always recomputes cross-attention rather than reusing the cache
+        # (see get_specializations for the compile-time counterpart).
+        feature_len = 2 * encoder_seq_len if kwargs.get("dynamo", False) else 1
 
         inputs = {
-            "input_features": torch.zeros((bs, encoder_feature_count, 1), dtype=torch.float32),
+            "input_features": torch.zeros((bs, encoder_feature_count, feature_len), dtype=torch.float32),
             "input_ids": torch.zeros((bs, seq_len), dtype=torch.int64),
             "position_ids": torch.arange(seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1),
             "past_key_values": [[] for _ in range(num_layers)],
@@ -823,7 +830,9 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
 
         return inputs
 
-    def get_specializations(self, batch_size: int, encoder_ctx_len, ctx_len, **compiler_options):
+    def get_specializations(
+        self, batch_size: int, encoder_ctx_len, ctx_len, weight_free: bool = False, **compiler_options
+    ):
         if encoder_ctx_len is None and hasattr(self.config, "max_source_positions"):
             encoder_ctx_len = self.config.max_source_positions
         elif encoder_ctx_len is None:
@@ -840,6 +849,13 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
             "feature_len": feature_len,
         }
 
+        if weight_free:
+            # The weight-free/dynamo export bakes feature_len as a static axis (see
+            # get_onnx_dynamic_axes), so there is no dynamic ONNX axis left for the
+            # compiler to specialize into a second, feature_len=1 "Decode" graph; the single exported
+            # graph only accepts input_features of this fixed feature_len, on every call.
+            return [encoder_specializations], compiler_options
+
         decoder_specializations = {
             "_graph_name": "Decode",
             "batch_size": batch_size,
@@ -855,6 +871,7 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
 
     def get_onnx_dynamic_axes(
         self,
+        dynamo: bool = False,
     ):
         num_layers = self.config.num_hidden_layers
 
@@ -877,6 +894,13 @@ class QEffWhisperForConditionalGeneration(WhisperForConditionalGeneration):
                     dynamic_axes[f"past_{kv}_{self_cross}.{i}"] = (
                         pkv_self_dynamic_axes if self_cross == "self" else pkv_cross_dynamic_axes
                     )
+
+        if dynamo:
+            # The encoder positional embedding only supports the traced feature lengths of 1
+            # (decode/cache reuse) and 2 * max_source_positions (encoder execution). A torch.export
+            # Dim cannot express that discrete constraint, so keep the raw audio feature length static
+            # in the Dynamo graph while preserving the dynamic axis for the legacy exporter.
+            dynamic_axes["input_features"].pop(2)
 
         return dynamic_axes
 
