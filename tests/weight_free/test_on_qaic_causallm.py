@@ -17,6 +17,7 @@ Covers causal-LM generation, HF/QAIC parity, and embedding parity.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,7 @@ from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
 from QEfficient.utils import get_num_layers_from_config
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
 from tests.transformers.models.golden_utils import config_fingerprint, golden_variant_key, resolve_hf_golden
 
@@ -61,17 +63,46 @@ BLOCKING_PARITY_PROMPT = "Hello world"
 HEAD_BLOCKING_NUM_DEVICES = 4
 
 
-def _blocking_compile_options(blocking_key: str) -> dict:
+def _blocking_runtime_options(blocking_key: str) -> tuple[dict, list[int] | None]:
     if blocking_key in {"h", "hq", "hkv"}:
         device_groups = get_qaic_mdp_device_groups(devices_per_group=HEAD_BLOCKING_NUM_DEVICES)
         if not device_groups:
             pytest.skip(f"No available QAIC MDP device group with {HEAD_BLOCKING_NUM_DEVICES} devices")
-        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}
+        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}, device_groups[0]
 
     device_ids = get_available_device_id()
     if device_ids is None:
         pytest.skip("No available QAIC device")
-    return {}
+    return {}, device_ids
+
+
+def _runtime_device_ids(device_ids: list[int]) -> list[int]:
+    if "QAIC_VISIBLE_DEVICES" in os.environ:
+        return list(range(len(device_ids)))
+    return device_ids
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    "visible_devices,discovered_device_ids,expected_device_ids",
+    [
+        (None, [4, 5, 6, 7], [4, 5, 6, 7]),
+        ("4,5,6,7", [4, 5, 6, 7], [0, 1, 2, 3]),
+        ("4,5,6,7", [4], [0]),
+    ],
+)
+def test_runtime_device_ids_respect_qaic_visibility(
+    monkeypatch,
+    visible_devices,
+    discovered_device_ids,
+    expected_device_ids,
+):
+    if visible_devices is None:
+        monkeypatch.delenv("QAIC_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("QAIC_VISIBLE_DEVICES", visible_devices)
+
+    assert _runtime_device_ids(discovered_device_ids) == expected_device_ids
 
 
 def _assert_retained_fp8_onnx(onnx_path: Path) -> None:
@@ -133,7 +164,7 @@ def test_weight_free_embedding_hw_hf_parity(model_type, model_id, pooling, tmp_e
         compile_dir=str(tmp_export_dir / f"{model_type}_compile"),
         seq_len=32,
         batch_size=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
     )
     qaic_output = qeff_model.generate(inputs=inputs)
 
@@ -170,7 +201,7 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
         compile_dir=str(tmp_export_dir / "wf_gen_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -327,7 +358,7 @@ def test_weight_free_hw_hf_parity(model_type, model_id, tmp_export_dir):
         compile_dir=str(tmp_export_dir / "wf_hw_parity_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -377,7 +408,7 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
         compile_dir=str(tmp_export_dir / "legacy_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -407,7 +438,7 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
         compile_dir=str(tmp_export_dir / "wf_vs_legacy_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -497,13 +528,13 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         assert_has_subfunctions(onnx_path, qeff_model)
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
-    compile_options = _blocking_compile_options(blocking_key)
+    compile_options, device_ids = _blocking_runtime_options(blocking_key)
     qeff_model.compile(
         onnx_path=str(onnx_path),
         compile_dir=str(tmp_export_dir / f"wf_blocking_{model_type}_{blocking_key}_{use_onnx_subfunctions}_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         qaic_config=qaic_config,
         use_onnx_subfunctions=use_onnx_subfunctions,
@@ -513,6 +544,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     qaic_output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,
+        device_ids=_runtime_device_ids(device_ids),
     )
     assert qaic_output is not None, "Blocked weight-free QAIC generate returned None"
     assert hasattr(qaic_output, "generated_ids") and qaic_output.generated_ids is not None
