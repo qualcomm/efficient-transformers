@@ -35,6 +35,10 @@ _MOE_WEIGHT_LEGACY_SUFFIXES = {
 _COMPUTED_INITIALIZER_NAMES = {
     "cos_cached",
     "sin_cached",
+    "main_cos_cached",
+    "main_sin_cached",
+    "compress_cos_cached",
+    "compress_sin_cached",
     "inv_freq",
     "original_inv_freq",
     "main_inv_freq",

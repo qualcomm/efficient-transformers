@@ -1187,6 +1187,54 @@ def qeff_apply_rotary_pos_emb(
     return torch.cat((nope, rotated), dim=x.dim() - 1)
 
 
+class QEffDeepseekV4RotaryEmbedding(DeepseekV4RotaryEmbedding):
+    def __init__(
+        self,
+        config: DeepseekV4Config,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__(config)
+        if device is not None:
+            self.to(device)
+        self.__qeff_init__(dtype)
+
+    def __qeff_init__(self, dtype: torch.dtype | None = None) -> None:
+        seq_len = getattr(self.config, "max_seq_len_cached", None)
+        if seq_len is None:
+            seq_len = self.original_max_seq_len
+        seq_len = int(seq_len)
+        if seq_len <= 0:
+            raise ValueError("DeepSeek V4 RoPE cache length must be positive.")
+
+        position_ids = torch.arange(
+            -1,
+            seq_len,
+            device=self.main_inv_freq.device,
+            dtype=torch.long,
+        ).unsqueeze(0)
+        reference = torch.empty((), device=self.main_inv_freq.device, dtype=dtype or torch.get_default_dtype())
+        self.max_seq_len_cached = seq_len
+        for layer_type in self.layer_types:
+            cos, sin = super().forward(reference, position_ids, layer_type=layer_type)
+            self.register_buffer(f"{layer_type}_cos_cached", cos.squeeze(0).contiguous(), persistent=False)
+            self.register_buffer(f"{layer_type}_sin_cached", sin.squeeze(0).contiguous(), persistent=False)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_ids: torch.Tensor,
+        layer_type: str | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if layer_type not in self.layer_types:
+            raise ValueError(f"Unsupported DeepSeek V4 RoPE layer type: {layer_type}.")
+        cache_indices = position_ids + 1
+        cos = getattr(self, f"{layer_type}_cos_cached")[cache_indices]
+        sin = getattr(self, f"{layer_type}_sin_cached")[cache_indices]
+        return cos.to(device=x.device, dtype=x.dtype), sin.to(device=x.device, dtype=x.dtype)
+
+
 class QEffDeepseekV4Attention(DeepseekV4Attention):
     """DeepSeek V4 sliding/HCA/CSA attention using fixed-capacity QEff cache state."""
 
@@ -2193,7 +2241,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        cos, sin = position_embeddings[self.rope_layer_type]
+        if isinstance(position_embeddings, dict):
+            cos, sin = position_embeddings[self.rope_layer_type]
+        else:
+            cos, sin = position_embeddings
 
         q_residual = self.q_a_norm(self.q_a_proj(hidden_states)).to(hidden_states.dtype)
         q = self.q_b_proj(q_residual).view(*hidden_shape).transpose(1, 2)
@@ -3193,6 +3244,24 @@ class DeepseekV4CompressorWeightAttributeTransform:
 
 
 class QEffDeepseekV4Model(DeepseekV4Model):
+    def __qeff_init__(self) -> None:
+        rotary_device = self.embed_tokens.weight.device
+        if rotary_device.type == "meta":
+            rotary_device = torch.device("cpu")
+        rotary_emb = QEffDeepseekV4RotaryEmbedding(
+            self.config,
+            device=rotary_device,
+            dtype=self.embed_tokens.weight.dtype,
+        )
+        for layer_type in rotary_emb.layer_types:
+            self.register_buffer(
+                f"{layer_type}_cos_cached", getattr(rotary_emb, f"{layer_type}_cos_cached"), persistent=False
+            )
+            self.register_buffer(
+                f"{layer_type}_sin_cached", getattr(rotary_emb, f"{layer_type}_sin_cached"), persistent=False
+            )
+        self.rotary_emb = nn.Identity()
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -3226,9 +3295,17 @@ class QEffDeepseekV4Model(DeepseekV4Model):
         _, valid = _sliding_window_context_indices(position_ids, self.config.sliding_window, position_ids.device)
         causal_mask = ~valid.unsqueeze(1)
         hidden_states = inputs_embeds.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
+        rope_indices = position_ids + 1
         position_embeddings = {
-            "main": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="main"),
-            "compress": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="compress"),
+            layer_type: (
+                getattr(self, f"{layer_type}_cos_cached")[rope_indices].to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype
+                ),
+                getattr(self, f"{layer_type}_sin_cached")[rope_indices].to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype
+                ),
+            )
+            for layer_type in ("main", "compress")
         }
         prefill_cache = any(
             bool(getattr(self.config, flag, False))
@@ -3236,9 +3313,14 @@ class QEffDeepseekV4Model(DeepseekV4Model):
         )
         retained_states = list(cache.to_legacy_cache()) if prefill_cache else None
         for layer_idx, layer in enumerate(self.layers):
+            layer_position_embeddings = (
+                position_embeddings
+                if prefill_cache
+                else position_embeddings[layer.self_attn.rope_layer_type]
+            )
             layer_output = layer(
                 hidden_states,
-                position_embeddings=position_embeddings,
+                position_embeddings=layer_position_embeddings,
                 position_ids=position_ids,
                 attention_mask=causal_mask,
                 input_ids=input_ids,

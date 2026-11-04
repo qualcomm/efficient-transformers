@@ -57,6 +57,7 @@ from transformers.cache_utils import DynamicCache
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4ForCausalLM,
+    DeepseekV4RotaryEmbedding,
     DeepseekV4RMSNorm,
     DeepseekV4UnweightedRMSNorm,
 )
@@ -82,6 +83,7 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Attention,
     QEffDeepseekV4Cache,
     QEffDeepseekV4ForCausalLM,
+    QEffDeepseekV4RotaryEmbedding,
     QEffDeepseekV4RMSNorm,
     QEffDeepseekV4UnweightedRMSNorm,
 )
@@ -132,6 +134,34 @@ def _tiny_deepseek_v4_config() -> DeepseekV4Config:
         compress_rates={"heavily_compressed_attention": 4, "compressed_sparse_attention": 2},
         max_position_embeddings=32,
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_deepseek_v4_static_rope_cache_matches_transformers(dtype):
+    config = _tiny_deepseek_v4_config()
+    config.max_seq_len_cached = 16
+    reference = DeepseekV4RotaryEmbedding(config)
+    cached = QEffDeepseekV4RotaryEmbedding(config, dtype=dtype)
+    position_ids = torch.tensor([[-1, 0, 7, 15]])
+    hidden_states = torch.empty(1, position_ids.shape[1], config.hidden_size, dtype=dtype)
+
+    for layer_type in ("main", "compress"):
+        expected = reference(hidden_states, position_ids, layer_type=layer_type)
+        actual = cached(hidden_states, position_ids, layer_type=layer_type)
+        torch.testing.assert_close(actual[0], expected[0])
+        torch.testing.assert_close(actual[1], expected[1])
+
+
+def test_deepseek_v4_model_rope_cache_tables_are_nonpersistent_buffers():
+    config = _tiny_deepseek_v4_config()
+    config.max_seq_len_cached = 16
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    model = qeff_model.model.model
+
+    for name in ("main_cos_cached", "main_sin_cached", "compress_cos_cached", "compress_sin_cached"):
+        assert name in model._buffers
+        assert name in model._non_persistent_buffers_set
+        assert name not in dict(model.named_parameters())
 
 
 def test_deepseek_v4_weighted_rms_norm_preserves_bf16_rounding():
@@ -1012,6 +1042,14 @@ def test_deepseek_v4_csa_prefill_indexer_admits_completed_entry_at_boundary():
 
     torch.testing.assert_close(selected, torch.tensor([[[1, 0]]]))
     assert valid.all()
+
+
+def test_deepseek_v4_rope_tables_are_computed_weight_free_initializers():
+    from QEfficient.exporter.weight_free.checkpoint_key_resolver import _is_computed_initializer
+
+    for name in ("main_cos_cached", "main_sin_cached", "compress_cos_cached", "compress_sin_cached"):
+        assert _is_computed_initializer(f"model.{name}")
+    assert not _is_computed_initializer("model.layers.0.mlp.gate.weight")
 
 
 def test_deepseek_v4_weight_free_subfunction_binds_compressor_weights_as_attributes(tmp_path):
