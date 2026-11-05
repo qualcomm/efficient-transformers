@@ -4019,7 +4019,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             qaic_config and (qaic_config.get("dflash2_checkpoint") or qaic_config.get("target_layer_ids"))
         )
         if self.dflash_dlm:
-            if self.model.__class__.__name__ == "DFlash2ForCausalLM":
+            from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+            if isinstance(self.model, DFlash2ForCausalLM):
                 self.model, _ = DFlash2DLMTransform.apply(self.model, qaic_config)
             else:
                 self.model, _ = DFlashTransform.apply(self.model, qaic_config)

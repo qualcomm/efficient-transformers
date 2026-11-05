@@ -650,6 +650,67 @@ def test_dflash_transforms_run_before_spd_and_sampler(monkeypatch, qaic_config, 
     assert applied == expected_order
 
 
+def test_dflash2_dlm_dispatch_accepts_subclasses(monkeypatch):
+    from transformers import Qwen3Config
+
+    from QEfficient import QEFFAutoModelForCausalLM
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+    from QEfficient.transformers.models.pytorch_transforms import (
+        DFlash2DLMTransform,
+        DFlashDLMTransform,
+        DFlashTransform,
+        SamplerTransform,
+        SpDTransform,
+    )
+
+    class WrappedDFlash2ForCausalLM(DFlash2ForCausalLM):
+        pass
+
+    config = Qwen3Config(
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        hidden_size=32,
+        intermediate_size=64,
+        vocab_size=64,
+        max_position_embeddings=32,
+        head_dim=16,
+        layer_types=["sliding_attention"],
+        sliding_window=16,
+        dflash_config={
+            "block_size": 4,
+            "conv_group_size": 16,
+            "conv_kernel_size": 2,
+            "mask_token_id": 63,
+            "selector_rank": 8,
+            "selector_top_k": 1,
+        },
+    )
+    model = WrappedDFlash2ForCausalLM(config).eval()
+    applied = []
+
+    def record_dflash2(cls, transformed_model, qaic_config=None, **kwargs):
+        applied.append(type(transformed_model))
+        return transformed_model, True
+
+    def reject_legacy(*args, **kwargs):
+        raise AssertionError("A DFlash-2 subclass must not use the DFlash-1 transform path")
+
+    def passthrough(cls, transformed_model, qaic_config=None, **kwargs):
+        return transformed_model, False
+
+    monkeypatch.setattr(DFlash2DLMTransform, "apply", classmethod(record_dflash2))
+    monkeypatch.setattr(DFlashTransform, "apply", classmethod(reject_legacy))
+    monkeypatch.setattr(DFlashDLMTransform, "apply", classmethod(reject_legacy))
+    monkeypatch.setattr(SpDTransform, "apply", classmethod(passthrough))
+    monkeypatch.setattr(SamplerTransform, "apply", classmethod(passthrough))
+
+    wrapped = QEFFAutoModelForCausalLM(model, qaic_config={"dflash_dlm": True})
+
+    assert wrapped.model is model
+    assert applied == [WrappedDFlash2ForCausalLM]
+
+
 def test_dflash2_target_transform_sets_shared_dflash_chunk_metadata():
     from QEfficient.transformers.models.pytorch_transforms import DFlash2TLMTransform
 
