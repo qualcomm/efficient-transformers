@@ -45,7 +45,14 @@ python perplexity_calculator_cloud.py --model_type torch --model_name meta-llama
 --num_samples: Number of samples to use (-1 for all) (default: -1).
 --qpc_device_id: QAIC device ids (comma-separated) (default: [0]).
 --log_file: Log file name (default: perplexity_results.log).
+--trust_remote_code: Load the torch reference with trust_remote_code=True (remote-code models such as IFM/K2-Horizon-*).
 ```
+
+## Notes
+
+- Keep `--prompt_len 1` (the default). After the first token the script feeds one token per step at the next position, so a larger prompt length does not match the data windows. Every QPC built by QEfficient has the seq_len 1 specialization this needs.
+- `--ctx_len` must not exceed the ctx_len the QPC was compiled with.
+- Use the same `--ctx_len`, `--stride` and `--num_samples` for the torch, fp16 and MXFP6 legs; the pass targets at the end of the torch log are ratios against that run.
 
 ## Output Details
 The script logs the following information:

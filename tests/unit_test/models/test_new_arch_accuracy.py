@@ -13,6 +13,7 @@ Covers the 14 architectures that had zero unit test coverage:
   - OLMo2, MPT, CodeGen, GPTJ
   - GPT-OSS (structure only — external module mapper)
   - Grok1 (structure only — external module mapper)
+  - K2 Horizon (structure, specialization guard, grouped RMSNorm — external module mapper)
 
 All tests run on CPU only, using tiny in-memory models.
 """
@@ -1093,6 +1094,122 @@ class TestGrok1TransformStructure:
         grok1_mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method["Grok1ModelForCausalLM"]
         assert "forward" in grok1_mapping
         assert callable(grok1_mapping["forward"])
+
+
+# ---------------------------------------------------------------------------
+# Tests: K2 Horizon (structure only — external module mapper)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.transforms
+class TestK2HorizonTransformStructure:
+    """K2 Horizon (remote code): KVCacheExternalModuleMapperTransform must map every class by name."""
+
+    @pytest.mark.parametrize(
+        "class_name",
+        ["K2HorizonForCausalLM", "K2HorizonModel", "K2HorizonDecoderLayer", "K2HorizonAttention", "K2HorizonRMSNorm"],
+    )
+    def test_k2_horizon_class_in_external_mapper_transform(self, class_name):
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
+
+        mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method[class_name]
+        assert callable(mapping["forward"])
+
+    def test_k2_horizon_causal_lm_export_and_specialization_hooks(self):
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
+
+        mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method["K2HorizonForCausalLM"]
+        assert callable(mapping["get_submodules_for_export"])
+        assert callable(mapping["get_specializations"])
+
+    def test_k2_horizon_init_hooks(self):
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheExternalModuleMapperTransform
+
+        mapping = KVCacheExternalModuleMapperTransform._match_string_replace_method
+        assert callable(mapping["K2HorizonModel"]["__qeff_init__"])
+        assert callable(mapping["K2HorizonAttention"]["__qeff_init__"])
+        assert "__qeff_init__" not in mapping["K2HorizonRMSNorm"]  # the norm has no per-module state
+
+    def test_k2_horizon_model_init_refuses_experts(self):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonModel
+
+        model = SimpleNamespace(config=SimpleNamespace(num_experts=2, max_position_embeddings=256))
+        with pytest.raises(NotImplementedError, match="experts"):
+            QEffK2HorizonModel.__qeff_init__(model)
+
+    @pytest.mark.parametrize(
+        ("attrs", "message"),
+        [
+            ({"rope_head_dim": 16}, "partial rotary"),
+            ({"sliding_window": 128}, "sliding-window"),
+            ({"query_key_norm": True}, "query_key_norm"),
+            ({"gate_func": "softplus"}, "attention_gate_func"),
+        ],
+    )
+    def test_k2_horizon_attention_init_refuses_unsupported_options(self, attrs, message):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonAttention
+
+        # the dense sizes: full rotary, no window, no QK norm, no gate
+        attn = SimpleNamespace(
+            head_dim=32,
+            rope_head_dim=32,
+            sliding_window=None,
+            gate_func=None,
+            config=SimpleNamespace(query_key_norm=False),
+        )
+        QEffK2HorizonAttention.__qeff_init__(attn)
+        for name, value in attrs.items():
+            if name == "query_key_norm":
+                attn.config.query_key_norm = value
+            else:
+                setattr(attn, name, value)
+        with pytest.raises(NotImplementedError, match=message):
+            QEffK2HorizonAttention.__qeff_init__(attn)
+
+    def test_k2_horizon_specializations_follow_the_baked_rotary_table(self):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonForCausalLM
+
+        # a config smaller than the constant cap bakes a smaller table; the guard must follow the table
+        table_rows = 128
+        model = QEffK2HorizonForCausalLM.__new__(QEffK2HorizonForCausalLM)
+        model.model = SimpleNamespace(cos_cached=torch.zeros(table_rows, 32))
+        specs = QEffK2HorizonForCausalLM.get_specializations(
+            model, batch_size=1, prefill_seq_len=32, ctx_len=table_rows
+        )
+        assert specs == [
+            {"batch_size": 1, "seq_len": 32, "ctx_len": table_rows},
+            {"batch_size": 1, "seq_len": 1, "ctx_len": table_rows},
+        ]
+        with pytest.raises(ValueError, match="rotary tables"):
+            QEffK2HorizonForCausalLM.get_specializations(
+                model, batch_size=1, prefill_seq_len=32, ctx_len=table_rows + 1
+            )
+        with pytest.raises(ValueError, match="rotary tables"):
+            QEffK2HorizonForCausalLM.get_specializations(
+                model, batch_size=1, prefill_seq_len=table_rows + 1, ctx_len=table_rows
+            )
+
+    @pytest.mark.parametrize("n_groups", [1, 4])
+    def test_k2_horizon_grouped_rmsnorm_matches_reference(self, n_groups):
+        from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import QEffK2HorizonRMSNorm
+
+        torch.manual_seed(0)
+        hidden_size, eps = 64, 1e-6
+        norm = torch.nn.Module()
+        norm.weight = torch.nn.Parameter(torch.rand(hidden_size) + 0.5)
+        norm.hidden_size, norm.n_groups, norm.variance_epsilon = hidden_size, n_groups, eps
+
+        x = torch.randn(2, 5, hidden_size)
+        grouped = x.reshape(2, 5, n_groups, hidden_size // n_groups)
+        reference = norm.weight * (grouped * torch.rsqrt(grouped.pow(2).mean(-1, keepdim=True) + eps)).reshape(x.shape)
+        out = QEffK2HorizonRMSNorm.forward(norm, x)
+        assert torch.allclose(out, reference, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------

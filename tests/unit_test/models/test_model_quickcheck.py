@@ -67,6 +67,7 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeVisionConfig,
 )
 
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
     QEFFAutoModelForCausalLM,
@@ -1615,6 +1616,120 @@ def test_causal_lm_cpu_runtime_parity_with_api_runner(model_type, model_id, tmp_
 
     assert np.array_equal(hf_tokens, kv_tokens.squeeze(0))
     assert np.array_equal(kv_tokens, ort_tokens)
+
+
+K2_HORIZON_SIZES = ["IFM/K2-Horizon-0.9B", "IFM/K2-Horizon-3.7B", "IFM/K2-Horizon-7B", "IFM/K2-Horizon-32B"]
+
+
+def _reduced_k2_horizon_config(model_id: str):
+    """The real Hub config cut to 2 layers / 4 heads, keeping what differs between sizes:
+    norm groups, head_dim, rope type and vocabulary. The 32B keeps hidden_size != heads * head_dim."""
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    config.num_hidden_layers = 2
+    config.num_attention_heads = 4
+    config.num_key_value_heads = 2
+    config.hidden_size = 3 * config.head_dim if model_id.endswith("32B") else 4 * config.head_dim
+    config.intermediate_size = 512
+    config.mlp_only_layers = [0, 1]
+    config.max_position_embeddings = 256
+    config.dtype = torch.float32  # the Hub configs say bfloat16; the CPU reference cache is float32
+    return config
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize("model_id", K2_HORIZON_SIZES, ids=[m.split("-")[-1] for m in K2_HORIZON_SIZES])
+def test_k2_horizon_reduced_config_cpu_runtime_parity(model_id, tmp_path):
+    # remote-code model with no tiny Hub checkpoint: one reduced config per published size
+    torch.manual_seed(0)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    config = _reduced_k2_horizon_config(model_id)
+    model_hf = AutoModelForCausalLM.from_config(config, trust_remote_code=True, **MODEL_KWARGS)
+    model_hf.eval()
+
+    api_runner = ApiRunner(
+        batch_size=1,
+        tokenizer=tokenizer,
+        config=config,
+        prompt=["hello world"],
+        prompt_len=8,
+        ctx_len=12,
+        full_batch_size=None,
+    )
+
+    hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
+    qeff_model = QEFFAutoModelForCausalLM(model_hf, pretrained_model_name_or_path=model_id)
+    kv_tokens = api_runner.run_kv_model_on_pytorch(qeff_model.model)
+    onnx_path = _exported_onnx_path(qeff_model.export(tmp_path))
+    ort_tokens = api_runner.run_kv_model_on_ort(str(onnx_path))
+
+    assert np.array_equal(hf_tokens, kv_tokens.squeeze(0))
+    assert np.array_equal(kv_tokens, ort_tokens)
+
+
+@pytest.mark.llm_model
+@pytest.mark.parametrize(
+    "blocking_cfg, extra_inputs",
+    [
+        (AttentionBlockingConfig(mode=BlockingMode.KV, num_kv_blocks=2, ctx_len=16), {}),
+        (
+            AttentionBlockingConfig(
+                mode=BlockingMode.HQKV, num_kv_blocks=2, num_q_blocks=2, head_block_size=1, ctx_len=16
+            ),
+            {},
+        ),
+        (
+            AttentionBlockingConfig(
+                mode=BlockingMode.HQKV, num_kv_blocks=2, num_q_blocks=2, head_block_size=1, ctx_len=16
+            ),
+            {"comp_ctx_lengths": torch.arange(8), "batch_index": torch.tensor([[0]])},
+        ),
+    ],
+    ids=["kv", "hqkv", "hqkv_ccl_cb"],
+)
+def test_k2_horizon_blocked_attention_matches_eager(blocking_cfg, extra_inputs):
+    """The blocked path (attn_blocking_config set) must reproduce the eager path's logits on the 7B reduced config.
+
+    The third case also passes comp_ctx_lengths and batch_index so the CCL mask slice and the CB
+    cache kwargs go through past_key_value_update on both paths (CPU-only check of that plumbing).
+    """
+    from copy import deepcopy
+
+    from QEfficient.transformers.models.pytorch_transforms import BlockingAttentionTransform
+
+    torch.manual_seed(0)
+    model_id = "IFM/K2-Horizon-7B"
+    config = _reduced_k2_horizon_config(model_id)
+    model_hf = AutoModelForCausalLM.from_config(config, trust_remote_code=True, **MODEL_KWARGS)
+    model_hf.eval()
+    eager = QEFFAutoModelForCausalLM(model_hf, pretrained_model_name_or_path=model_id).model
+    blocked = deepcopy(eager)
+    blocked, applied = BlockingAttentionTransform.apply(blocked, blocking_cfg)
+    assert applied
+    assert all(
+        getattr(m, "attn_blocking_config", None) is blocking_cfg
+        for m in blocked.modules()
+        if type(m).__name__ == "K2HorizonAttention"
+    )
+
+    ctx_len = blocking_cfg.ctx_len
+    input_ids = torch.randint(0, config.vocab_size, (1, 8))
+    position_ids = torch.arange(8).unsqueeze(0)
+    kv_shape = (1, config.num_key_value_heads, ctx_len, config.head_dim)
+    inputs = {
+        "input_ids": input_ids,
+        "position_ids": position_ids,
+        "past_key_values": tuple(
+            (torch.zeros(kv_shape), torch.zeros(kv_shape)) for _ in range(config.num_hidden_layers)
+        ),
+        **extra_inputs,
+    }
+    with torch.no_grad():
+        eager_logits = eager(**deepcopy(inputs)).logits
+        blocked_logits = blocked(**deepcopy(inputs)).logits
+
+    assert torch.allclose(eager_logits, blocked_logits, atol=1e-4, rtol=1e-4), (
+        f"max abs diff {(eager_logits - blocked_logits).abs().max().item()} for mode {blocking_cfg.mode}"
+    )
 
 
 @pytest.mark.llm_model

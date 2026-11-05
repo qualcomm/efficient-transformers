@@ -449,6 +449,13 @@ from QEfficient.transformers.models.internvl.modeling_internvl import (
     QEffInternVisionEmbeddings,
     QEffInternVLModel,
 )
+from QEfficient.transformers.models.k2_horizon.modeling_k2_horizon import (
+    QEffK2HorizonAttention,
+    QEffK2HorizonDecoderLayer,
+    QEffK2HorizonForCausalLM,
+    QEffK2HorizonModel,
+    QEffK2HorizonRMSNorm,
+)
 from QEfficient.transformers.models.kimi_k25.modeling_kimi_k25 import (
     QEffKimiK25ForConditionalGeneration,
     QEffLearnable2DInterpPosEmbDivided_fixed,
@@ -1419,6 +1426,24 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
         "RMSNorm": {
             "forward": QEFFGrok1CustomRMSNormAIC.forward,
         },
+        # Mapping for the K2 Horizon dense models (IFM/K2-Horizon-*, remote code)
+        "K2HorizonForCausalLM": {
+            "forward": QEffK2HorizonForCausalLM.forward,
+            "get_submodules_for_export": QEffK2HorizonForCausalLM.get_submodules_for_export,
+            "get_specializations": QEffK2HorizonForCausalLM.get_specializations,
+        },
+        "K2HorizonModel": {
+            "forward": QEffK2HorizonModel.forward,
+            "__qeff_init__": QEffK2HorizonModel.__qeff_init__,
+        },
+        "K2HorizonDecoderLayer": {"forward": QEffK2HorizonDecoderLayer.forward},
+        "K2HorizonAttention": {
+            "forward": QEffK2HorizonAttention.forward,
+            "__qeff_init__": QEffK2HorizonAttention.__qeff_init__,
+        },
+        "K2HorizonRMSNorm": {
+            "forward": QEffK2HorizonRMSNorm.forward,
+        },
         "KimiK25ForConditionalGeneration": {
             "_qeff_merge_input_ids_with_image_features": QEffKimiK25ForConditionalGeneration._qeff_merge_input_ids_with_image_features,
             "get_qeff_vision_encoder": QEffKimiK25ForConditionalGeneration.get_qeff_vision_encoder,
@@ -1533,6 +1558,9 @@ def get_decoder_layer_classes_for_export(model: nn.Module) -> set:
 
 class BlockingAttentionTransform:
     _skip_classes = {}
+    # remote-code attention classes keep their Hub type (KVCacheExternalModuleMapperTransform only swaps methods),
+    # so the ones whose QEff forward reads attn_blocking_config are matched by class name
+    _external_attention_class_names = {"K2HorizonAttention"}
 
     @classmethod
     def apply(cls, model: nn.Module, attn_blocking_config) -> tuple[nn.Module, bool]:
@@ -1549,7 +1577,11 @@ class BlockingAttentionTransform:
             if type(module) in cls._skip_classes:
                 warnings.warn(f"Blocking is not yet supported for {type(module)}.")
                 continue
-            if type(module) in supported_attention_classes or "DeepseekV3ForCausalLM" in model_architectures:
+            if (
+                type(module) in supported_attention_classes
+                or module.__class__.__name__ in cls._external_attention_class_names
+                or "DeepseekV3ForCausalLM" in model_architectures
+            ):
                 module.attn_blocking_config = attn_blocking_config
                 transformed = True
             elif module.__class__.__name__.endswith("Attention") and type(module) not in supported_attention_classes:

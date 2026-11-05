@@ -501,6 +501,32 @@ class TestBlockingWrapperFallbackAndParity:
         assert transformed, "BlockingAttentionTransform must use nested wrapper model config"
         assert wrapped.model.attn.attn_blocking_config is cfg
 
+    def test_external_string_mapped_attention_gets_config_without_warning(self):
+        """Remote-code attention keeps its Hub class (KVCacheExternalModuleMapperTransform swaps methods only),
+        so the transform must match it by name instead of warning that blocking is unsupported."""
+        import warnings
+
+        from QEfficient.transformers.models.pytorch_transforms import BlockingAttentionTransform
+
+        class K2HorizonAttention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = nn.Linear(4, 4)
+
+        class _Container(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn = K2HorizonAttention()
+
+        cfg = AttentionBlockingConfig(mode=BlockingMode.KV, num_kv_blocks=2, ctx_len=128)
+        model = _Container()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            model, transformed = BlockingAttentionTransform.apply(model, cfg)
+
+        assert transformed
+        assert model.attn.attn_blocking_config is cfg
+
     @pytest.mark.parametrize(
         "blocking_cfg",
         [

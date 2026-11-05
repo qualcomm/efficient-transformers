@@ -137,11 +137,11 @@ class QPCInferenceSession(InferenceSession):
 
 
 class PytorchInferenceSession(InferenceSession):
-    def __init__(self, model_name, device=None):
+    def __init__(self, model_name, device=None, trust_remote_code=False):
         from QEfficient.utils._utils import login_and_download_hf_lm
 
         model_name = login_and_download_hf_lm(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=trust_remote_code)
         self.model = self.model.eval()
 
     def run(self, **inputs):
@@ -361,6 +361,11 @@ def main():
         help="QAIC device ids (comma-separated)",
     )
     parser.add_argument("--log_file", default="perplexity_results.log", help="Log file name")
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Pass trust_remote_code=True when loading the torch reference model (remote-code models)",
+    )
     args = parser.parse_args()
 
     start_time = time.time()
@@ -374,7 +379,7 @@ def main():
     if args.model_type == "onnx":
         inference_session = ONNXInferenceSession(args.model_path)
     elif args.model_type == "torch":
-        inference_session = PytorchInferenceSession(args.model_name)
+        inference_session = PytorchInferenceSession(args.model_name, trust_remote_code=args.trust_remote_code)
     elif args.model_type == "qpc":
         inference_session = QPCInferenceSession(args.model_path, args.qpc_device_id)
     else:
@@ -410,6 +415,8 @@ def main():
         print(f"Perplexity: {perplexity}", file=fp)
         print(f"Total time for evaluation: {(time.time() - start_time) / 3600.0} hrs", file=fp)
         if isinstance(args.model_type, str) and args.model_type == "torch":
+            logger.info(f"Target Perplexity for FP16 Precision: {(perplexity * 100.1) / 100:.8f}")
+            logger.info(f"Target Perplexity for MXFP6/MXINT8 Precision: {(perplexity * 101) / 100:.8f}")
             print("\n*******************************************************", file=fp)
             print(f"Torch Original Perplexity: {perplexity}", file=fp)
             print(f"Target Perplexity for FP16 Precision: {(perplexity * 100.1) / 100}", file=fp)

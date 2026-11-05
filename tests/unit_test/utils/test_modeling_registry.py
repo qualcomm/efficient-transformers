@@ -230,6 +230,11 @@ class TestExternalModelClassMapping:
 
         assert "Grok1Config" in EXTERNAL_MODEL_CLASS_MAPPING
 
+    def test_contains_k2_horizon(self):
+        from QEfficient.transformers.modeling_utils import EXTERNAL_MODEL_CLASS_MAPPING
+
+        assert EXTERNAL_MODEL_CLASS_MAPPING["K2HorizonConfig"] == "QEFFAutoModelForCausalLM"
+
 
 # ---------------------------------------------------------------------------
 # Tests: DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH
