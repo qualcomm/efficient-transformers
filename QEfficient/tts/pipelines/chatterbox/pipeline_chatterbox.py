@@ -144,7 +144,7 @@ class QEffChatterboxMultilingualTTS:
 
         Args:
             pretrained_model_name_or_path (str): Hub repo id or local directory with the checkpoint files.
-            t3_model (str): Multilingual T3 checkpoint: ``"v3"`` (default, validated), ``"v2"`` (untested) or a
+            t3_model (str): Multilingual T3 checkpoint: ``"v3"`` (default) or ``"v2"``, both validated, or a
                 ``.safetensors`` name.
             revision (str, optional): Hub revision to pin.
         """

@@ -143,7 +143,7 @@ If the `kv_offload` is set to `True` it runs in dual QPC and if its set to `Fals
 Supported modes:
 
 - One request at a time (no continuous batching); graphs exported in fp32 and compiled to fp16.
-- Validated with the Multilingual V3 checkpoint (`t3_model="v3"`); V2 is untested.
+- Validated with the Multilingual V3 and V2 checkpoints (`t3_model="v3"`, `t3_model="v2"`).
 - Known limitation: when the speech is padded to a length bucket, the last ~5 mel frames (about 100 ms) of audio can differ slightly from upstream.
 - Needs Resemble AI's `chatterbox` package at git commit `5de7a54`, installed with `--no-deps` (see `examples/audio/README.md`).
 
