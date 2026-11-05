@@ -2013,6 +2013,31 @@ def test_causal_lm_runner_bundle_matches_compiled_batch_size(tmp_path):
 
 
 @pytest.mark.cpu_only
+def test_vlm_prefill_slice_ignores_ragged_past_key_values():
+    from QEfficient.generation.generation_helpers import _slice_vlm_prefill_inputs
+
+    ragged_past_key_values = (
+        (np.zeros((1, 2, 4, 8), dtype=np.float32), np.zeros((1, 2, 4, 8), dtype=np.float32)),
+        (np.zeros((1, 2, 1, 8), dtype=np.float32),),
+    )
+    with pytest.raises(ValueError):
+        np.asarray(ragged_past_key_values)
+
+    host_inputs = _slice_vlm_prefill_inputs(
+        {
+            "input_ids": np.array([[1, 2, 3, 4]], dtype=np.int64),
+            "position_ids": np.array([[0, 1, 2, 3]], dtype=np.int64),
+            "past_key_values": ragged_past_key_values,
+        },
+        prefill_seq_len=2,
+    )
+
+    assert set(host_inputs) == {"input_ids", "position_ids"}
+    np.testing.assert_array_equal(host_inputs["input_ids"], np.array([[1, 2]], dtype=np.int64))
+    np.testing.assert_array_equal(host_inputs["position_ids"], np.array([[0, 1]], dtype=np.int64))
+
+
+@pytest.mark.cpu_only
 def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
     from types import SimpleNamespace
 
