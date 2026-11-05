@@ -2537,8 +2537,8 @@ def test_qwen3_5_linear_conv_state_shapes_match_retained_state_contract():
 
 
 @pytest.mark.reproducer
-def test_qwen3_5_linear_conv_state_export_compile_reproducer(tmp_path):
-    """Reproduce the Qwen3.5 linear conv retained-state compiler assertion."""
+def test_qwen3_5_linear_conv_state_export_compile_reproducer(tmp_path, monkeypatch):
+    """Verify Qwen3.5 linear conv retained states reach the compile interface."""
     config = _tiny_qwen3_5_text_config()
     config.num_hidden_layers = 24
     config.layer_types = [
@@ -2556,7 +2556,32 @@ def test_qwen3_5_linear_conv_state_export_compile_reproducer(tmp_path):
     hf_model = AutoModelForCausalLM.from_config(config, **MODEL_KWARGS).eval()
     qeff_model = QEFFAutoModelForCausalLM(hf_model, continuous_batching=False)
 
+    qeff_model.transform(
+        ctx_len=4096,
+        seq_len=64,
+        bs=1,
+        num_devices=2,
+        num_cores=16,
+        mdp_num_partitions=2,
+        mdp_strategy="intersection",
+    )
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(
+            export_dir=tmp_path / "qwen3-5-linear-conv-state",
+            prefill_seq_len=64,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    captured_kwargs = {}
+
+    def fake_compile(**kwargs):
+        captured_kwargs.update(kwargs)
+        return tmp_path / "qpc"
+
+    monkeypatch.setattr(qeff_model, "_compile", fake_compile)
     qpc_paths = qeff_model.compile(
+        onnx_path=str(onnx_path),
         prefill_seq_len=64,
         ctx_len=4096,
         use_onnx_subfunctions=True,
@@ -2567,7 +2592,21 @@ def test_qwen3_5_linear_conv_state_export_compile_reproducer(tmp_path):
         mdp_strategy="intersection",
     )
 
-    assert qpc_paths
+    assert qpc_paths == tmp_path / "qpc"
+    assert captured_kwargs["onnx_path"] == str(onnx_path)
+    assert captured_kwargs["retained_state"] is True
+    assert captured_kwargs["mdp_num_partitions"] == 2
+    assert captured_kwargs["mdp_strategy"] == "intersection"
+    assert captured_kwargs["use_onnx_subfunctions"] is True
+
+    custom_io = captured_kwargs["custom_io"]
+    for layer_idx, layer_type in enumerate(config.layer_types):
+        if layer_type != "linear_attention":
+            continue
+        assert f"conv_state.{layer_idx}" in custom_io
+        assert any(
+            f"conv_state.{layer_idx}{suffix}" in custom_io for suffix in ("_RetainedState", "_InternalRetainedState")
+        )
 
 
 def test_qwen3_5_moe_get_specializations_supports_multi_resolution():
