@@ -1232,7 +1232,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         num_tiles = (capacity + tile_size - 1) // tile_size
         top_k = min(index_topk, capacity)
         topk_per_tile = max(topk_per_tile, (top_k + num_tiles - 1) // num_tiles)
-        causal_threshold = torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype).unsqueeze(-1)
+        causal_threshold = (
+            torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype).unsqueeze(-1)
+        )
 
         candidate_scores = []
         candidate_indices = []

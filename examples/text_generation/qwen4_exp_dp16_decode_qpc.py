@@ -38,6 +38,7 @@ def build_model(snapshot: Path, checkpoint: Path, compile_dir: Path):
         _prune_weight_free_checkpoint,
         _window_config,
     )
+
     qaic_config = {
         "indexer_dp": 16,
         "indexer_cp": 1,

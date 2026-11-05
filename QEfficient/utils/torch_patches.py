@@ -630,6 +630,8 @@ def preserve_mixed_export_subfunctions():
             if onnx_core is not None:
                 onnx_core._prepare_exported_program_for_export = original_prepare
             utils._hop_compile_and_call = original
+
+
 _INVOKE_SUBGRAPH_CACHE_PATCH_LOCK = threading.RLock()
 _MIXED_EXPORT_PATCH_LOCK = threading.RLock()
 _MISSING_META = object()

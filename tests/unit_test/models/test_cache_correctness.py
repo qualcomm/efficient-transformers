@@ -585,6 +585,8 @@ def test_glm_dsa_folded_cache_multi_token_prefill_round_trip():
     logical_valid = valid.any(dim=2).permute(1, 0, 2, 3).reshape(batch_size, query_length, 1)
     assert logical_valid.all()
     torch.testing.assert_close(logical.squeeze(2), updates)
+
+
 # ---------------------------------------------------------------------------
 # Tests: write_only_paged_attention must reject writes larger than one block
 # ---------------------------------------------------------------------------

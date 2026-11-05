@@ -306,6 +306,8 @@ def reuse_exported_subfunctions(exported_program):
     logger.debug("Subfunction reuse: %d region call(s) now share an earlier body.", len(merges))
     exported_program.validate()
     return exported_program
+
+
 def canonical_symbolic_expr(value, names):
     """Return an int or SymInt as a sympy expression using canonical symbol names."""
     key = _symbolic_key(value)
