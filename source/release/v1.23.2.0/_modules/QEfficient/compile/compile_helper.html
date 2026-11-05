@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.compile.compile_helper &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../v1.23.0/source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.compile.compile_helper</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.compile.compile_helper</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># -----------------------------------------------------------------------------</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">subprocess</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.compile.qnn_compiler</span><span class="w"> </span><span class="kn">import</span> <span class="nb">compile</span> <span class="k">as</span> <span class="n">qnn_compile</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">constants</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils._utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_json</span><span class="p">,</span> <span class="n">load_yaml</span><span class="p">,</span> <span class="n">to_named_specializations</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.logging_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">create_and_dump_specializations</span><span class="p">(</span>
+    <span class="n">batch_size</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">prompt_len</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">ctx_len</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">full_batch_size</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="p">):</span>
+    <span class="c1"># Build the base specialization entries first, then convert to named format.</span>
+    <span class="n">base_specializations</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;batch_size&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">batch_size</span><span class="p">),</span>
+            <span class="s2">&quot;seq_len&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">prompt_len</span><span class="p">),</span>
+            <span class="s2">&quot;ctx_len&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">ctx_len</span><span class="p">),</span>
+        <span class="p">},</span>
+        <span class="p">{</span><span class="s2">&quot;batch_size&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">batch_size</span><span class="p">),</span> <span class="s2">&quot;seq_len&quot;</span><span class="p">:</span> <span class="s2">&quot;1&quot;</span><span class="p">,</span> <span class="s2">&quot;ctx_len&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">ctx_len</span><span class="p">)},</span>
+    <span class="p">]</span>
+    <span class="c1"># If continuous batching is enabled by providing full_batch_size we need to add FBS to the specialization file and update the batch size of decoder part to FBS</span>
+    <span class="k">if</span> <span class="n">full_batch_size</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">base_specializations</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;full_batch_size&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">full_batch_size</span><span class="p">)</span>
+        <span class="n">base_specializations</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="s2">&quot;full_batch_size&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">full_batch_size</span><span class="p">)</span>
+        <span class="n">base_specializations</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="s2">&quot;batch_size&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">full_batch_size</span><span class="p">)</span>
+
+    <span class="c1"># To handle repetitive input in specializations when prompt_len is 1</span>
+    <span class="k">if</span> <span class="n">prompt_len</span> <span class="o">==</span> <span class="mi">1</span> <span class="ow">and</span> <span class="n">full_batch_size</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">base_specializations</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
+
+    <span class="c1"># Dump</span>
+    <span class="n">specializations</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;specializations&quot;</span><span class="p">:</span> <span class="n">to_named_specializations</span><span class="p">(</span><span class="n">base_specializations</span><span class="p">)}</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">file</span><span class="p">:</span>
+        <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">specializations</span><span class="p">,</span> <span class="n">file</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">compile_kv_model_on_cloud_ai_100</span><span class="p">(</span>
+    <span class="n">onnx_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">specializations_json</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">num_cores</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">base_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">mxfp6</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span>
+    <span class="n">custom_io_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">aic_enable_depth_first</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span>
+    <span class="n">allow_mxint8_mdp_io</span><span class="p">:</span> <span class="nb">bool</span><span class="p">,</span>
+    <span class="n">mos</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">device_group</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">bool</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Compiles an ONNX Key-Value (KV) model for Cloud AI 100 hardware using `qaic-compile`.</span>
+
+<span class="sd">    This function sets up and executes the Qualcomm AI 100 compiler with various options</span>
+<span class="sd">    to generate a QPC package.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    onnx_path : str</span>
+<span class="sd">        Path to the ONNX model file to be compiled.</span>
+<span class="sd">    specializations_json : str</span>
+<span class="sd">        Path to the JSON file defining compilation specializations (batch size, sequence length, etc.).</span>
+<span class="sd">    num_cores : int</span>
+<span class="sd">        Number of cores to use for compilation on Cloud AI 100.</span>
+<span class="sd">    base_path : str</span>
+<span class="sd">        Base directory where QPC binaries will be stored (a `qpcs` subdirectory will be created).</span>
+<span class="sd">    mxfp6 : bool</span>
+<span class="sd">        If True, enables MXFP6 precision for MatMul weights.</span>
+<span class="sd">    custom_io_path : str</span>
+<span class="sd">        Path to the Custom IO list file (e.g., YAML format) specifying input/output data types.</span>
+<span class="sd">    aic_enable_depth_first : bool</span>
+<span class="sd">        If True, enables Depth-First Search (DFS) optimization with default memory size.</span>
+<span class="sd">    allow_mxint8_mdp_io : bool</span>
+<span class="sd">        If True, allows MXINT8 compression of MDP IO traffic.</span>
+
+<span class="sd">    Other Parameters</span>
+<span class="sd">    ----------------</span>
+<span class="sd">    mos : int, optional</span>
+<span class="sd">        Effort level to reduce on-chip memory. A value greater than 0 applies this effort. Default is -1 (no effort).</span>
+<span class="sd">    device_group : List[int], optional</span>
+<span class="sd">        List of device IDs for multi-device compilation (tensor slicing). If `len(device_group) &gt; 1`,</span>
+<span class="sd">        a multi-device partition configuration is generated. Default is None.</span>
+<span class="sd">    **kwargs :</span>
+<span class="sd">        Additional compiler options passed directly to `qaic-compile`. These are formatted as</span>
+<span class="sd">        `-key=value` or `-key` for boolean flags.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Tuple[bool, str]</span>
+<span class="sd">        A tuple containing:</span>
+<span class="sd">        - bool: True if compilation was successful, False otherwise.</span>
+<span class="sd">        - str: Path to the generated QPC binary directory.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    FileNotFoundError</span>
+<span class="sd">        If the `specializations_json` or `custom_io_path` files are not found.</span>
+<span class="sd">    RuntimeError</span>
+<span class="sd">        If the `qaic-compile` compilation process fails.</span>
+
+<span class="sd">    Warnings</span>
+<span class="sd">    --------</span>
+<span class="sd">    DeprecationWarning</span>
+<span class="sd">        This method will be removed soon; use `QEFFAutoModelForCausalLM.compile` instead.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+        <span class="s2">&quot;</span><span class="se">\033</span><span class="s2">[93mUse `QEFFAutoModelForCausalLM.compile` instead, this method will be removed soon.</span><span class="se">\033</span><span class="s2">[0m&quot;</span><span class="p">,</span>
+        <span class="ne">DeprecationWarning</span><span class="p">,</span>
+        <span class="n">stacklevel</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">aic_binary_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">base_path</span><span class="p">,</span> <span class="s2">&quot;qpcs&quot;</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isdir</span><span class="p">(</span><span class="n">aic_binary_dir</span><span class="p">):</span>
+        <span class="n">shutil</span><span class="o">.</span><span class="n">rmtree</span><span class="p">(</span><span class="n">aic_binary_dir</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">specializations_json</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Please use &#39;QEfficient.compile&#39;, as </span><span class="si">{</span><span class="n">specializations_json</span><span class="si">}</span><span class="s2"> file was not found&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">custom_io_path</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">custom_io_path</span><span class="si">}</span><span class="s2"> file was not found!&quot;</span><span class="p">)</span>
+    <span class="n">command</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="s2">&quot;/opt/qti-aic/exec/qaic-compile&quot;</span><span class="p">,</span>
+        <span class="sa">f</span><span class="s2">&quot;-m=</span><span class="si">{</span><span class="n">onnx_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;-aic-hw&quot;</span><span class="p">,</span>
+        <span class="sa">f</span><span class="s2">&quot;-aic-hw-version=</span><span class="si">{</span><span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s1">&#39;aic_hw_version&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s1">&#39;aic-hw-version&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">constants</span><span class="o">.</span><span class="n">DEFAULT_AIC_HW_VERSION</span><span class="p">))</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="sa">f</span><span class="s2">&quot;-network-specialization-config=</span><span class="si">{</span><span class="n">specializations_json</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;-convert-to-fp16&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;-retained-state&quot;</span><span class="p">,</span>
+        <span class="sa">f</span><span class="s2">&quot;-aic-num-cores=</span><span class="si">{</span><span class="n">num_cores</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="sa">f</span><span class="s2">&quot;-custom-IO-list-file=</span><span class="si">{</span><span class="n">custom_io_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="sa">f</span><span class="s2">&quot;-aic-binary-dir=</span><span class="si">{</span><span class="n">aic_binary_dir</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+    <span class="p">]</span>
+    <span class="k">if</span> <span class="n">mxfp6</span><span class="p">:</span>
+        <span class="n">command</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;-mxfp6-matmul&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">mos</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">command</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;-mos=</span><span class="si">{</span><span class="n">mos</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">aic_enable_depth_first</span><span class="p">:</span>
+        <span class="n">command</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;-aic-enable-depth-first&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">allow_mxint8_mdp_io</span><span class="p">:</span>
+        <span class="n">command</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;-allow-mxint8-mdp-io&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">device_group</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">device_group</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">mdp_ts_config</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;connections&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;devices&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">device_group</span><span class="p">))),</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;p2p&quot;</span><span class="p">}],</span>
+            <span class="s2">&quot;partitions&quot;</span><span class="p">:</span> <span class="p">[</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Partition0&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;devices&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;deviceId&quot;</span><span class="p">:</span> <span class="n">device</span><span class="p">,</span> <span class="s2">&quot;numCores&quot;</span><span class="p">:</span> <span class="n">num_cores</span><span class="p">}</span> <span class="k">for</span> <span class="n">device</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">device_group</span><span class="p">))],</span>
+                <span class="p">}</span>
+            <span class="p">],</span>
+        <span class="p">}</span>
+        <span class="n">mdp_ts_config_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">base_path</span><span class="p">,</span> <span class="s2">&quot;mdp_ts_config.json&quot;</span><span class="p">)</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">mdp_ts_config_path</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">file</span><span class="p">:</span>
+            <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">mdp_ts_config</span><span class="p">,</span> <span class="n">file</span><span class="p">,</span> <span class="n">indent</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+        <span class="n">command</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;-mdp-load-partition-config=</span><span class="si">{</span><span class="n">mdp_ts_config_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">option</span> <span class="o">=</span> <span class="s2">&quot;-&quot;</span> <span class="o">+</span> <span class="n">key</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">&quot;_&quot;</span><span class="p">,</span> <span class="s2">&quot;-&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">bool</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">value</span><span class="p">:</span>
+                <span class="n">command</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">option</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="n">command</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">option</span><span class="si">}</span><span class="s2">=</span><span class="si">{</span><span class="n">value</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Running AI 100 compiler:&quot;</span><span class="p">,</span> <span class="s2">&quot; &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">command</span><span class="p">))</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">command</span><span class="p">,</span> <span class="n">capture_output</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">returncode</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Compilation Failed!!</span><span class="se">\n\n</span><span class="s2">STDOUT</span><span class="se">\n</span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">stdout</span><span class="si">}</span><span class="se">\n\n</span><span class="s2">STDERR</span><span class="se">\n</span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">stderr</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">===================== Compilation Done! =====================</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span><span class="o">.</span><span class="n">returncode</span> <span class="o">==</span> <span class="mi">0</span><span class="p">,</span> <span class="n">aic_binary_dir</span>
+
+
+<div class="viewcode-block" id="compile"><a class="viewcode-back" href="../../../source/cli_api.html#QEfficient.compile.compile_helper.compile">[docs]</a><span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span>
+    <span class="n">onnx_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">qpc_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">num_cores</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">device_group</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1">#  FIXME: use num_devices instead</span>
+    <span class="n">aic_enable_depth_first</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">mos</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">batch_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="n">prompt_len</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span><span class="p">,</span>
+    <span class="n">ctx_len</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">128</span><span class="p">,</span>
+    <span class="n">mxfp6</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">mxint8</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">custom_io_file_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">full_batch_size</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">allow_mxint8_mdp_io</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">enable_qnn</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">qnn_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Compiles the given ONNX model using either the Cloud AI 100 platform SDK compiler</span>
+<span class="sd">    or the QNN compiler, and saves the compiled QPC package.</span>
+
+<span class="sd">    This function handles the creation of specialization files, selection of custom IO</span>
+<span class="sd">    configurations, and execution of the appropriate compiler (QAIC or QNN).</span>
+<span class="sd">    It supports multi-device compilation for tensor slicing.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    onnx_path : str</span>
+<span class="sd">        Path to the generated ONNX model file.</span>
+<span class="sd">    qpc_path : str</span>
+<span class="sd">        Target directory path for saving the compiled QPC binaries.</span>
+<span class="sd">    num_cores : int</span>
+<span class="sd">        Number of cores to use for compilation.</span>
+
+<span class="sd">    Other Parameters</span>
+<span class="sd">    ----------------</span>
+<span class="sd">    device_group : List[int], optional</span>
+<span class="sd">        List of device IDs. Used to determine the number of devices for multi-device compilation.</span>
+<span class="sd">        Default is None.</span>
+<span class="sd">    aic_enable_depth_first : bool, optional</span>
+<span class="sd">        If True, enables Depth-First Search (DFS) optimization with default memory size during QAIC compilation.</span>
+<span class="sd">        Default is False.</span>
+<span class="sd">    mos : int, optional</span>
+<span class="sd">        Effort level to reduce on-chip memory during QAIC compilation. A value greater than 0 applies this effort.</span>
+<span class="sd">        Default is -1 (no effort).</span>
+<span class="sd">    batch_size : int, optional</span>
+<span class="sd">        Batch size to compile the model for. Default is 1.</span>
+<span class="sd">    full_batch_size : int, optional</span>
+<span class="sd">        Sets the full batch size to enable continuous batching mode. If provided, `batch_size` must be 1.</span>
+<span class="sd">        Default is None.</span>
+<span class="sd">    prompt_len : int, optional</span>
+<span class="sd">        Prompt length for the model to compile. Default is 32.</span>
+<span class="sd">    ctx_len : int, optional</span>
+<span class="sd">        Maximum context length to compile the model for. Default is 128.</span>
+<span class="sd">    mxfp6 : bool, optional</span>
+<span class="sd">        If True, enables MXFP6 precision for MatMul weights during compilation. Default is True.</span>
+<span class="sd">    mxint8 : bool, optional</span>
+<span class="sd">        If True, compresses Present/Past KV to MXINT8 using a CustomIO configuration. Default is False.</span>
+<span class="sd">    custom_io_file_path : str, optional</span>
+<span class="sd">        Explicit path to a Custom IO file (e.g., YAML format). If None, it&#39;s inferred based on `mxint8`.</span>
+<span class="sd">        Default is None.</span>
+<span class="sd">    allow_mxint8_mdp_io : bool, optional</span>
+<span class="sd">        If True, allows MXINT8 compression of MDP IO traffic during QAIC compilation. Default is False.</span>
+<span class="sd">    enable_qnn : bool, optional</span>
+<span class="sd">        If True, enables compilation using the QNN compiler instead of QAIC. Default is False.</span>
+<span class="sd">    qnn_config : str, optional</span>
+<span class="sd">        Path to the QNN Config parameters file, used if `enable_qnn` is True. Default is None.</span>
+<span class="sd">    **kwargs :</span>
+<span class="sd">        Additional compiler options passed directly to the chosen compiler.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Path to the compiled QPC package directory.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        If both `batch_size` and `full_batch_size` are greater than one (mutually exclusive in some contexts).</span>
+<span class="sd">    FileNotFoundError</span>
+<span class="sd">        If required Custom IO files are not found.</span>
+
+<span class="sd">    Warnings</span>
+<span class="sd">    --------</span>
+<span class="sd">    DeprecationWarning</span>
+<span class="sd">        This method will be removed soon; use `QEFFAutoModelForCausalLM.compile` instead.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">full_batch_size</span> <span class="ow">and</span> <span class="n">batch_size</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Only either batch_size or full_batch_size should be greater than one&quot;</span><span class="p">)</span>
+
+    <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">qpc_path</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">specialization_json_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">qpc_path</span><span class="p">,</span> <span class="s2">&quot;specializations.json&quot;</span><span class="p">)</span>
+
+    <span class="n">create_and_dump_specializations</span><span class="p">(</span>
+        <span class="n">batch_size</span><span class="o">=</span><span class="n">batch_size</span><span class="p">,</span>
+        <span class="n">prompt_len</span><span class="o">=</span><span class="n">prompt_len</span><span class="p">,</span>
+        <span class="n">ctx_len</span><span class="o">=</span><span class="n">ctx_len</span><span class="p">,</span>
+        <span class="n">path</span><span class="o">=</span><span class="n">specialization_json_path</span><span class="p">,</span>
+        <span class="n">full_batch_size</span><span class="o">=</span><span class="n">full_batch_size</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">dtype_suffix</span> <span class="o">=</span> <span class="s2">&quot;int8&quot;</span> <span class="k">if</span> <span class="n">mxint8</span> <span class="k">else</span> <span class="s2">&quot;fp16&quot;</span>
+    <span class="n">source_path</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;./custom_io_</span><span class="si">{</span><span class="n">dtype_suffix</span><span class="si">}</span><span class="s2">.yaml&quot;</span>
+    <span class="n">destination_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">qpc_path</span><span class="p">),</span> <span class="sa">f</span><span class="s2">&quot;custom_io_</span><span class="si">{</span><span class="n">dtype_suffix</span><span class="si">}</span><span class="s2">.yaml&quot;</span><span class="p">)</span>
+
+    <span class="c1"># Move the custom YAML file to the cache/qeff_model directory</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">shutil</span><span class="o">.</span><span class="n">move</span><span class="p">(</span><span class="n">source_path</span><span class="p">,</span> <span class="n">destination_path</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Successfully moved &#39;</span><span class="si">{</span><span class="n">source_path</span><span class="si">}</span><span class="s2">&#39; to &#39;</span><span class="si">{</span><span class="n">destination_path</span><span class="si">}</span><span class="s2">&#39;.&quot;</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Error while moving file &#39;</span><span class="si">{</span><span class="n">source_path</span><span class="si">}</span><span class="s2">&#39;: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="n">custom_io_file_name</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;custom_io_</span><span class="si">{</span><span class="n">dtype_suffix</span><span class="si">}</span><span class="s2">.yaml&quot;</span>
+    <span class="k">if</span> <span class="n">custom_io_file_path</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">custom_io_file_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">custom_io_file_name</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">custom_io_file_path</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">&quot;Custom IO file </span><span class="si">{</span><span class="n">custom_io_file_name</span><span class="si">}</span><span class="s2"> is not present at the expected path </span><span class="si">{</span><span class="n">custom_io_file_path</span><span class="si">}</span><span class="s2">. Please pass the correct file path or rerun infer/export API&quot;</span>
+        <span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">enable_qnn</span><span class="p">:</span>
+        <span class="n">qpc_path</span> <span class="o">=</span> <span class="n">qnn_compile</span><span class="p">(</span>
+            <span class="n">onnx_path</span><span class="o">=</span><span class="n">onnx_path</span><span class="p">,</span>
+            <span class="n">qpc_base_path</span><span class="o">=</span><span class="n">qpc_path</span><span class="p">,</span>
+            <span class="n">qnn_binary_dir</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">qpc_path</span><span class="p">,</span> <span class="s2">&quot;qpcs&quot;</span><span class="p">),</span>
+            <span class="n">num_cores</span><span class="o">=</span><span class="n">num_cores</span><span class="p">,</span>
+            <span class="n">mxfp6</span><span class="o">=</span><span class="n">mxfp6</span><span class="p">,</span>
+            <span class="n">mxint8</span><span class="o">=</span><span class="n">mxint8</span><span class="p">,</span>
+            <span class="n">allow_mxint8_mdp_io</span><span class="o">=</span><span class="n">allow_mxint8_mdp_io</span><span class="p">,</span>
+            <span class="n">aic_enable_depth_first</span><span class="o">=</span><span class="n">aic_enable_depth_first</span><span class="p">,</span>
+            <span class="n">mos</span><span class="o">=</span><span class="n">mos</span><span class="p">,</span>
+            <span class="n">device_group</span><span class="o">=</span><span class="n">device_group</span><span class="p">,</span>
+            <span class="n">qnn_config</span><span class="o">=</span><span class="n">qnn_config</span><span class="p">,</span>
+            <span class="n">specializations</span><span class="o">=</span><span class="p">(</span><span class="n">load_json</span><span class="p">(</span><span class="n">specialization_json_path</span><span class="p">))[</span><span class="s2">&quot;specializations&quot;</span><span class="p">],</span>
+            <span class="n">custom_io</span><span class="o">=</span><span class="n">load_yaml</span><span class="p">(</span><span class="n">custom_io_file_path</span><span class="p">),</span>
+        <span class="p">)</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;QNN Compiled QPC files can be found here: </span><span class="si">{</span><span class="n">qpc_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">_</span><span class="p">,</span> <span class="n">qpc_path</span> <span class="o">=</span> <span class="n">compile_kv_model_on_cloud_ai_100</span><span class="p">(</span>
+            <span class="n">onnx_path</span><span class="o">=</span><span class="n">onnx_path</span><span class="p">,</span>
+            <span class="n">specializations_json</span><span class="o">=</span><span class="n">specialization_json_path</span><span class="p">,</span>
+            <span class="n">num_cores</span><span class="o">=</span><span class="n">num_cores</span><span class="p">,</span>
+            <span class="n">custom_io_path</span><span class="o">=</span><span class="n">custom_io_file_path</span><span class="p">,</span>
+            <span class="n">base_path</span><span class="o">=</span><span class="n">qpc_path</span><span class="p">,</span>
+            <span class="n">mxfp6</span><span class="o">=</span><span class="n">mxfp6</span><span class="p">,</span>
+            <span class="n">aic_enable_depth_first</span><span class="o">=</span><span class="n">aic_enable_depth_first</span><span class="p">,</span>
+            <span class="n">allow_mxint8_mdp_io</span><span class="o">=</span><span class="n">allow_mxint8_mdp_io</span><span class="p">,</span>
+            <span class="n">mos</span><span class="o">=</span><span class="n">mos</span><span class="p">,</span>
+            <span class="n">device_group</span><span class="o">=</span><span class="n">device_group</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;io_encrypt&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">):</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Compilation for IO-Encrypt has been successfully completed at path: </span><span class="si">{</span><span class="n">qpc_path</span><span class="si">}</span><span class="s2">. However, Efficient-Transformers do not support IO-Encrypt execution. Please run the execution separately&quot;</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Compiled QPC files can be found here: </span><span class="si">{</span><span class="n">qpc_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">qpc_path</span></div>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.2.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../index.html">release/v1.23.2.0</a></dd>
+        <dd><a href="../../../../v1.23.0/index.html">release/v1.23.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

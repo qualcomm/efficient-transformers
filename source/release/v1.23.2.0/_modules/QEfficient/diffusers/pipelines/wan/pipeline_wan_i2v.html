@@ -1,0 +1,1182 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../../v1.23.0/source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># ----------------------------------------------------------------------------</span>
+<span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">QEfficient WAN Image-to-Video Pipeline Implementation</span>
+
+<span class="sd">This module provides an optimized implementation of the WAN image-to-video pipeline</span>
+<span class="sd">for high-performance image-to-video generation on Qualcomm AI hardware.</span>
+<span class="sd">The pipeline supports WAN 2.2 architectures with unified transformer for converting</span>
+<span class="sd">static images into dynamic video sequences with temporal consistency.</span>
+
+<span class="sd">TODO: 1. Update Umt5 to Qaic; present running on cpu</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Union</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers</span><span class="w"> </span><span class="kn">import</span> <span class="n">WanImageToVideoPipeline</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers.image_processor</span><span class="w"> </span><span class="kn">import</span> <span class="n">PipelineImageInput</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers.utils.torch_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">randn_tensor</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">tqdm</span><span class="w"> </span><span class="kn">import</span> <span class="n">tqdm</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.models.transformers.transformer_wan</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffWanUnifiedWrapper</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.pipelines.pipeline_module</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffVAE</span><span class="p">,</span> <span class="n">QEffWanUnifiedTransformer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.pipelines.pipeline_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">ONNX_SUBFUNCTION_MODULE</span><span class="p">,</span>
+    <span class="n">ModulePerf</span><span class="p">,</span>
+    <span class="n">QEffPipelineOutput</span><span class="p">,</span>
+    <span class="n">calculate_latent_dimensions_with_frames</span><span class="p">,</span>
+    <span class="n">compile_modules_parallel</span><span class="p">,</span>
+    <span class="n">compile_modules_sequential</span><span class="p">,</span>
+    <span class="n">config_manager</span><span class="p">,</span>
+    <span class="n">set_execute_params</span><span class="p">,</span>
+    <span class="n">update_npi_path</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.generation.cloud_infer</span><span class="w"> </span><span class="kn">import</span> <span class="n">QAICInferenceSession</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">constants</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.logging_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
+
+
+<div class="viewcode-block" id="QEffWanImageToVideoPipeline"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffWanImageToVideoPipeline</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    QEfficient-optimized WAN image-to-video pipeline for high-performance video generation on Qualcomm AI hardware.</span>
+
+<span class="sd">    This pipeline provides an optimized implementation of the WAN image-to-video diffusion model</span>
+<span class="sd">    specifically designed for deployment on Qualcomm AI Cloud (QAIC) devices. It extends the original</span>
+<span class="sd">    HuggingFace WAN image-to-video model with QEfficient-optimized components that can be exported to ONNX format</span>
+<span class="sd">    and compiled into Qualcomm Program Container (QPC) files for efficient video generation from static images.</span>
+
+<span class="sd">    The pipeline supports the complete WAN image-to-video workflow including:</span>
+<span class="sd">    - Image conditioning and preprocessing for temporal consistency</span>
+<span class="sd">    - UMT5 text encoding for rich semantic understanding</span>
+<span class="sd">    - Unified transformer architecture: Combines multiple transformer stages into a single optimized model</span>
+<span class="sd">    - VAE encoding/decoding for image-to-latent and latent-to-video conversion</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        text_encoder: UMT5 text encoder for semantic text understanding (TODO: QEfficient optimization)</span>
+<span class="sd">        vae_encoder (QEffVAE): VAE encoder for converting input images to latent space</span>
+<span class="sd">        unified_wrapper (QEffWanUnifiedWrapper): Wrapper combining transformer stages</span>
+<span class="sd">        transformer (QEffWanUnifiedTransformer): Optimized unified transformer for denoising</span>
+<span class="sd">        vae_decoder (QEffVAE): VAE decoder for latent-to-video conversion</span>
+<span class="sd">        modules (Dict[str, Any]): Dictionary of pipeline modules for batch operations</span>
+<span class="sd">        model (WanImageToVideoPipeline): Original HuggingFace WAN I2V model reference</span>
+<span class="sd">        tokenizer: Text tokenizer for preprocessing</span>
+<span class="sd">        scheduler: Diffusion scheduler for timestep management</span>
+
+<span class="sd">    Example:</span>
+<span class="sd">            &gt;&gt;&gt; from QEfficient.diffusers.pipelines.wan import QEffWanImageToVideoPipeline</span>
+<span class="sd">            &gt;&gt;&gt; from PIL import Image</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Load pipeline and input image</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffWanImageToVideoPipeline.from_pretrained(&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; image = Image.open(&quot;input_frame.jpg&quot;)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Generate video with motion</span>
+<span class="sd">            &gt;&gt;&gt; result = pipeline(</span>
+<span class="sd">            ...     image=image,</span>
+<span class="sd">            ...     prompt=&quot;A person walking through a sunny garden with flowing motion&quot;,</span>
+<span class="sd">            ...     height=544,</span>
+<span class="sd">            ...     width=720,</span>
+<span class="sd">            ...     num_frames=81,</span>
+<span class="sd">            ...     num_inference_steps=4,</span>
+<span class="sd">            ...     guidance_scale=1.0</span>
+<span class="sd">            ... )</span>
+<span class="sd">            &gt;&gt;&gt; # Save generated video</span>
+<span class="sd">            &gt;&gt;&gt; frames = result.images[0]</span>
+<span class="sd">            &gt;&gt;&gt; export_to_video(frames, &quot;generated_video.mp4&quot;, fps=16)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_hf_auto_class</span> <span class="o">=</span> <span class="n">WanImageToVideoPipeline</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the QEfficient WAN image-to-video pipeline.</span>
+
+<span class="sd">        This pipeline provides an optimized implementation of the WAN image-to-video model</span>
+<span class="sd">        for deployment on Qualcomm AI hardware. It wraps the original HuggingFace WAN I2V model</span>
+<span class="sd">        components with QEfficient-optimized versions that can be exported to ONNX and compiled</span>
+<span class="sd">        for QAIC devices.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model (WanImageToVideoPipeline): Pre-loaded WanImageToVideoPipeline model with</span>
+<span class="sd">                transformer, transformer_2, VAE, and text encoder components</span>
+<span class="sd">            **kwargs: Additional keyword arguments including configuration parameters</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Wrap model components with QEfficient optimized versions</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">custom_config</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="c1"># Text encoder (TODO: Replace with QEfficient UMT5 optimization)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">text_encoder</span>
+        <span class="c1"># Create unified transformer wrapper combining dual-stage models(high, low noise DiTs)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">unified_wrapper</span> <span class="o">=</span> <span class="n">QEffWanUnifiedWrapper</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">transformer</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">transformer_2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span> <span class="o">=</span> <span class="n">QEffWanUnifiedTransformer</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">unified_wrapper</span><span class="p">)</span>
+        <span class="c1"># VAE encoder for image-to-latent conversion</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span> <span class="o">=</span> <span class="n">QEffVAE</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="p">,</span> <span class="s2">&quot;encoder&quot;</span><span class="p">)</span>
+        <span class="c1"># VAE decoder for latent-to-video conversion</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span> <span class="o">=</span> <span class="n">QEffVAE</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="p">,</span> <span class="s2">&quot;decoder&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Store all modules in a dictionary for easy iteration during export/compile</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">modules</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;vae_encoder&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="p">,</span>
+            <span class="s2">&quot;transformer&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="p">,</span>
+            <span class="s2">&quot;vae_decoder&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="p">,</span>
+        <span class="p">}</span>
+
+        <span class="c1"># Copy tokenizers and scheduler from the original model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">tokenizer</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">tokenizer</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">scheduler</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">get_onnx_params</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">get_img_encoder_onnx_params</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">get_onnx_params</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">get_video_onnx_params</span>
+
+        <span class="c1"># Extract patch dimensions from transformer configuration</span>
+        <span class="n">_</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">patch_height</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">patch_width</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">patch_size</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">do_classifier_free_guidance</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Determine if classifier-free guidance should be used.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            bool: True if CFG should be applied based on current guidance scales</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_guidance_scale</span> <span class="o">&gt;</span> <span class="mf">1.0</span> <span class="ow">and</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_guidance_scale_2</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_guidance_scale_2</span> <span class="o">&gt;</span> <span class="mf">1.0</span><span class="p">)</span>
+
+<div class="viewcode-block" id="QEffWanImageToVideoPipeline.from_pretrained"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.from_pretrained">[docs]</a>    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_pretrained</span><span class="p">(</span>
+        <span class="bp">cls</span><span class="p">,</span>
+        <span class="n">pretrained_model_name_or_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">]],</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Load a pretrained WAN image-to-video model from HuggingFace Hub or local path and wrap it with QEfficient optimizations.</span>
+
+<span class="sd">        This class method provides a convenient way to instantiate a QEffWanImageToVideoPipeline from a pretrained</span>
+<span class="sd">        WAN I2V model. It automatically loads the base WanImageToVideoPipeline model in float32 precision on CPU</span>
+<span class="sd">        and wraps all components with QEfficient-optimized versions for QAIC deployment.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            pretrained_model_name_or_path (str or os.PathLike): Either a HuggingFace model identifier</span>
+<span class="sd">                or a local path to a saved WAN I2V model directory. Should contain transformer, transformer_2,</span>
+<span class="sd">                text_encoder, and VAE components optimized for image-to-video generation.</span>
+<span class="sd">            **kwargs: Additional keyword arguments passed to WanImageToVideoPipeline.from_pretrained().</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            QEffWanImageToVideoPipeline: A fully initialized I2V pipeline instance with QEfficient-optimized components</span>
+<span class="sd">                ready for export, compilation, and inference on QAIC devices.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            ValueError: If the model path is invalid or model cannot be loaded</span>
+<span class="sd">            OSError: If there are issues accessing the model files</span>
+<span class="sd">            RuntimeError: If model initialization fails</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; # Load from HuggingFace Hub</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffWanImageToVideoPipeline.from_pretrained(&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Load from local path</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffWanImageToVideoPipeline.from_pretrained(&quot;/local/path/to/wan/i2v&quot;)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Load with custom cache directory</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffWanImageToVideoPipeline.from_pretrained(</span>
+<span class="sd">            ...     &quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;,</span>
+<span class="sd">            ...     cache_dir=&quot;/custom/cache/dir&quot;</span>
+<span class="sd">            ... )</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Load the base WAN model in float32 on CPU for optimization</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">_hf_auto_class</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+            <span class="n">pretrained_model_name_or_path</span><span class="p">,</span>
+            <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;cpu&quot;</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+            <span class="n">pretrained_model_name_or_path</span><span class="o">=</span><span class="n">pretrained_model_name_or_path</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffWanImageToVideoPipeline.export"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">export_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Export all pipeline modules to ONNX format for deployment preparation.</span>
+
+<span class="sd">        This method systematically exports the VAE encoder, unified transformer, and VAE decoder to ONNX format with</span>
+<span class="sd">        image-to-video specific configurations including temporal dimensions, dynamic axes, and</span>
+<span class="sd">        optimization settings.</span>
+
+<span class="sd">        The export process prepares the models for subsequent compilation to QPC format, enabling</span>
+<span class="sd">        efficient inference on QAIC hardware. ONNX subfunctions can be used for certain modules</span>
+<span class="sd">        to optimize memory usage and performance.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            export_dir (str, optional): Target directory for saving ONNX model files. If None,</span>
+<span class="sd">                uses the default export directory structure. The directory will be created</span>
+<span class="sd">                if it doesn&#39;t exist.</span>
+<span class="sd">            use_onnx_subfunctions (bool, default=False): Whether to enable ONNX subfunction</span>
+<span class="sd">                optimization for supported modules. This can optimize the graph structure</span>
+<span class="sd">                and improve compilation efficiency for complex models like the transformer.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Absolute path to the export directory containing all ONNX model files.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            RuntimeError: If ONNX export fails for any module</span>
+<span class="sd">            OSError: If there are issues creating the export directory or writing files</span>
+<span class="sd">            ValueError: If module configurations are invalid</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffWanImageToVideoPipeline.from_pretrained(&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; export_path = pipeline.export(</span>
+<span class="sd">            ...     export_dir=&quot;/path/to/export&quot;,</span>
+<span class="sd">            ...     use_onnx_subfunctions=True</span>
+<span class="sd">            ... )</span>
+<span class="sd">            &gt;&gt;&gt; print(f&quot;Models exported to: {export_path}&quot;)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="c1"># Export each module with corresponding parameters</span>
+        <span class="k">for</span> <span class="n">module_name</span><span class="p">,</span> <span class="n">module_obj</span> <span class="ow">in</span> <span class="n">tqdm</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">items</span><span class="p">(),</span> <span class="n">desc</span><span class="o">=</span><span class="s2">&quot;Exporting modules&quot;</span><span class="p">,</span> <span class="n">unit</span><span class="o">=</span><span class="s2">&quot;module&quot;</span><span class="p">):</span>
+            <span class="c1"># Get ONNX export configuration with video dimensions</span>
+            <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span> <span class="o">=</span> <span class="n">module_obj</span><span class="o">.</span><span class="n">get_onnx_params</span><span class="p">()</span>
+
+            <span class="c1"># Prepare export parameters</span>
+            <span class="n">export_params</span> <span class="o">=</span> <span class="p">{</span>
+                <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="n">example_inputs</span><span class="p">,</span>
+                <span class="s2">&quot;output_names&quot;</span><span class="p">:</span> <span class="n">output_names</span><span class="p">,</span>
+                <span class="s2">&quot;dynamic_axes&quot;</span><span class="p">:</span> <span class="n">dynamic_axes</span><span class="p">,</span>
+                <span class="s2">&quot;export_dir&quot;</span><span class="p">:</span> <span class="n">export_dir</span><span class="p">,</span>
+            <span class="p">}</span>
+
+            <span class="c1"># Enable ONNX subfunctions for supported modules if requested</span>
+            <span class="k">if</span> <span class="n">use_onnx_subfunctions</span> <span class="ow">and</span> <span class="n">module_name</span> <span class="ow">in</span> <span class="n">ONNX_SUBFUNCTION_MODULE</span><span class="p">:</span>
+                <span class="n">export_params</span><span class="p">[</span><span class="s2">&quot;use_onnx_subfunctions&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">True</span>
+
+            <span class="n">module_obj</span><span class="o">.</span><span class="n">export</span><span class="p">(</span><span class="o">**</span><span class="n">export_params</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffWanImageToVideoPipeline.get_default_config_path"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.get_default_config_path">[docs]</a>    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_default_config_path</span><span class="p">():</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the default configuration file path for WAN pipeline.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the default WAN configuration JSON file.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)),</span> <span class="s2">&quot;configs/wan_i2v_config.json&quot;</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffWanImageToVideoPipeline.get_vae_encoder_npi_path"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.get_vae_encoder_npi_path">[docs]</a>    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_vae_encoder_npi_path</span><span class="p">():</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the default VAE encoder NPI configuration file path for WAN I2V pipeline.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the default WAN I2V VAE encoder NPI file.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)),</span> <span class="s2">&quot;configs/npi_wan_i2v_vae_encoder.yaml&quot;</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffWanImageToVideoPipeline.compile"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">compile_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">parallel</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">height</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_HEIGHT_45P</span><span class="p">,</span>
+        <span class="n">width</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_WIDTH_45P</span><span class="p">,</span>
+        <span class="n">num_frames</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_FRAMES</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compiles the ONNX graphs of the different model components for deployment on Qualcomm AI hardware.</span>
+
+<span class="sd">        This method takes the ONNX paths of the transformer and compiles them into an optimized format</span>
+<span class="sd">        for inference using JSON-based configuration.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            compile_config (str, optional): Path to a JSON configuration file containing</span>
+<span class="sd">                compilation settings, device mappings, and optimization parameters. If None,</span>
+<span class="sd">                uses the default configuration.</span>
+<span class="sd">            parallel (bool, default=False): Compilation mode selection:</span>
+<span class="sd">                - True: Compile modules in parallel using ThreadPoolExecutor for faster processing</span>
+<span class="sd">                - False: Compile modules sequentially for lower resource usage</span>
+<span class="sd">            height (int, default=192): Target image height in pixels.</span>
+<span class="sd">            width (int, default=320): Target image width in pixels.</span>
+<span class="sd">            num_frames (int, deafult=81) : Target num of frames in pixel space</span>
+<span class="sd">            use_onnx_subfunctions (bool, default=False): Whether to export models with ONNX</span>
+<span class="sd">                subfunctions before compilation if not already exported.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            RuntimeError: If compilation fails for any module or if QAIC compiler is not available</span>
+<span class="sd">            FileNotFoundError: If ONNX models haven&#39;t been exported or config file is missing</span>
+<span class="sd">            ValueError: If configuration parameters are invalid</span>
+<span class="sd">            OSError: If there are issues with file I/O during compilation</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffWanImageToVideoPipeline.from_pretrained(&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; # Sequential compilation with default config</span>
+<span class="sd">            &gt;&gt;&gt; pipeline.compile(height=480, width=832, num_frames=81)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Parallel compilation with custom config</span>
+<span class="sd">            &gt;&gt;&gt; pipeline.compile(</span>
+<span class="sd">            ...     compile_config=&quot;/path/to/custom_config.json&quot;,</span>
+<span class="sd">            ...     parallel=True,</span>
+<span class="sd">            ...     height=480,</span>
+<span class="sd">            ...     width=832,</span>
+<span class="sd">            ...     num_frames=81</span>
+<span class="sd">            ... )</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Load compilation configuration</span>
+        <span class="n">config_manager</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config_source</span><span class="o">=</span><span class="n">compile_config</span><span class="p">,</span> <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">)</span>
+
+        <span class="c1"># Set device IDs, qpc path if precompiled qpc exist</span>
+        <span class="n">set_execute_params</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+        <span class="c1"># Ensure all modules are exported to ONNX before compilation</span>
+        <span class="k">if</span> <span class="nb">any</span><span class="p">(</span>
+            <span class="n">path</span> <span class="ow">is</span> <span class="kc">None</span>
+            <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="p">[</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">onnx_path</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">onnx_path</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">onnx_path</span><span class="p">,</span>
+            <span class="p">]</span>
+        <span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">export</span><span class="p">(</span><span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">)</span>
+
+        <span class="c1"># Configure pipeline dimensions and calculate compressed latent parameters</span>
+        <span class="n">cl</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span><span class="p">,</span> <span class="n">latent_frames</span> <span class="o">=</span> <span class="n">calculate_latent_dimensions_with_frames</span><span class="p">(</span>
+            <span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="p">,</span>
+            <span class="n">num_frames</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_spatial</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">patch_height</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">patch_width</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="c1"># # Update NPI path for vae encoder</span>
+        <span class="n">vae_npi_full_path</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_vae_encoder_npi_path</span><span class="p">()</span>
+        <span class="n">update_npi_path</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">vae_npi_full_path</span><span class="p">,</span> <span class="n">module_name</span><span class="o">=</span><span class="s2">&quot;vae_encoder&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Prepare dynamic specialization updates based on video dimensions</span>
+        <span class="n">specialization_updates</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;vae_encoder&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;num_frames&quot;</span><span class="p">:</span> <span class="n">num_frames</span><span class="p">,</span>
+                <span class="s2">&quot;height&quot;</span><span class="p">:</span> <span class="n">height</span><span class="p">,</span>
+                <span class="s2">&quot;width&quot;</span><span class="p">:</span> <span class="n">width</span><span class="p">,</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;transformer&quot;</span><span class="p">:</span> <span class="p">[</span>
+                <span class="c1"># high noise</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;cl&quot;</span><span class="p">:</span> <span class="n">cl</span><span class="p">,</span>  <span class="c1"># Compressed latent dimension</span>
+                    <span class="s2">&quot;latent_height&quot;</span><span class="p">:</span> <span class="n">latent_height</span><span class="p">,</span>  <span class="c1"># Latent space height</span>
+                    <span class="s2">&quot;latent_width&quot;</span><span class="p">:</span> <span class="n">latent_width</span><span class="p">,</span>  <span class="c1"># Latent space width</span>
+                    <span class="s2">&quot;latent_frames&quot;</span><span class="p">:</span> <span class="n">latent_frames</span><span class="p">,</span>  <span class="c1"># Latent frames</span>
+                <span class="p">},</span>
+                <span class="c1"># low noise</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;cl&quot;</span><span class="p">:</span> <span class="n">cl</span><span class="p">,</span>  <span class="c1"># Compressed latent dimension</span>
+                    <span class="s2">&quot;latent_height&quot;</span><span class="p">:</span> <span class="n">latent_height</span><span class="p">,</span>  <span class="c1"># Latent space height</span>
+                    <span class="s2">&quot;latent_width&quot;</span><span class="p">:</span> <span class="n">latent_width</span><span class="p">,</span>  <span class="c1"># Latent space width</span>
+                    <span class="s2">&quot;latent_frames&quot;</span><span class="p">:</span> <span class="n">latent_frames</span><span class="p">,</span>  <span class="c1"># Latent frames</span>
+                <span class="p">},</span>
+            <span class="p">],</span>
+            <span class="s2">&quot;vae_decoder&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;latent_frames&quot;</span><span class="p">:</span> <span class="n">latent_frames</span><span class="p">,</span>
+                <span class="s2">&quot;latent_height&quot;</span><span class="p">:</span> <span class="n">latent_height</span><span class="p">,</span>
+                <span class="s2">&quot;latent_width&quot;</span><span class="p">:</span> <span class="n">latent_width</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="c1"># Use generic utility functions for compilation</span>
+        <span class="k">if</span> <span class="n">parallel</span><span class="p">:</span>
+            <span class="n">compile_modules_parallel</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">modules</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">custom_config</span><span class="p">,</span> <span class="n">specialization_updates</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">compile_modules_sequential</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">modules</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">custom_config</span><span class="p">,</span> <span class="n">specialization_updates</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffWanImageToVideoPipeline.prepare_latents"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.prepare_latents">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">prepare_latents</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">image</span><span class="p">:</span> <span class="n">PipelineImageInput</span><span class="p">,</span>
+        <span class="n">batch_size</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+        <span class="n">num_channels_latents</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="n">height</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">480</span><span class="p">,</span>
+        <span class="n">width</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">832</span><span class="p">,</span>
+        <span class="n">num_frames</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">81</span><span class="p">,</span>
+        <span class="n">dtype</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">dtype</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">device</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">generator</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Generator</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Generator</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">latents</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">last_image</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Prepare latent variables for image-to-video generation with temporal conditioning.</span>
+
+<span class="sd">        This method handles the complex process of preparing latent tensors for I2V generation,</span>
+<span class="sd">        including image conditioning, temporal mask generation, and VAE encoding. It creates</span>
+<span class="sd">        the initial noise latents and processes the input image(s) to create conditioning</span>
+<span class="sd">        information that maintains temporal consistency throughout video generation.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            image (PipelineImageInput): Input image(s) to condition the video generation.</span>
+<span class="sd">                Can be PIL Image, numpy array, or torch tensor.</span>
+<span class="sd">            batch_size (int): Number of videos to generate in parallel.</span>
+<span class="sd">            num_channels_latents (int, default=16): Number of channels in the latent space.</span>
+<span class="sd">            height (int, default=480): Target video height in pixels.</span>
+<span class="sd">            width (int, default=832): Target video width in pixels.</span>
+<span class="sd">            num_frames (int, default=81): Number of frames in the generated video.</span>
+<span class="sd">            dtype (torch.dtype, optional): Data type for latent tensors. If None, uses float32.</span>
+<span class="sd">            device (torch.device, optional): Device to place tensors on. If None, uses CPU.</span>
+<span class="sd">            generator (torch.Generator or List[torch.Generator], optional): Random generator(s)</span>
+<span class="sd">                for reproducible latent initialization.</span>
+<span class="sd">            latents (torch.Tensor, optional): Pre-generated latent tensors. If None, random</span>
+<span class="sd">                latents are created.</span>
+<span class="sd">            last_image (torch.Tensor, optional): Optional last frame image for video completion</span>
+<span class="sd">                tasks. Used to create temporal boundaries.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Tuple[torch.Tensor, torch.Tensor]: A tuple containing:</span>
+<span class="sd">                - latents: Initial noise latents for denoising process</span>
+<span class="sd">                - condition: Conditioning tensor combining temporal masks and image latents</span>
+<span class="sd">                  OR (if expand_timesteps=True):</span>
+<span class="sd">                - latents: Initial noise latents</span>
+<span class="sd">                - latent_condition: Image conditioning latents</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            ValueError: If generator list length doesn&#39;t match batch size</span>
+<span class="sd">            RuntimeError: If VAE encoding fails or tensor operations fail</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">num_latent_frames</span> <span class="o">=</span> <span class="p">(</span><span class="n">num_frames</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span> <span class="o">+</span> <span class="mi">1</span>
+        <span class="n">latent_height</span> <span class="o">=</span> <span class="n">height</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_spatial</span>
+        <span class="n">latent_width</span> <span class="o">=</span> <span class="n">width</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_spatial</span>
+
+        <span class="n">shape</span> <span class="o">=</span> <span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">num_channels_latents</span><span class="p">,</span> <span class="n">num_latent_frames</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">generator</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">generator</span><span class="p">)</span> <span class="o">!=</span> <span class="n">batch_size</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;You have passed a list of generators of length </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">generator</span><span class="p">)</span><span class="si">}</span><span class="s2">, but requested an effective batch&quot;</span>
+                <span class="sa">f</span><span class="s2">&quot; size of </span><span class="si">{</span><span class="n">batch_size</span><span class="si">}</span><span class="s2">. Make sure the batch size matches the length of the generators.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">latents</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">latents</span> <span class="o">=</span> <span class="n">randn_tensor</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">generator</span><span class="o">=</span><span class="n">generator</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">latents</span> <span class="o">=</span> <span class="n">latents</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">)</span>
+
+        <span class="n">image</span> <span class="o">=</span> <span class="n">image</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>  <span class="c1"># [batch_size, channels, 1, height, width]</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">expand_timesteps</span><span class="p">:</span>
+            <span class="n">video_condition</span> <span class="o">=</span> <span class="n">image</span>
+
+        <span class="k">elif</span> <span class="n">last_image</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">video_condition</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">(</span>
+                <span class="p">[</span><span class="n">image</span><span class="p">,</span> <span class="n">image</span><span class="o">.</span><span class="n">new_zeros</span><span class="p">(</span><span class="n">image</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">image</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">num_frames</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">)],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">2</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">last_image</span> <span class="o">=</span> <span class="n">last_image</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+            <span class="n">video_condition</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">(</span>
+                <span class="p">[</span><span class="n">image</span><span class="p">,</span> <span class="n">image</span><span class="o">.</span><span class="n">new_zeros</span><span class="p">(</span><span class="n">image</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">image</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">num_frames</span> <span class="o">-</span> <span class="mi">2</span><span class="p">,</span> <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">),</span> <span class="n">last_image</span><span class="p">],</span>
+                <span class="n">dim</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="n">video_condition</span> <span class="o">=</span> <span class="n">video_condition</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+
+        <span class="n">latents_mean</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">latents_mean</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">z_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">device</span><span class="p">,</span> <span class="n">latents</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="p">)</span>
+        <span class="n">latents_std</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">latents_std</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span>
+            <span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">z_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">device</span><span class="p">,</span> <span class="n">latents</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+
+        <span class="c1"># Initialize VAE encoder inference session</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span>
+                <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">device_ids</span>
+            <span class="p">)</span>
+
+        <span class="c1"># # Allocate output buffer for VAE encoder</span>
+        <span class="n">output_buffer</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;latents&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_DIT_I2V_IMG_LATENT_CHANNELS</span><span class="p">,</span> <span class="n">num_latent_frames</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span>
+            <span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">)</span>
+        <span class="p">}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="n">output_buffer</span><span class="p">)</span>
+
+        <span class="n">aic_vae_encoder_input</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;image&quot;</span><span class="p">:</span> <span class="n">video_condition</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()}</span>
+
+        <span class="c1"># Vae encoder QAIC inference</span>
+        <span class="n">start_vae_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_encoder</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">aic_vae_encoder_input</span><span class="p">)</span>
+        <span class="n">end_vae_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">vae_encoder_perf</span> <span class="o">=</span> <span class="n">end_vae_time</span> <span class="o">-</span> <span class="n">start_vae_time</span>
+
+        <span class="n">qaic_op</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;latents&quot;</span><span class="p">])</span>
+        <span class="n">latent_condition_mean</span><span class="p">,</span> <span class="n">logvar</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">chunk</span><span class="p">(</span><span class="n">qaic_op</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">latent_condition</span> <span class="o">=</span> <span class="n">latent_condition_mean</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="n">latent_condition</span> <span class="o">=</span> <span class="n">latent_condition</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="n">latent_condition</span> <span class="o">=</span> <span class="p">(</span><span class="n">latent_condition</span> <span class="o">-</span> <span class="n">latents_mean</span><span class="p">)</span> <span class="o">*</span> <span class="n">latents_std</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">expand_timesteps</span><span class="p">:</span>
+            <span class="n">first_frame_mask</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span>
+                <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">num_latent_frames</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span>
+            <span class="p">)</span>
+            <span class="n">first_frame_mask</span><span class="p">[:,</span> <span class="p">:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="k">return</span> <span class="n">latents</span><span class="p">,</span> <span class="n">latent_condition</span><span class="p">,</span> <span class="n">first_frame_mask</span><span class="p">,</span> <span class="n">vae_encoder_perf</span>
+
+        <span class="n">mask_lat_size</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">num_frames</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">last_image</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">mask_lat_size</span><span class="p">[:,</span> <span class="p">:,</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_frames</span><span class="p">))]</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">mask_lat_size</span><span class="p">[:,</span> <span class="p">:,</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_frames</span> <span class="o">-</span> <span class="mi">1</span><span class="p">))]</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="n">first_frame_mask</span> <span class="o">=</span> <span class="n">mask_lat_size</span><span class="p">[:,</span> <span class="p">:,</span> <span class="mi">0</span><span class="p">:</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">first_frame_mask</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">repeat_interleave</span><span class="p">(</span>
+            <span class="n">first_frame_mask</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">repeats</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span>
+        <span class="p">)</span>
+        <span class="n">mask_lat_size</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">first_frame_mask</span><span class="p">,</span> <span class="n">mask_lat_size</span><span class="p">[:,</span> <span class="p">:,</span> <span class="mi">1</span><span class="p">:,</span> <span class="p">:]],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+        <span class="n">mask_lat_size</span> <span class="o">=</span> <span class="n">mask_lat_size</span><span class="o">.</span><span class="n">view</span><span class="p">(</span>
+            <span class="n">batch_size</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span>
+        <span class="p">)</span>
+        <span class="n">mask_lat_size</span> <span class="o">=</span> <span class="n">mask_lat_size</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="n">mask_lat_size</span> <span class="o">=</span> <span class="n">mask_lat_size</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">latent_condition</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">latents</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">mask_lat_size</span><span class="p">,</span> <span class="n">latent_condition</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">),</span> <span class="n">vae_encoder_perf</span></div>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">image</span><span class="p">:</span> <span class="n">PipelineImageInput</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">negative_prompt</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">height</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">544</span><span class="p">,</span>
+        <span class="n">width</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">720</span><span class="p">,</span>
+        <span class="n">num_frames</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">81</span><span class="p">,</span>
+        <span class="n">num_inference_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">50</span><span class="p">,</span>
+        <span class="n">guidance_scale</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span>
+        <span class="n">guidance_scale_2</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">num_videos_per_prompt</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">generator</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Generator</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Generator</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">latents</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">negative_prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">image_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">last_image</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">output_type</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;np&quot;</span><span class="p">,</span>
+        <span class="n">return_dict</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+        <span class="n">attention_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">callback_on_step_end</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="n">Callable</span><span class="p">[[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="n">Dict</span><span class="p">],</span> <span class="kc">None</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">callback_on_step_end_tensor_inputs</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;latents&quot;</span><span class="p">],</span>
+        <span class="n">max_sequence_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+        <span class="n">custom_config_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">parallel_compile</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate videos from input images and text prompts using the QEfficient-optimized WAN I2V pipeline on QAIC hardware.</span>
+
+<span class="sd">        This is the main entry point for image-to-video generation. It orchestrates the complete WAN I2V</span>
+<span class="sd">        diffusion pipeline optimized for Qualcomm AI Cloud devices, converting static images into dynamic</span>
+<span class="sd">        video sequences with temporal consistency and text-guided motion.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            image (PipelineImageInput): Input image(s) to condition the video generation. Can be PIL Image,</span>
+<span class="sd">                numpy array, or torch tensor. This serves as the first frame or conditioning frame for the video.</span>
+<span class="sd">            prompt (str or List[str], optional): Primary text prompt(s) describing the desired motion and content</span>
+<span class="sd">                for the video. Required unless `prompt_embeds` is provided.</span>
+<span class="sd">            negative_prompt (str or List[str], optional): Negative prompt(s) describing what to avoid</span>
+<span class="sd">                in the generated video. Used with classifier-free guidance.</span>
+<span class="sd">            height (int, optional): Target video height in pixels. Must be divisible by VAE scale factor.</span>
+<span class="sd">                Default: 480.</span>
+<span class="sd">            width (int, optional): Target video width in pixels. Must be divisible by VAE scale factor.</span>
+<span class="sd">                Default: 832.</span>
+<span class="sd">            num_frames (int, optional): Number of video frames to generate. Must satisfy temporal</span>
+<span class="sd">                divisibility requirements (num_frames - 1) % temporal_scale_factor == 0. Default: 81.</span>
+<span class="sd">            num_inference_steps (int, optional): Number of denoising steps. More steps generally</span>
+<span class="sd">                improve quality but increase generation time. Default: 50.</span>
+<span class="sd">            guidance_scale (float, optional): Guidance scale for classifier-free guidance in high-noise stage.</span>
+<span class="sd">                Default: 3.0.</span>
+<span class="sd">            guidance_scale_2 (float, optional): Guidance scale for low-noise stage in WAN 2.2.</span>
+<span class="sd">                If None, uses guidance_scale value.</span>
+<span class="sd">            num_videos_per_prompt (int, optional): Number of videos to generate per prompt. Default: 1.</span>
+<span class="sd">            generator (torch.Generator or List[torch.Generator], optional): Random generator for</span>
+<span class="sd">                reproducible generation.</span>
+<span class="sd">            latents (torch.Tensor, optional): Pre-generated latent tensors. If None, random latents</span>
+<span class="sd">                are generated based on video dimensions.</span>
+<span class="sd">            prompt_embeds (torch.Tensor, optional): Pre-computed text embeddings from UMT5 encoder.</span>
+<span class="sd">                Shape: [batch, seq_len, hidden_dim].</span>
+<span class="sd">            negative_prompt_embeds (torch.Tensor, optional): Pre-computed negative text embeddings.</span>
+<span class="sd">            image_embeds (torch.Tensor, optional): Pre-computed image embeddings (currently unused).</span>
+<span class="sd">            last_image (torch.Tensor, optional): Optional last frame image for video completion tasks.</span>
+<span class="sd">                Used to create temporal boundaries in the generated video.</span>
+<span class="sd">            output_type (str, optional): Output format. Options: &quot;np&quot; (default), &quot;pil&quot;, or &quot;latent&quot;.</span>
+<span class="sd">            return_dict (bool, optional): Whether to return a dictionary or tuple. Default: True.</span>
+<span class="sd">            attention_kwargs (Dict[str, Any], optional): Additional attention arguments for transformer.</span>
+<span class="sd">            callback_on_step_end (Callable, optional): Callback function executed after each denoising step.</span>
+<span class="sd">            callback_on_step_end_tensor_inputs (List[str], optional): Tensor names to pass to callback.</span>
+<span class="sd">                Default: [&quot;latents&quot;].</span>
+<span class="sd">            max_sequence_length (int, optional): Maximum token sequence length for text encoder. Default: 512.</span>
+<span class="sd">            custom_config_path (str, optional): Path to custom JSON configuration file for compilation.</span>
+<span class="sd">            use_onnx_subfunctions (bool, optional): Whether to export transformer blocks as ONNX subfunctions.</span>
+<span class="sd">                Default: False.</span>
+<span class="sd">            parallel_compile (bool, optional): Whether to compile modules in parallel. Default: True.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            QEffPipelineOutput: A dataclass containing:</span>
+<span class="sd">                - images: Generated video(s) in the format specified by `output_type`</span>
+<span class="sd">                - pipeline_module: Performance metrics for each pipeline component (transformer, VAE decoder)</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            ValueError: If input validation fails or parameters are incompatible</span>
+<span class="sd">            RuntimeError: If compilation fails or QAIC devices are unavailable</span>
+<span class="sd">            FileNotFoundError: If custom config file is specified but not found</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; from QEfficient.diffusers.pipelines.wan import QEffWanImageToVideoPipeline</span>
+<span class="sd">            &gt;&gt;&gt; from PIL import Image</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Load pipeline and input image</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffWanImageToVideoPipeline.from_pretrained(&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; image = Image.open(&quot;input_frame.jpg&quot;)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Generate video with motion</span>
+<span class="sd">            &gt;&gt;&gt; result = pipeline(</span>
+<span class="sd">            ...     image=image,</span>
+<span class="sd">            ...     prompt=&quot;A person walking through a sunny garden with flowing motion&quot;,</span>
+<span class="sd">            ...     height=544,</span>
+<span class="sd">            ...     width=720,</span>
+<span class="sd">            ...     num_frames=81,</span>
+<span class="sd">            ...     num_inference_steps=4,</span>
+<span class="sd">            ...     guidance_scale=1.0</span>
+<span class="sd">            ... )</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Save generated video</span>
+<span class="sd">            &gt;&gt;&gt; frames = result.images[0]</span>
+<span class="sd">            &gt;&gt;&gt; export_to_video(frames, &quot;generated_video.mp4&quot;, fps=16)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">device</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">_execution_device</span>
+
+        <span class="c1"># Compile models with custom configuration if needed</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+            <span class="n">compile_config</span><span class="o">=</span><span class="n">custom_config_path</span><span class="p">,</span>
+            <span class="n">parallel</span><span class="o">=</span><span class="n">parallel_compile</span><span class="p">,</span>
+            <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">,</span>
+            <span class="n">height</span><span class="o">=</span><span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="o">=</span><span class="n">width</span><span class="p">,</span>
+            <span class="n">num_frames</span><span class="o">=</span><span class="n">num_frames</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Step 1: Validate all inputs</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">check_inputs</span><span class="p">(</span>
+            <span class="n">prompt</span><span class="p">,</span>
+            <span class="n">negative_prompt</span><span class="p">,</span>
+            <span class="n">image</span><span class="p">,</span>
+            <span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="p">,</span>
+            <span class="n">prompt_embeds</span><span class="p">,</span>
+            <span class="n">negative_prompt_embeds</span><span class="p">,</span>
+            <span class="n">image_embeds</span><span class="p">,</span>
+            <span class="n">callback_on_step_end_tensor_inputs</span><span class="p">,</span>
+            <span class="n">guidance_scale_2</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Ensure num_frames satisfies temporal divisibility requirements</span>
+        <span class="k">if</span> <span class="n">num_frames</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;`num_frames - 1` has to be divisible by </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span><span class="si">}</span><span class="s2">. Rounding to the nearest number.&quot;</span>
+            <span class="p">)</span>
+            <span class="n">num_frames</span> <span class="o">=</span> <span class="p">(</span>
+                <span class="n">num_frames</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span>
+                <span class="o">+</span> <span class="mi">1</span>
+            <span class="p">)</span>
+        <span class="n">num_frames</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">num_frames</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">boundary_ratio</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">guidance_scale_2</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">guidance_scale_2</span> <span class="o">=</span> <span class="n">guidance_scale</span>
+
+        <span class="c1"># Initialize pipeline state</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_guidance_scale</span> <span class="o">=</span> <span class="n">guidance_scale</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_guidance_scale_2</span> <span class="o">=</span> <span class="n">guidance_scale_2</span> <span class="k">if</span> <span class="n">guidance_scale_2</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">guidance_scale</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_attention_kwargs</span> <span class="o">=</span> <span class="n">attention_kwargs</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_current_timestep</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_interrupt</span> <span class="o">=</span> <span class="kc">False</span>
+
+        <span class="c1"># Step 2: Determine batch size from inputs</span>
+        <span class="k">if</span> <span class="n">prompt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+            <span class="n">batch_size</span> <span class="o">=</span> <span class="mi">1</span>
+        <span class="k">elif</span> <span class="n">prompt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+            <span class="n">batch_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">batch_size</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c1"># Step 3: Encode input prompts using UMT5 text encoder</span>
+        <span class="c1"># TODO: Update UMT5 on QAIC</span>
+        <span class="n">prompt_embeds</span><span class="p">,</span> <span class="n">negative_prompt_embeds</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">encode_prompt</span><span class="p">(</span>
+            <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+            <span class="n">negative_prompt</span><span class="o">=</span><span class="n">negative_prompt</span><span class="p">,</span>
+            <span class="n">do_classifier_free_guidance</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">do_classifier_free_guidance</span><span class="p">,</span>
+            <span class="n">num_videos_per_prompt</span><span class="o">=</span><span class="n">num_videos_per_prompt</span><span class="p">,</span>
+            <span class="n">prompt_embeds</span><span class="o">=</span><span class="n">prompt_embeds</span><span class="p">,</span>
+            <span class="n">negative_prompt_embeds</span><span class="o">=</span><span class="n">negative_prompt_embeds</span><span class="p">,</span>
+            <span class="n">max_sequence_length</span><span class="o">=</span><span class="n">max_sequence_length</span><span class="p">,</span>
+            <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Convert embeddings to transformer dtype for compatibility</span>
+        <span class="n">transformer_dtype</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">transformer_high</span><span class="o">.</span><span class="n">dtype</span>
+        <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">transformer_dtype</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">negative_prompt_embeds</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">negative_prompt_embeds</span> <span class="o">=</span> <span class="n">negative_prompt_embeds</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">transformer_dtype</span><span class="p">)</span>
+
+        <span class="c1"># Step 4: Prepare timesteps for denoising process</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">set_timesteps</span><span class="p">(</span><span class="n">num_inference_steps</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+        <span class="n">timesteps</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">timesteps</span>
+
+        <span class="c1"># Step 5: Prepare initial latent variables for video generation</span>
+        <span class="n">num_channels_latents</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">z_dim</span>
+        <span class="n">image</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">video_processor</span><span class="o">.</span><span class="n">preprocess</span><span class="p">(</span><span class="n">image</span><span class="p">,</span> <span class="n">height</span><span class="o">=</span><span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="n">width</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">last_image</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">last_image</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">video_processor</span><span class="o">.</span><span class="n">preprocess</span><span class="p">(</span><span class="n">last_image</span><span class="p">,</span> <span class="n">height</span><span class="o">=</span><span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="n">width</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span>
+                <span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+            <span class="p">)</span>
+
+        <span class="n">latents_outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">prepare_latents</span><span class="p">(</span>
+            <span class="n">image</span><span class="p">,</span>
+            <span class="n">batch_size</span> <span class="o">*</span> <span class="n">num_videos_per_prompt</span><span class="p">,</span>
+            <span class="n">num_channels_latents</span><span class="p">,</span>
+            <span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="p">,</span>
+            <span class="n">num_frames</span><span class="p">,</span>
+            <span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="n">device</span><span class="p">,</span>
+            <span class="n">generator</span><span class="p">,</span>
+            <span class="n">latents</span><span class="p">,</span>
+            <span class="n">last_image</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">expand_timesteps</span><span class="p">:</span>
+            <span class="c1"># wan 2.2 5b i2v use firt_frame_mask to mask timesteps</span>
+            <span class="n">latents</span><span class="p">,</span> <span class="n">condition</span><span class="p">,</span> <span class="n">first_frame_mask</span><span class="p">,</span> <span class="n">vae_encoder_perf</span> <span class="o">=</span> <span class="n">latents_outputs</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">latents</span><span class="p">,</span> <span class="n">condition</span><span class="p">,</span> <span class="n">vae_encoder_perf</span> <span class="o">=</span> <span class="n">latents_outputs</span>
+
+        <span class="c1"># 6. Denoising loop</span>
+        <span class="n">num_warmup_steps</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">timesteps</span><span class="p">)</span> <span class="o">-</span> <span class="n">num_inference_steps</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">order</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_num_timesteps</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">timesteps</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">boundary_ratio</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">boundary_timestep</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">boundary_ratio</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">num_train_timesteps</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">boundary_timestep</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="c1"># Step 7: Initialize QAIC inference session for transformer</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">qpc_load_start</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span>
+                <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">device_ids</span>
+            <span class="p">)</span>
+            <span class="n">qpc_load_end</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot; DIT QAICInferenceSession time </span><span class="si">{</span><span class="n">qpc_load_end</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">qpc_load_start</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> seconds&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Calculate compressed latent dimension for transformer buffer allocation</span>
+        <span class="n">cl</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calculate_latent_dimensions_with_frames</span><span class="p">(</span>
+            <span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="p">,</span>
+            <span class="n">num_frames</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_spatial</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">scale_factor_temporal</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">patch_height</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">patch_width</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="c1"># Allocate output buffer for QAIC inference</span>
+        <span class="n">output_buffer</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span>
+                <span class="n">cl</span><span class="p">,</span>  <span class="c1"># Compressed latent dimension</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_DIT_OUT_CHANNELS</span><span class="p">,</span>
+            <span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
+        <span class="p">}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="n">output_buffer</span><span class="p">)</span>
+        <span class="n">transformer_perf</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="c1"># Step 8: Denoising loop with dual-stage processing</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">progress_bar</span><span class="p">(</span><span class="n">total</span><span class="o">=</span><span class="n">num_inference_steps</span><span class="p">)</span> <span class="k">as</span> <span class="n">progress_bar</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">timesteps</span><span class="p">):</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_interrupt</span><span class="p">:</span>
+                    <span class="k">continue</span>
+
+                <span class="bp">self</span><span class="o">.</span><span class="n">_current_timestep</span> <span class="o">=</span> <span class="n">t</span>
+
+                <span class="c1"># Determine which model to use based on boundary timestep</span>
+                <span class="k">if</span> <span class="n">boundary_timestep</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">t</span> <span class="o">&gt;=</span> <span class="n">boundary_timestep</span><span class="p">:</span>
+                    <span class="c1"># High-noise stage</span>
+                    <span class="n">current_model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">transformer_high</span>
+                    <span class="n">current_guidance_scale</span> <span class="o">=</span> <span class="n">guidance_scale</span>
+                    <span class="n">model_type</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>  <span class="c1"># High-noise model indicator</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="c1"># Low-noise stage</span>
+                    <span class="n">current_model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">transformer_low</span>
+                    <span class="n">current_guidance_scale</span> <span class="o">=</span> <span class="n">guidance_scale_2</span>
+                    <span class="n">model_type</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>  <span class="c1"># Low-noise model indicator</span>
+
+                <span class="c1"># Prepare latent input with proper dtype</span>
+                <span class="n">latent_model_input</span> <span class="o">=</span> <span class="n">latents</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">transformer_dtype</span><span class="p">)</span>
+
+                <span class="c1"># Handle timestep expansion for temporal consistency</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">expand_timesteps</span><span class="p">:</span>
+                    <span class="n">latent_model_input</span> <span class="o">=</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">first_frame_mask</span><span class="p">)</span> <span class="o">*</span> <span class="n">condition</span> <span class="o">+</span> <span class="n">first_frame_mask</span> <span class="o">*</span> <span class="n">latents</span>
+                    <span class="n">latent_model_input</span> <span class="o">=</span> <span class="n">latent_model_input</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">transformer_dtype</span><span class="p">)</span>
+
+                    <span class="c1"># seq_len: num_latent_frames * (latent_height // patch_size) * (latent_width // patch_size)</span>
+                    <span class="n">temp_ts</span> <span class="o">=</span> <span class="p">(</span><span class="n">first_frame_mask</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">][:,</span> <span class="p">::</span><span class="mi">2</span><span class="p">,</span> <span class="p">::</span><span class="mi">2</span><span class="p">]</span> <span class="o">*</span> <span class="n">t</span><span class="p">)</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span>
+                    <span class="c1"># batch_size, seq_len</span>
+                    <span class="n">timestep</span> <span class="o">=</span> <span class="n">temp_ts</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">expand</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">latent_model_input</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="n">latents</span><span class="p">,</span> <span class="n">condition</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">transformer_dtype</span><span class="p">)</span>
+                    <span class="n">timestep</span> <span class="o">=</span> <span class="n">t</span><span class="o">.</span><span class="n">expand</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+
+                <span class="c1"># Extract dimensions for patch processing</span>
+                <span class="n">batch_size</span><span class="p">,</span> <span class="n">num_channels</span><span class="p">,</span> <span class="n">latent_frames</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span> <span class="o">=</span> <span class="n">latent_model_input</span><span class="o">.</span><span class="n">shape</span>
+                <span class="n">p_t</span><span class="p">,</span> <span class="n">p_h</span><span class="p">,</span> <span class="n">p_w</span> <span class="o">=</span> <span class="n">current_model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">patch_size</span>
+                <span class="n">post_patch_num_frames</span> <span class="o">=</span> <span class="n">latent_frames</span> <span class="o">//</span> <span class="n">p_t</span>
+                <span class="n">post_patch_height</span> <span class="o">=</span> <span class="n">latent_height</span> <span class="o">//</span> <span class="n">p_h</span>
+                <span class="n">post_patch_width</span> <span class="o">=</span> <span class="n">latent_width</span> <span class="o">//</span> <span class="n">p_w</span>
+
+                <span class="c1"># Generate rotary position embeddings</span>
+                <span class="n">rotary_emb</span> <span class="o">=</span> <span class="n">current_model</span><span class="o">.</span><span class="n">rope</span><span class="p">(</span><span class="n">latent_model_input</span><span class="p">)</span>
+                <span class="n">rotary_emb</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">(</span><span class="n">rotary_emb</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+                <span class="n">ts_seq_len</span> <span class="o">=</span> <span class="kc">None</span>
+                <span class="n">timestep</span> <span class="o">=</span> <span class="n">timestep</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span>
+
+                <span class="c1"># Generate conditioning embeddings (time + text)</span>
+                <span class="n">temb</span><span class="p">,</span> <span class="n">timestep_proj</span><span class="p">,</span> <span class="n">encoder_hidden_states</span><span class="p">,</span> <span class="n">encoder_hidden_states_image</span> <span class="o">=</span> <span class="p">(</span>
+                    <span class="n">current_model</span><span class="o">.</span><span class="n">condition_embedder</span><span class="p">(</span>
+                        <span class="n">timestep</span><span class="p">,</span> <span class="n">prompt_embeds</span><span class="p">,</span> <span class="n">encoder_hidden_states_image</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">timestep_seq_len</span><span class="o">=</span><span class="n">ts_seq_len</span>
+                    <span class="p">)</span>
+                <span class="p">)</span>
+
+                <span class="c1"># Generate negative conditioning for classifier-free guidance</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">do_classifier_free_guidance</span><span class="p">:</span>
+                    <span class="n">temb</span><span class="p">,</span> <span class="n">timestep_proj</span><span class="p">,</span> <span class="n">encoder_hidden_states_neg</span><span class="p">,</span> <span class="n">encoder_hidden_states_image</span> <span class="o">=</span> <span class="p">(</span>
+                        <span class="n">current_model</span><span class="o">.</span><span class="n">condition_embedder</span><span class="p">(</span>
+                            <span class="n">timestep</span><span class="p">,</span>
+                            <span class="n">negative_prompt_embeds</span><span class="p">,</span>
+                            <span class="n">encoder_hidden_states_image</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+                            <span class="n">timestep_seq_len</span><span class="o">=</span><span class="n">ts_seq_len</span><span class="p">,</span>
+                        <span class="p">)</span>
+                    <span class="p">)</span>
+
+                <span class="c1"># Reshape timestep projection for transformer input</span>
+                <span class="n">timestep_proj</span> <span class="o">=</span> <span class="n">timestep_proj</span><span class="o">.</span><span class="n">unflatten</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+
+                <span class="c1"># Prepare inputs for QAIC inference</span>
+                <span class="n">inputs_aic</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="n">latent_model_input</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="n">encoder_hidden_states</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;rotary_emb&quot;</span><span class="p">:</span> <span class="n">rotary_emb</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;temb&quot;</span><span class="p">:</span> <span class="n">temb</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;timestep_proj&quot;</span><span class="p">:</span> <span class="n">timestep_proj</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;tsp&quot;</span><span class="p">:</span> <span class="n">model_type</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>  <span class="c1"># Transformer stage pointer</span>
+                <span class="p">}</span>
+
+                <span class="c1"># Prepare negative inputs for classifier-free guidance</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">do_classifier_free_guidance</span><span class="p">:</span>
+                    <span class="n">inputs_aic2</span> <span class="o">=</span> <span class="p">{</span>
+                        <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="n">latent_model_input</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                        <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="n">encoder_hidden_states_neg</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                        <span class="s2">&quot;rotary_emb&quot;</span><span class="p">:</span> <span class="n">rotary_emb</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                        <span class="s2">&quot;temb&quot;</span><span class="p">:</span> <span class="n">temb</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                        <span class="s2">&quot;timestep_proj&quot;</span><span class="p">:</span> <span class="n">timestep_proj</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="p">}</span>
+
+                <span class="c1"># Run conditional prediction with caching context</span>
+                <span class="k">with</span> <span class="n">current_model</span><span class="o">.</span><span class="n">cache_context</span><span class="p">(</span><span class="s2">&quot;cond&quot;</span><span class="p">):</span>
+                    <span class="c1"># QAIC inference for conditional prediction</span>
+                    <span class="n">start_transformer_step_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+                    <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">inputs_aic</span><span class="p">)</span>
+                    <span class="n">end_transformer_step_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+                    <span class="n">transformer_perf</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">end_transformer_step_time</span> <span class="o">-</span> <span class="n">start_transformer_step_time</span><span class="p">)</span>
+                    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;DIT </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2"> time </span><span class="si">{</span><span class="n">end_transformer_step_time</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">start_transformer_step_time</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> seconds&quot;</span><span class="p">)</span>
+
+                    <span class="c1"># Process transformer output</span>
+                    <span class="n">hidden_states</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;output&quot;</span><span class="p">])</span>
+
+                    <span class="c1"># Reshape output from patches back to video format</span>
+                    <span class="n">hidden_states</span> <span class="o">=</span> <span class="n">hidden_states</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span>
+                        <span class="n">batch_size</span><span class="p">,</span> <span class="n">post_patch_num_frames</span><span class="p">,</span> <span class="n">post_patch_height</span><span class="p">,</span> <span class="n">post_patch_width</span><span class="p">,</span> <span class="n">p_t</span><span class="p">,</span> <span class="n">p_h</span><span class="p">,</span> <span class="n">p_w</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span>
+                    <span class="p">)</span>
+
+                    <span class="c1"># Permute dimensions to reconstruct video tensor</span>
+                    <span class="n">hidden_states</span> <span class="o">=</span> <span class="n">hidden_states</span><span class="o">.</span><span class="n">permute</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">6</span><span class="p">)</span>
+                    <span class="n">noise_pred</span> <span class="o">=</span> <span class="n">hidden_states</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="mi">7</span><span class="p">)</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+
+                <span class="c1"># Run unconditional prediction for classifier-free guidance</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">do_classifier_free_guidance</span><span class="p">:</span>  <span class="c1"># Note: CFG will increase DIT num steps.</span>
+                    <span class="k">with</span> <span class="n">current_model</span><span class="o">.</span><span class="n">cache_context</span><span class="p">(</span><span class="s2">&quot;uncond&quot;</span><span class="p">):</span>
+                        <span class="c1"># QAIC inference for unconditional prediction</span>
+                        <span class="n">start_transformer_step_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+                        <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">inputs_aic2</span><span class="p">)</span>
+                        <span class="n">end_transformer_step_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+                        <span class="n">transformer_perf</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">end_transformer_step_time</span> <span class="o">-</span> <span class="n">start_transformer_step_time</span><span class="p">)</span>
+
+                        <span class="c1"># Process unconditional output</span>
+                        <span class="n">hidden_states</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;output&quot;</span><span class="p">])</span>
+
+                        <span class="c1"># Reshape unconditional output</span>
+                        <span class="n">hidden_states</span> <span class="o">=</span> <span class="n">hidden_states</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span>
+                            <span class="n">batch_size</span><span class="p">,</span> <span class="n">post_patch_num_frames</span><span class="p">,</span> <span class="n">post_patch_height</span><span class="p">,</span> <span class="n">post_patch_width</span><span class="p">,</span> <span class="n">p_t</span><span class="p">,</span> <span class="n">p_h</span><span class="p">,</span> <span class="n">p_w</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span>
+                        <span class="p">)</span>
+
+                        <span class="n">hidden_states</span> <span class="o">=</span> <span class="n">hidden_states</span><span class="o">.</span><span class="n">permute</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">6</span><span class="p">)</span>
+                        <span class="n">noise_uncond</span> <span class="o">=</span> <span class="n">hidden_states</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="mi">7</span><span class="p">)</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+
+                        <span class="c1"># Apply classifier-free guidance</span>
+                        <span class="n">noise_pred</span> <span class="o">=</span> <span class="n">noise_uncond</span> <span class="o">+</span> <span class="n">current_guidance_scale</span> <span class="o">*</span> <span class="p">(</span><span class="n">noise_pred</span> <span class="o">-</span> <span class="n">noise_uncond</span><span class="p">)</span>
+
+                <span class="c1"># Update latents using scheduler (x_t -&gt; x_t-1)</span>
+                <span class="n">latents</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">noise_pred</span><span class="p">,</span> <span class="n">t</span><span class="p">,</span> <span class="n">latents</span><span class="p">,</span> <span class="n">return_dict</span><span class="o">=</span><span class="kc">False</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+
+                <span class="c1"># Execute callback if provided # TODO: optimize to run DIT and vae in parallel</span>
+                <span class="k">if</span> <span class="n">callback_on_step_end</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">callback_kwargs</span> <span class="o">=</span> <span class="p">{}</span>
+                    <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">callback_on_step_end_tensor_inputs</span><span class="p">:</span>
+                        <span class="n">callback_kwargs</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">=</span> <span class="nb">locals</span><span class="p">()[</span><span class="n">k</span><span class="p">]</span>
+                    <span class="n">callback_outputs</span> <span class="o">=</span> <span class="n">callback_on_step_end</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">callback_kwargs</span><span class="p">,</span> <span class="n">num_frames</span><span class="o">=</span><span class="n">num_frames</span><span class="p">)</span>
+                    <span class="n">latents</span> <span class="o">=</span> <span class="n">callback_outputs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;latents&quot;</span><span class="p">,</span> <span class="n">latents</span><span class="p">)</span>
+                    <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">callback_outputs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;prompt_embeds&quot;</span><span class="p">,</span> <span class="n">prompt_embeds</span><span class="p">)</span>
+                    <span class="n">negative_prompt_embeds</span> <span class="o">=</span> <span class="n">callback_outputs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;negative_prompt_embeds&quot;</span><span class="p">,</span> <span class="n">negative_prompt_embeds</span><span class="p">)</span>
+
+                <span class="c1"># Update progress bar</span>
+                <span class="k">if</span> <span class="n">i</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">timesteps</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span> <span class="ow">or</span> <span class="p">((</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">num_warmup_steps</span> <span class="ow">and</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">order</span> <span class="o">==</span> <span class="mi">0</span><span class="p">):</span>
+                    <span class="n">progress_bar</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_current_timestep</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">expand_timesteps</span><span class="p">:</span>
+            <span class="n">latents</span> <span class="o">=</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">first_frame_mask</span><span class="p">)</span> <span class="o">*</span> <span class="n">condition</span> <span class="o">+</span> <span class="n">first_frame_mask</span> <span class="o">*</span> <span class="n">latents</span>
+
+        <span class="c1"># Prepare latents for VAE decoding</span>
+        <span class="n">latents</span> <span class="o">=</span> <span class="n">latents</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+
+        <span class="c1"># Apply VAE normalization (denormalization)</span>
+        <span class="n">latents_mean</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">latents_mean</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">z_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">device</span><span class="p">,</span> <span class="n">latents</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="p">)</span>
+        <span class="n">latents_std</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">latents_std</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span>
+            <span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">z_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">device</span><span class="p">,</span> <span class="n">latents</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="n">latents</span> <span class="o">=</span> <span class="n">latents</span> <span class="o">/</span> <span class="n">latents_std</span> <span class="o">+</span> <span class="n">latents_mean</span>
+
+        <span class="c1"># Initialize VAE decoder inference session</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span>
+                <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">device_ids</span>
+            <span class="p">)</span>
+
+        <span class="c1"># # Allocate output buffer for VAE decoder</span>
+        <span class="n">output_buffer</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;sample&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="n">num_frames</span><span class="p">,</span> <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">)}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="n">output_buffer</span><span class="p">)</span>
+        <span class="n">inputs</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;latent_sample&quot;</span><span class="p">:</span> <span class="n">latents</span><span class="o">.</span><span class="n">numpy</span><span class="p">()}</span>
+
+        <span class="n">start_decode_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">video</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decoder</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>
+        <span class="n">end_decode_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">vae_decoder_perf</span> <span class="o">=</span> <span class="n">end_decode_time</span> <span class="o">-</span> <span class="n">start_decode_time</span>
+
+        <span class="c1"># Post-process video for output</span>
+        <span class="n">video_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">video</span><span class="p">[</span><span class="s2">&quot;sample&quot;</span><span class="p">])</span>
+        <span class="n">video</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">video_processor</span><span class="o">.</span><span class="n">postprocess_video</span><span class="p">(</span><span class="n">video_tensor</span><span class="p">)</span>
+
+        <span class="c1"># Step 10: Collect performance metrics</span>
+        <span class="n">perf_data</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;vae_encoder&quot;</span><span class="p">:</span> <span class="n">vae_encoder_perf</span><span class="p">,</span>
+            <span class="s2">&quot;transformer&quot;</span><span class="p">:</span> <span class="n">transformer_perf</span><span class="p">,</span>
+            <span class="s2">&quot;vae_decoder&quot;</span><span class="p">:</span> <span class="n">vae_decoder_perf</span><span class="p">,</span>
+        <span class="p">}</span>
+
+        <span class="c1"># Build performance metrics for output</span>
+        <span class="n">perf_metrics</span> <span class="o">=</span> <span class="p">[</span><span class="n">ModulePerf</span><span class="p">(</span><span class="n">module_name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="n">perf</span><span class="o">=</span><span class="n">perf_data</span><span class="p">[</span><span class="n">name</span><span class="p">])</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">perf_data</span><span class="o">.</span><span class="n">keys</span><span class="p">()]</span>
+
+        <span class="k">return</span> <span class="n">QEffPipelineOutput</span><span class="p">(</span>
+            <span class="n">pipeline_module</span><span class="o">=</span><span class="n">perf_metrics</span><span class="p">,</span>
+            <span class="n">images</span><span class="o">=</span><span class="n">video</span><span class="p">,</span>
+        <span class="p">)</span></div>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.2.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../../../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../../../index.html">release/v1.23.2.0</a></dd>
+        <dd><a href="../../../../../../v1.23.0/index.html">release/v1.23.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

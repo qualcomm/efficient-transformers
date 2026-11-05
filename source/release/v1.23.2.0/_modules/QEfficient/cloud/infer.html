@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.cloud.infer &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../v1.23.0/source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.cloud.infer</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.cloud.infer</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># -----------------------------------------------------------------------------</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">argparse</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">PIL</span><span class="w"> </span><span class="kn">import</span> <span class="n">Image</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">PreTrainedModel</span><span class="p">,</span> <span class="n">TextStreamer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers.models.auto.modeling_auto</span><span class="w"> </span><span class="kn">import</span> <span class="n">MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEFFCommonLoader</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.cloud</span><span class="w"> </span><span class="kn">import</span> <span class="n">warn_deprecated_cloud_api</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">check_and_assign_cache_dir</span><span class="p">,</span> <span class="n">load_hf_processor</span><span class="p">,</span> <span class="n">load_hf_tokenizer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.logging_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
+
+
+<span class="c1"># TODO: Remove after adding support for VLM&#39;s compile and execute</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">execute_vlm_model</span><span class="p">(</span>
+    <span class="n">qeff_model</span><span class="p">:</span> <span class="n">PreTrainedModel</span><span class="p">,</span>
+    <span class="n">model_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">image_url</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">image_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># type: ignore</span>
+    <span class="n">device_group</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">local_model_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">cache_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">hf_token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">generation_len</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Generate output from a compiled Vision-Language Model (VLM) on Cloud AI 100 hardware.</span>
+
+<span class="sd">    This method takes a QEfficient VLM model, processes image and text inputs, and generates</span>
+<span class="sd">    text outputs using the compiled QPC.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    qeff_model : PreTrainedModel</span>
+<span class="sd">        QEfficient model object, expected to be an instance capable of VLM operations.</span>
+<span class="sd">    model_name : str</span>
+<span class="sd">        Hugging Face Model Card name (e.g., ``llava-hf/llava-1.5-7b-hf``) used for loading processor.</span>
+<span class="sd">    image_url : str</span>
+<span class="sd">        URL of the image to be used for inference.</span>
+<span class="sd">    image_path : str</span>
+<span class="sd">        Local file path to the image to be used for inference.</span>
+
+<span class="sd">    Other Parameters</span>
+<span class="sd">    ----------------</span>
+<span class="sd">    prompt : str, optional</span>
+<span class="sd">        Sample prompt for the model text generation. Default is None.</span>
+<span class="sd">    device_group : List[int], optional</span>
+<span class="sd">        List of device IDs to be used for inference. If ``len(device_group) &gt; 1``,</span>
+<span class="sd">        multiple card setup is enabled. Default is None.</span>
+<span class="sd">    local_model_dir : str, optional</span>
+<span class="sd">        Path to custom model weights and config files, used if not loading from Hugging Face Hub. Default is None.</span>
+<span class="sd">    cache_dir : str, optional</span>
+<span class="sd">        Cache directory where downloaded HuggingFace files are stored. Default is None.</span>
+<span class="sd">    hf_token : str, optional</span>
+<span class="sd">        HuggingFace login token to access private repositories. Default is None.</span>
+<span class="sd">    generation_len : int, optional</span>
+<span class="sd">        Maximum number of tokens to be generated. Default is None.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    dict</span>
+<span class="sd">        Output from the ``AI_100`` runtime, typically containing generated text and performance metrics.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        If neither ``image_url`` nor ``image_path`` is provided.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warn_deprecated_cloud_api</span><span class="p">(</span><span class="s2">&quot;infer&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">image_url</span> <span class="ow">or</span> <span class="n">image_path</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s1">&#39;Neither Image URL nor Image Path is found, either provide &quot;image_url&quot; or &quot;image_path&quot;&#39;</span><span class="p">)</span>
+    <span class="n">raw_image</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">image_url</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span><span class="o">.</span><span class="n">raw</span><span class="p">)</span> <span class="k">if</span> <span class="n">image_url</span> <span class="k">else</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">image_path</span><span class="p">)</span>
+
+    <span class="n">processor</span> <span class="o">=</span> <span class="n">load_hf_processor</span><span class="p">(</span>
+        <span class="n">pretrained_model_name_or_path</span><span class="o">=</span><span class="p">(</span><span class="n">local_model_dir</span> <span class="k">if</span> <span class="n">local_model_dir</span> <span class="k">else</span> <span class="n">model_name</span><span class="p">),</span>
+        <span class="n">cache_dir</span><span class="o">=</span><span class="n">cache_dir</span><span class="p">,</span>
+        <span class="n">hf_token</span><span class="o">=</span><span class="n">hf_token</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="c1"># Added for QEff version 1.20 supported VLM models (mllama and llava)</span>
+    <span class="n">conversation</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="p">[</span>
+                <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;image&quot;</span><span class="p">},</span>
+                <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="n">prompt</span><span class="p">[</span><span class="mi">0</span><span class="p">]},</span>
+            <span class="p">],</span>
+        <span class="p">}</span>
+    <span class="p">]</span>
+
+    <span class="c1"># Converts a list of dictionaries with `&quot;role&quot;` and `&quot;content&quot;` keys to a list of token ids.</span>
+    <span class="n">input_text</span> <span class="o">=</span> <span class="n">processor</span><span class="o">.</span><span class="n">apply_chat_template</span><span class="p">(</span><span class="n">conversation</span><span class="p">,</span> <span class="n">add_generation_prompt</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">tokenize</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+    <span class="n">split_inputs</span> <span class="o">=</span> <span class="n">processor</span><span class="p">(</span>
+        <span class="n">text</span><span class="o">=</span><span class="n">input_text</span><span class="p">,</span>
+        <span class="n">images</span><span class="o">=</span><span class="n">raw_image</span><span class="p">,</span>
+        <span class="n">return_tensors</span><span class="o">=</span><span class="s2">&quot;pt&quot;</span><span class="p">,</span>
+        <span class="n">add_special_tokens</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">streamer</span> <span class="o">=</span> <span class="n">TextStreamer</span><span class="p">(</span><span class="n">processor</span><span class="o">.</span><span class="n">tokenizer</span><span class="p">)</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">qeff_model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span>
+        <span class="n">inputs</span><span class="o">=</span><span class="n">split_inputs</span><span class="p">,</span>
+        <span class="n">streamer</span><span class="o">=</span><span class="n">streamer</span><span class="p">,</span>
+        <span class="n">device_ids</span><span class="o">=</span><span class="n">device_group</span><span class="p">,</span>
+        <span class="n">generation_len</span><span class="o">=</span><span class="n">generation_len</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">output</span>
+
+
+<div class="viewcode-block" id="main"><a class="viewcode-back" href="../../../source/cli_api.html#QEfficient.cloud.infer.main">[docs]</a><span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span>
+    <span class="n">model_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">num_cores</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">device_group</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">prompt</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># type: ignore</span>
+    <span class="n">prompts_txt_file_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">aic_enable_depth_first</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">mos</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="n">batch_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="n">full_batch_size</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">prompt_len</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span><span class="p">,</span>
+    <span class="n">ctx_len</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">128</span><span class="p">,</span>
+    <span class="n">generation_len</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">mxfp6</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">mxint8</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">local_model_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">cache_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">hf_token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">allow_mxint8_mdp_io</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">enable_qnn</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">qnn_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">trust_remote_code</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">ccl_enabled</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">dynamo</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Main entry point for the QEfficient inference script.</span>
+
+<span class="sd">    This function handles the end-to-end process of downloading, optimizing,</span>
+<span class="sd">    compiling, and executing a HuggingFace model on Cloud AI 100 hardware.</span>
+<span class="sd">    The process follows these steps:</span>
+<span class="sd">    </span>
+<span class="sd">    1. Checks for an existing compiled QPC package. If found, it jumps directly to execution.</span>
+<span class="sd">    2. Checks for an existing exported ONNX file. If true, it proceeds to compilation then execution.</span>
+<span class="sd">    3. Checks if the HuggingFace model exists in the cache. If true, it performs model transformation, ONNX export, compilation, and then execution.</span>
+<span class="sd">    4. If none of the above, it downloads the HuggingFace model, then performs transformation, ONNX export, compilation, and execution.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    model_name : str</span>
+<span class="sd">        Hugging Face Model Card name (e.g., ``gpt2``) or path to a local model.</span>
+<span class="sd">    num_cores : int</span>
+<span class="sd">        Number of cores to compile the model on.</span>
+
+<span class="sd">    Other Parameters</span>
+<span class="sd">    ----------------</span>
+<span class="sd">    device_group : List[int], optional</span>
+<span class="sd">        List of device IDs to be used for compilation and inference. If ``len(device_group) &gt; 1``,</span>
+<span class="sd">        a multiple card setup is enabled. Default is None.</span>
+<span class="sd">    prompt : str, optional</span>
+<span class="sd">        Sample prompt(s) for the model text generation. For batch size &gt; 1,</span>
+<span class="sd">        pass multiple prompts separated by a pipe (``|``) symbol. Default is None.</span>
+<span class="sd">    prompts_txt_file_path : str, optional</span>
+<span class="sd">        Path to a text file containing multiple input prompts, one per line. Default is None.</span>
+<span class="sd">    aic_enable_depth_first : bool, optional</span>
+<span class="sd">        Enables Depth-First Search (DFS) with default memory size during compilation. Default is False.</span>
+<span class="sd">    mos : int, optional</span>
+<span class="sd">        Effort level to reduce on-chip memory. Default is 1.</span>
+<span class="sd">    batch_size : int, optional</span>
+<span class="sd">        Batch size to compile the model for. Default is 1.</span>
+<span class="sd">    full_batch_size : int, optional</span>
+<span class="sd">        Sets the full batch size to enable continuous batching mode. Default is None.</span>
+<span class="sd">    prompt_len : int, optional</span>
+<span class="sd">        Prompt length for the model to compile. Default is 32.</span>
+<span class="sd">    ctx_len : int, optional</span>
+<span class="sd">        Maximum context length to compile the model for. Default is 128.</span>
+<span class="sd">    generation_len : int, optional</span>
+<span class="sd">        Maximum number of tokens to be generated during inference. Default is None.</span>
+<span class="sd">    mxfp6 : bool, optional</span>
+<span class="sd">        Enables compilation for MXFP6 precision for constant MatMul weights. Default is False.</span>
+<span class="sd">        A warning is issued as ``--mxfp6`` is deprecated; use ``--mxfp6-matmul`` instead.</span>
+<span class="sd">    mxint8 : bool, optional</span>
+<span class="sd">        Compresses Present/Past KV to ``MXINT8`` using ``CustomIO`` config. Default is False.</span>
+<span class="sd">        A warning is issued as ``--mxint8`` is deprecated; use ``--mxint8-kv-cache`` instead.</span>
+<span class="sd">    local_model_dir : str, optional</span>
+<span class="sd">        Path to custom model weights and config files. Default is None.</span>
+<span class="sd">    cache_dir : str, optional</span>
+<span class="sd">        Cache directory where downloaded HuggingFace files are stored. Default is None.</span>
+<span class="sd">    hf_token : str, optional</span>
+<span class="sd">        HuggingFace login token to access private repositories. Default is None.</span>
+<span class="sd">    allow_mxint8_mdp_io : bool, optional</span>
+<span class="sd">        Allows MXINT8 compression of MDP IO traffic during compilation. Default is False.</span>
+<span class="sd">    enable_qnn : bool or str, optional</span>
+<span class="sd">        Enables QNN compilation. Can be passed as a flag (True) or with a configuration file path (str).</span>
+<span class="sd">        If a string path is provided, it&#39;s treated as ``qnn_config``. Default is False.</span>
+<span class="sd">    qnn_config : str, optional</span>
+<span class="sd">        Path of the QNN Config parameters file. Default is None.</span>
+<span class="sd">    trust_remote_code : bool, optional</span>
+<span class="sd">        If True, trusts remote code when loading models from HuggingFace. Default is False.</span>
+<span class="sd">    use_onnx_subfunctions : bool, optional</span>
+<span class="sd">        Enables ONNX subfunctions during export and compile. Default is False.</span>
+<span class="sd">    dynamo : bool, optional</span>
+<span class="sd">        Use the dynamo-based ONNX exporter instead of the legacy TorchScript exporter. Default is False.</span>
+<span class="sd">    **kwargs :</span>
+<span class="sd">        Additional compiler options passed directly to `qaic-compile`. Any flag supported by</span>
+<span class="sd">        `qaic-compile` can be passed. Parameters are converted to flags as follows:</span>
+
+<span class="sd">        - ``-allocator_dealloc_delay=1`` -&gt; ``-allocator-dealloc-delay=1``</span>
+<span class="sd">        - ``-qpc_crc=True`` -&gt; ``-qpc-crc``</span>
+
+<span class="sd">    Example</span>
+<span class="sd">    -------</span>
+<span class="sd">    To run inference from the command line:</span>
+
+<span class="sd">    .. code-block:: bash</span>
+
+<span class="sd">        python -m QEfficient.cloud.infer --model-name gpt2 --num-cores 16 --prompt &quot;Hello world&quot;</span>
+
+<span class="sd">    For advanced compilation options:</span>
+
+<span class="sd">    .. code-block:: bash</span>
+
+<span class="sd">        python -m QEfficient.cloud.infer --model-name meta-llama/Llama-3.2-11B-Vision-Instruct \\</span>
+<span class="sd">            --num-cores 16 --prompt &quot;Describe this image.&quot; --image-url &quot;https://example.com/image.jpg&quot; \\</span>
+<span class="sd">            --ctx-len 512 --img-size 560 --mxfp6-matmul</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warn_deprecated_cloud_api</span><span class="p">(</span><span class="s2">&quot;infer&quot;</span><span class="p">)</span>
+    <span class="n">cache_dir</span> <span class="o">=</span> <span class="n">check_and_assign_cache_dir</span><span class="p">(</span><span class="n">local_model_dir</span><span class="p">,</span> <span class="n">cache_dir</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="s2">&quot;--mxfp6&quot;</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span> <span class="ow">and</span> <span class="n">mxfp6</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">&quot;mxfp6 is going to be deprecated in a future release, use -mxfp6_matmul instead.&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s2">&quot;--mxint8&quot;</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span> <span class="ow">and</span> <span class="n">mxint8</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">&quot;mxint8 is going to be deprecated in a future release, use -mxint8_kv_cache instead.&quot;</span><span class="p">)</span>
+
+    <span class="n">qaic_config</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;ccl_enabled&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">}</span> <span class="k">if</span> <span class="n">ccl_enabled</span> <span class="k">else</span> <span class="kc">None</span>
+
+    <span class="n">qeff_model</span> <span class="o">=</span> <span class="n">QEFFCommonLoader</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+        <span class="n">pretrained_model_name_or_path</span><span class="o">=</span><span class="n">model_name</span><span class="p">,</span>
+        <span class="n">cache_dir</span><span class="o">=</span><span class="n">cache_dir</span><span class="p">,</span>
+        <span class="n">hf_token</span><span class="o">=</span><span class="n">hf_token</span><span class="p">,</span>
+        <span class="n">full_batch_size</span><span class="o">=</span><span class="n">full_batch_size</span><span class="p">,</span>
+        <span class="n">local_model_dir</span><span class="o">=</span><span class="n">local_model_dir</span><span class="p">,</span>
+        <span class="n">trust_remote_code</span><span class="o">=</span><span class="n">trust_remote_code</span><span class="p">,</span>
+        <span class="n">qaic_config</span><span class="o">=</span><span class="n">qaic_config</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">image_path</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;image_path&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="n">image_url</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;image_url&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="n">iteration</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;iteration&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">automation</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;automation&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+
+    <span class="n">config</span> <span class="o">=</span> <span class="n">qeff_model</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span>
+    <span class="n">architecture</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">architectures</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">config</span><span class="o">.</span><span class="n">architectures</span> <span class="k">else</span> <span class="kc">None</span>
+
+    <span class="k">if</span> <span class="n">architecture</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES</span><span class="o">.</span><span class="n">values</span><span class="p">()</span> <span class="ow">and</span> <span class="p">(</span>
+        <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;img_size&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span> <span class="ow">or</span> <span class="n">image_path</span> <span class="ow">or</span> <span class="n">image_url</span>
+    <span class="p">):</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Skipping image arguments as they are not valid for </span><span class="si">{</span><span class="n">architecture</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="c1">#########</span>
+    <span class="c1"># Compile</span>
+    <span class="c1">#########</span>
+    <span class="n">_</span> <span class="o">=</span> <span class="n">qeff_model</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+        <span class="n">prefill_seq_len</span><span class="o">=</span><span class="n">prompt_len</span><span class="p">,</span>
+        <span class="n">ctx_len</span><span class="o">=</span><span class="n">ctx_len</span><span class="p">,</span>
+        <span class="n">num_cores</span><span class="o">=</span><span class="n">num_cores</span><span class="p">,</span>
+        <span class="n">mxfp6_matmul</span><span class="o">=</span><span class="n">mxfp6</span><span class="p">,</span>
+        <span class="n">aic_enable_depth_first</span><span class="o">=</span><span class="n">aic_enable_depth_first</span><span class="p">,</span>
+        <span class="n">batch_size</span><span class="o">=</span><span class="n">batch_size</span><span class="p">,</span>
+        <span class="n">mos</span><span class="o">=</span><span class="n">mos</span><span class="p">,</span>
+        <span class="n">mxint8_kv_cache</span><span class="o">=</span><span class="n">mxint8</span><span class="p">,</span>
+        <span class="n">num_devices</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span> <span class="k">if</span> <span class="n">device_group</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">len</span><span class="p">(</span><span class="n">device_group</span><span class="p">)),</span>
+        <span class="n">full_batch_size</span><span class="o">=</span><span class="n">full_batch_size</span><span class="p">,</span>
+        <span class="n">allow_mxint8_mdp_io</span><span class="o">=</span><span class="n">allow_mxint8_mdp_io</span><span class="p">,</span>
+        <span class="n">enable_qnn</span><span class="o">=</span><span class="n">enable_qnn</span><span class="p">,</span>
+        <span class="n">qnn_config</span><span class="o">=</span><span class="n">qnn_config</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">,</span>
+        <span class="n">dynamo</span><span class="o">=</span><span class="n">dynamo</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="c1">#  If the io-encrypt flag is passed we will exit after QPC generation.</span>
+    <span class="k">if</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;io_encrypt&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="n">exit</span><span class="p">()</span>
+
+    <span class="c1">#########</span>
+    <span class="c1"># Execute</span>
+    <span class="c1">#########</span>
+    <span class="k">if</span> <span class="n">architecture</span> <span class="ow">in</span> <span class="n">MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
+        <span class="n">exec_info</span> <span class="o">=</span> <span class="n">execute_vlm_model</span><span class="p">(</span>
+            <span class="n">qeff_model</span><span class="o">=</span><span class="n">qeff_model</span><span class="p">,</span>
+            <span class="n">model_name</span><span class="o">=</span><span class="n">model_name</span><span class="p">,</span>
+            <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+            <span class="n">image_url</span><span class="o">=</span><span class="n">image_url</span><span class="p">,</span>
+            <span class="n">image_path</span><span class="o">=</span><span class="n">image_path</span><span class="p">,</span>
+            <span class="n">device_group</span><span class="o">=</span><span class="n">device_group</span><span class="p">,</span>
+            <span class="n">local_model_dir</span><span class="o">=</span><span class="n">local_model_dir</span><span class="p">,</span>
+            <span class="n">cache_dir</span><span class="o">=</span><span class="n">cache_dir</span><span class="p">,</span>
+            <span class="n">hf_token</span><span class="o">=</span><span class="n">hf_token</span><span class="p">,</span>
+            <span class="n">generation_len</span><span class="o">=</span><span class="n">generation_len</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="n">exec_info</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">tokenizer</span> <span class="o">=</span> <span class="n">load_hf_tokenizer</span><span class="p">(</span>
+            <span class="n">pretrained_model_name_or_path</span><span class="o">=</span><span class="p">(</span><span class="n">local_model_dir</span> <span class="k">if</span> <span class="n">local_model_dir</span> <span class="k">else</span> <span class="n">model_name</span><span class="p">),</span>
+            <span class="n">cache_dir</span><span class="o">=</span><span class="n">cache_dir</span><span class="p">,</span>
+            <span class="n">hf_token</span><span class="o">=</span><span class="n">hf_token</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="n">_</span> <span class="o">=</span> <span class="n">qeff_model</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span>
+            <span class="n">tokenizer</span><span class="p">,</span>
+            <span class="n">prompts</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+            <span class="n">device_id</span><span class="o">=</span><span class="n">device_group</span><span class="p">,</span>
+            <span class="n">prompts_txt_file_path</span><span class="o">=</span><span class="n">prompts_txt_file_path</span><span class="p">,</span>
+            <span class="n">generation_len</span><span class="o">=</span><span class="n">generation_len</span><span class="p">,</span>
+            <span class="n">iteration</span><span class="o">=</span><span class="n">iteration</span><span class="p">,</span>
+            <span class="n">automation</span><span class="o">=</span><span class="n">automation</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">parser</span> <span class="o">=</span> <span class="n">argparse</span><span class="o">.</span><span class="n">ArgumentParser</span><span class="p">(</span>
+        <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Inference command, the model will be downloaded from HF, optimized, compiled, executed on Cloud AI 100&quot;</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">&quot;--model-name&quot;</span><span class="p">,</span> <span class="s2">&quot;--model_name&quot;</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;HF Model card name/id&quot;</span><span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--local-model-dir&quot;</span><span class="p">,</span> <span class="s2">&quot;--local_model_dir&quot;</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Path to custom model weights and config files&quot;</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--cache-dir&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--cache_dir&quot;</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Cache dir to store HF Downloads&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--hf-token&quot;</span><span class="p">,</span> <span class="s2">&quot;--hf_token&quot;</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">str</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;HF token id for private HF models&quot;</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">&quot;--batch-size&quot;</span><span class="p">,</span> <span class="s2">&quot;--batch_size&quot;</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Batch size for text generation&quot;</span><span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--prompt-len&quot;</span><span class="p">,</span> <span class="s2">&quot;--prompt_len&quot;</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Sequence length for text generation.&quot;</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">&quot;--ctx-len&quot;</span><span class="p">,</span> <span class="s2">&quot;--ctx_len&quot;</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Context length for text generation.&quot;</span><span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--comp-ctx-lengths-prefill&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="k">lambda</span> <span class="n">comp_ctx_lengths_prefill</span><span class="p">:</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">comp_ctx_lengths_prefill</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;,&quot;</span><span class="p">)],</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Define ccl list in csv format (e.g.,--comp-ctx-lengths 512,1024,2048).&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--comp-ctx-lengths-decode&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="k">lambda</span> <span class="n">comp_ctx_lengths_decode</span><span class="p">:</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">comp_ctx_lengths_decode</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;,&quot;</span><span class="p">)],</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Define ccl list in csv format (e.g.,--comp-ctx-lengths 512,1024,2048).&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--ccl_enabled&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--ccl-enabled&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;If passed, ccl feature will be activated&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--mxfp6&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--mxfp6_matmul&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--mxfp6-matmul&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Compress constant MatMul weights to MXFP6 E2M3, default is no compression&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--trust_remote_code&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Enable trusting remote code when loading models. Default is False; set to True by passing this flag.&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--mxint8&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--mxint8_kv_cache&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--mxint8-kv-cache&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Compress Present/Past KV to MXINT8 using CustomIO config, default is False&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--use-onnx-subfunctions&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--use_onnx_subfunctions&quot;</span><span class="p">,</span>
+        <span class="n">dest</span><span class="o">=</span><span class="s2">&quot;use_onnx_subfunctions&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Enable ONNX subfunctions during export/compile.&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--dynamo&quot;</span><span class="p">,</span>
+        <span class="n">dest</span><span class="o">=</span><span class="s2">&quot;dynamo&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Use the dynamo-based ONNX exporter instead of the legacy TorchScript exporter.&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--num_cores&quot;</span><span class="p">,</span> <span class="s2">&quot;--num-cores&quot;</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Number of cores to compile on Cloud AI 100&quot;</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--device_group&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--device-group&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="k">lambda</span> <span class="n">device_ids</span><span class="p">:</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">device_ids</span><span class="o">.</span><span class="n">strip</span><span class="p">(</span><span class="s2">&quot;[]&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;,&quot;</span><span class="p">)],</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Cloud AI 100 device ids (comma-separated) e.g. [0,1]  &quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--prompt&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="k">lambda</span> <span class="n">prompt</span><span class="p">:</span> <span class="n">prompt</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;|&quot;</span><span class="p">),</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Input prompt, if executing for batch size&gt;1, pass input prompts in single string but separate with pipe (|) symbol&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--prompts_txt_file_path&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--prompts-txt-file-path&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="nb">str</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;File path for taking input prompts from txt file, sample prompts.txt file present in examples/sample_prompts folder&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">&quot;--generation_len&quot;</span><span class="p">,</span> <span class="s2">&quot;--generation-len&quot;</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Number of tokens to generate&quot;</span><span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--aic_enable_depth_first&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--aic-enable-depth-first&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;If passed, this option will be enabled during compilation, disabled by default&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--mos&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Effort level to reduce the on-chip memory&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="c1"># FIXME: Add verbose feature</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--verbose&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;-v&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;pass to print info logs&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--full_batch_size&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--full-batch-size&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Set full batch size to enable continuous batching mode, default is None&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--allow-mxint8-mdp-io&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--allow_mxint8_mdp_io&quot;</span><span class="p">,</span>
+        <span class="n">action</span><span class="o">=</span><span class="s2">&quot;store_true&quot;</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;If passed, this option allows MXINT8 compression of MDP IO traffic&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--enable_qnn&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--enable-qnn&quot;</span><span class="p">,</span>
+        <span class="n">nargs</span><span class="o">=</span><span class="s2">&quot;?&quot;</span><span class="p">,</span>
+        <span class="n">const</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="nb">str</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Enables QNN. Optionally, a configuration file can be provided with [--enable_qnn CONFIG_FILE].</span><span class="se">\</span>
+<span class="s2">             If not provided, the default configuration will be used.</span><span class="se">\</span>
+<span class="s2">             Sample Config: QEfficient/compile/qnn_config.json&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="n">args</span><span class="p">,</span> <span class="n">compiler_options</span> <span class="o">=</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse_known_args</span><span class="p">()</span>
+
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">enable_qnn</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="n">args</span><span class="o">.</span><span class="n">qnn_config</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">enable_qnn</span>
+        <span class="n">args</span><span class="o">.</span><span class="n">enable_qnn</span> <span class="o">=</span> <span class="kc">True</span>
+
+    <span class="n">compiler_options_dict</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">compiler_options</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="n">compiler_options</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;--&quot;</span><span class="p">):</span>
+            <span class="n">key</span> <span class="o">=</span> <span class="n">compiler_options</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">lstrip</span><span class="p">(</span><span class="s2">&quot;-&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">&quot;-&quot;</span><span class="p">,</span> <span class="s2">&quot;_&quot;</span><span class="p">)</span>
+            <span class="n">value</span> <span class="o">=</span> <span class="p">(</span>
+                <span class="n">compiler_options</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span>
+                <span class="k">if</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">compiler_options</span><span class="p">)</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">compiler_options</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;-&quot;</span><span class="p">)</span>
+                <span class="k">else</span> <span class="kc">True</span>
+            <span class="p">)</span>
+            <span class="n">compiler_options_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+    <span class="k">if</span> <span class="n">args</span><span class="o">.</span><span class="n">verbose</span><span class="p">:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>
+    <span class="k">del</span> <span class="n">args</span><span class="o">.</span><span class="n">verbose</span>  <span class="c1"># type: ignore</span>
+    <span class="n">main</span><span class="p">(</span><span class="o">**</span><span class="n">args</span><span class="o">.</span><span class="vm">__dict__</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options_dict</span><span class="p">)</span>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.2.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../index.html">release/v1.23.2.0</a></dd>
+        <dd><a href="../../../../v1.23.0/index.html">release/v1.23.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Finetune Infra &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../_static/doctools.js?v=888ff710"></script>
+        <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Train anywhere, Infer on Qualcomm Cloud AI 100" href="blogs.html" />
+    <link rel="prev" title="CLI API Reference" href="cli_api.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../v1.23.0/source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Finetune Infra</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#installation">Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#finetuning">Finetuning</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#dataset-details">Dataset Details</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#single-soc-finetuning-on-qaic">Single SOC finetuning on QAIC</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#distributed-training-ddp-on-qaic">Distributed training(DDP) on QAIC</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#multi-node-across-multiple-servers-finetuning-on-qaic">Multi Node(across multiple servers) finetuning on QAIC</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#expose-qaic-accelerator-devices">Expose QAIC accelerator devices</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#start-docker-container">Start Docker container</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#visualization">Visualization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#some-features-functionalities-of-fine-tuning-stack">Some features/functionalities of fine-tuning stack:</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#steps-to-fine-tune-with-a-custom-dataset">🔧 Steps to Fine-Tune with a Custom Dataset</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Finetune Infra</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/source/finetune.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="finetune-infra">
+<h1>Finetune Infra<a class="headerlink" href="#finetune-infra" title="Permalink to this heading"></a></h1>
+<p>This repository provides the infrastructure for finetuning models using different hardware accelerators such as QAic.
+Same CLI can be used to run finetuning on GPU by changing the value of device flag (for finetuning on GPU, install torch specific to CUDA).</p>
+<section id="installation">
+<h2>Installation<a class="headerlink" href="#installation" title="Permalink to this heading"></a></h2>
+<p>Same as QEfficient along with QAIC PyTorch Eager mode.</p>
+<p>For QEfficient Library : https://github.com/quic/efficient-transformers</p>
+<p>For torch_qaic, assuming QEfficient is already installed,</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>/opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-0.1.0-cp312-cp312-linux_x86_64.whl
+</pre></div>
+</div>
+<p>If qeff-env inside docker is used then torch_qaic and accelerate packages are already installed.</p>
+</section>
+<hr class="docutils" />
+<section id="finetuning">
+<h2>Finetuning<a class="headerlink" href="#finetuning" title="Permalink to this heading"></a></h2>
+<p>Export the ENV variables to download and enable private datasets</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">HF_DATASETS_TRUST_REMOTE_CODE</span><span class="o">=</span>True
+</pre></div>
+</div>
+<p>Export the ENV variables to get the device and HW traces and debugging logs</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">QAIC_DEVICE_LOG_LEVEL</span><span class="o">=</span><span class="m">0</span><span class="w"> </span><span class="c1"># For Device level logs</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">QAIC_DEBUG</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="c1"># To understand the CPU fallback ops</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="dataset-details">
+<h2>Dataset Details<a class="headerlink" href="#dataset-details" title="Permalink to this heading"></a></h2>
+<p>To download the Alpaca dataset, visit this <a class="reference external" href="https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/refs/heads/main/alpaca_data.json">link</a>. Download the dataset and place it under the <strong>dataset</strong> directory. Make sure to update the training configuration accordingly.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>wget<span class="w"> </span>-c<span class="w"> </span>https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/refs/heads/main/alpaca_data.json<span class="w"> </span>-P<span class="w"> </span>dataset/
+</pre></div>
+</div>
+<p>To download the grammar dataset, visit this <a class="reference external" href="https://github.com/meta-llama/llama-cookbook/blob/main/src/llama_cookbook/datasets/grammar_dataset/grammar_dataset_process.ipynb">link</a>. Download the dataset and place it under the <strong>datasets_grammar</strong> directory. Make sure to update the training configuration accordingly.</p>
+</section>
+<hr class="docutils" />
+<section id="usage">
+<h2>Usage<a class="headerlink" href="#usage" title="Permalink to this heading"></a></h2>
+<section id="single-soc-finetuning-on-qaic">
+<h3>Single SOC finetuning on QAIC<a class="headerlink" href="#single-soc-finetuning-on-qaic" title="Permalink to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">QEfficient</span><span class="o">.</span><span class="n">cloud</span><span class="o">.</span><span class="n">finetune</span> <span class="o">--</span><span class="n">device</span> <span class="n">qaic</span><span class="p">:</span><span class="mi">0</span> <span class="o">--</span><span class="n">model_name</span> <span class="s2">&quot;meta-llama/Llama-3.2-1B&quot;</span>
+</pre></div>
+</div>
+<p>You can also configure various training parameters. Below is an example command line</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">QEfficient</span><span class="o">.</span><span class="n">cloud</span><span class="o">.</span><span class="n">finetune</span> <span class="o">--</span><span class="n">device</span> <span class="n">qaic</span><span class="p">:</span><span class="mi">0</span> <span class="o">--</span><span class="n">use</span><span class="o">-</span><span class="n">peft</span> <span class="o">--</span><span class="n">output_dir</span> <span class="o">./</span><span class="n">meta</span><span class="o">-</span><span class="n">sam</span> <span class="o">--</span><span class="n">num_epochs</span> <span class="mi">2</span> <span class="o">--</span><span class="n">context_length</span> <span class="mi">256</span> 
+</pre></div>
+</div>
+<p>For more details on the usage of the training parameters, use the below command:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="o">-</span><span class="n">m</span> <span class="n">QEfficient</span><span class="o">.</span><span class="n">cloud</span><span class="o">.</span><span class="n">finetune</span> <span class="o">-</span><span class="n">h</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="distributed-training-ddp-on-qaic">
+<h3>Distributed training(DDP) on QAIC<a class="headerlink" href="#distributed-training-ddp-on-qaic" title="Permalink to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">QAIC_VISIBLE_DEVICES</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">3</span> <span class="n">torchrun</span> <span class="o">--</span><span class="n">nproc</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">node</span> <span class="mi">4</span> <span class="o">-</span><span class="n">m</span> <span class="n">QEfficient</span><span class="o">.</span><span class="n">cloud</span><span class="o">.</span><span class="n">finetune</span> <span class="o">--</span><span class="n">device</span> <span class="n">qaic</span> <span class="o">--</span><span class="n">enable_ddp</span>  <span class="o">--</span><span class="n">num_epochs</span> <span class="mi">2</span>  <span class="o">--</span><span class="n">model_name</span> <span class="s2">&quot;meta-llama/Llama-3.2-1B&quot;</span>
+</pre></div>
+</div>
+<p>**nproc-per-node is number of workers(QAIC devices) running locally.</p>
+</section>
+<hr class="docutils" />
+<section id="multi-node-across-multiple-servers-finetuning-on-qaic">
+<h3>Multi Node(across multiple servers) finetuning on QAIC<a class="headerlink" href="#multi-node-across-multiple-servers-finetuning-on-qaic" title="Permalink to this heading"></a></h3>
+<p>This enables scaling training across multiple nodes.</p>
+<p>Use servers with compatible/same network interface(eg:ethernet).</p>
+<p>And supported only for linux servers now. Use servers connected to same switch for benefits in time while scaling.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">PYTHONUNBUFFERED</span><span class="p">:</span> <span class="n">make</span> <span class="n">python</span> <span class="n">prints</span> <span class="n">unbuffered</span><span class="p">,</span> <span class="n">especially</span> <span class="n">useful</span> <span class="n">to</span> <span class="n">identify</span> <span class="n">progress</span> <span class="p">(</span><span class="ow">or</span> <span class="n">lack</span> <span class="n">thereof</span><span class="p">)</span> <span class="k">for</span> <span class="n">distributed</span> <span class="n">tasks</span><span class="o">.</span><span class="n">This</span> <span class="ow">is</span> <span class="n">optional</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">compulsory</span>
+</pre></div>
+</div>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">GLOO_SOCKET_IFNAME</span><span class="p">:</span> <span class="n">specify</span> <span class="n">which</span> <span class="n">network</span> <span class="n">interface</span> <span class="n">gloo</span> <span class="p">(</span><span class="ow">and</span> <span class="n">indirectly</span> <span class="n">qccl</span><span class="p">)</span> <span class="n">uses</span> <span class="k">for</span> <span class="n">inter</span><span class="o">-</span><span class="n">host</span> <span class="n">communication</span> <span class="p">(</span><span class="n">eg</span><span class="p">:</span> <span class="n">eno1</span><span class="p">,</span> <span class="n">eth0</span> <span class="n">etc</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="o">--</span><span class="n">nnodes</span><span class="p">:</span> <span class="n">total</span> <span class="n">number</span> <span class="n">of</span> <span class="n">hosts</span> <span class="n">participating</span> <span class="ow">in</span> <span class="n">the</span> <span class="n">task</span>
+</pre></div>
+</div>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="o">--</span><span class="n">nproc</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">node</span><span class="p">:</span> <span class="n">number</span> <span class="n">of</span> <span class="n">processes</span> <span class="n">launched</span> <span class="n">on</span> <span class="n">this</span> <span class="n">host</span><span class="p">,</span> <span class="n">usually</span> <span class="n">coincides</span> <span class="k">with</span> <span class="n">number</span> <span class="n">of</span> <span class="n">accelerators</span> <span class="n">on</span> <span class="n">this</span> <span class="n">host</span>
+</pre></div>
+</div>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>--master_addr: ip of the host designated with node_rank=0 ($ ip addr)
+</pre></div>
+</div>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="o">--</span><span class="n">master_port</span><span class="p">:</span> <span class="n">port</span> <span class="n">on</span> <span class="n">which</span> <span class="n">host</span> <span class="n">will</span> <span class="n">be</span> <span class="n">listening</span> <span class="k">for</span> <span class="n">other</span> <span class="n">nodes</span> <span class="n">to</span> <span class="n">connect</span><span class="o">.</span> <span class="p">(</span><span class="n">eg</span><span class="p">:</span> <span class="mi">8888</span><span class="p">,</span> <span class="mi">8000</span> <span class="n">etc</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Use –node-rank 0 on the host server and –node-rank 1 on client server(for dual server setup). When running distributed training across multiple servers, the –node-rank parameter must be assigned a unique value for each server, starting from 0 and incrementing by 1 for each additional server. For a setup with N servers it range from 0 to N-1.</p>
+<p>Steps to run Multi Node Finetuning:</p>
+<ol class="arabic simple">
+<li><p>Launch Docker Containers on Each Node:</p></li>
+</ol>
+<p>Run the following docker setup commands on both machines (server and client).</p>
+<section id="expose-qaic-accelerator-devices">
+<h4>Expose QAIC accelerator devices<a class="headerlink" href="#expose-qaic-accelerator-devices" title="Permalink to this heading"></a></h4>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">devices</span><span class="o">=</span><span class="p">(</span><span class="o">/</span><span class="n">dev</span><span class="o">/</span><span class="n">accel</span><span class="o">/*</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="start-docker-container">
+<h4>Start Docker container<a class="headerlink" href="#start-docker-container" title="Permalink to this heading"></a></h4>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">sudo</span> <span class="n">docker</span> <span class="n">run</span> <span class="o">-</span><span class="n">it</span> \
+    <span class="o">--</span><span class="n">name</span> <span class="n">qaic_ddp1</span> \
+    <span class="o">--</span><span class="n">net</span><span class="o">=</span><span class="n">host</span> \
+    <span class="o">--</span><span class="n">ipc</span><span class="o">=</span><span class="n">host</span> \
+    <span class="o">--</span><span class="n">add</span><span class="o">-</span><span class="n">host</span> <span class="n">gb</span><span class="o">-</span><span class="mi">292</span><span class="o">-</span><span class="n">blr</span><span class="o">-</span><span class="mi">06</span><span class="p">:</span><span class="mf">10.131.26.213</span> \
+    <span class="o">--</span><span class="n">add</span><span class="o">-</span><span class="n">host</span> <span class="n">gb</span><span class="o">-</span><span class="mi">292</span><span class="o">-</span><span class="n">blr</span><span class="o">-</span><span class="mi">30</span><span class="p">:</span><span class="mf">10.131.30.207</span> \
+    <span class="o">-</span><span class="n">v</span> <span class="o">/</span><span class="n">home</span><span class="o">/</span><span class="n">ubuntu</span><span class="o">/</span><span class="p">:</span><span class="o">/</span><span class="n">home</span><span class="o">/</span><span class="n">ubuntu</span><span class="o">/</span> \
+    <span class="s2">&quot;${devices[@]/#/--device=}&quot;</span> \
+    <span class="n">docker</span><span class="o">-</span><span class="n">registry</span><span class="o">.</span><span class="n">qualcomm</span><span class="o">.</span><span class="n">com</span><span class="o">/</span><span class="n">qraniumtest</span><span class="o">/</span><span class="n">qranium</span><span class="p">:</span><span class="mf">1.22.0.17</span><span class="o">-</span><span class="n">ubuntu22</span><span class="o">-</span><span class="n">x86_64</span> \
+    <span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">bash</span>
+</pre></div>
+</div>
+<p>** Note :
+In distributed ML setups, all nodes must resolve each other’s hostnames. If DNS in the environment does not resolve internal hostnames, we must manually force name resolution using –add-host.</p>
+<ol class="arabic simple" start="2">
+<li><p>Set QAIC Device Visibility</p></li>
+</ol>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>export QAIC_VISIBLE_DEVICES=$(seq -s, 0 63)
+
+</pre></div>
+</div>
+<p>For example this sample command exposes devices 0–63 to the training process.</p>
+<ol class="arabic simple" start="3">
+<li><p>Activate the TORCH_QAIC Environment Inside the Container</p></li>
+</ol>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">source</span> <span class="o">/</span><span class="n">opt</span><span class="o">/</span><span class="n">torch</span><span class="o">-</span><span class="n">qaic</span><span class="o">-</span><span class="n">env</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">activate</span>
+</pre></div>
+</div>
+<ol class="arabic simple" start="4">
+<li><p>Verify that the Qefficient Library is installed:</p></li>
+</ol>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">pip</span> <span class="n">install</span> <span class="o">-</span><span class="n">e</span> <span class="o">.</span>
+</pre></div>
+</div>
+<ol class="arabic simple" start="5">
+<li><p>Use below command on host server</p></li>
+</ol>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">QAIC_VISIBLE_DEVICES</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span><span class="mi">1</span> <span class="n">GLOO_SOCKET_IFNAME</span><span class="o">=*</span> <span class="n">torchrun</span> <span class="o">--</span><span class="n">nnodes</span><span class="o">=</span><span class="mi">2</span> <span class="o">--</span><span class="n">nproc</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">node</span><span class="o">=</span><span class="mi">2</span> <span class="o">--</span><span class="n">node</span><span class="o">-</span><span class="n">rank</span><span class="o">=</span><span class="mi">0</span> <span class="o">--</span><span class="n">master_addr</span><span class="o">=*</span> <span class="o">--</span><span class="n">master_port</span><span class="o">=</span><span class="mi">8888</span> <span class="o">-</span><span class="n">m</span> <span class="n">QEfficient</span><span class="o">.</span><span class="n">cloud</span><span class="o">.</span><span class="n">finetune</span> <span class="o">--</span><span class="n">device</span> <span class="n">qaic</span> <span class="o">--</span><span class="n">seed</span> <span class="mi">0</span> <span class="o">--</span><span class="n">enable_ddp</span> <span class="o">--</span><span class="n">num_epochs</span> <span class="mi">2</span> <span class="o">--</span><span class="n">model_name</span> <span class="s2">&quot;meta-llama/Llama-3.2-1B&quot;</span> <span class="o">--</span><span class="n">dataset</span> <span class="n">gsm8k_dataset</span> <span class="o">--</span><span class="n">output_dir</span> <span class="n">training_results</span>
+</pre></div>
+</div>
+<ol class="arabic simple" start="6">
+<li><p>Use below command on client server</p></li>
+</ol>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">QAIC_VISIBLE_DEVICES</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span><span class="mi">1</span> <span class="n">GLOO_SOCKET_IFNAME</span><span class="o">=*</span> <span class="n">torchrun</span> <span class="o">--</span><span class="n">nnodes</span><span class="o">=</span><span class="mi">2</span> <span class="o">--</span><span class="n">nproc</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">node</span><span class="o">=</span><span class="mi">2</span> <span class="o">--</span><span class="n">node</span><span class="o">-</span><span class="n">rank</span><span class="o">=</span><span class="mi">1</span> <span class="o">--</span><span class="n">master_addr</span><span class="o">=*</span> <span class="o">--</span><span class="n">master_port</span><span class="o">=</span><span class="mi">8888</span> <span class="o">-</span><span class="n">m</span> <span class="n">QEfficient</span><span class="o">.</span><span class="n">cloud</span><span class="o">.</span><span class="n">finetune</span> <span class="o">--</span><span class="n">device</span> <span class="n">qaic</span> <span class="o">--</span><span class="n">seed</span> <span class="mi">0</span> <span class="o">--</span><span class="n">enable_ddp</span> <span class="o">--</span><span class="n">num_epochs</span> <span class="mi">2</span> <span class="o">--</span><span class="n">model_name</span> <span class="s2">&quot;meta-llama/Llama-3.2-1B&quot;</span> <span class="o">--</span><span class="n">dataset</span> <span class="n">gsm8k_dataset</span> <span class="o">--</span><span class="n">output_dir</span> <span class="n">training_results</span>
+</pre></div>
+</div>
+</section>
+</section>
+</section>
+<hr class="docutils" />
+<section id="visualization">
+<h2>Visualization<a class="headerlink" href="#visualization" title="Permalink to this heading"></a></h2>
+<p>Tensorboard logs are generated inside runs/ directory with date and time stamp.
+to visualise the data,</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">tensorboard</span> <span class="o">--</span><span class="n">logdir</span> <span class="n">runs</span><span class="o">/&lt;</span><span class="n">file</span><span class="o">&gt;</span> <span class="o">--</span><span class="n">bind_all</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="some-features-functionalities-of-fine-tuning-stack">
+<h2>Some features/functionalities of fine-tuning stack:<a class="headerlink" href="#some-features-functionalities-of-fine-tuning-stack" title="Permalink to this heading"></a></h2>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>1) Gradient accumulation: By default, gradient accumulation happens for 4 steps. To update this value, command line argument gradient_accumulation_steps has to be passed. (Example: &#39;--gradient_accumulation_steps 8&#39;)
+2) Gradient Checkpointing: By default, gradient checkpointing is disabled. To enable it, command line argument gradient_accumulation_steps has to be passed.
+</pre></div>
+</div>
+<section id="steps-to-fine-tune-with-a-custom-dataset">
+<h3>🔧 Steps to Fine-Tune with a Custom Dataset<a class="headerlink" href="#steps-to-fine-tune-with-a-custom-dataset" title="Permalink to this heading"></a></h3>
+<ol class="arabic">
+<li><p><strong>Launching Fine-Tuning with a Custom Dataset</strong></p>
+<ul>
+<li><p>Use the following command-line arguments to begin fine-tuning using a custom dataset:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>--dataset<span class="w"> </span>custom_dataset<span class="w"> </span>--dataset_config<span class="w"> </span>data_config.json
+</pre></div>
+</div>
+</li>
+<li><p>The <code class="docutils literal notranslate"><span class="pre">--dataset_config</span></code> argument is mandatory when <code class="docutils literal notranslate"><span class="pre">--dataset</span> <span class="pre">custom_dataset</span></code> is specified. The <code class="docutils literal notranslate"><span class="pre">data_config.json</span></code> file contains essential parameters used during dataset preprocessing.</p>
+<p><strong>Example <code class="docutils literal notranslate"><span class="pre">data_config.json</span></code> File</strong></p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="nt">&quot;train_split&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;train&quot;</span><span class="p">,</span>
+<span class="nt">&quot;test_split&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;test&quot;</span><span class="p">,</span>
+<span class="nt">&quot;test_split_ratio&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.15</span><span class="p">,</span>
+<span class="nt">&quot;preproc_file&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sample_dataset_preproc.py:preprocessing_fn&quot;</span><span class="p">,</span>
+<span class="nt">&quot;collate_file&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sample_dataset_preproc.py:data_collate_fn&quot;</span><span class="p">,</span>
+<span class="nt">&quot;disc_style&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sarcasm_more&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</li>
+<li><p><strong>Specifying the Preprocessing Function</strong></p>
+<ul>
+<li><p>In <code class="docutils literal notranslate"><span class="pre">data_config.json</span></code>, include a <code class="docutils literal notranslate"><span class="pre">&quot;preproc_file&quot;</span></code> mandatory key to define the path to your preprocessing Python file and the function within it.</p></li>
+<li><p>Use the format <code class="docutils literal notranslate"><span class="pre">&quot;filename.py:function_name&quot;</span></code>. The filename and function name both are required.
+<em>Example:</em></p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="nt">&quot;preproc_file&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sample_dataset_preproc.py:preprocessing_fn&quot;</span>
+</pre></div>
+</div>
+</li>
+<li><p>The preprocessing function must follow the structure below. The function parameters and the return type of the function should not be altered. The sample illustrates <code class="docutils literal notranslate"><span class="pre">apply_prompt_template</span></code> and <code class="docutils literal notranslate"><span class="pre">tokenize</span></code> as sub-functions, but we can define our own sub-functions as needed. For reference, check the example files in the <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main/QEfficient/finetune/dataset">./QEfficient/finetune/dataset/</a> directory.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">preprocessing_fn</span><span class="p">(</span><span class="n">dataset_config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">,</span> <span class="n">split</span><span class="p">,</span> <span class="n">context_length</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+    <span class="c1"># Load the dataset or read from the disk</span>
+    <span class="c1"># ...</span>
+
+    <span class="c1"># Split the dataset into train and test splits if needed,</span>
+    <span class="c1"># and use the appropriate split based on the &#39;split&#39; argument.</span>
+    <span class="c1"># ...</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">apply_prompt_template</span><span class="p">(</span><span class="n">example</span><span class="p">):</span>
+        <span class="c1"># Apply prompt formatting to each datapoint (e.g., example)</span>
+        <span class="c1"># ...</span>
+        <span class="k">return</span> <span class="n">example</span> <span class="c1"># Return the processed example</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">tokenize</span><span class="p">(</span><span class="n">example</span><span class="p">):</span>
+        <span class="c1"># Tokenize the formatted datapoint (e.g., example)</span>
+        <span class="c1"># ...</span>
+        <span class="k">return</span> <span class="n">tokenizer</span><span class="p">(</span><span class="n">example</span><span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">],</span> <span class="n">truncation</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">max_length</span><span class="o">=</span><span class="n">context_length</span><span class="p">)</span> <span class="c1"># Example tokenization</span>
+
+    <span class="c1"># Apply prompt template to preprocess it in accordance to the dataset and task.</span>
+    <span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">apply_prompt_template</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+
+    <span class="c1"># Finally, tokenize the dataset</span>
+    <span class="n">dataset</span> <span class="o">=</span> <span class="n">dataset</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">tokenize</span><span class="p">,</span> <span class="n">batched</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">remove_columns</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;text&#39;</span><span class="p">])</span> <span class="c1"># Example batched tokenization</span>
+    
+    <span class="c1"># Each sample in the dataset should have keys acceptable by the HF</span>
+    <span class="c1"># model and the loss function.</span>
+    <span class="c1"># Typically, for CausalLM models used with &#39;generation&#39; task_mode,</span>
+    <span class="c1"># the keys should be &#39;input_ids&#39;, &#39;attention_mask&#39;, and &#39;labels&#39;.</span>
+    <span class="k">return</span> <span class="n">dataset</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>In the sample preprocessing function above, the <code class="docutils literal notranslate"><span class="pre">split</span></code> variable takes its value from <code class="docutils literal notranslate"><span class="pre">data_config.json</span></code>. For the training dataset, the value will be taken from the <code class="docutils literal notranslate"><span class="pre">&quot;train_split&quot;</span></code> key, and for the evaluation/test dataset, it will be taken from the <code class="docutils literal notranslate"><span class="pre">&quot;test_split&quot;</span></code> key.</p></li>
+<li><p>Additional arguments needed for the preprocessing function can be passed in <code class="docutils literal notranslate"><span class="pre">data_config.json</span></code> and will be available via the <code class="docutils literal notranslate"><span class="pre">dataset_config</span></code> variable within the function. For instance, in the sample config above, <code class="docutils literal notranslate"><span class="pre">&quot;test_split_ratio&quot;</span></code> and <code class="docutils literal notranslate"><span class="pre">&quot;disc_style&quot;</span></code> keys can be used in the preprocessing function to define the test split ratio and style of the dataset. These values are accessed through the <code class="docutils literal notranslate"><span class="pre">dataset_config</span></code> variable. Check out the sample preprocessing file at <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main/QEfficient/finetune/dataset/custom_dataset/sample_dataset_preproc.py">./QEfficient/finetune/dataset/custom_dataset/sample_dataset_preproc.py</a>.</p></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><p><strong>Custom Collate Function for Batching</strong></p>
+<ul>
+<li><p>When using a batch size greater than 1, we may need to override the default collate (batching different samples together in a batch) behavior by including a <code class="docutils literal notranslate"><span class="pre">&quot;collate_file&quot;</span></code> key in <code class="docutils literal notranslate"><span class="pre">data_config.json</span></code>.</p></li>
+<li><p>Use the same <code class="docutils literal notranslate"><span class="pre">&quot;file.py:function&quot;</span></code> format. If omitted, the default Hugging Face <code class="docutils literal notranslate"><span class="pre">DataCollatorForSeq2Seq</span></code> is typically used, which pads sequences to the longest length in the batch.</p></li>
+<li><p>A custom collate function must follow the structure below. The function parameters and the return type of the function should not be altered:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">get_data_collator</span><span class="p">(</span><span class="n">tokenizer</span><span class="p">):</span>
+    <span class="c1"># Define and return a custom collate_fn here</span>
+    <span class="c1"># ...</span>
+ 
+    <span class="c1"># This function should take a list of samples and return a batch.</span>
+    <span class="c1"># Example:</span>
+    <span class="c1"># from transformers import DataCollatorForLanguageModeling</span>
+    <span class="c1"># return DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)</span>
+</pre></div>
+</div>
+</li>
+</ul>
+</li>
+</ol>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="cli_api.html" class="btn btn-neutral float-left" title="CLI API Reference" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="blogs.html" class="btn btn-neutral float-right" title="Train anywhere, Infer on Qualcomm Cloud AI 100" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.2.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../index.html">main</a></dd>
+        <dd><a href="../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../index.html">release/v1.23.2.0</a></dd>
+        <dd><a href="../../v1.23.0/index.html">release/v1.23.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,1897 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Diffuser Classes &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../_static/doctools.js?v=888ff710"></script>
+        <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="CLI API Reference" href="cli_api.html" />
+    <link rel="prev" title="QEfficient Auto Classes" href="qeff_autoclasses.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../v1.23.0/source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Diffuser Classes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#pipeline-api">Pipeline API</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#qefftextencoder"><code class="docutils literal notranslate"><span class="pre">QEffTextEncoder</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder"><code class="docutils literal notranslate"><span class="pre">QEffTextEncoder</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#qeffunet"><code class="docutils literal notranslate"><span class="pre">QEffUNet</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet"><code class="docutils literal notranslate"><span class="pre">QEffUNet</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#qeffvae"><code class="docutils literal notranslate"><span class="pre">QEffVAE</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE"><code class="docutils literal notranslate"><span class="pre">QEffVAE</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#qefffluxtransformermodel"><code class="docutils literal notranslate"><span class="pre">QEffFluxTransformerModel</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel"><code class="docutils literal notranslate"><span class="pre">QEffFluxTransformerModel</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#qeffwanunifiedtransformer"><code class="docutils literal notranslate"><span class="pre">QEffWanUnifiedTransformer</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer"><code class="docutils literal notranslate"><span class="pre">QEffWanUnifiedTransformer</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#model-classes">Model Classes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#qeffwanpipeline"><code class="docutils literal notranslate"><span class="pre">QEffWanPipeline</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline"><code class="docutils literal notranslate"><span class="pre">QEffWanPipeline</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#qeffwanimagetovideopipeline"><code class="docutils literal notranslate"><span class="pre">QEffWanImageToVideoPipeline</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline"><code class="docutils literal notranslate"><span class="pre">QEffWanImageToVideoPipeline</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#qefffluxpipeline"><code class="docutils literal notranslate"><span class="pre">QEffFluxPipeline</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline"><code class="docutils literal notranslate"><span class="pre">QEffFluxPipeline</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Diffuser Classes</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/source/diffuser_classes.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="diffuser-classes">
+<h1>Diffuser Classes<a class="headerlink" href="#diffuser-classes" title="Permalink to this heading"></a></h1>
+<section id="pipeline-api">
+<h2>Pipeline API<a class="headerlink" href="#pipeline-api" title="Permalink to this heading"></a></h2>
+<section id="qefftextencoder">
+<span id="id1"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffTextEncoder</span></code><a class="headerlink" href="#qefftextencoder" title="Permalink to this heading"></a></h3>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.pipeline_module.</span></span><span class="sig-name descname"><span class="pre">QEffTextEncoder</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Module</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffTextEncoder"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder" title="Permalink to this definition"></a></dt>
+<dd><p>Wrapper for text encoder models with ONNX export and QAIC compilation capabilities.</p>
+<p>This class handles text encoder models (CLIP, T5) with specific transformations and
+optimizations for efficient inference on Qualcomm AI hardware. It applies custom
+PyTorch and ONNX transformations to prepare models for deployment.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.model" title="Permalink to this definition"></a></dt>
+<dd><p>The wrapped text encoder model (deep copy of original)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>nn.Module</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder._pytorch_transforms">
+<span class="sig-name descname"><span class="pre">_pytorch_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder._pytorch_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>PyTorch transformations applied before ONNX export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder._onnx_transforms">
+<span class="sig-name descname"><span class="pre">_onnx_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder._onnx_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>ONNX transformations applied after export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">specializations</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">compiler_options</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffTextEncoder.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compile the ONNX model for Qualcomm AI hardware.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>specializations</strong> (<em>List</em><em>[</em><em>Dict</em><em>]</em>) – Model specialization configurations</p></li>
+<li><p><strong>**compiler_options</strong> – Additional compiler options (e.g., num_cores, aic_num_of_activations)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">inputs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_names</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dynamic_axes</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_kwargs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">{}</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffTextEncoder.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export the text encoder model to ONNX format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>inputs</strong> (<em>Dict</em>) – Example inputs for ONNX export</p></li>
+<li><p><strong>output_names</strong> (<em>List</em><em>[</em><em>str</em><em>]</em>) – Names of model outputs</p></li>
+<li><p><strong>dynamic_axes</strong> (<em>Dict</em>) – Specification of dynamic dimensions</p></li>
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Directory to save ONNX model</p></li>
+<li><p><strong>export_kwargs</strong> (<em>Dict</em><em>, </em><em>optional</em>) – Additional export arguments</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to the exported ONNX model</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.get_model_config">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span></em><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.get_model_config" title="Permalink to this definition"></a></dt>
+<dd><p>Get the model configuration as a dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The configuration dictionary of the underlying text encoder model</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.get_onnx_params">
+<span class="sig-name descname"><span class="pre">get_onnx_params</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffTextEncoder.get_onnx_params"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.get_onnx_params" title="Permalink to this definition"></a></dt>
+<dd><p>Generate ONNX export configuration for the text encoder.</p>
+<p>Creates example inputs, dynamic axes specifications, and output names
+tailored to the specific text encoder type (CLIP vs T5).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><ul class="simple">
+<li><p>example_inputs (Dict): Sample inputs for ONNX export</p></li>
+<li><p>dynamic_axes (Dict): Specification of dynamic dimensions</p></li>
+<li><p>output_names (List[str]): Names of model outputs</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Tuple containing</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qeffunet">
+<span id="id2"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffUNet</span></code><a class="headerlink" href="#qeffunet" title="Permalink to this heading"></a></h3>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffUNet">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.pipeline_module.</span></span><span class="sig-name descname"><span class="pre">QEffUNet</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Module</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffUNet"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet" title="Permalink to this definition"></a></dt>
+<dd><p>Wrapper for UNet models with ONNX export and QAIC compilation capabilities.</p>
+<p>This class handles UNet models with specific transformations and optimizations
+for efficient inference on Qualcomm AI hardware. UNet is commonly used in
+diffusion models for image generation tasks.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.model" title="Permalink to this definition"></a></dt>
+<dd><p>The wrapped UNet model</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>nn.Module</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffUNet._pytorch_transforms">
+<span class="sig-name descname"><span class="pre">_pytorch_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet._pytorch_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>PyTorch transformations applied before ONNX export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffUNet._onnx_transforms">
+<span class="sig-name descname"><span class="pre">_onnx_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet._onnx_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>ONNX transformations applied after export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">specializations</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">compiler_options</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffUNet.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compile the ONNX model for Qualcomm AI hardware.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>specializations</strong> (<em>List</em><em>[</em><em>Dict</em><em>]</em>) – Model specialization configurations</p></li>
+<li><p><strong>**compiler_options</strong> – Additional compiler options</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">inputs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_names</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dynamic_axes</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_kwargs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">{}</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffUNet.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export the UNet model to ONNX format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>inputs</strong> (<em>Dict</em>) – Example inputs for ONNX export</p></li>
+<li><p><strong>output_names</strong> (<em>List</em><em>[</em><em>str</em><em>]</em>) – Names of model outputs</p></li>
+<li><p><strong>dynamic_axes</strong> (<em>Dict</em>) – Specification of dynamic dimensions</p></li>
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Directory to save ONNX model</p></li>
+<li><p><strong>export_kwargs</strong> (<em>Dict</em><em>, </em><em>optional</em>) – Additional export arguments</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to the exported ONNX model</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.get_model_config">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span></em><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.get_model_config" title="Permalink to this definition"></a></dt>
+<dd><p>Get the model configuration as a dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The configuration dictionary of the underlying UNet model</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qeffvae">
+<span id="id3"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffVAE</span></code><a class="headerlink" href="#qeffvae" title="Permalink to this heading"></a></h3>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.pipeline_module.</span></span><span class="sig-name descname"><span class="pre">QEffVAE</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">type</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffVAE"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE" title="Permalink to this definition"></a></dt>
+<dd><p>Wrapper for Variational Autoencoder (VAE) models with ONNX export and QAIC compilation.</p>
+<p>This class handles VAE models with specific transformations and optimizations
+for efficient inference on Qualcomm AI hardware. VAE models are used in diffusion
+pipelines for encoding images to latent space and decoding latents back to images.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.model" title="Permalink to this definition"></a></dt>
+<dd><p>The wrapped VAE model (deep copy of original)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>nn.Module</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.type">
+<span class="sig-name descname"><span class="pre">type</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.type" title="Permalink to this definition"></a></dt>
+<dd><p>VAE operation type (“encoder” or “decoder”)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE._pytorch_transforms">
+<span class="sig-name descname"><span class="pre">_pytorch_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE._pytorch_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>PyTorch transformations applied before ONNX export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE._onnx_transforms">
+<span class="sig-name descname"><span class="pre">_onnx_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE._onnx_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>ONNX transformations applied after export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">specializations</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">compiler_options</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffVAE.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compile the ONNX model for Qualcomm AI hardware.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>specializations</strong> (<em>List</em><em>[</em><em>Dict</em><em>]</em>) – Model specialization configurations</p></li>
+<li><p><strong>**compiler_options</strong> – Additional compiler options</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">inputs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_names</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dynamic_axes</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_kwargs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">{}</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffVAE.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export the VAE model to ONNX format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>inputs</strong> (<em>Dict</em>) – Example inputs for ONNX export</p></li>
+<li><p><strong>output_names</strong> (<em>List</em><em>[</em><em>str</em><em>]</em>) – Names of model outputs</p></li>
+<li><p><strong>dynamic_axes</strong> (<em>Dict</em>) – Specification of dynamic dimensions</p></li>
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Directory to save ONNX model</p></li>
+<li><p><strong>export_kwargs</strong> (<em>Dict</em><em>, </em><em>optional</em>) – Additional export arguments</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to the exported ONNX model</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_img_encoder_onnx_params">
+<span class="sig-name descname"><span class="pre">get_img_encoder_onnx_params</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffVAE.get_img_encoder_onnx_params"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_img_encoder_onnx_params" title="Permalink to this definition"></a></dt>
+<dd><p>Generate ONNX export configuration for the VAE Encoder.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><ul class="simple">
+<li><p>example_inputs (Dict): Sample inputs for ONNX export</p></li>
+<li><p>dynamic_axes (Dict): Specification of dynamic dimensions</p></li>
+<li><p>output_names (List[str]): Names of model outputs</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Tuple containing</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_model_config">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span></em><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_model_config" title="Permalink to this definition"></a></dt>
+<dd><p>Get the model configuration as a dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The configuration dictionary of the underlying VAE model</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_onnx_params">
+<span class="sig-name descname"><span class="pre">get_onnx_params</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">latent_height</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">32</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">latent_width</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">32</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffVAE.get_onnx_params"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_onnx_params" title="Permalink to this definition"></a></dt>
+<dd><p>Generate ONNX export configuration for the VAE decoder.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>latent_height</strong> (<em>int</em>) – Height of latent representation (default: 32)</p></li>
+<li><p><strong>latent_width</strong> (<em>int</em>) – Width of latent representation (default: 32)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>example_inputs (Dict): Sample inputs for ONNX export</p></li>
+<li><p>dynamic_axes (Dict): Specification of dynamic dimensions</p></li>
+<li><p>output_names (List[str]): Names of model outputs</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tuple containing</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_video_onnx_params">
+<span class="sig-name descname"><span class="pre">get_video_onnx_params</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffVAE.get_video_onnx_params"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_video_onnx_params" title="Permalink to this definition"></a></dt>
+<dd><p>Generate ONNX export configuration for the VAE decoder.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>latent_height</strong> (<em>int</em>) – Height of latent representation (default: 32)</p></li>
+<li><p><strong>latent_width</strong> (<em>int</em>) – Width of latent representation (default: 32)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>example_inputs (Dict): Sample inputs for ONNX export</p></li>
+<li><p>dynamic_axes (Dict): Specification of dynamic dimensions</p></li>
+<li><p>output_names (List[str]): Names of model outputs</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tuple containing</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qefffluxtransformermodel">
+<span id="id4"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffFluxTransformerModel</span></code><a class="headerlink" href="#qefffluxtransformermodel" title="Permalink to this heading"></a></h3>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.pipeline_module.</span></span><span class="sig-name descname"><span class="pre">QEffFluxTransformerModel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Module</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffFluxTransformerModel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel" title="Permalink to this definition"></a></dt>
+<dd><p>Wrapper for Flux Transformer2D models with ONNX export and QAIC compilation capabilities.</p>
+<p>This class handles Flux Transformer2D models with specific transformations and optimizations
+for efficient inference on Qualcomm AI hardware. Flux uses a transformer-based diffusion
+architecture instead of traditional UNet, with dual transformer blocks and adaptive layer
+normalization (AdaLN) for conditioning.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.model" title="Permalink to this definition"></a></dt>
+<dd><p>The wrapped Flux transformer model</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>nn.Module</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel._pytorch_transforms">
+<span class="sig-name descname"><span class="pre">_pytorch_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel._pytorch_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>PyTorch transformations applied before ONNX export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel._onnx_transforms">
+<span class="sig-name descname"><span class="pre">_onnx_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel._onnx_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>ONNX transformations applied after export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">specializations</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">compiler_options</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffFluxTransformerModel.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compile the ONNX model for Qualcomm AI hardware.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>specializations</strong> (<em>List</em><em>[</em><em>Dict</em><em>]</em>) – Model specialization configurations</p></li>
+<li><p><strong>**compiler_options</strong> – Additional compiler options (e.g., num_cores, aic_num_of_activations)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">inputs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_names</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dynamic_axes</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffFluxTransformerModel.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export the Flux transformer model to ONNX format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>inputs</strong> (<em>Dict</em>) – Example inputs for ONNX export</p></li>
+<li><p><strong>output_names</strong> (<em>List</em><em>[</em><em>str</em><em>]</em>) – Names of model outputs</p></li>
+<li><p><strong>dynamic_axes</strong> (<em>Dict</em>) – Specification of dynamic dimensions</p></li>
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Directory to save ONNX model</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em>) – Whether to export transformer blocks as ONNX functions
+for better modularity and potential optimization</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to the exported ONNX model</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.get_model_config">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span></em><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.get_model_config" title="Permalink to this definition"></a></dt>
+<dd><p>Get the model configuration as a dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The configuration dictionary of the underlying Flux transformer model</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.get_onnx_params">
+<span class="sig-name descname"><span class="pre">get_onnx_params</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seq_length</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">256</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cl</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">4096</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffFluxTransformerModel.get_onnx_params"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.get_onnx_params" title="Permalink to this definition"></a></dt>
+<dd><p>Generate ONNX export configuration for the Flux transformer.</p>
+<p>Creates example inputs for all Flux-specific inputs including hidden states,
+text embeddings, timestep conditioning, and AdaLN embeddings.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>batch_size</strong> (<em>int</em>) – Batch size for example inputs (default: FLUX_ONNX_EXPORT_BATCH_SIZE)</p></li>
+<li><p><strong>seq_length</strong> (<em>int</em>) – Text sequence length (default: FLUX_ONNX_EXPORT_SEQ_LENGTH)</p></li>
+<li><p><strong>cl</strong> (<em>int</em>) – Compressed latent dimension (default: FLUX_ONNX_EXPORT_COMPRESSED_LATENT_DIM)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>example_inputs (Dict): Sample inputs for ONNX export</p></li>
+<li><p>dynamic_axes (Dict): Specification of dynamic dimensions</p></li>
+<li><p>output_names (List[str]): Names of model outputs</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tuple containing</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qeffwanunifiedtransformer">
+<span id="id5"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffWanUnifiedTransformer</span></code><a class="headerlink" href="#qeffwanunifiedtransformer" title="Permalink to this heading"></a></h3>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.pipeline_module.</span></span><span class="sig-name descname"><span class="pre">QEffWanUnifiedTransformer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">unified_transformer</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffWanUnifiedTransformer"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer" title="Permalink to this definition"></a></dt>
+<dd><p>Wrapper for WAN Unified Transformer with ONNX export and QAIC compilation capabilities.</p>
+<p>This class handles the unified WAN transformer model that combines high and low noise transformers
+into a single model for efficient deployment. Based on the timestep shape, the model dynamically
+selects between high and low noise transformers during inference.</p>
+<p>The wrapper applies specific transformations and optimizations for efficient inference on
+Qualcomm AI hardware, particularly for video diffusion models.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.model" title="Permalink to this definition"></a></dt>
+<dd><p>The QEffWanUnifiedWrapper model that combines high/low noise transformers</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>nn.Module</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer._pytorch_transforms">
+<span class="sig-name descname"><span class="pre">_pytorch_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer._pytorch_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>PyTorch transformations applied before ONNX export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer._onnx_transforms">
+<span class="sig-name descname"><span class="pre">_onnx_transforms</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer._onnx_transforms" title="Permalink to this definition"></a></dt>
+<dd><p>ONNX transformations applied after export</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">specializations</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">compiler_options</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffWanUnifiedTransformer.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compile the ONNX model for Qualcomm AI hardware.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>specializations</strong> (<em>List</em><em>[</em><em>Dict</em><em>]</em>) – Model specialization configurations</p></li>
+<li><p><strong>**compiler_options</strong> – Additional compiler options (e.g., num_cores, aic_num_of_activations)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">inputs</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_names</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dynamic_axes</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffWanUnifiedTransformer.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export the Wan transformer model to ONNX format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>inputs</strong> (<em>Dict</em>) – Example inputs for ONNX export</p></li>
+<li><p><strong>output_names</strong> (<em>List</em><em>[</em><em>str</em><em>]</em>) – Names of model outputs</p></li>
+<li><p><strong>dynamic_axes</strong> (<em>Dict</em>) – Specification of dynamic dimensions</p></li>
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Directory to save ONNX model</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em>) – Whether to export transformer blocks as ONNX functions
+for better modularity and potential optimization</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to the exported ONNX model</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.get_model_config">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span></em><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.get_model_config" title="Permalink to this definition"></a></dt>
+<dd><p>Get the model configuration as a dictionary.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The configuration dictionary of the underlying Wan transformer model</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.get_onnx_params">
+<span class="sig-name descname"><span class="pre">get_onnx_params</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/pipeline_module.html#QEffWanUnifiedTransformer.get_onnx_params"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.get_onnx_params" title="Permalink to this definition"></a></dt>
+<dd><p>Generate ONNX export configuration for the Wan transformer.</p>
+<p>Creates example inputs for all Wan-specific inputs including hidden states,
+text embeddings, timestep conditioning,
+:returns:     - example_inputs (Dict): Sample inputs for ONNX export</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>dynamic_axes (Dict): Specification of dynamic dimensions</p></li>
+<li><p>output_names (List[str]): Names of model outputs</p></li>
+</ul>
+</div></blockquote>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tuple containing</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+</section>
+<hr class="docutils" />
+<section id="model-classes">
+<h2>Model Classes<a class="headerlink" href="#model-classes" title="Permalink to this heading"></a></h2>
+<section id="qeffwanpipeline">
+<span id="id6"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffWanPipeline</span></code><a class="headerlink" href="#qeffwanpipeline" title="Permalink to this heading"></a></h3>
+<p>WAN supports two execution architectures:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">use_unified=True</span></code> (default): one unified transformer module.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">use_unified=False</span></code>: separate <code class="docutils literal notranslate"><span class="pre">transformer_high</span></code> and <code class="docutils literal notranslate"><span class="pre">transformer_low</span></code> modules.</p></li>
+</ul>
+<p>First-block-cache is currently supported only for non-unified WAN:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffWanPipeline</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="s2">&quot;Wan-AI/Wan2.2-T2V-A14B-Diffusers&quot;</span><span class="p">,</span>
+    <span class="n">use_unified</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">enable_first_block_cache</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">first_block_cache_downsample_factor</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">output</span> <span class="o">=</span> <span class="n">pipeline</span><span class="p">(</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A cat playing in a sunny garden&quot;</span><span class="p">,</span>
+    <span class="n">cache_threshold_high</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+    <span class="n">cache_threshold_low</span><span class="o">=</span><span class="mf">0.065</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>See examples:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/diffusers/wan/wan_lightning.py</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/diffusers/wan/wan_lightning_custom.py</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/diffusers/wan/wan_first_block_cache.py</span></code></p></li>
+</ul>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.wan.pipeline_wan.</span></span><span class="sig-name descname"><span class="pre">QEffWanPipeline</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_unified</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">enable_first_block_cache</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">first_block_cache_downsample_factor</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan.html#QEffWanPipeline"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline" title="Permalink to this definition"></a></dt>
+<dd><p>QEfficient-optimized WAN pipeline for high-performance text-to-video generation on Qualcomm AI hardware.</p>
+<p>This pipeline provides an optimized implementation of the WAN diffusion model
+specifically designed for deployment on Qualcomm AI Cloud (QAIC) devices. It extends the original
+HuggingFace WAN model with QEfficient-optimized components that can be exported to ONNX format
+and compiled into Qualcomm Program Container (QPC) files for efficient video generation.</p>
+<p>The pipeline supports the complete WAN workflow including:
+- UMT5 text encoding for rich semantic understanding
+- Unified transformer architecture: Combines multiple transformer stages into a single optimized model
+- VAE decoding for final video output
+- Performance monitoring and hardware optimization</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.text_encoder">
+<span class="sig-name descname"><span class="pre">text_encoder</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.text_encoder" title="Permalink to this definition"></a></dt>
+<dd><p>UMT5 text encoder for semantic text understanding (TODO: QEfficient optimization)</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.unified_wrapper">
+<span class="sig-name descname"><span class="pre">unified_wrapper</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.unified_wrapper" title="Permalink to this definition"></a></dt>
+<dd><p>Wrapper combining transformer stages (unified mode)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>QEffWanUnifiedWrapper</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.transformer">
+<span class="sig-name descname"><span class="pre">transformer</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.transformer" title="Permalink to this definition"></a></dt>
+<dd><p>Optimized unified transformer for denoising (unified mode)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer" title="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer">QEffWanUnifiedTransformer</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.transformer_high">
+<span class="sig-name descname"><span class="pre">transformer_high</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.transformer_high" title="Permalink to this definition"></a></dt>
+<dd><p>High-noise transformer module (non-unified mode)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>QEffWanTransformer</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.transformer_low">
+<span class="sig-name descname"><span class="pre">transformer_low</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.transformer_low" title="Permalink to this definition"></a></dt>
+<dd><p>Low-noise transformer module (non-unified mode)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>QEffWanTransformer</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.vae_decode">
+<span class="sig-name descname"><span class="pre">vae_decode</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.vae_decode" title="Permalink to this definition"></a></dt>
+<dd><p>VAE decoder for latent-to-video conversion</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.modules">
+<span class="sig-name descname"><span class="pre">modules</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.modules" title="Permalink to this definition"></a></dt>
+<dd><p>Dictionary of pipeline modules for batch operations</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dict[str, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.model" title="Permalink to this definition"></a></dt>
+<dd><p>Original HuggingFace WAN model reference</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>WanPipeline</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.tokenizer">
+<span class="sig-name descname"><span class="pre">tokenizer</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.tokenizer" title="Permalink to this definition"></a></dt>
+<dd><p>Text tokenizer for preprocessing</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.scheduler">
+<span class="sig-name descname"><span class="pre">scheduler</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.scheduler" title="Permalink to this definition"></a></dt>
+<dd><p>Diffusion scheduler for timestep management</p>
+</dd></dl>
+
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.pipelines.wan</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffWanPipeline</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;path/to/wan/model&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">videos</span> <span class="o">=</span> <span class="n">pipeline</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A cat playing in a garden&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">height</span><span class="o">=</span><span class="mi">480</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">width</span><span class="o">=</span><span class="mi">832</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">num_frames</span><span class="o">=</span><span class="mi">81</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">num_inference_steps</span><span class="o">=</span><span class="mi">4</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Save generated video</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">videos</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;generated_video.mp4&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">compile_config</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parallel</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">height</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">48</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">width</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">64</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_frames</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">81</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan.html#QEffWanPipeline.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compiles the ONNX graphs of the different model components for deployment on Qualcomm AI hardware.</p>
+<p>This method takes the ONNX paths of the transformer and compiles them into an optimized format
+for inference using JSON-based configuration.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>compile_config</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to a JSON configuration file containing
+compilation settings, device mappings, and optimization parameters. If None,
+uses the default configuration.</p></li>
+<li><p><strong>parallel</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Compilation mode selection:
+- True: Compile modules in parallel using ThreadPoolExecutor for faster processing
+- False: Compile modules sequentially for lower resource usage</p></li>
+<li><p><strong>height</strong> (<em>int</em><em>, </em><em>default=192</em>) – Target image height in pixels.</p></li>
+<li><p><strong>width</strong> (<em>int</em><em>, </em><em>default=320</em>) – Target image width in pixels.</p></li>
+<li><p><strong>num_frames</strong> (<em>int</em><em>, </em><em>deafult=81</em>) – Target num of frames in pixel space</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Whether to export models with ONNX
+subfunctions before compilation if not already exported.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>RuntimeError</strong> – If compilation fails for any module or if QAIC compiler is not available</p></li>
+<li><p><strong>FileNotFoundError</strong> – If ONNX models haven’t been exported or config file is missing</p></li>
+<li><p><strong>ValueError</strong> – If configuration parameters are invalid</p></li>
+<li><p><strong>OSError</strong> – If there are issues with file I/O during compilation</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Wan-AI/Wan2.2-T2V-A14B-Diffusers&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Sequential compilation with default config</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="n">height</span><span class="o">=</span><span class="mi">480</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="mi">832</span><span class="p">,</span> <span class="n">num_frames</span><span class="o">=</span><span class="mi">81</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Parallel compilation with custom config</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">compile_config</span><span class="o">=</span><span class="s2">&quot;/path/to/custom_config.json&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">parallel</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">height</span><span class="o">=</span><span class="mi">480</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">width</span><span class="o">=</span><span class="mi">832</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">num_frames</span><span class="o">=</span><span class="mi">81</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.do_classifier_free_guidance">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">do_classifier_free_guidance</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.do_classifier_free_guidance" title="Permalink to this definition"></a></dt>
+<dd><p>Determine if classifier-free guidance should be used.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>True if CFG should be applied based on current guidance scales</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan.html#QEffWanPipeline.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export all pipeline modules to ONNX format for deployment preparation.</p>
+<p>This method systematically exports the unified transformer to ONNX format with
+video-specific configurations including temporal dimensions, dynamic axes, and
+optimization settings. The export process prepares the model for subsequent
+compilation to QPC format for efficient inference on QAIC hardware.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Target directory for saving ONNX model files. If None,
+uses the default export directory structure. The directory will be created
+if it doesn’t exist.</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Whether to enable ONNX subfunction
+optimization for supported modules. This can optimize the graph structure
+and improve compilation efficiency for complex models like the transformer.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Absolute path to the export directory containing all ONNX model files.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>RuntimeError</strong> – If ONNX export fails for any module</p></li>
+<li><p><strong>OSError</strong> – If there are issues creating the export directory or writing files</p></li>
+<li><p><strong>ValueError</strong> – If module configurations are invalid</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Wan-AI/Wan2.2-T2V-A14B-Diffusers&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">export_path</span> <span class="o">=</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">export</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">export_dir</span><span class="o">=</span><span class="s2">&quot;/path/to/export&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="kc">True</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.from_pretrained">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_pretrained</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pretrained_model_name_or_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">PathLike</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_unified</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">enable_first_block_cache</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">first_block_cache_downsample_factor</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan.html#QEffWanPipeline.from_pretrained"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.from_pretrained" title="Permalink to this definition"></a></dt>
+<dd><p>Load a pretrained WAN model from HuggingFace Hub or local path and wrap it with QEfficient optimizations.</p>
+<p>This class method provides a convenient way to instantiate a QEffWanPipeline from a pretrained
+WAN model. It automatically loads the base WanPipeline model in float32 precision on CPU
+and wraps all components with QEfficient-optimized versions for QAIC deployment.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>pretrained_model_name_or_path</strong> (<em>str</em><em> or </em><em>os.PathLike</em>) – Either a HuggingFace model identifier
+or a local path to a saved WAN model directory. Should contain transformer, transformer_2,
+text_encoder, and VAE components.</p></li>
+<li><p><strong>use_unified</strong> (<em>bool</em><em>, </em><em>optional</em>) – Selects WAN execution architecture.
+- True: unified high/low transformer module
+- False: separate high and low transformer modules</p></li>
+<li><p><strong>enable_first_block_cache</strong> (<em>bool</em><em>, </em><em>optional</em>) – Enables retained-state first-block-cache
+for non-unified mode.</p></li>
+<li><p><strong>first_block_cache_downsample_factor</strong> (<em>int</em><em>, </em><em>optional</em>) – Downsample factor for first-block
+cache key when cache is enabled.</p></li>
+<li><p><strong>**kwargs</strong> – Additional keyword arguments passed to WanPipeline.from_pretrained().</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>A fully initialized pipeline instance with QEfficient-optimized components</dt><dd><p>ready for export, compilation, and inference on QAIC devices.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline" title="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline">QEffWanPipeline</a></p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>ValueError</strong> – If the model path is invalid or model cannot be loaded</p></li>
+<li><p><strong>OSError</strong> – If there are issues accessing the model files</p></li>
+<li><p><strong>RuntimeError</strong> – If model initialization fails</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load from HuggingFace Hub</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Wan-AI/Wan2.2-T2V-A14B-Diffusers&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load from local path</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;/local/path/to/wan&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load with custom cache directory</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="s2">&quot;wan-model-id&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cache_dir</span><span class="o">=</span><span class="s2">&quot;/custom/cache/dir&quot;</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.get_default_config_path">
+<span class="sig-name descname"><span class="pre">get_default_config_path</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan.html#QEffWanPipeline.get_default_config_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan.QEffWanPipeline.get_default_config_path" title="Permalink to this definition"></a></dt>
+<dd><p>Get the default configuration file path for WAN pipeline.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Path to the default WAN configuration JSON file.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="qeffwanimagetovideopipeline">
+<span id="id7"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffWanImageToVideoPipeline</span></code><a class="headerlink" href="#qeffwanimagetovideopipeline" title="Permalink to this heading"></a></h3>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.</span></span><span class="sig-name descname"><span class="pre">QEffWanImageToVideoPipeline</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan_i2v.html#QEffWanImageToVideoPipeline"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline" title="Permalink to this definition"></a></dt>
+<dd><p>QEfficient-optimized WAN image-to-video pipeline for high-performance video generation on Qualcomm AI hardware.</p>
+<p>This pipeline provides an optimized implementation of the WAN image-to-video diffusion model
+specifically designed for deployment on Qualcomm AI Cloud (QAIC) devices. It extends the original
+HuggingFace WAN image-to-video model with QEfficient-optimized components that can be exported to ONNX format
+and compiled into Qualcomm Program Container (QPC) files for efficient video generation from static images.</p>
+<p>The pipeline supports the complete WAN image-to-video workflow including:
+- Image conditioning and preprocessing for temporal consistency
+- UMT5 text encoding for rich semantic understanding
+- Unified transformer architecture: Combines multiple transformer stages into a single optimized model
+- VAE encoding/decoding for image-to-latent and latent-to-video conversion</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.text_encoder">
+<span class="sig-name descname"><span class="pre">text_encoder</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.text_encoder" title="Permalink to this definition"></a></dt>
+<dd><p>UMT5 text encoder for semantic text understanding (TODO: QEfficient optimization)</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.vae_encoder">
+<span class="sig-name descname"><span class="pre">vae_encoder</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.vae_encoder" title="Permalink to this definition"></a></dt>
+<dd><p>VAE encoder for converting input images to latent space</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE" title="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE">QEffVAE</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.unified_wrapper">
+<span class="sig-name descname"><span class="pre">unified_wrapper</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.unified_wrapper" title="Permalink to this definition"></a></dt>
+<dd><p>Wrapper combining transformer stages</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>QEffWanUnifiedWrapper</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.transformer">
+<span class="sig-name descname"><span class="pre">transformer</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.transformer" title="Permalink to this definition"></a></dt>
+<dd><p>Optimized unified transformer for denoising</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer" title="QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer">QEffWanUnifiedTransformer</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.vae_decoder">
+<span class="sig-name descname"><span class="pre">vae_decoder</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.vae_decoder" title="Permalink to this definition"></a></dt>
+<dd><p>VAE decoder for latent-to-video conversion</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE" title="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE">QEffVAE</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.modules">
+<span class="sig-name descname"><span class="pre">modules</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.modules" title="Permalink to this definition"></a></dt>
+<dd><p>Dictionary of pipeline modules for batch operations</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dict[str, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.model" title="Permalink to this definition"></a></dt>
+<dd><p>Original HuggingFace WAN I2V model reference</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>WanImageToVideoPipeline</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.tokenizer">
+<span class="sig-name descname"><span class="pre">tokenizer</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.tokenizer" title="Permalink to this definition"></a></dt>
+<dd><p>Text tokenizer for preprocessing</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.scheduler">
+<span class="sig-name descname"><span class="pre">scheduler</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.scheduler" title="Permalink to this definition"></a></dt>
+<dd><p>Diffusion scheduler for timestep management</p>
+</dd></dl>
+
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.pipelines.wan</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffWanImageToVideoPipeline</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">PIL</span><span class="w"> </span><span class="kn">import</span> <span class="n">Image</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load pipeline and input image</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanImageToVideoPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">image</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="s2">&quot;input_frame.jpg&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Generate video with motion</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">result</span> <span class="o">=</span> <span class="n">pipeline</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">image</span><span class="o">=</span><span class="n">image</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A person walking through a sunny garden with flowing motion&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">height</span><span class="o">=</span><span class="mi">544</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">width</span><span class="o">=</span><span class="mi">720</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">num_frames</span><span class="o">=</span><span class="mi">81</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">num_inference_steps</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">guidance_scale</span><span class="o">=</span><span class="mf">1.0</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Save generated video</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">frames</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">export_to_video</span><span class="p">(</span><span class="n">frames</span><span class="p">,</span> <span class="s2">&quot;generated_video.mp4&quot;</span><span class="p">,</span> <span class="n">fps</span><span class="o">=</span><span class="mi">16</span><span class="p">)</span>
+</pre></div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">compile_config</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parallel</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">height</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">48</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">width</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">64</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_frames</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">81</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan_i2v.html#QEffWanImageToVideoPipeline.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compiles the ONNX graphs of the different model components for deployment on Qualcomm AI hardware.</p>
+<p>This method takes the ONNX paths of the transformer and compiles them into an optimized format
+for inference using JSON-based configuration.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>compile_config</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to a JSON configuration file containing
+compilation settings, device mappings, and optimization parameters. If None,
+uses the default configuration.</p></li>
+<li><p><strong>parallel</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Compilation mode selection:
+- True: Compile modules in parallel using ThreadPoolExecutor for faster processing
+- False: Compile modules sequentially for lower resource usage</p></li>
+<li><p><strong>height</strong> (<em>int</em><em>, </em><em>default=192</em>) – Target image height in pixels.</p></li>
+<li><p><strong>width</strong> (<em>int</em><em>, </em><em>default=320</em>) – Target image width in pixels.</p></li>
+<li><p><strong>num_frames</strong> (<em>int</em><em>, </em><em>deafult=81</em>) – Target num of frames in pixel space</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Whether to export models with ONNX
+subfunctions before compilation if not already exported.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>RuntimeError</strong> – If compilation fails for any module or if QAIC compiler is not available</p></li>
+<li><p><strong>FileNotFoundError</strong> – If ONNX models haven’t been exported or config file is missing</p></li>
+<li><p><strong>ValueError</strong> – If configuration parameters are invalid</p></li>
+<li><p><strong>OSError</strong> – If there are issues with file I/O during compilation</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanImageToVideoPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Sequential compilation with default config</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="n">height</span><span class="o">=</span><span class="mi">480</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="mi">832</span><span class="p">,</span> <span class="n">num_frames</span><span class="o">=</span><span class="mi">81</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Parallel compilation with custom config</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">compile_config</span><span class="o">=</span><span class="s2">&quot;/path/to/custom_config.json&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">parallel</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">height</span><span class="o">=</span><span class="mi">480</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">width</span><span class="o">=</span><span class="mi">832</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">num_frames</span><span class="o">=</span><span class="mi">81</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.do_classifier_free_guidance">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">do_classifier_free_guidance</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.do_classifier_free_guidance" title="Permalink to this definition"></a></dt>
+<dd><p>Determine if classifier-free guidance should be used.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>True if CFG should be applied based on current guidance scales</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan_i2v.html#QEffWanImageToVideoPipeline.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export all pipeline modules to ONNX format for deployment preparation.</p>
+<p>This method systematically exports the VAE encoder, unified transformer, and VAE decoder to ONNX format with
+image-to-video specific configurations including temporal dimensions, dynamic axes, and
+optimization settings.</p>
+<p>The export process prepares the models for subsequent compilation to QPC format, enabling
+efficient inference on QAIC hardware. ONNX subfunctions can be used for certain modules
+to optimize memory usage and performance.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Target directory for saving ONNX model files. If None,
+uses the default export directory structure. The directory will be created
+if it doesn’t exist.</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Whether to enable ONNX subfunction
+optimization for supported modules. This can optimize the graph structure
+and improve compilation efficiency for complex models like the transformer.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Absolute path to the export directory containing all ONNX model files.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>RuntimeError</strong> – If ONNX export fails for any module</p></li>
+<li><p><strong>OSError</strong> – If there are issues creating the export directory or writing files</p></li>
+<li><p><strong>ValueError</strong> – If module configurations are invalid</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanImageToVideoPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">export_path</span> <span class="o">=</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">export</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">export_dir</span><span class="o">=</span><span class="s2">&quot;/path/to/export&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="kc">True</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Models exported to: </span><span class="si">{</span><span class="n">export_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.from_pretrained">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_pretrained</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pretrained_model_name_or_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">PathLike</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan_i2v.html#QEffWanImageToVideoPipeline.from_pretrained"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.from_pretrained" title="Permalink to this definition"></a></dt>
+<dd><p>Load a pretrained WAN image-to-video model from HuggingFace Hub or local path and wrap it with QEfficient optimizations.</p>
+<p>This class method provides a convenient way to instantiate a QEffWanImageToVideoPipeline from a pretrained
+WAN I2V model. It automatically loads the base WanImageToVideoPipeline model in float32 precision on CPU
+and wraps all components with QEfficient-optimized versions for QAIC deployment.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>pretrained_model_name_or_path</strong> (<em>str</em><em> or </em><em>os.PathLike</em>) – Either a HuggingFace model identifier
+or a local path to a saved WAN I2V model directory. Should contain transformer, transformer_2,
+text_encoder, and VAE components optimized for image-to-video generation.</p></li>
+<li><p><strong>**kwargs</strong> – Additional keyword arguments passed to WanImageToVideoPipeline.from_pretrained().</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>A fully initialized I2V pipeline instance with QEfficient-optimized components</dt><dd><p>ready for export, compilation, and inference on QAIC devices.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline" title="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline">QEffWanImageToVideoPipeline</a></p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>ValueError</strong> – If the model path is invalid or model cannot be loaded</p></li>
+<li><p><strong>OSError</strong> – If there are issues accessing the model files</p></li>
+<li><p><strong>RuntimeError</strong> – If model initialization fails</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load from HuggingFace Hub</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanImageToVideoPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load from local path</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanImageToVideoPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;/local/path/to/wan/i2v&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load with custom cache directory</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffWanImageToVideoPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="s2">&quot;Wan-AI/Wan2.2-I2V-A14B-Diffusers&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cache_dir</span><span class="o">=</span><span class="s2">&quot;/custom/cache/dir&quot;</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.get_default_config_path">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_default_config_path</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan_i2v.html#QEffWanImageToVideoPipeline.get_default_config_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.get_default_config_path" title="Permalink to this definition"></a></dt>
+<dd><p>Get the default configuration file path for WAN pipeline.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Path to the default WAN configuration JSON file.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.get_vae_encoder_npi_path">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_vae_encoder_npi_path</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan_i2v.html#QEffWanImageToVideoPipeline.get_vae_encoder_npi_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.get_vae_encoder_npi_path" title="Permalink to this definition"></a></dt>
+<dd><p>Get the default VAE encoder NPI configuration file path for WAN I2V pipeline.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Path to the default WAN I2V VAE encoder NPI file.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.prepare_latents">
+<span class="sig-name descname"><span class="pre">prepare_latents</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Image</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">ndarray</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">PIL.Image.Image</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">numpy.ndarray</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">torch.Tensor</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_channels_latents</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">16</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">height</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">480</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">width</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">832</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_frames</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">81</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">dtype</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">device</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">generator</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Generator</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">Generator</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">latents</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">last_image</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Tensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Tensor</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Tensor</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/wan/pipeline_wan_i2v.html#QEffWanImageToVideoPipeline.prepare_latents"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.wan.pipeline_wan_i2v.QEffWanImageToVideoPipeline.prepare_latents" title="Permalink to this definition"></a></dt>
+<dd><p>Prepare latent variables for image-to-video generation with temporal conditioning.</p>
+<p>This method handles the complex process of preparing latent tensors for I2V generation,
+including image conditioning, temporal mask generation, and VAE encoding. It creates
+the initial noise latents and processes the input image(s) to create conditioning
+information that maintains temporal consistency throughout video generation.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>image</strong> (<em>PipelineImageInput</em>) – Input image(s) to condition the video generation.
+Can be PIL Image, numpy array, or torch tensor.</p></li>
+<li><p><strong>batch_size</strong> (<em>int</em>) – Number of videos to generate in parallel.</p></li>
+<li><p><strong>num_channels_latents</strong> (<em>int</em><em>, </em><em>default=16</em>) – Number of channels in the latent space.</p></li>
+<li><p><strong>height</strong> (<em>int</em><em>, </em><em>default=480</em>) – Target video height in pixels.</p></li>
+<li><p><strong>width</strong> (<em>int</em><em>, </em><em>default=832</em>) – Target video width in pixels.</p></li>
+<li><p><strong>num_frames</strong> (<em>int</em><em>, </em><em>default=81</em>) – Number of frames in the generated video.</p></li>
+<li><p><strong>dtype</strong> (<em>torch.dtype</em><em>, </em><em>optional</em>) – Data type for latent tensors. If None, uses float32.</p></li>
+<li><p><strong>device</strong> (<em>torch.device</em><em>, </em><em>optional</em>) – Device to place tensors on. If None, uses CPU.</p></li>
+<li><p><strong>generator</strong> (<em>torch.Generator</em><em> or </em><em>List</em><em>[</em><em>torch.Generator</em><em>]</em><em>, </em><em>optional</em>) – Random generator(s)
+for reproducible latent initialization.</p></li>
+<li><p><strong>latents</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – Pre-generated latent tensors. If None, random
+latents are created.</p></li>
+<li><p><strong>last_image</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – Optional last frame image for video completion
+tasks. Used to create temporal boundaries.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>A tuple containing:</dt><dd><ul class="simple">
+<li><p>latents: Initial noise latents for denoising process</p></li>
+<li><p>condition: Conditioning tensor combining temporal masks and image latents
+OR (if expand_timesteps=True):</p></li>
+<li><p>latents: Initial noise latents</p></li>
+<li><p>latent_condition: Image conditioning latents</p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Tuple[torch.Tensor, torch.Tensor]</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>ValueError</strong> – If generator list length doesn’t match batch size</p></li>
+<li><p><strong>RuntimeError</strong> – If VAE encoding fails or tensor operations fail</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qefffluxpipeline">
+<span id="id8"></span><h3><code class="docutils literal notranslate"><span class="pre">QEffFluxPipeline</span></code><a class="headerlink" href="#qefffluxpipeline" title="Permalink to this heading"></a></h3>
+<p>FLUX supports optional first-block-cache via runtime monkey patching:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffFluxPipeline</span>
+
+<span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffFluxPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+    <span class="s2">&quot;black-forest-labs/FLUX.1-schnell&quot;</span><span class="p">,</span>
+    <span class="n">enable_first_block_cache</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">first_block_cache_downsample_factor</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">output</span> <span class="o">=</span> <span class="n">pipeline</span><span class="p">(</span>
+    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A laughing girl&quot;</span><span class="p">,</span>
+    <span class="n">cache_threshold</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>When <code class="docutils literal notranslate"><span class="pre">enable_first_block_cache=False</span></code>, the pipeline follows baseline behavior and ignores <code class="docutils literal notranslate"><span class="pre">cache_threshold</span></code>.</p>
+<p>See examples:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/diffusers/flux/flux_1_schnell.py</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/diffusers/flux/flux_1_shnell_custom.py</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/diffusers/flux/flux_1_schnell_first_block_cache.py</span></code></p></li>
+</ul>
+<dl class="py class">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">QEfficient.diffusers.pipelines.flux.pipeline_flux.</span></span><span class="sig-name descname"><span class="pre">QEffFluxPipeline</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">enable_first_block_cache</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">first_block_cache_downsample_factor</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/flux/pipeline_flux.html#QEffFluxPipeline"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline" title="Permalink to this definition"></a></dt>
+<dd><p>QEfficient-optimized Flux pipeline for high-performance text-to-image generation on Qualcomm AI hardware.</p>
+<p>This pipeline provides an optimized implementation of the Flux diffusion model specifically designed
+for deployment on Qualcomm AI Cloud (QAIC) devices. It wraps the original HuggingFace Flux model
+components with QEfficient-optimized versions that can be exported to ONNX format and compiled
+into Qualcomm Program Container (QPC) files for efficient inference.</p>
+<p>The pipeline supports the complete Flux workflow including:
+- Dual text encoding with CLIP and T5 encoders
+- Transformer-based denoising with adaptive layer normalization
+- VAE decoding for final image generation
+- Performance monitoring and optimization</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.text_encoder">
+<span class="sig-name descname"><span class="pre">text_encoder</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.text_encoder" title="Permalink to this definition"></a></dt>
+<dd><p>Optimized CLIP text encoder for pooled embeddings</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder" title="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder">QEffTextEncoder</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.text_encoder_2">
+<span class="sig-name descname"><span class="pre">text_encoder_2</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.text_encoder_2" title="Permalink to this definition"></a></dt>
+<dd><p>Optimized T5 text encoder for sequence embeddings</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder" title="QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder">QEffTextEncoder</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.transformer">
+<span class="sig-name descname"><span class="pre">transformer</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.transformer" title="Permalink to this definition"></a></dt>
+<dd><p>Optimized Flux transformer for denoising</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel" title="QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel">QEffFluxTransformerModel</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.vae_decode">
+<span class="sig-name descname"><span class="pre">vae_decode</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.vae_decode" title="Permalink to this definition"></a></dt>
+<dd><p>Optimized VAE decoder for latent-to-image conversion</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE" title="QEfficient.diffusers.pipelines.pipeline_module.QEffVAE">QEffVAE</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.modules">
+<span class="sig-name descname"><span class="pre">modules</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.modules" title="Permalink to this definition"></a></dt>
+<dd><p>Dictionary of all pipeline modules for batch operations</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dict[str, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.model">
+<span class="sig-name descname"><span class="pre">model</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.model" title="Permalink to this definition"></a></dt>
+<dd><p>Original HuggingFace Flux model reference</p>
+<dl class="field-list simple">
+<dt class="field-odd">Type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>FluxPipeline</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.tokenizer">
+<span class="sig-name descname"><span class="pre">tokenizer</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.tokenizer" title="Permalink to this definition"></a></dt>
+<dd><p>CLIP tokenizer for text preprocessing</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.scheduler">
+<span class="sig-name descname"><span class="pre">scheduler</span></span><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.scheduler" title="Permalink to this definition"></a></dt>
+<dd><p>Diffusion scheduler for timestep management</p>
+</dd></dl>
+
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.pipelines.flux</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffFluxPipeline</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffFluxPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;black-forest-labs/FLUX.1-schnell&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">images</span> <span class="o">=</span> <span class="n">pipeline</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">prompt</span><span class="o">=</span><span class="s2">&quot;A beautiful sunset over mountains&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">height</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">width</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">num_inference_steps</span><span class="o">=</span><span class="mi">28</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">images</span><span class="o">.</span><span class="n">images</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="s2">&quot;generated_image.png&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.compile">
+<span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">compile_config</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parallel</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">height</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">width</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">512</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/flux/pipeline_flux.html#QEffFluxPipeline.compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.compile" title="Permalink to this definition"></a></dt>
+<dd><p>Compile ONNX models into optimized QPC format for deployment on Qualcomm AI hardware.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>compile_config</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to a JSON configuration file containing
+compilation settings, device mappings, and optimization parameters. If None,
+uses the default configuration from get_default_config_path().</p></li>
+<li><p><strong>parallel</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Compilation mode selection:
+- True: Compile modules in parallel using ThreadPoolExecutor for faster processing
+- False: Compile modules sequentially for lower resource usage</p></li>
+<li><p><strong>height</strong> (<em>int</em><em>, </em><em>default=512</em>) – Target image height in pixels.</p></li>
+<li><p><strong>width</strong> (<em>int</em><em>, </em><em>default=512</em>) – Target image width in pixels.</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Whether to export models with ONNX
+subfunctions before compilation.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>RuntimeError</strong> – If compilation fails for any module or if QAIC compiler is not available</p></li>
+<li><p><strong>FileNotFoundError</strong> – If ONNX models haven’t been exported or config file is missing</p></li>
+<li><p><strong>ValueError</strong> – If configuration parameters are invalid</p></li>
+<li><p><strong>OSError</strong> – If there are issues with file I/O during compilation</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffFluxPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;black-forest-labs/FLUX.1-schnell&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Sequential compilation with default config</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="n">height</span><span class="o">=</span><span class="mi">1024</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="mi">1024</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Parallel compilation with custom config</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">compile_config</span><span class="o">=</span><span class="s2">&quot;/path/to/custom_config.json&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">parallel</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">height</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">width</span><span class="o">=</span><span class="mi">512</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.encode_prompt">
+<span class="sig-name descname"><span class="pre">encode_prompt</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">prompt</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompt_2</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_images_per_prompt</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompt_embeds</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">FloatTensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pooled_prompt_embeds</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">FloatTensor</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_sequence_length</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">512</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/flux/pipeline_flux.html#QEffFluxPipeline.encode_prompt"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.encode_prompt" title="Permalink to this definition"></a></dt>
+<dd><p>Encode text prompts using Flux’s dual text encoder architecture.</p>
+<p>Flux employs both CLIP and T5 encoders for comprehensive text understanding:
+- CLIP provides pooled embeddings for global semantic conditioning
+- T5 provides detailed sequence embeddings for fine-grained text control</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>prompt</strong> (<em>str</em><em> or </em><em>List</em><em>[</em><em>str</em><em>]</em>) – Primary prompt(s) for both encoders</p></li>
+<li><p><strong>prompt_2</strong> (<em>str</em><em> or </em><em>List</em><em>[</em><em>str</em><em>]</em><em>, </em><em>optional</em>) – Secondary prompt(s) for T5. If None, uses primary prompt</p></li>
+<li><p><strong>num_images_per_prompt</strong> (<em>int</em>) – Number of images to generate per prompt</p></li>
+<li><p><strong>prompt_embeds</strong> (<em>torch.FloatTensor</em><em>, </em><em>optional</em>) – Pre-computed T5 embeddings</p></li>
+<li><p><strong>pooled_prompt_embeds</strong> (<em>torch.FloatTensor</em><em>, </em><em>optional</em>) – Pre-computed CLIP pooled embeddings</p></li>
+<li><p><strong>max_sequence_length</strong> (<em>int</em>) – Maximum sequence length for T5 tokenization</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>(prompt_embeds, pooled_prompt_embeds, text_ids, encoder_perf_times)</dt><dd><ul class="simple">
+<li><p>prompt_embeds (torch.Tensor): T5 sequence embeddings [batch*num_images, seq_len, 4096]</p></li>
+<li><p>pooled_prompt_embeds (torch.Tensor): CLIP pooled embeddings [batch*num_images, 768]</p></li>
+<li><p>text_ids (torch.Tensor): Position IDs for text tokens [seq_len, 3]</p></li>
+<li><p>encoder_perf_times (List[float]): Performance times [CLIP_time, T5_time]</p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">export_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/flux/pipeline_flux.html#QEffFluxPipeline.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.export" title="Permalink to this definition"></a></dt>
+<dd><p>Export all pipeline modules to ONNX format for deployment preparation.</p>
+<p>This method systematically exports each pipeline component (CLIP text encoder, T5 text encoder,
+Flux transformer, and VAE decoder) to ONNX format. Each module is exported with its specific
+configuration including dynamic axes, input/output specifications, and optimization settings.</p>
+<p>The export process prepares the models for subsequent compilation to QPC format, enabling
+efficient inference on QAIC hardware. ONNX subfunctions can be used for certain modules
+to optimize memory usage and performance.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>export_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Target directory for saving ONNX model files. If None,
+uses the default export directory structure based on model name and configuration.
+The directory will be created if it doesn’t exist.</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em><em>, </em><em>default=False</em>) – Whether to enable ONNX subfunction
+optimization for supported modules. This can optimize thegraph and
+improve compilation efficiency for models like the transformer.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>Absolute path to the export directory containing all ONNX model files.</dt><dd><p>Each module will have its own subdirectory with the exported ONNX file.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>RuntimeError</strong> – If ONNX export fails for any module</p></li>
+<li><p><strong>OSError</strong> – If there are issues creating the export directory or writing files</p></li>
+<li><p><strong>ValueError</strong> – If module configurations are invalid</p></li>
+</ul>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ul class="simple">
+<li><p>All models are exported in float32 precision for maximum compatibility</p></li>
+<li><p>Dynamic axes are configured to support variable batch sizes and sequence lengths</p></li>
+<li><p>The export process may take several minutes depending on model size</p></li>
+<li><p>Exported ONNX files can be large (several GB for complete pipeline)</p></li>
+</ul>
+</div>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffFluxPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;black-forest-labs/FLUX.1-schnell&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">export_path</span> <span class="o">=</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">export</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">export_dir</span><span class="o">=</span><span class="s2">&quot;/path/to/export&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="kc">True</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Models exported to: </span><span class="si">{</span><span class="n">export_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.from_pretrained">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_pretrained</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pretrained_model_name_or_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">PathLike</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">enable_first_block_cache</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">first_block_cache_downsample_factor</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/flux/pipeline_flux.html#QEffFluxPipeline.from_pretrained"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.from_pretrained" title="Permalink to this definition"></a></dt>
+<dd><p>Load a pretrained Flux model from HuggingFace Hub or local path and wrap it with QEfficient optimizations.</p>
+<p>This class method provides a convenient way to instantiate a QEffFluxPipeline from a pretrained
+Flux model. It automatically loads the base FluxPipeline model in float32 precision on CPU
+and wraps all components with QEfficient-optimized versions for QAIC deployment.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>pretrained_model_name_or_path</strong> (<em>str</em><em> or </em><em>os.PathLike</em>) – Either a HuggingFace model identifier
+(e.g., “black-forest-labs/FLUX.1-schnell”) or a local path to a saved model directory.</p></li>
+<li><p><strong>enable_first_block_cache</strong> (<em>bool</em><em>, </em><em>optional</em>) – Enables retained-state first-block-cache path.</p></li>
+<li><p><strong>first_block_cache_downsample_factor</strong> (<em>int</em><em>, </em><em>optional</em>) – Downsample factor for the first-block
+residual cache key when cache is enabled.</p></li>
+<li><p><strong>**kwargs</strong> – Additional keyword arguments passed to FluxPipeline.from_pretrained().</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>A fully initialized pipeline instance with QEfficient-optimized components</dt><dd><p>ready for export, compilation, and inference on QAIC devices.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline" title="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline">QEffFluxPipeline</a></p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>ValueError</strong> – If the model path is invalid or model cannot be loaded</p></li>
+<li><p><strong>OSError</strong> – If there are issues accessing the model files</p></li>
+<li><p><strong>RuntimeError</strong> – If model initialization fails</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load from HuggingFace Hub</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffFluxPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;black-forest-labs/FLUX.1-schnell&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load from local path</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffFluxPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;/path/to/local/flux/model&quot;</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Load with custom cache directory</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">pipeline</span> <span class="o">=</span> <span class="n">QEffFluxPipeline</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="s2">&quot;black-forest-labs/FLUX.1-dev&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cache_dir</span><span class="o">=</span><span class="s2">&quot;/custom/cache/dir&quot;</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.get_default_config_path">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_default_config_path</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/diffusers/pipelines/flux/pipeline_flux.html#QEffFluxPipeline.get_default_config_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.get_default_config_path" title="Permalink to this definition"></a></dt>
+<dd><p>Get the absolute path to the default Flux pipeline configuration file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><dl class="simple">
+<dt>Absolute path to the flux_config.json file containing default pipeline</dt><dd><p>configuration settings for compilation and device allocation.</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="qeff_autoclasses.html" class="btn btn-neutral float-left" title="QEfficient Auto Classes" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="cli_api.html" class="btn btn-neutral float-right" title="CLI API Reference" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.2.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../index.html">main</a></dd>
+        <dd><a href="../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../index.html">release/v1.23.2.0</a></dd>
+        <dd><a href="../../v1.23.0/index.html">release/v1.23.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
