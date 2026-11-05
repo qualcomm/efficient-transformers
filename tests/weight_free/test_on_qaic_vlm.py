@@ -75,7 +75,7 @@ WEIGHT_FREE_VLM_QAIC_MODEL_IDS = {
     "qwen3_5_moe": "tiny-random/qwen3.5-moe",
     "gemma4": "tiny-random/gemma-4-dense",
 }
-VLM_GENERATION_LEN = 10
+VLM_GENERATION_LEN = 2
 VLM_PREFILL_SEQ_LEN = 64
 VLM_CTX_LEN = 512
 VLM_IMAGE_HEIGHT = 354
