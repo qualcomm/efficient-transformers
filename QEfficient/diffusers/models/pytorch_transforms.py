@@ -61,7 +61,7 @@ class CustomOpsTransform(ModuleMappingTransform):
 
 
 class CLIPTextTransform(ModuleMappingTransform):
-    _module_mapping: ClassVar[dict[type, type]] = {
+    _module_mapping = {
         CLIPTextModel: QEffCLIPTextModel,
     }
 

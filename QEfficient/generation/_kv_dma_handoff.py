@@ -65,6 +65,7 @@ def is_retained_state_name(name: str) -> bool:
         "compressed_",
         "k_pe",
         "indexer_key.",
+        "index_key.",
     )
     return base_name.startswith(retained_state_prefixes)
 
