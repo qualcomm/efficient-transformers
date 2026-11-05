@@ -302,4 +302,5 @@ compile_dir = model.compile(
 
 The same path is exposed by the text-generation examples with `--weight-free --artifacts`.
 
+
 Image-text-to-text generation also requires an example `processor`, `images`, and `prompts`. For dual-QPC models, set exactly one of `skip_vision=True` or `skip_lang=True` to emit one independently replayable stage.

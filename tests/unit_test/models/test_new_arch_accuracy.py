@@ -17,6 +17,10 @@ Covers the 14 architectures that had zero unit test coverage:
 All tests run on CPU only, using tiny in-memory models.
 """
 
+from typing import ClassVar
+from unittest.mock import patch
+
+import numpy as np
 import pytest
 import torch
 
@@ -283,6 +287,46 @@ def make_tiny_qwen3_5_moe():
         layer_types=["full_attention", "linear_attention"],
     )
     return Qwen3_5MoeForCausalLM(cfg).eval(), cfg
+
+
+def make_tiny_qwen4_exp():
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForCausalLM
+
+    cfg = Qwen4ExpTextConfig(
+        vocab_size=32,
+        eos_token_id=0,
+        hidden_size=16,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+        num_experts=2,
+        num_experts_per_tok=1,
+        hc_count=2,
+        hc_lowrank=4,
+        ple_layer_ids=[2],
+        ple_embed_dim=16,
+        ple_conv_kernel_size=2,
+        ngram_size=2,
+        heads_per_ngram=1,
+        ngram_vocab_size_base=2,
+        split_ngram_parts=1,
+        indexer_n_heads=1,
+        indexer_kv_heads=1,
+        indexer_head_dim=8,
+        indexer_budget=4,
+        indexer_compress_ratio=2,
+        max_position_embeddings=8,
+        layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+    )
+    return Qwen4ExpForCausalLM(cfg).eval(), cfg
 
 
 def make_tiny_gptbigcode():
@@ -666,6 +710,391 @@ class TestQwen3_5MoEAccuracy:
         with torch.no_grad():
             out = model(**qeff_inputs)
         assert torch.isfinite(out.logits).all(), "Qwen3.5-MoE combined transforms must produce finite logits"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Qwen4-Exp
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.transforms
+class TestQwen4ExpDecode:
+    """Qwen4-Exp uses explicit decode states and host-provided PLE embeddings."""
+
+    def test_qwen4_exp_moe_block_matches_hf(self):
+        """Canonical QEff dispatch must preserve the upstream MoE block numerics."""
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpForCausalLM
+
+        torch.manual_seed(123)
+        hf_model, config = make_tiny_qwen4_exp()
+        hf_block = hf_model.model.layers[0].mlp
+
+        torch.manual_seed(123)
+        qeff_model, _ = make_tiny_qwen4_exp()
+        qeff_model, applied = KVCacheTransform.apply(qeff_model)
+        assert applied and isinstance(qeff_model, QEffQwen4ExpForCausalLM)
+        qeff_block = qeff_model.model.layers[0].mlp
+        hidden_states = torch.randn(2, 3, config.hidden_size)
+
+        with torch.no_grad():
+            hf_output = hf_block(hidden_states)
+            qeff_output = qeff_block(hidden_states)
+
+        assert qeff_output.shape == hf_output.shape
+        assert torch.isfinite(qeff_output).all()
+        torch.testing.assert_close(qeff_output, hf_output, rtol=1e-5, atol=1e-6)
+
+    def test_qwen4_exp_qaic_runner_skips_retained_bindings_and_runs_three_host_inputs(self):
+        """The QPC runner must leave all Qwen retained state on the device."""
+        from examples.text_generation import qwen4_exp_decode_parity as parity_app
+
+        class Binding:
+            def __init__(self, name, dims, binding_type):
+                self.name = name
+                self.dims = dims
+                self.type = binding_type
+
+        class MockSession:
+            instances: ClassVar[list] = []
+
+            def __init__(self, qpc_path, device_ids=None):
+                del qpc_path, device_ids
+                self.aic_to_np_dtype_mapping = {
+                    "int64": np.dtype(np.int64),
+                    "f16": np.dtype(np.float16),
+                    "f32": np.dtype(np.float32),
+                }
+                self.input_names = list(parity_app.QWEN4_QAIC_HOST_INPUT_NAMES + parity_app.QWEN4_RETAINED_STATE_NAMES)
+                self.output_names = ["logits", *parity_app.QWEN4_RETAINED_OUTPUT_NAMES]
+                self.bindings = [
+                    Binding("input_ids", (1, 1), "int64"),
+                    Binding("ngram_embeddings", (1, 1, 2560), "f16"),
+                    Binding("position_ids", (4, 1, 1), "int64"),
+                    *[
+                        Binding(name, parity_app.QWEN4_QAIC_STATE_SHAPES[name], "f16")
+                        for name in parity_app.QWEN4_RETAINED_STATE_NAMES
+                    ],
+                    Binding("logits", parity_app.QWEN4_QAIC_LOGITS_SHAPE, "f32"),
+                    *[Binding(name, (1,), "f16") for name in parity_app.QWEN4_RETAINED_OUTPUT_NAMES],
+                ]
+                self.binding_index_map = {binding.name: index for index, binding in enumerate(self.bindings)}
+                self.skipped = []
+                self.set_buffer_calls = []
+                self.run_calls = []
+                self.events = []
+                self.instances.append(self)
+
+            def skip_buffers(self, names):
+                self.skipped.append(names)
+                self.events.append(("skip_buffers", names))
+
+            def set_buffers(self, buffers):
+                self.set_buffer_calls.append(buffers)
+                self.events.append(("set_buffers", tuple(buffers)))
+
+            def run(self, inputs):
+                self.run_calls.append(inputs)
+                return {
+                    "logits": np.zeros(parity_app.QWEN4_QAIC_LOGITS_SHAPE, dtype=np.float32),
+                    "qsa_key_state.3_RetainedState": np.array([]),
+                }
+
+        with patch.object(parity_app, "QAICInferenceSession", MockSession):
+            runner = parity_app.Qwen4ExpQAICDecodeRunner("mock.qpc")
+            logits = runner.run_step(
+                np.array([[7]], dtype=np.int64),
+                torch.zeros((1, 1, 2560), dtype=torch.float32),
+                np.zeros((4, 1, 1), dtype=np.int64),
+            )
+
+        session = MockSession.instances[-1]
+        expected_skipped_names = list(parity_app.QWEN4_RETAINED_STATE_NAMES + parity_app.QWEN4_RETAINED_OUTPUT_NAMES)
+        assert session.skipped == [expected_skipped_names]
+        assert len(expected_skipped_names) == 22
+        assert session.events[:2] == [("skip_buffers", expected_skipped_names), ("set_buffers", ("logits",))]
+        assert len(session.run_calls) == 1
+        assert set(session.run_calls[0]) == set(parity_app.QWEN4_QAIC_HOST_INPUT_NAMES)
+        assert session.run_calls[0]["ngram_embeddings"].dtype == np.float32
+        assert logits.dtype == np.float32
+
+    def test_qwen4_exp_qaic_runner_skips_only_ts2_retained_bindings(self):
+        """Tensor-sliced QPCs expose only a subset of the retained-state ABI."""
+        from examples.text_generation import qwen4_exp_decode_parity as parity_app
+
+        class Binding:
+            def __init__(self, name, dims, binding_type):
+                self.name = name
+                self.dims = dims
+                self.type = binding_type
+
+        class TS2MockSession:
+            instances: ClassVar[list] = []
+
+            def __init__(self, qpc_path, device_ids=None):
+                del qpc_path, device_ids
+                self.aic_to_np_dtype_mapping = {
+                    "int64": np.dtype(np.int64),
+                    "f16": np.dtype(np.float16),
+                    "f32": np.dtype(np.float32),
+                }
+                self.input_names = [
+                    *parity_app.QWEN4_QAIC_HOST_INPUT_NAMES,
+                    "qsa_key_state.3",
+                    "qsa_value_state.3",
+                    "qsa_index_state.3",
+                ]
+                self.output_names = ["logits"]
+                self.bindings = [
+                    Binding("input_ids", (1, 1), "int64"),
+                    Binding("ngram_embeddings", (1, 1, 2560), "f16"),
+                    Binding("position_ids", (4, 1, 1), "int64"),
+                    Binding("qsa_key_state.3", parity_app.QWEN4_QAIC_STATE_SHAPES["qsa_key_state.3"], "f16"),
+                    Binding("qsa_value_state.3", parity_app.QWEN4_QAIC_STATE_SHAPES["qsa_value_state.3"], "f16"),
+                    Binding("qsa_index_state.3", parity_app.QWEN4_QAIC_STATE_SHAPES["qsa_index_state.3"], "f16"),
+                    Binding("logits", parity_app.QWEN4_QAIC_LOGITS_SHAPE, "f32"),
+                ]
+                self.binding_index_map = {binding.name: index for index, binding in enumerate(self.bindings)}
+                self.events = []
+                self.instances.append(self)
+
+            def skip_buffers(self, names):
+                self.events.append(("skip_buffers", names))
+
+            def set_buffers(self, buffers):
+                self.events.append(("set_buffers", tuple(buffers)))
+
+        with patch.object(parity_app, "QAICInferenceSession", TS2MockSession):
+            parity_app.Qwen4ExpQAICDecodeRunner("mock-ts2.qpc")
+
+        assert TS2MockSession.instances[-1].events == [
+            (
+                "skip_buffers",
+                ["qsa_key_state.3", "qsa_value_state.3", "qsa_index_state.3"],
+            ),
+            ("set_buffers", ("logits",)),
+        ]
+
+    def test_qwen4_exp_qaic_runner_skips_two_layer_retained_bindings(self):
+        """A two-layer QPC exposes only GDN and PLE retained state."""
+        from examples.text_generation import qwen4_exp_decode_parity as parity_app
+
+        class Binding:
+            def __init__(self, name, dims, binding_type):
+                self.name = name
+                self.dims = dims
+                self.type = binding_type
+
+        two_layer_states = parity_app.QWEN4_RETAINED_STATE_NAMES[:5]
+        two_layer_outputs = [f"{name}_RetainedState" for name in two_layer_states]
+
+        class TwoLayerMockSession:
+            instances: ClassVar[list] = []
+
+            def __init__(self, qpc_path, device_ids=None):
+                del qpc_path, device_ids
+                self.input_names = [*parity_app.QWEN4_QAIC_HOST_INPUT_NAMES, *two_layer_states]
+                self.output_names = ["logits", *two_layer_outputs]
+                self.bindings = [
+                    Binding("input_ids", (1, 1), "int64"),
+                    Binding("ngram_embeddings", (1, 1, 2560), "f16"),
+                    Binding("position_ids", (4, 1, 1), "int64"),
+                    *[Binding(name, parity_app.QWEN4_QAIC_STATE_SHAPES[name], "f16") for name in two_layer_states],
+                    Binding("logits", parity_app.QWEN4_QAIC_LOGITS_SHAPE, "f32"),
+                    *[Binding(name, (1,), "f16") for name in two_layer_outputs],
+                ]
+                self.binding_index_map = {binding.name: index for index, binding in enumerate(self.bindings)}
+                self.events = []
+                self.instances.append(self)
+
+            def skip_buffers(self, names):
+                self.events.append(("skip_buffers", names))
+
+            def set_buffers(self, buffers):
+                self.events.append(("set_buffers", tuple(buffers)))
+
+        with patch.object(parity_app, "QAICInferenceSession", TwoLayerMockSession):
+            parity_app.Qwen4ExpQAICDecodeRunner("mock-two-layer.qpc")
+
+        assert TwoLayerMockSession.instances[-1].events == [
+            ("skip_buffers", [*two_layer_states, *two_layer_outputs]),
+            ("set_buffers", ("logits",)),
+        ]
+
+    def test_qwen4_exp_prompt_prefill_discards_intermediate_logits_and_generates_from_final_logits(self):
+        """Known prompt successors bypass logits until the final prompt token."""
+        from examples.text_generation import qwen4_exp_decode_parity as parity_app
+
+        next_by_input = {13: 2, 2: 3, 3: 4}
+        run_calls = []
+        comparisons = []
+
+        def run_token(token_id, position):
+            run_calls.append((token_id, position))
+            logits = np.zeros((1, 1, 5), dtype=np.float32)
+            logits[..., next_by_input.get(token_id, 0)] = 1
+            return logits, logits.copy(), logits.copy()
+
+        def compare_logits(phase, position, input_token, hf_logits, qeff_logits, qaic_logits):
+            del qeff_logits, qaic_logits
+            comparisons.append((phase, position, input_token))
+            return int(np.asarray(hf_logits).argmax(axis=-1).reshape(-1)[0])
+
+        generated, events = parity_app._run_prompt_and_generation_loop(
+            prompt_token_ids=[11, 12, 13],
+            generation_steps=3,
+            run_token=run_token,
+            compare_logits=compare_logits,
+        )
+
+        assert run_calls == [(11, 0), (12, 1), (13, 2), (2, 3), (3, 4)]
+        assert comparisons == [("prompt-final", 2, 13), ("generation", 3, 2), ("generation", 4, 3)]
+        assert generated == [2, 3, 4]
+        assert [event["compared"] for event in events] == [False, False, True, True, True]
+        assert [event["next_token"] for event in events[:2]] == [12, 13]
+
+    def _transform_and_inputs(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpForCausalLM
+
+        model, config = make_tiny_qwen4_exp()
+        model, applied = KVCacheTransform.apply(model)
+        assert applied
+        assert isinstance(model, QEffQwen4ExpForCausalLM)
+        inputs = model.get_dummy_inputs(batch_size=1)
+        return model, config, inputs
+
+    def test_qwen4_exp_schedule_and_retained_state_abi(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import qeff_prepare_qwen4_exp_mrope
+
+        model, config, inputs = self._transform_and_inputs()
+        assert [layer.layer_type for layer in model.model.layers] == [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "qwen_sparse_attention",
+        ]
+        expected_names = [
+            "gdn_conv_state.0",
+            "gdn_recurrent_state.0",
+            "gdn_conv_state.1",
+            "gdn_recurrent_state.1",
+            "ple_conv_state.1",
+            "gdn_conv_state.2",
+            "gdn_recurrent_state.2",
+            "qsa_key_state.3",
+            "qsa_value_state.3",
+            "qsa_index_state.3",
+            "qsa_partial_state.3",
+        ]
+        assert model.get_retained_state_names() == expected_names
+        assert model.get_onnx_past_key_value_names(1) == expected_names[2:5]
+        assert model.get_onnx_past_key_value_names(3) == expected_names[7:]
+        assert model.get_output_names()[1:] == [f"{name}_RetainedState" for name in expected_names]
+        assert set(expected_names) <= set(model.get_onnx_dynamic_axes())
+        assert inputs["ngram_embeddings"].shape == (1, 1, config.ple_embed_dim)
+        assert inputs["past_key_values"][0][1].dtype == torch.float32
+        assert inputs["past_key_values"][3][3].dtype == inputs["ngram_embeddings"].dtype
+        assert isinstance(model.model.sin_cached, torch.nn.Parameter)
+        assert isinstance(model.model.cos_cached, torch.nn.Parameter)
+        assert model.model.sin_cached.shape == model.model.cos_cached.shape
+        assert model.model.sin_cached.shape[0] == config.max_position_embeddings
+        mrope_position_ids = inputs["position_ids"][1:]
+        cos, sin = qeff_prepare_qwen4_exp_mrope(
+            model.model.cos_cached,
+            model.model.sin_cached,
+            mrope_position_ids,
+            config.rope_parameters.get("mrope_section", [11, 11, 10]),
+        )
+        assert cos.shape == sin.shape == (1, 1, config.head_dim)
+        shifted_cos, _ = qeff_prepare_qwen4_exp_mrope(
+            model.model.cos_cached,
+            model.model.sin_cached,
+            mrope_position_ids + 1,
+            config.rope_parameters.get("mrope_section", [11, 11, 10]),
+        )
+        assert not torch.equal(cos, shifted_cos)
+
+    def test_qwen4_exp_decode_accepts_legacy_cache_and_masks_future_qsa_slots(self):
+        model, config, inputs = self._transform_and_inputs()
+        legacy = tuple(tuple(state.clone() for state in layer) for layer in inputs["past_key_values"])
+        gdn = model.model.layers[0].linear_attn
+        qsa = model.model.layers[3].self_attn
+        with (
+            patch.object(gdn, "forward", wraps=gdn.forward) as gdn_forward,
+            patch.object(qsa, "forward", wraps=qsa.forward) as qsa_forward,
+        ):
+            output = model(
+                input_ids=inputs["input_ids"],
+                ngram_embeddings=inputs["ngram_embeddings"],
+                position_ids=inputs["position_ids"],
+                past_key_values=legacy,
+            )
+        assert output.logits.shape == (1, 1, config.vocab_size)
+        assert isinstance(output.past_key_values, tuple)
+        assert gdn_forward.call_args.kwargs["position_embeddings"] is not None
+        assert qsa_forward.call_args.args[1][0].shape[-1] == config.head_dim
+
+        cache = model.qeff_cache_from_legacy(legacy)
+        cache.qsa_value_states[3][:, :, 7].fill_(1000)
+        hidden_states = model.model.embed_tokens(inputs["input_ids"])
+        position_embeddings = model.model.rotary_emb(hidden_states, inputs["position_ids"][1:])
+        cache.position_ids = inputs["position_ids"][1:]
+        with_future, _ = model.model.layers[3].self_attn(hidden_states, position_embeddings, past_key_values=cache)
+        cache = model.qeff_cache_from_legacy(legacy)
+        cache.position_ids = inputs["position_ids"][1:]
+        without_future, _ = model.model.layers[3].self_attn(hidden_states, position_embeddings, past_key_values=cache)
+        torch.testing.assert_close(with_future, without_future)
+
+    def test_qwen4_exp_compile_contract_uses_decode_specializations_and_bf16_states(self):
+        model, _, _ = self._transform_and_inputs()
+
+        specializations = model.get_specializations(batch_size=1, prefill_seq_len=32, ctx_len=8)
+        assert specializations == [
+            {"batch_size": 1, "seq_len": 1, "ctx_len": 8, "pooled_ctx_len": 4},
+            {"batch_size": 1, "seq_len": 1, "ctx_len": 8, "pooled_ctx_len": 4},
+        ]
+
+        custom_io = model.get_custom_io()
+        retained_names = model.get_retained_state_names()
+        assert set(custom_io) == {
+            name for state_name in retained_names for name in (state_name, f"{state_name}_RetainedState")
+        }
+        assert set(custom_io.values()) == {"float16"}
+
+        mxint8_custom_io = model.get_custom_io(dtype="mxint8", mxint8_kv_cache=True)
+        for state_name in retained_names:
+            expected_dtype = "mxint8" if state_name.startswith("qsa_") else "float16"
+            assert mxint8_custom_io[state_name] == expected_dtype
+            assert mxint8_custom_io[f"{state_name}_RetainedState"] == expected_dtype
+
+    def test_qwen4_exp_host_ngram_lookup_matches_reference_hash_and_tracks_history(self, tmp_path):
+        """The host lookup follows upstream PLE IDs without retaining a table in QEff."""
+        import json
+
+        from safetensors.torch import save_file
+
+        from QEfficient.transformers.models.qwen4_exp.host_ngram import HostNGramHistory, ShardedNGramLookup
+
+        model, config = make_tiny_qwen4_exp()
+        reference = model.model.layers[1].ple.ple_embedding
+        with torch.no_grad():
+            reference.ngram_embedding.weight.copy_(
+                torch.arange(reference.ngram_embedding.weight.numel(), dtype=torch.float32).view_as(
+                    reference.ngram_embedding.weight
+                )
+            )
+        table_key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight"
+        save_file({table_key: reference.ngram_embedding.weight}, tmp_path / "table.safetensors")
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {table_key: "table.safetensors"}})
+        )
+        history = HostNGramHistory(config.ngram_size, config.eos_token_id)
+        lookup = ShardedNGramLookup(config, tmp_path)
+        input_ids = torch.tensor([[3]])
+        expected = reference(input_ids, past_key_values=None)
+        actual = lookup.lookup(input_ids, history)
+        torch.testing.assert_close(actual, expected)
+        assert actual.shape == (1, 1, config.ple_embed_dim)
+        assert history.token_ids.tolist() == [[3]]
 
 
 # ---------------------------------------------------------------------------

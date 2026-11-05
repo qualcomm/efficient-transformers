@@ -9,6 +9,7 @@ import gc
 import warnings
 from collections.abc import Callable
 from types import MethodType
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -20,6 +21,21 @@ from transformers.models.codegen.modeling_codegen import (
 )
 from transformers.models.deberta_v2.modeling_deberta_v2 import (
     DisentangledSelfAttention,
+)
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    DeepseekV4Attention,
+    DeepseekV4DecoderLayer,
+    DeepseekV4Experts,
+    DeepseekV4ForCausalLM,
+    DeepseekV4HashRouter,
+    DeepseekV4HyperConnection,
+    DeepseekV4HyperHead,
+    DeepseekV4MLP,
+    DeepseekV4Model,
+    DeepseekV4RMSNorm,
+    DeepseekV4SparseMoeBlock,
+    DeepseekV4TopKRouter,
+    DeepseekV4UnweightedRMSNorm,
 )
 from transformers.models.falcon.modeling_falcon import (
     FalconAttention,
@@ -69,6 +85,17 @@ from transformers.models.glm4_moe.modeling_glm4_moe import (
     Glm4MoeRMSNorm,
     Glm4MoeRotaryEmbedding,
     Glm4MoeTopkRouter,
+)
+from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+    GlmMoeDsaAttention,
+    GlmMoeDsaDecoderLayer,
+    GlmMoeDsaForCausalLM,
+    GlmMoeDsaIndexer,
+    GlmMoeDsaModel,
+    GlmMoeDsaMoE,
+    GlmMoeDsaRMSNorm,
+    GlmMoeDsaRotaryEmbedding,
+    GlmMoeDsaTopkRouter,
 )
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block, GPT2LMHeadModel, GPT2Model
 from transformers.models.gpt_bigcode.modeling_gpt_bigcode import (
@@ -131,6 +158,19 @@ from transformers.models.llava.modeling_llava import (
 )
 from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextForConditionalGeneration,
+)
+from transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+    MiniMaxM3SparseForConditionalGeneration,
+    MiniMaxM3VLAttention,
+    MiniMaxM3VLDecoderLayer,
+    MiniMaxM3VLDenseMLP,
+    MiniMaxM3VLForCausalLM,
+    MiniMaxM3VLIndexer,
+    MiniMaxM3VLRMSNorm,
+    MiniMaxM3VLRotaryEmbedding,
+    MiniMaxM3VLSparseMoeBlock,
+    MiniMaxM3VLTextModel,
+    MiniMaxM3VLTopKRouter,
 )
 from transformers.models.mistral.modeling_mistral import (
     MistralAttention,
@@ -242,6 +282,16 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeVisionAttention,
     Qwen3_5MoeVisionModel,
 )
+from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    Qwen4ExpForCausalLM,
+    Qwen4ExpTextAttention,
+    Qwen4ExpTextDecoderLayer,
+    Qwen4ExpTextExperts,
+    Qwen4ExpTextGatedDeltaNet,
+    Qwen4ExpTextModel,
+    Qwen4ExpTextPLELayer,
+    Qwen4ExpTextSparseMoeBlock,
+)
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeAttention,
     Qwen3MoeDecoderLayer,
@@ -344,6 +394,21 @@ from QEfficient.transformers.models.dflash_draft.modeling_dflash_draft import (
     QEffDFlashForCausalLM,
     QEffDFlashModel,
 )
+from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    QEffDeepseekV4Attention,
+    QEffDeepseekV4DecoderLayer,
+    QEffDeepseekV4Experts,
+    QEffDeepseekV4ForCausalLM,
+    QEffDeepseekV4HashRouter,
+    QEffDeepseekV4HyperConnection,
+    QEffDeepseekV4HyperHead,
+    QEffDeepseekV4MLP,
+    QEffDeepseekV4Model,
+    QEffDeepseekV4RMSNorm,
+    QEffDeepseekV4SparseMoeBlock,
+    QEffDeepseekV4TopKRouter,
+    QEffDeepseekV4UnweightedRMSNorm,
+)
 from QEfficient.transformers.models.falcon.modeling_falcon import (
     QEffFalconAttention,
     QEffFalconDecoderLayer,
@@ -390,6 +455,17 @@ from QEfficient.transformers.models.glm4_moe.modeling_glm4_moe import (
     QEffGlm4MoeMoE,
     QEffGlm4MoeRotaryEmbedding,
     QEffGlm4MoeTopkRouter,
+)
+from QEfficient.transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+    QEffGlmMoeDsaAttention,
+    QEffGlmMoeDsaDecoderLayer,
+    QEffGlmMoeDsaForCausalLM,
+    QEffGlmMoeDsaIndexer,
+    QEffGlmMoeDsaModel,
+    QEffGlmMoeDsaMoE,
+    QEffGlmMoeDsaRMSNorm,
+    QEffGlmMoeDsaRotaryEmbedding,
+    QEffGlmMoeDsaTopkRouter,
 )
 from QEfficient.transformers.models.gpt2.modeling_gpt2 import (
     QEffGPT2Attention,
@@ -481,6 +557,18 @@ from QEfficient.transformers.models.llava.modeling_llava import (
 from QEfficient.transformers.models.llava_next.modeling_llava_next import (
     QEffLlavaNextDecoderWrapper,
     QEffLlavaNextForConditionalGeneration,
+)
+from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+    QEffMiniMaxM3SparseForConditionalGeneration,
+    QEffMiniMaxM3VLAttention,
+    QEffMiniMaxM3VLDecoderLayer,
+    QEffMiniMaxM3VLDenseMLP,
+    QEffMiniMaxM3VLForCausalLM,
+    QEffMiniMaxM3VLIndexer,
+    QEffMiniMaxM3VLRotaryEmbedding,
+    QEffMiniMaxM3VLSparseMoeBlock,
+    QEffMiniMaxM3VLTextModel,
+    QEffMiniMaxM3VLTopKRouter,
 )
 from QEfficient.transformers.models.mistral.modeling_mistral import (
     QEffMistralAttention,
@@ -594,6 +682,16 @@ from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     QEffQwen3_5MoeVisionAttention,
     QEffQwen3_5MoeVisionModel,
 )
+from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    QEffQwen4ExpForCausalLM,
+    QEffQwen4ExpTextAttention,
+    QEffQwen4ExpTextDecoderLayer,
+    QEffQwen4ExpTextExperts,
+    QEffQwen4ExpTextGatedDeltaNet,
+    QEffQwen4ExpTextModel,
+    QEffQwen4ExpTextPLELayer,
+    QEffQwen4ExpTextSparseMoeBlock,
+)
 from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import (
     QEffQwen3MoeAttention,
     QEffQwen3MoeDecoderLayer,
@@ -650,7 +748,6 @@ from QEfficient.transformers.models.whisper.modeling_whisper import (
 from QEfficient.transformers.moe import (
     MoEFlavour,
     QEffMoEBlockMixin,
-    pack_moe_weights_for_expert_parallel,
     unpack_moe_weights_from_expert_parallel,
 )
 from QEfficient.transformers.post_processing import build_and_attach_mlp, model_type_registry
@@ -710,6 +807,10 @@ class CustomOpsTransform(ModuleMappingTransform):
         Qwen3VLMoeTextRMSNorm: CustomRMSNormAIC,
         Qwen3VLTextRMSNorm: CustomRMSNormAIC,
         Glm4MoeRMSNorm: CustomRMSNormAIC,
+        GlmMoeDsaRMSNorm: QEffGlmMoeDsaRMSNorm,
+        DeepseekV4RMSNorm: QEffDeepseekV4RMSNorm,
+        DeepseekV4UnweightedRMSNorm: QEffDeepseekV4UnweightedRMSNorm,
+        MiniMaxM3VLRMSNorm: GemmaCustomRMSNormAIC,
         Wav2Vec2Encoder: QEffWav2Vec2Encoder,
         Wav2Vec2EncoderStableLayerNorm: QEffWav2Vec2EncoderStableLayerNorm,
         # BERT-family: replace _create_attention_masks (uses create_bidirectional_mask,
@@ -731,12 +832,31 @@ class CustomOpsTransform(ModuleMappingTransform):
 
 class KVCacheTransform(ModuleMappingTransform):
     _module_mapping = {
+        # DeepSeek V4
+        DeepseekV4ForCausalLM: QEffDeepseekV4ForCausalLM,
+        DeepseekV4Model: QEffDeepseekV4Model,
+        DeepseekV4DecoderLayer: QEffDeepseekV4DecoderLayer,
+        DeepseekV4Attention: QEffDeepseekV4Attention,
+        DeepseekV4SparseMoeBlock: QEffDeepseekV4SparseMoeBlock,
+        DeepseekV4Experts: QEffDeepseekV4Experts,
+        DeepseekV4TopKRouter: QEffDeepseekV4TopKRouter,
+        DeepseekV4HashRouter: QEffDeepseekV4HashRouter,
+        DeepseekV4HyperConnection: QEffDeepseekV4HyperConnection,
+        DeepseekV4HyperHead: QEffDeepseekV4HyperHead,
+        DeepseekV4MLP: QEffDeepseekV4MLP,
         # GLMMoe
         Glm4MoeModel: QEffGlm4MoeModel,
         Glm4MoeForCausalLM: QEffGlm4MoeForCausalLM,
         Glm4MoeAttention: QEffGlm4MoeAttention,
         Glm4MoeDecoderLayer: QEffGlm4MoeDecoderLayer,
         Glm4MoeRotaryEmbedding: QEffGlm4MoeRotaryEmbedding,
+        # GLM-MoE-DSA
+        GlmMoeDsaModel: QEffGlmMoeDsaModel,
+        GlmMoeDsaForCausalLM: QEffGlmMoeDsaForCausalLM,
+        GlmMoeDsaAttention: QEffGlmMoeDsaAttention,
+        GlmMoeDsaDecoderLayer: QEffGlmMoeDsaDecoderLayer,
+        GlmMoeDsaRotaryEmbedding: QEffGlmMoeDsaRotaryEmbedding,
+        GlmMoeDsaIndexer: QEffGlmMoeDsaIndexer,
         # CodeGen
         CodeGenAttention: QEffCodeGenAttention,
         CodeGenBlock: QEffCodeGenBlock,
@@ -804,6 +924,17 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen3VLVisionModel: QEffQwen3VLVisionModel,
         Qwen3VLTextModel: QEffQwen3VLTextModel,
         Qwen3VLTextRotaryEmbedding: QEffQwen3VLTextRotaryEmbedding,
+        # MiniMaxM3VL
+        MiniMaxM3SparseForConditionalGeneration: QEffMiniMaxM3SparseForConditionalGeneration,
+        MiniMaxM3VLAttention: QEffMiniMaxM3VLAttention,
+        MiniMaxM3VLDecoderLayer: QEffMiniMaxM3VLDecoderLayer,
+        MiniMaxM3VLDenseMLP: QEffMiniMaxM3VLDenseMLP,
+        MiniMaxM3VLForCausalLM: QEffMiniMaxM3VLForCausalLM,
+        MiniMaxM3VLIndexer: QEffMiniMaxM3VLIndexer,
+        MiniMaxM3VLRotaryEmbedding: QEffMiniMaxM3VLRotaryEmbedding,
+        MiniMaxM3VLSparseMoeBlock: QEffMiniMaxM3VLSparseMoeBlock,
+        MiniMaxM3VLTextModel: QEffMiniMaxM3VLTextModel,
+        MiniMaxM3VLTopKRouter: QEffMiniMaxM3VLTopKRouter,
         # Gemma2
         Gemma2Attention: QEffGemma2Attention,
         Gemma2DecoderLayer: QEffGemma2DecoderLayer,
@@ -909,6 +1040,15 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen3_5MoeAttention: QEffQwen3_5MoeAttention,
         Qwen3_5MoeVisionAttention: QEffQwen3_5MoeVisionAttention,
         Qwen3_5MoeVisionModel: QEffQwen3_5MoeVisionModel,
+        # Qwen4-Exp text-only decode
+        Qwen4ExpForCausalLM: QEffQwen4ExpForCausalLM,
+        Qwen4ExpTextModel: QEffQwen4ExpTextModel,
+        Qwen4ExpTextDecoderLayer: QEffQwen4ExpTextDecoderLayer,
+        Qwen4ExpTextAttention: QEffQwen4ExpTextAttention,
+        Qwen4ExpTextGatedDeltaNet: QEffQwen4ExpTextGatedDeltaNet,
+        Qwen4ExpTextPLELayer: QEffQwen4ExpTextPLELayer,
+        Qwen4ExpTextSparseMoeBlock: QEffQwen4ExpTextSparseMoeBlock,
+        Qwen4ExpTextExperts: QEffQwen4ExpTextExperts,
         # Qwen2.5 VL
         Qwen2_5_VLForConditionalGeneration: QEffQwen_2_5_vl_ForConditionalGeneration,
         Qwen2_5_VLModel: QEffQwen2_5_VLModel,
@@ -1363,6 +1503,90 @@ class VlmNoKVOffloadTransform(ModuleMappingTransform):
     }
 
 
+class PagedAttentionMinimax(PytorchTransform):
+    """Install the paged indexer local-position layout for MiniMax models."""
+
+    @classmethod
+    def apply(cls, model: nn.Module, qaic_config, ctx_len) -> tuple[nn.Module, bool]:
+        transformed = False
+        for module in model.modules():
+            if not isinstance(module, QEffMiniMaxM3VLIndexer):
+                continue
+            config = module.config
+
+            def get_config(name, default=None):
+                return qaic_config.get(name, getattr(config, name, default))
+
+            num_kv_blocks = get_config("indexer_num_blocks")
+            if num_kv_blocks is None:
+                num_kv_blocks = get_config("num_kv_blocks")
+            indexer_cp = get_config("msa_indexer_cp", 1)
+            indexer_dp = get_config("msa_indexer_dp", 1)
+            indexer_hkv = get_config("indexer_n_head", 1)
+            page_block_size = get_config("page_block_size", config.index_block_size)
+            num_logical_pages = get_config("msa_indexer_num_logical_pages", get_config("num_logical_pages"))
+            num_cores = get_config("num_cores_per_device", 1)
+            if ctx_len is None or num_kv_blocks is None:
+                raise ValueError("Paged MiniMax attention requires ctx_len and num_kv_blocks.")
+            if page_block_size != config.index_block_size:
+                raise ValueError("Paged MiniMax decode requires page_block_size == index_block_size.")
+            logical_ctx_len = ctx_len if num_logical_pages is None else int(num_logical_pages) * page_block_size
+            if logical_ctx_len < ctx_len:
+                raise ValueError(
+                    f"num_logical_pages ({num_logical_pages}) with page_block_size ({page_block_size}) "
+                    f"cannot hold ctx_len ({ctx_len})."
+                )
+            logical_kv_block_size = logical_ctx_len // num_kv_blocks
+            kv_block_size = logical_kv_block_size // indexer_cp
+            num_groups_blk = kv_block_size // page_block_size
+            if num_groups_blk % num_cores:
+                raise ValueError("Paged MiniMax indexer groups must divide evenly across cores.")
+            groups_per_core = num_groups_blk // num_cores
+            tokens_per_core = groups_per_core * page_block_size
+            rows = indexer_dp * indexer_cp * indexer_hkv
+            t_idx = torch.arange(tokens_per_core, device=next(module.parameters()).device).view(
+                1, 1, 1, 1, tokens_per_core
+            )
+            core_idx = torch.arange(num_cores, device=t_idx.device).view(1, 1, num_cores, 1, 1)
+            cp_idx = torch.arange(indexer_cp, device=t_idx.device).view(1, indexer_cp, 1, 1, 1)
+            local_group = (t_idx // page_block_size) * num_cores + core_idx
+            local_pos = (
+                local_group * (indexer_cp * page_block_size) + cp_idx * page_block_size + t_idx % page_block_size
+            ).to(torch.int32)
+            local_pos = (
+                local_pos.view(1, 1, indexer_cp, 1, num_cores, 1, tokens_per_core)
+                .expand(1, indexer_dp, indexer_cp, indexer_hkv, num_cores, 1, tokens_per_core)
+                .reshape(1, rows, num_cores, 1, tokens_per_core)
+            )
+            module.register_buffer("indexer_paged_local_pos", local_pos)
+            if indexer_dp > 1:
+                module.register_buffer(
+                    "indexer_paged_q_proj_weight",
+                    module.q_proj.weight.detach().repeat(indexer_dp, 1),
+                    persistent=False,
+                )
+                module.register_buffer(
+                    "indexer_paged_k_proj_weight",
+                    module.k_proj.weight.detach().repeat(indexer_dp, 1),
+                    persistent=False,
+                )
+                if module.q_proj.bias is not None:
+                    module.register_buffer(
+                        "indexer_paged_q_proj_bias",
+                        module.q_proj.bias.detach().repeat(indexer_dp),
+                        persistent=False,
+                    )
+                if module.k_proj.bias is not None:
+                    module.register_buffer(
+                        "indexer_paged_k_proj_bias",
+                        module.k_proj.bias.detach().repeat(indexer_dp),
+                        persistent=False,
+                    )
+            module.indexer_paged_projection_dp = indexer_dp
+            transformed = True
+        return model, transformed
+
+
 class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
     _match_class_replace_method = {}
     _match_string_replace_method = {
@@ -1456,6 +1680,21 @@ class KVCacheExternalModuleMapperTransform(ExternalModuleMapperTransform):
         "DeepseekV3RMSNorm": {
             "forward": QEffDeepseekV3CustomRMSNormAIC.forward,
         },
+        "MiniMaxM3SparseForConditionalGeneration": {"forward": QEffMiniMaxM3SparseForConditionalGeneration.forward},
+        "MiniMaxM3VLForCausalLM": {
+            "forward": QEffMiniMaxM3VLForCausalLM.forward,
+            "get_submodules_for_export": QEffMiniMaxM3VLForCausalLM.get_submodules_for_export,
+        },
+        "MiniMaxM3VLTextModel": {
+            "forward": QEffMiniMaxM3VLTextModel.forward,
+            "__qeff_init__": QEffMiniMaxM3VLTextModel.__qeff_init__,
+        },
+        "MiniMaxM3VLDecoderLayer": {"forward": QEffMiniMaxM3VLDecoderLayer.forward},
+        "MiniMaxM3VLDenseMLP": {"forward": QEffMiniMaxM3VLDenseMLP.forward},
+        "MiniMaxM3VLAttention": {"forward": QEffMiniMaxM3VLAttention.forward},
+        "MiniMaxM3VLRotaryEmbedding": {"forward": QEffMiniMaxM3VLRotaryEmbedding.forward},
+        "MiniMaxM3VLTopKRouter": {"forward": QEffMiniMaxM3VLTopKRouter.forward},
+        "MiniMaxM3VLSparseMoeBlock": {"forward": QEffMiniMaxM3VLSparseMoeBlock.forward},
     }
 
 
@@ -1535,22 +1774,80 @@ class BlockingAttentionTransform:
     _skip_classes = {}
 
     @classmethod
-    def apply(cls, model: nn.Module, attn_blocking_config) -> tuple[nn.Module, bool]:
+    def apply(
+        cls,
+        model: nn.Module,
+        attn_blocking_config,
+        *,
+        qaic_config: Optional[dict] = None,
+        batch_size: int = 1,
+        seq_len: int = 1,
+        context_length: Optional[int] = None,
+        num_devices: int = 1,
+        num_cores: int = 16,
+        prefill_only: bool = False,
+    ) -> Tuple[nn.Module, bool]:
         transformed = False
         model_config = getattr(model, "config", None) or getattr(getattr(model, "model", None), "config", None)
         model_architectures = getattr(model_config, "architectures", None) or []
+        is_glm_moe_dsa = getattr(model_config, "model_type", None) == "glm_moe_dsa" or (
+            "GlmMoeDsaForCausalLM" in model_architectures
+        )
+        glm_layer_configs = None
+        if is_glm_moe_dsa:
+            from QEfficient.transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+                QEffGlmMoeDsaAttention,
+                resolve_glm_attention_layer_configs,
+            )
+
+            glm_layer_configs = resolve_glm_attention_layer_configs(
+                model_config,
+                qaic_config,
+                batch_size=int(batch_size),
+                context_length=int(context_length or getattr(model_config, "max_position_embeddings", 1)),
+                num_devices=int(num_devices),
+                num_cores=int(num_cores),
+                seq_len=int(seq_len),
+                prefill_only=bool(prefill_only),
+            )
+            model._qeff_compile_batch_size = int(batch_size)
+            model._qeff_compile_seq_len = int(seq_len)
+            model._qeff_compile_context_length = int(
+                context_length or getattr(model_config, "max_position_embeddings", 1)
+            )
         supported_attention_classes = {
             qeff_class
             for qeff_class in KVCacheTransform._module_mapping.values()
             if qeff_class.__name__.endswith("Attention")
         }
         supported_attention_classes.add(QEffPrefillOnlyChunkedGptOssAttention)
+        supported_gated_delta_classes = {QEffQwen3_5GatedDeltaNet, QEffQwen3_5MoeGatedDeltaNet}
         for module in model.modules():
+            if is_glm_moe_dsa and isinstance(module, QEffGlmMoeDsaAttention):
+                module.attn_blocking_config = attn_blocking_config
+                module.glm_attention_config = glm_layer_configs[module.layer_idx]
+                transformed = True
+                continue
             if type(module) in cls._skip_classes:
                 warnings.warn(f"Blocking is not yet supported for {type(module)}.")
                 continue
-            if type(module) in supported_attention_classes or "DeepseekV3ForCausalLM" in model_architectures:
+            if (
+                type(module) in supported_attention_classes
+                or type(module) in supported_gated_delta_classes
+                or "DeepseekV3ForCausalLM" in model_architectures
+            ):
                 module.attn_blocking_config = attn_blocking_config
+                if isinstance(module, QEffQwen4ExpTextAttention):
+                    module.configure_qsa(
+                        getattr(attn_blocking_config, "qsa_config", None),
+                        ctx_len=getattr(attn_blocking_config, "ctx_len", None),
+                        seq_len=getattr(attn_blocking_config, "seq_len", None),
+                    )
+                    module.forward = MethodType(QEffQwen4ExpTextAttention.qsa_forward, module)
+                elif isinstance(module, QEffQwen3_5GatedDeltaNet):
+                    module.forward = MethodType(QEffQwen3_5GatedDeltaNet.forward, module)
+                elif isinstance(module, QEffQwen3_5MoeGatedDeltaNet):
+                    module.forward = MethodType(QEffQwen3_5MoeGatedDeltaNet.forward, module)
                 transformed = True
             elif module.__class__.__name__.endswith("Attention") and type(module) not in supported_attention_classes:
                 warnings.warn(f"Blocking is not yet supported for {type(module)}.")
@@ -1599,7 +1896,189 @@ class GatedDeltaConfigTransform:
             if full_state_update or bool(module.gdn_full_state_update) != full_state_update:
                 transformed = True
             module.gdn_full_state_update = full_state_update
+        return model, transformed
 
+
+class FFNBlockingTransform(PytorchTransform):
+    """Configure DeepSeek V4 routed-expert FFN tiling from ``qaic_config``."""
+
+    _VALID_MODES = {"default", "token", "weight", "token_weight"}
+
+    @classmethod
+    def apply(cls, model: nn.Module, qaic_config: Optional[dict] = None) -> Tuple[nn.Module, bool]:
+        config = qaic_config or {}
+        mode = config.get("ffn_blocking_mode", "default")
+        token_block_size = config.get("ffn_token_block_size")
+        weight_block_size = config.get("ffn_weight_block_size")
+
+        if mode not in cls._VALID_MODES:
+            raise ValueError(
+                f"qaic_config['ffn_blocking_mode'] must be one of {sorted(cls._VALID_MODES)}, got {mode!r}."
+            )
+        for key, value in (
+            ("ffn_token_block_size", token_block_size),
+            ("ffn_weight_block_size", weight_block_size),
+        ):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+                raise ValueError(f"qaic_config['{key}'] must be a positive integer when provided.")
+
+        transformed = False
+        for module in model.modules():
+            if isinstance(module, QEffDeepseekV4Experts) or callable(getattr(module, "configure_ffn_blocking", None)):
+                module.configure_ffn_blocking(mode, token_block_size, weight_block_size)
+                transformed = True
+
+        return model, transformed
+
+
+class DeepseekV4PrefillMoETransform(PytorchTransform):
+    """Configure expert-parallel routed MoE only for DeepSeek V4 prefill exports."""
+
+    @classmethod
+    def apply(
+        cls,
+        model: nn.Module,
+        *,
+        prefill_only: bool = False,
+        batch_size: int = 1,
+        num_devices: int = 1,
+        num_cores: int = DEFAULT_AIC_NUM_CORES,
+        qaic_config: dict | None = None,
+        prefill_seq_len: int | None = None,
+        hash_params: dict | None = None,
+    ) -> tuple[nn.Module, bool]:
+        modules = [module for module in model.modules() if isinstance(module, QEffDeepseekV4SparseMoeBlock)]
+        if not modules:
+            return model, False
+        if not prefill_only:
+            for module in modules:
+                module.configure_prefill_expert_parallel(enabled=False)
+            return model, True
+
+        from QEfficient.transformers.moe import MoEFlavour
+
+        moe_config = (qaic_config or {}).get("moe_config", {}) or {}
+        requested_flavour = moe_config.get("flavour")
+        if requested_flavour not in (None, MoEFlavour.EXPERT_PARALLEL.value):
+            raise NotImplementedError("DeepSeek V4 prefill supports only moe_config['flavour']='expert_parallel'.")
+        cores_per_expert = int(moe_config.get("cores_per_expert", 1))
+        tree_reduce = moe_config.get("tree_reduce", False)
+        if not isinstance(tree_reduce, bool):
+            raise TypeError("qaic_config['moe_config']['tree_reduce'] must be a boolean")
+        chunk_size = int(moe_config.get("expert_parallel_chunk_size", MOE_PREFILL_PACKED_CHUNK_SIZE))
+        if chunk_size <= 0:
+            raise ValueError("moe expert_parallel_chunk_size must be greater than zero")
+        compile_tokens = int(batch_size) * int(prefill_seq_len or ONNX_EXPORT_EXAMPLE_SEQ_LEN)
+        num_packed_chunks = max(1, -(-compile_tokens // chunk_size))
+
+        layout = None
+        for module in modules:
+            layout = _resolve_expert_parallel_layout(
+                num_experts=module.experts.num_experts,
+                num_devices=int(num_devices),
+                num_cores=int(num_cores),
+                cores_per_expert=cores_per_expert,
+            )
+            total_avl_cores, num_pipeline_stages, num_parallelized_experts, experts_per_soc = layout
+            module.configure_prefill_expert_parallel(
+                enabled=True,
+                num_pipeline_stages=num_pipeline_stages,
+                num_parallelized_experts=num_parallelized_experts,
+                num_devices=int(num_devices),
+                experts_per_soc=experts_per_soc,
+                tree_reduce=tree_reduce,
+                num_packed_chunks=num_packed_chunks,
+            )
+            module.total_avl_cores = total_avl_cores
+            module.cores_per_expert = cores_per_expert
+
+        if hash_params is not None and layout is not None:
+            total_avl_cores, num_pipeline_stages, num_parallelized_experts, _ = layout
+            hash_params["moe_prefill_flavour"] = MoEFlavour.EXPERT_PARALLEL.value
+            hash_params["moe_prefill_total_avl_cores"] = total_avl_cores
+            hash_params["moe_prefill_cores_per_expert"] = cores_per_expert
+            hash_params["moe_prefill_tree_reduce"] = tree_reduce
+            hash_params["moe_prefill_num_pipeline_stages"] = num_pipeline_stages
+            hash_params["moe_prefill_num_parallelized_experts"] = num_parallelized_experts
+            hash_params["moe_prefill_expert_parallel_chunk_size"] = chunk_size
+            hash_params["moe_prefill_num_packed_chunks"] = num_packed_chunks
+        return model, True
+
+
+class GatedDeltaConfigTransform:
+    @classmethod
+    def apply(cls, model: nn.Module, gated_delta_config: dict | None = None) -> tuple[nn.Module, bool]:
+        gated_delta_config = gated_delta_config or {}
+        full_state_update = bool(gated_delta_config.get("full_state_update", False))
+        target_modules = [module for module in model.modules() if hasattr(module, "torch_chunk_gated_delta_rule_qeff")]
+        full_state_targets = [module for module in target_modules if hasattr(module, "gdn_full_state_update")]
+        if full_state_update and not full_state_targets:
+            raise ValueError("qaic_config['gdn_full_state_update'] is not supported for this model")
+        if not target_modules:
+            return model, False
+
+        if not gated_delta_config:
+            # Preserve the legacy chunk-size reset and independently clear the
+            # model-specific full-state mode between prefill/decode compiles.
+            transformed = False
+            for module in target_modules:
+                if getattr(module, "gdn_chunk_size", 64) != 64:
+                    module.gdn_chunk_size = 64
+                    if hasattr(module, "__qeff_init__"):
+                        module.__qeff_init__()
+                    transformed = True
+            for module in full_state_targets:
+                if bool(module.gdn_full_state_update):
+                    module.gdn_full_state_update = False
+                    transformed = True
+            return model, transformed
+
+        chunk_size = gated_delta_config.get("chunk_size")
+        chunk_size = int(chunk_size) if chunk_size is not None else None
+
+        transformed = False
+        for module in target_modules:
+            if chunk_size is not None and chunk_size > 0:
+                module.gdn_chunk_size = chunk_size
+                if hasattr(module, "__qeff_init__"):
+                    module.__qeff_init__()
+                transformed = True
+        for module in full_state_targets:
+            if full_state_update or bool(module.gdn_full_state_update) != full_state_update:
+                transformed = True
+            module.gdn_full_state_update = full_state_update
+
+        return model, transformed
+
+
+class FFNBlockingTransform(PytorchTransform):
+    """Configure DeepSeek V4 routed-expert FFN tiling from ``qaic_config``."""
+
+    _VALID_MODES = {"default", "token", "weight", "token_weight"}
+
+    @classmethod
+    def apply(cls, model: nn.Module, qaic_config: Optional[dict] = None) -> Tuple[nn.Module, bool]:
+        config = qaic_config or {}
+        mode = config.get("ffn_blocking_mode", "default")
+        token_block_size = config.get("ffn_token_block_size")
+        weight_block_size = config.get("ffn_weight_block_size")
+
+        if mode not in cls._VALID_MODES:
+            raise ValueError(
+                f"qaic_config['ffn_blocking_mode'] must be one of {sorted(cls._VALID_MODES)}, got {mode!r}."
+            )
+        for key, value in (
+            ("ffn_token_block_size", token_block_size),
+            ("ffn_weight_block_size", weight_block_size),
+        ):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+                raise ValueError(f"qaic_config['{key}'] must be a positive integer when provided.")
+
+        transformed = False
+        for module in model.modules():
+            if isinstance(module, QEffDeepseekV4Experts):
+                module.configure_ffn_blocking(mode, token_block_size, weight_block_size)
+                transformed = True
         return model, transformed
 
 
@@ -1682,6 +2161,9 @@ class OptimizedMoEMapperTransform(ModuleMappingTransform):
         # GLM4-MoE
         Glm4MoeMoE: QEffGlm4MoeMoE,
         Glm4MoeTopkRouter: QEffGlm4MoeTopkRouter,
+        # GLM-MoE-DSA
+        GlmMoeDsaMoE: QEffGlmMoeDsaMoE,
+        GlmMoeDsaTopkRouter: QEffGlmMoeDsaTopkRouter,
         # Llama4
         Llama4TextMoe: QEffLlama4TextMoe,
         Llama4TextExperts: QEffLlama4TextExperts,
@@ -1709,6 +2191,8 @@ class OptimizedMoEMapperTransform(ModuleMappingTransform):
         GraniteMoeTopKRouter: QEffGraniteMoeTopKRouter,
         # Mixtral
         MixtralSparseMoeBlock: QEffMixtralSparseMoeBlock,
+        # MiniMax M3
+        MiniMaxM3VLSparseMoeBlock: QEffMiniMaxM3VLSparseMoeBlock,
     }
 
     @classmethod
@@ -1932,7 +2416,12 @@ def _replace_moe_weight_aliases(model: nn.Module, old_weights: nn.Module, new_we
 
 
 class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
-    """Pack or restore MoE weights according to the selected MoE export flavour."""
+    """Keep MoE weights canonical for every export flavour.
+
+    Expert-parallel prefill slices each pipeline slot's experts in the graph,
+    so prefill and decode can consume the same prepared checkpoint. Packed
+    weights supplied by older callers are restored to canonical here.
+    """
 
     @classmethod
     def apply(cls, model: nn.Module) -> tuple[nn.Module, bool]:
@@ -1941,26 +2430,10 @@ class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
             if not getattr(module, "weights_transformed", False):
                 continue
             weights = getattr(module, "moe_weights", None)
-            if weights is None:
+            if weights is None or getattr(module, "_qeff_original_checkpoint_layout", False):
                 continue
 
-            flavour = getattr(module, "_moe_flavour", MoEFlavour.DECODE_BMM)
-            if not isinstance(flavour, MoEFlavour):
-                flavour = MoEFlavour(flavour)
-
-            if flavour is MoEFlavour.EXPERT_PARALLEL:
-                num_pipeline_stages = getattr(module, "num_pipeline_stages", None)
-                num_parallelized_experts = getattr(module, "num_parallelized_experts", None)
-                if num_pipeline_stages is None or num_parallelized_experts is None:
-                    num_pipeline_stages = weights.gate.shape[1] if weights.gate.ndim == 4 else weights.num_experts
-                    num_parallelized_experts = weights.gate.shape[0] if weights.gate.ndim == 4 else 1
-                new_weights = pack_moe_weights_for_expert_parallel(
-                    weights,
-                    num_pipeline_stages=int(num_pipeline_stages),
-                    num_parallelized_experts=int(num_parallelized_experts),
-                )
-            else:
-                new_weights = unpack_moe_weights_from_expert_parallel(weights)
+            new_weights = unpack_moe_weights_from_expert_parallel(weights)
 
             if new_weights is weights:
                 continue
@@ -1968,6 +2441,33 @@ class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
             del weights
             gc.collect()
             transformed = True
+        return model, transformed
+
+
+class FFNBlockingTransform(PytorchTransform):
+    """Configure optional token tiling for optimized routed MoE FFNs."""
+
+    _VALID_MODES = {"default", "token", "weight", "token_weight"}
+
+    @classmethod
+    def apply(cls, model: nn.Module, qaic_config: Optional[dict] = None) -> Tuple[nn.Module, bool]:
+        config = qaic_config or {}
+        mode = config.get("ffn_blocking_mode", "default")
+        token_block_size = config.get("ffn_token_block_size")
+        if mode not in cls._VALID_MODES:
+            raise ValueError(
+                f"qaic_config['ffn_blocking_mode'] must be one of {sorted(cls._VALID_MODES)}, got {mode!r}."
+            )
+        if token_block_size is not None and (
+            not isinstance(token_block_size, int) or isinstance(token_block_size, bool) or token_block_size < 1
+        ):
+            raise ValueError("qaic_config['ffn_token_block_size'] must be a positive integer when provided.")
+
+        transformed = False
+        for module in model.modules():
+            if isinstance(module, QEffMoEBlockMixin):
+                module.configure_ffn_blocking(mode, token_block_size)
+                transformed = True
         return model, transformed
 
 
@@ -1992,6 +2492,8 @@ class OptimizedMoETransform(PytorchTransform):
         if not (mapped or external_mapped):
             return model, False
 
+        model, ffn_blocking_configured = FFNBlockingTransform.apply(model, qaic_config=qaic_config)
+
         model, weights_ready = OptimizedMoEWeightsTransform.apply(model)
         model, export_configured = OptimizedMoEExportConfigTransform.apply(
             model,
@@ -2004,7 +2506,14 @@ class OptimizedMoETransform(PytorchTransform):
             hash_params=hash_params,
         )
         _, expert_parallel_weights_ready = OptimizedMoEExpertParallelWeightsTransform.apply(model)
-        return model, mapped or external_mapped or weights_ready or export_configured or expert_parallel_weights_ready
+        return model, (
+            mapped
+            or external_mapped
+            or ffn_blocking_configured
+            or weights_ready
+            or export_configured
+            or expert_parallel_weights_ready
+        )
 
 
 class SimpleDecodeMoeTransform(OptimizedMoETransform):

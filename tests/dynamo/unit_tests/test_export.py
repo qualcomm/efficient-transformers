@@ -9,7 +9,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
+import torch
+import onnx
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
@@ -19,6 +23,7 @@ from .._helpers import (
     DTYPE,
     DYNAMO,
     DYNAMO_CAUSAL_LM_MODEL_IDS,
+    MODEL_KWARGS,
     PROMPT_LEN,
     assert_has_subfunctions,
     assert_retained_state_outputs,
@@ -28,6 +33,15 @@ from .._helpers import (
     load_tokenizer,
     skip_on_hf_model_load_error,
 )
+
+
+def _flatten_qwen4_exp_inputs(qeff_model, inputs):
+    retained = [state for layer in inputs["past_key_values"] for state in layer]
+    values = [inputs["input_ids"], inputs["ngram_embeddings"], inputs["position_ids"], *retained]
+    return {
+        name: value.detach().cpu().numpy()
+        for name, value in zip(qeff_model.get_onnx_dynamic_axes(), values, strict=True)
+    }
 
 
 @pytest.mark.dynamo
@@ -84,3 +98,106 @@ def test_dynamo_export_and_ort_parity(model_type, model_id, tmp_export_dir):
         f"HF PT vs ORT parity failed for {model_hf.__class__.__name__}: "
         f"HF={hf_tokens.flatten().tolist()}, ORT={ort_tokens.flatten().tolist()}"
     )
+
+
+@pytest.mark.dynamo
+@pytest.mark.dynamo_export
+def test_qwen4_exp_dynamo_export_and_ort_retained_state_parity(tmp_export_dir):
+    """Export the heterogeneous four-layer Qwen4-Exp decode graph through Dynamo.
+
+    Qwen4-Exp layers have different retained-state signatures (GDN, PLE, and
+    QSA), so repeated-subgraph extraction is intentionally disabled. Dynamo
+    export itself must still preserve the complete flattened ONNX ABI.
+    """
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
+
+    from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+
+    ort = pytest.importorskip("onnxruntime")
+
+    torch.manual_seed(42)
+    model, _ = make_tiny_qwen4_exp()
+    model, applied = KVCacheTransform.apply(model)
+    assert applied
+    qeff_model = QEFFAutoModelForCausalLM(model)
+    inputs = qeff_model.model.get_dummy_inputs(batch_size=2)
+
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            tmp_export_dir,
+            dynamo=True,
+            use_onnx_subfunctions=False,
+            offload_pt_weights=False,
+        )
+    )
+
+    assert onnx_path.is_file()
+    assert_retained_state_outputs(onnx_path, expected_count=11)
+    assert [item.name for item in ort.InferenceSession(str(onnx_path)).get_inputs()] == list(
+        qeff_model.model.get_onnx_dynamic_axes()
+    )
+
+    with torch.no_grad():
+        pytorch_output = qeff_model.model(**inputs)
+    ort_output = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"]).run(
+        None, _flatten_qwen4_exp_inputs(qeff_model.model, inputs)
+    )
+    expected_outputs = [
+        pytorch_output.logits.detach().cpu().numpy(),
+        *[state.detach().cpu().numpy() for layer in pytorch_output.past_key_values for state in layer],
+    ]
+    for expected, actual in zip(expected_outputs, ort_output, strict=True):
+        np.testing.assert_allclose(expected, actual, rtol=1e-4, atol=1e-5)
+
+
+def test_dynamo_export_reuses_equivalent_mixed_layer_subfunctions(tmp_export_dir):
+    """A 4-layer sliding/full-attention model must export one subfunction per distinct layer
+    type, call each one for every matching layer, and keep HF PT == ORT parity."""
+    model_id = DYNAMO_CAUSAL_LM_MODEL_IDS["gpt_oss"]
+    layer_types = ["sliding_attention", "full_attention", "sliding_attention", "full_attention"]
+    try:
+        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        config.num_hidden_layers = len(layer_types)
+        config.layer_types = layer_types
+        config.dtype = MODEL_KWARGS["torch_dtype"]
+        tokenizer = load_tokenizer(model_id)
+    except Exception as exc:
+        skip_on_model_fetch_error(exc, model_id)
+    torch.manual_seed(0)
+    model_hf = AutoModelForCausalLM.from_config(
+        config, attn_implementation=MODEL_KWARGS["attn_implementation"], dtype=MODEL_KWARGS["torch_dtype"]
+    ).eval()
+
+    from QEfficient.utils.run_utils import ApiRunner
+
+    api_runner = ApiRunner(
+        batch_size=BATCH_SIZE,
+        tokenizer=tokenizer,
+        config=model_hf.config,
+        prompt=["hello world"],
+        prompt_len=PROMPT_LEN,
+        ctx_len=CTX_LEN,
+        full_batch_size=None,
+    )
+    hf_tokens = api_runner.run_hf_model_on_pytorch(model_hf)
+
+    qeff_model = QEFFAutoModelForCausalLM(model_hf)
+    onnx_path = exported_onnx_path(
+        qeff_model.export(tmp_export_dir, dynamo=True, use_onnx_subfunctions=True, offload_pt_weights=False)
+    )
+
+    onnx_model = onnx.load(str(onnx_path), load_external_data=False)
+    layer_functions = {fn.name for fn in onnx_model.functions if "DecoderLayer" in fn.name}
+    layer_calls = [node for node in onnx_model.graph.node if node.op_type in layer_functions]
+    assert len(layer_calls) == len(layer_types), f"Expected one call per layer, got {len(layer_calls)}"
+    assert len({node.op_type for node in layer_calls}) == 2, (
+        f"Expected sliding and full attention layers to map to two distinct subfunctions, "
+        f"got {sorted({node.op_type for node in layer_calls})}"
+    )
+    for sliding_call, full_call in ((0, 1), (2, 3)):
+        assert layer_calls[sliding_call].op_type != layer_calls[full_call].op_type
+    assert layer_calls[0].op_type == layer_calls[2].op_type
+    assert layer_calls[1].op_type == layer_calls[3].op_type
+
+    ort_tokens = api_runner.run_kv_model_on_ort(str(onnx_path))
+    assert hf_tokens.flatten().tolist() == ort_tokens.flatten().tolist()

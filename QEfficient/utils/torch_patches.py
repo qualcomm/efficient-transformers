@@ -19,6 +19,12 @@ Patches kept here:
     patch that preserves nested regions and reuses only equivalent FX bodies,
     plus a post-decomposition hook that shares equivalent region bodies
     before ONNX translation (QEfficient/utils/export_subfunctions.py).
+  - isolate_invoke_subgraph_cache: avoid stale invoke_subgraph bodies when
+    repeated nested GraphModules reuse local identifiers during export.
+  - preserve_mixed_export_subfunctions: scoped PyTorch 2.13 non-strict export
+    patch that preserves nested regions and reuses only equivalent FX bodies,
+    plus a post-decomposition hook that shares equivalent region bodies
+    before ONNX translation (QEfficient/utils/export_subfunctions.py).
   - preserve_subfunction_source_lines: preserve FX source metadata while Dynamo
     retraces GraphModule subfunctions.
 
@@ -626,6 +632,285 @@ def preserve_mixed_export_subfunctions():
             utils._hop_compile_and_call = original
 
 
+_INVOKE_SUBGRAPH_CACHE_PATCH_LOCK = threading.RLock()
+_MIXED_EXPORT_PATCH_LOCK = threading.RLock()
+_MISSING_META = object()
+
+
+def _same_graph_leaf(left, right, left_names, right_names, node_map):
+    """Compare two FX argument leaves, canonicalizing symbolic values and mapping nodes."""
+    from QEfficient.utils.export_subfunctions import canonical_symbolic_expr
+
+    if isinstance(left, torch.fx.Node):
+        return node_map.get(left) is right
+    if isinstance(left, slice) or isinstance(right, slice):
+        return (
+            isinstance(left, slice)
+            and isinstance(right, slice)
+            and all(
+                _same_graph_leaf(x, y, left_names, right_names, node_map)
+                for x, y in ((left.start, right.start), (left.stop, right.stop), (left.step, right.step))
+            )
+        )
+    if isinstance(left, torch.SymInt) or isinstance(right, torch.SymInt):
+        return (
+            isinstance(left, (int, torch.SymInt))
+            and isinstance(right, (int, torch.SymInt))
+            and canonical_symbolic_expr(left, left_names) == canonical_symbolic_expr(right, right_names)
+        )
+    return left == right
+
+
+def _same_graph_structure(a, b, root=True, names=None):
+    """Compare two flat export bodies by operations, dataflow and constants.
+
+    PyTorch's comparator flattens tensor metadata with a fresh cache key per
+    tensor, so any operand with a symbolic dimension (for example a dynamic
+    context-length cache) never compares equal, and nested bodies such as loop
+    bodies may carry no ``example_value`` at all. Root placeholders are
+    compared with a symbol-renaming-invariant operand key instead, and symbolic
+    constants or ``sym_size`` reads are compared through the same renaming.
+    Nested bodies are compared structurally, since their inputs are tied to the
+    root operands.
+    """
+    from QEfficient.utils.export_subfunctions import canonical_operand_keys, canonical_symbolic_expr
+
+    if root:
+        left_inputs, right_inputs = (
+            [node.meta.get("example_value") for node in gm.graph.nodes if node.op == "placeholder"] for gm in (a, b)
+        )
+        names = ({}, {})
+        if canonical_operand_keys(left_inputs, names[0]) != canonical_operand_keys(right_inputs, names[1]):
+            return False
+    left_names, right_names = names
+    node_map = {}
+    for left, right in zip(a.graph.nodes, b.graph.nodes):
+        if left.op != right.op:
+            return False
+        if left.op == "placeholder":
+            pass
+        elif left.op in {"call_function", "call_method", "output"}:
+            if left.op != "output" and left.target != right.target:
+                return False
+            if (
+                root
+                and left.target is torch.ops.aten.sym_size.int
+                and all(
+                    isinstance(arg, torch.fx.Node)
+                    and arg.op == "placeholder"
+                    and isinstance(arg.meta.get("example_value"), torch.Tensor)
+                    for arg in (left.args[0], right.args[0])
+                )
+                and left.args[1] == right.args[1]
+            ):
+                # Either graph may read the same canonical size from a different operand.
+                dim = left.args[1]
+                left_size = left.args[0].meta["example_value"].shape[dim]
+                right_size = right.args[0].meta["example_value"].shape[dim]
+                if canonical_symbolic_expr(left_size, left_names) != canonical_symbolic_expr(right_size, right_names):
+                    return False
+                node_map[left] = right
+                continue
+            left_leaves, left_spec = pytree.tree_flatten((left.args, left.kwargs))
+            right_leaves, right_spec = pytree.tree_flatten((right.args, right.kwargs))
+            if left_spec != right_spec:
+                return False
+            for left_leaf, right_leaf in zip(left_leaves, right_leaves):
+                if not _same_graph_leaf(left_leaf, right_leaf, left_names, right_names, node_map):
+                    return False
+        elif left.op == "get_attr":
+            left_attr, right_attr = getattr(a, left.target, None), getattr(b, right.target, None)
+            if not (isinstance(left_attr, torch.fx.GraphModule) and isinstance(right_attr, torch.fx.GraphModule)):
+                return False
+            if not _same_graph_structure(left_attr, right_attr, root=False, names=names):
+                return False
+        else:
+            return False
+        node_map[left] = right
+    return True
+
+
+def _same_export_region(a, b, fake_mode, a_operands=None, b_operands=None):
+    """Conservatively identify equivalent flat, lifted-input export regions.
+
+    Tensor attributes remain unsupported, while nested GraphModule attributes
+    are compared recursively by PyTorch's graph comparator.
+
+    Actual call operands can temporarily replace each body's placeholder
+    metadata. Nested compiled regions have independent ShapeEnvs, so their
+    stored symbols cannot be compared reliably across layer calls.
+    """
+    from torch._dynamo.variables.higher_order_ops import are_same_graph_modules
+    from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
+
+    if not isinstance(a, torch.fx.GraphModule) or not isinstance(b, torch.fx.GraphModule):
+        return False
+    if a.meta.get("nested_region_config") != b.meta.get("nested_region_config"):
+        return False
+    if len(a.graph.nodes) != len(b.graph.nodes):
+        return False
+
+    for left, right in zip(a.graph.nodes, b.graph.nodes):
+        if left.op != right.op or left.op not in {
+            "placeholder",
+            "call_function",
+            "call_method",
+            "get_attr",
+            "output",
+        }:
+            return False
+        if left.op == "get_attr" and not all(
+            isinstance(getattr(module, node.target, None), torch.fx.GraphModule)
+            for module, node in ((a, left), (b, right))
+        ):
+            return False
+        if left.op == "placeholder" and not all(
+            isinstance(node.meta.get("example_value"), (torch.Tensor, torch.SymInt)) for node in (left, right)
+        ):
+            return False
+        if pytree.tree_flatten((left.args, left.kwargs))[1] != pytree.tree_flatten((right.args, right.kwargs))[1]:
+            return False
+
+    placeholders = [tuple(node for node in gm.graph.nodes if node.op == "placeholder") for gm in (a, b)]
+    operands = (a_operands, b_operands)
+    if any(args is not None and len(nodes) != len(args) for nodes, args in zip(placeholders, operands)):
+        return False
+    replacements = [
+        (node, value)
+        for nodes, args in zip(placeholders, operands)
+        if args is not None
+        for node, value in zip(nodes, args)
+    ]
+    if any(not isinstance(value, (torch.Tensor, torch.SymInt)) for _, value in replacements):
+        return False
+    saved = [(node, node.meta.get("example_value", _MISSING_META)) for node, _ in replacements]
+    try:
+        for node, value in replacements:
+            node.meta["example_value"] = value
+        # Comparing symbolic tensor metadata can otherwise record SymInt
+        # comparisons in the active export proxy trace and fail on symbols
+        # belonging to the separately compiled region.
+        with disable_proxy_modes_tracing():
+            try:
+                if are_same_graph_modules("non_strict_export", a, b, fake_mode):
+                    return True
+            except (KeyError, NotImplementedError):
+                pass
+            return _same_graph_structure(a, b)
+    finally:
+        for node, value in saved:
+            if value is _MISSING_META:
+                node.meta.pop("example_value", None)
+            else:
+                node.meta["example_value"] = value
+
+
+def _invoke_subgraph_for_export(subgraph, *operands):
+    """Invoke an export region in the current proxy trace."""
+    from torch._guards import detect_fake_mode
+    from torch._higher_order_ops.invoke_subgraph import invoke_subgraph_infer
+    from torch.fx.experimental.proxy_tensor import get_proxy_mode
+
+    mode = get_proxy_mode()
+    fake_mode = detect_fake_mode(operands)
+    cache = getattr(mode, "_invoke_subgraph_cache", None) if mode is not None else None
+    if mode is not None and fake_mode is not None and cache is not None:
+        inputs = getattr(mode, "_qeff_export_region_inputs", None)
+        if inputs is None:
+            inputs = mode._qeff_export_region_inputs = {}
+        for previous in cache:
+            previous_inputs = inputs.get(previous)
+            if previous_inputs is not None and _same_export_region(
+                previous, subgraph, fake_mode, previous_inputs, operands
+            ):
+                subgraph = previous
+                break
+        inputs.setdefault(subgraph, operands)
+
+    # The inference entrypoint allocates identifiers against the enclosing
+    # proxy trace, avoiding collisions between independently compiled regions.
+    return invoke_subgraph_infer(subgraph, *operands)
+
+
+def _export_region_backend(backend):
+    """Preserve nested regions and deduplicate only equivalent region bodies."""
+
+    def wrapped(gm, example_inputs):
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node.target is torch.ops.higher_order.invoke_subgraph:
+                node.target = _invoke_subgraph_for_export
+                node.args = (node.args[0], *node.args[2:])
+        gm.recompile()
+        return backend(gm, example_inputs)
+
+    return wrapped
+
+
+def _mixed_export_hop_compile_and_call(fn, args, kwargs):
+    """Compile one nested region without losing its enclosing export identity."""
+    from torch._dynamo.eval_frame import set_fullgraph_compiled_frame_count
+    from torch._higher_order_ops.utils import setup_compilation_env
+
+    # PyTorch's default inner compile may inline a single-use region. Keeping
+    # this disabled preserves the boundary long enough for the outer export
+    # trace to see all decoder layers and reuse equivalent bodies safely.
+    region_context = torch._dynamo.config.patch(inline_single_use_invoke_subgraph=False)
+    with region_context, setup_compilation_env() as backend:
+        old_count = set_fullgraph_compiled_frame_count(0)
+        try:
+            return torch.compile(fn, backend=_export_region_backend(backend), fullgraph=True)(*args, **(kwargs or {}))
+        finally:
+            set_fullgraph_compiled_frame_count(old_count)
+
+
+@contextmanager
+def preserve_mixed_export_subfunctions():
+    """Apply the mixed-layer non-strict export candidate when PyTorch supports it.
+
+    This is intentionally a scoped monkey patch of the private nested compile
+    hook and, when available, the ONNX preparation hook. The latter runs after
+    decomposition and before ONNX translation, when equivalent region bodies
+    can be compared using the enclosing ShapeEnv.
+    """
+    with _MIXED_EXPORT_PATCH_LOCK:
+        try:
+            utils = importlib.import_module("torch._higher_order_ops.utils")
+            original = utils._hop_compile_and_call
+        except (AttributeError, ModuleNotFoundError):
+            # PyTorch versions without this hook have a different
+            # invoke_subgraph implementation and need no QEff patch.
+            yield
+            return
+
+        def patched(fn, args, kwargs=None):
+            return _mixed_export_hop_compile_and_call(fn, args, kwargs)
+
+        try:
+            onnx_core = importlib.import_module("torch.onnx._internal.exporter._core")
+            original_prepare = onnx_core._prepare_exported_program_for_export
+        except (AttributeError, ModuleNotFoundError):
+            onnx_core = original_prepare = None
+            logger.warning(
+                "torch.onnx exporter hook '_prepare_exported_program_for_export' not found; "
+                "ONNX subfunction reuse is disabled and repeated layers may be exported as duplicates."
+            )
+
+        utils._hop_compile_and_call = patched
+        if onnx_core is not None:
+            from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
+
+            def prepare_with_reuse(*args, **kwargs):
+                return reuse_exported_subfunctions(original_prepare(*args, **kwargs))
+
+            onnx_core._prepare_exported_program_for_export = prepare_with_reuse
+        try:
+            yield
+        finally:
+            if onnx_core is not None:
+                onnx_core._prepare_exported_program_for_export = original_prepare
+            utils._hop_compile_and_call = original
+
+
 @contextmanager
 def preserve_subfunction_source_lines():
     """Preserve original FX source metadata while retracing Dynamo subfunctions.
@@ -658,6 +943,41 @@ def preserve_subfunction_source_lines():
             yield
         finally:
             module.reenter_make_fx = original
+
+
+@contextmanager
+def isolate_invoke_subgraph_cache():
+    """Avoid reusing invoke_subgraph cache entries across independent ONNX function bodies.
+
+    PyTorch names nested GraphModule bodies locally, so different parent graphs can
+    each contain an identifier like subgraph_0. During export, the invoke_subgraph
+    cache is process-global for the tracing context and is keyed by that identifier,
+    which can make a later function call a stale body with an incompatible lifted-input
+    signature.
+    """
+    with _INVOKE_SUBGRAPH_CACHE_PATCH_LOCK:
+        try:
+            from torch._guards import InvokeSubgraphCache
+        except ImportError:
+            yield
+            return
+
+        original_get_proxy = InvokeSubgraphCache.get_proxy_dispatch_entry
+        original_get_autograd = InvokeSubgraphCache.get_autograd_key_entry
+        original_get_functionalize_schema = InvokeSubgraphCache.get_functionalize_schema_entry
+
+        def _no_cached_entry(*args, **kwargs):
+            return None
+
+        InvokeSubgraphCache.get_proxy_dispatch_entry = _no_cached_entry
+        InvokeSubgraphCache.get_autograd_key_entry = _no_cached_entry
+        InvokeSubgraphCache.get_functionalize_schema_entry = _no_cached_entry
+        try:
+            yield
+        finally:
+            InvokeSubgraphCache.get_proxy_dispatch_entry = original_get_proxy
+            InvokeSubgraphCache.get_autograd_key_entry = original_get_autograd
+            InvokeSubgraphCache.get_functionalize_schema_entry = original_get_functionalize_schema
 
 
 @contextmanager

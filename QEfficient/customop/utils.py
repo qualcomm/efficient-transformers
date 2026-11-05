@@ -9,8 +9,38 @@ import torch
 
 
 def select_interface(eager_impl, custom_op_impl):
-    use_custom_op = torch._dynamo.is_compiling()
+    use_custom_op = torch.compiler.is_exporting() or torch._dynamo.is_compiling()
     return custom_op_impl if use_custom_op else eager_impl
+
+
+def _dynamo_symbolic(domain_op: str, inputs: tuple[torch.Tensor, ...], dtype: torch.dtype, shape):
+    """Emit a first-class ONNX custom node during Dynamo export.
+
+    The ``torch.library`` path is retained for ``torch.compile``.  ONNX's
+    symbolic API is more reliable for the QSA cache operators because it
+    prevents Dynamo from decomposing their eager indexing implementation.
+    """
+    output = torch.onnx.ops.symbolic(domain_op, inputs, {}, dtype=dtype, shape=shape, version=1)
+    # Weight-free Dynamo export traces model tensors on ``meta``.  ONNX
+    # symbolic outputs default to CPU unless their device is made explicit,
+    # which later causes mixed-device failures when the result is consumed by
+    # ordinary ATen operators.
+    return output.to(inputs[0].device)
+
+
+def compile_length_sequence_chunk(
+    tensor: torch.Tensor,
+    dim: int,
+    num_chunks: int,
+    chunk_idx: int,
+    compile_axis_size: int,
+) -> torch.Tensor:
+    from QEfficient.customop.sequence_chunk import CompileLengthSequenceChunkFunc
+
+    return select_interface(
+        CompileLengthSequenceChunkFunc.apply,
+        torch.ops.qefficient.compile_length_sequence_chunk,
+    )(tensor, dim, num_chunks, chunk_idx, compile_axis_size)
 
 
 # ---------------------------------------------------------------------------
@@ -30,10 +60,44 @@ def ctx_scatter(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.T
     return select_interface(CtxScatterFunc.apply, torch.ops.qefficient.ctx_scatter)(data, position_ids, updates)
 
 
+def ctx_scatter_paged_attention(
+    data: torch.Tensor, block_index: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterFuncPagedAttention
+
+    return select_interface(CtxScatterFuncPagedAttention.apply, torch.ops.qefficient.ctx_scatter_paged_attention)(
+        data, block_index, position_ids, updates
+    )
+
+
 def ctx_scatter_3d(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc3D
 
     return select_interface(CtxScatterFunc3D.apply, torch.ops.qefficient.ctx_scatter_3d)(data, position_ids, updates)
+
+
+def ctx_scatter_dp(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterDPFunc
+
+    return select_interface(CtxScatterDPFunc.apply, torch.ops.qefficient.ctx_scatter_dp)(data, position_ids, updates)
+
+
+def ctx_scatter_folded_rows(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterFoldedRowsFunc
+
+    return select_interface(CtxScatterFoldedRowsFunc.apply, torch.ops.qefficient.ctx_scatter_folded_rows)(
+        data, position_ids, updates
+    )
+
+
+def ctx_scatter_dp_cp(
+    data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor, context_parallel: int
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterDPCPFunc
+
+    return select_interface(CtxScatterDPCPFunc.apply, torch.ops.qefficient.ctx_scatter_dp_cp)(
+        data, position_ids, updates, context_parallel
+    )
 
 
 def ctx_scatter_3d_generalized(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
@@ -52,10 +116,40 @@ def ctx_scatter_3d_int(data: torch.Tensor, position_ids: torch.Tensor, updates: 
     )
 
 
+def ctx_chunk_scatter_batch(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxChunkScatterBatchFunc
+
+    return select_interface(CtxChunkScatterBatchFunc.apply, torch.ops.qefficient.ctx_chunk_scatter_batch)(
+        data, position_ids, updates
+    )
+
+
 def ctx_gather_3d(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxGatherFunc3D
 
     return select_interface(CtxGatherFunc3D.apply, torch.ops.qefficient.ctx_gather_3d)(data, ctx_indices)
+
+
+def ctx_gather_dp(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherDPFunc
+
+    return select_interface(CtxGatherDPFunc.apply, torch.ops.qefficient.ctx_gather_dp)(data, ctx_indices)
+
+
+def ctx_gather_folded_rows(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFoldedRowsFunc
+
+    return select_interface(CtxGatherFoldedRowsFunc.apply, torch.ops.qefficient.ctx_gather_folded_rows)(
+        data, ctx_indices
+    )
+
+
+def ctx_gather_dp_cp(data: torch.Tensor, ctx_indices: torch.Tensor, context_parallel: int) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherDPCPFunc
+
+    return select_interface(CtxGatherDPCPFunc.apply, torch.ops.qefficient.ctx_gather_dp_cp)(
+        data, ctx_indices, context_parallel
+    )
 
 
 def ctx_gather_3d_generalized(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
@@ -92,6 +186,106 @@ def ctx_gather_blocked_kv_batch(data: torch.Tensor, ctx_indices: torch.Tensor) -
     return select_interface(CtxGatherFuncBlockedKVBatch.apply, torch.ops.qefficient.ctx_gather_blocked_kv_batch)(
         data, ctx_indices
     )
+
+
+def ctx_paged_scatter(data, block_id, addr, updates):
+    from QEfficient.customop.ctx_scatter_gather import CtxPagedScatterFunc
+
+    if torch.compiler.is_exporting():
+        return _dynamo_symbolic(
+            "com.qualcomm.cloud::CtxPagedScatter",
+            (data, block_id, addr, updates),
+            data.dtype,
+            data.shape,
+        )
+    return select_interface(CtxPagedScatterFunc.apply, torch.ops.qefficient.ctx_paged_scatter)(
+        data, block_id, addr, updates
+    )
+
+
+def ctx_gather_blocked_kv_batch(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKVBatch
+
+    return select_interface(CtxGatherFuncBlockedKVBatch.apply, torch.ops.qefficient.ctx_gather_blocked_kv_batch)(
+        data, ctx_indices
+    )
+
+
+def ctx_gather_paged_attention(
+    data: torch.Tensor, block_indices: torch.Tensor, ctx_indices: torch.Tensor
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncPagedAttention
+
+    return select_interface(CtxGatherFuncPagedAttention.apply, torch.ops.qefficient.ctx_gather_paged_attention)(
+        data, block_indices, ctx_indices
+    )
+
+
+def ctx_paged_scatter_dp(
+    data: torch.Tensor, block_id: torch.Tensor, addr: torch.Tensor, updates: torch.Tensor
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxPagedScatterFuncDP
+
+    return select_interface(CtxPagedScatterFuncDP.apply, torch.ops.qefficient.ctx_paged_scatter_dp)(
+        data, block_id, addr, updates
+    )
+
+
+def ctx_gather_rows(data, ctx_indices):
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherRowsFunc
+
+    if torch.compiler.is_exporting():
+        return _dynamo_symbolic(
+            "com.qualcomm.cloud::CtxGatherRows",
+            (data, ctx_indices),
+            data.dtype,
+            (*ctx_indices.shape, data.shape[-1]),
+        )
+    return select_interface(CtxGatherRowsFunc.apply, torch.ops.qefficient.ctx_gather_rows)(data, ctx_indices)
+
+
+def ctx_paged_scatter_page(data: torch.Tensor, block_id: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxPagedScatterFuncPage
+
+    return select_interface(CtxPagedScatterFuncPage.apply, torch.ops.qefficient.ctx_paged_scatter_page)(
+        data, block_id, updates
+    )
+
+
+def ctx_gather_paged_kv_heads(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncPagedKVHeads
+
+    return select_interface(CtxGatherFuncPagedKVHeads.apply, torch.ops.qefficient.ctx_gather_paged_kv_heads)(
+        data, block_ids
+    )
+
+
+def ctx_gather_blocked_kv_dp(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockedKVDP
+
+    return select_interface(CtxGatherFuncBlockedKVDP.apply, torch.ops.qefficient.ctx_gather_blocked_kv_dp)(
+        data, ctx_indices
+    )
+
+
+def ctx_gather_paged_kv_dp(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncPagedKVDP
+
+    return select_interface(CtxGatherFuncPagedKVDP.apply, torch.ops.qefficient.ctx_gather_paged_kv_dp)(data, block_ids)
+
+
+def ctx_gather_block_range_kv_dp(data: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxGatherFuncBlockRangeKVDP
+
+    return select_interface(CtxGatherFuncBlockRangeKVDP.apply, torch.ops.qefficient.ctx_gather_block_range_kv_dp)(
+        data, block_ids
+    )
+
+
+def m3_ctx_scatter(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import M3CtxScatterFunc
+
+    return select_interface(M3CtxScatterFunc.apply, torch.ops.qefficient.m3_ctx_scatter)(data, position_ids, updates)
 
 
 # ---------------------------------------------------------------------------

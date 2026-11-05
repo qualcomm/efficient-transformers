@@ -20,6 +20,7 @@ Tests verify:
 All tests run on CPU only, no quantized model downloads required.
 """
 
+import torch
 
 # ---------------------------------------------------------------------------
 # Tests: Quantization Transform Importability and Structure
@@ -86,6 +87,140 @@ class TestQuantizationTransformImportability:
         from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8DeQuantLinear
 
         assert FP8DeQuantLinearToLinearTransform._match_class is FP8DeQuantLinear
+
+    def test_fp8_blockwise_grouped_linear_preserves_grouped_shape(self):
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import FP8BlockWiseDequantGroupedLinear
+
+        layer = FP8BlockWiseDequantGroupedLinear.for_fp8_layer_with_blocksize(
+            in_features=4,
+            out_features=8,
+            weight_block_size=[2, 2],
+            fmt="e4m3",
+            n_groups=2,
+            bias=False,
+        ).to_empty(device="meta")
+
+        output = layer(torch.empty(1, 2, 4, device="meta"))
+
+        assert output.shape == (1, 2, 4)
+
+    def test_fp8_blockwise_replacement_skips_incompatible_linear_shapes(self):
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
+            FP8BlockWiseDequantLinear,
+            QEffFP8Config,
+            _replace_with_fp8_dequant_linear_and_experts_if_qwen,
+        )
+
+        model = torch.nn.Module()
+        model.compatible = torch.nn.Linear(128, 128, bias=False)
+        model.incompatible = torch.nn.Linear(4096, 64, bias=False)
+
+        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
+            model,
+            quantization_config=QEffFP8Config(
+                quant_method="fp8",
+                activation_scheme="dynamic",
+                fmt="e4m3",
+                scale_fmt="ue8m0",
+                weight_block_size=[128, 128],
+            ),
+        )
+
+        assert has_been_replaced
+        assert isinstance(model.compatible, FP8BlockWiseDequantLinear)
+        assert type(model.incompatible) is torch.nn.Linear
+
+    def test_fp8_blockwise_replacement_skips_unscaled_deepseek_v4_compressor_projections(self):
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
+            FP8BlockWiseDequantLinear,
+            QEffFP8Config,
+            _get_model_specific_fp8_exclusions,
+            _replace_with_fp8_dequant_linear_and_experts_if_qwen,
+        )
+
+        model = torch.nn.Module()
+        model.config = SimpleNamespace(model_type="deepseek_v4")
+        model.regular_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn = torch.nn.Module()
+        model.self_attn.compressor = torch.nn.Module()
+        model.self_attn.compressor.kv_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn.compressor.gate_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn.compressor.indexer = torch.nn.Module()
+        model.self_attn.compressor.indexer.kv_proj = torch.nn.Linear(128, 128, bias=False)
+        model.self_attn.compressor.indexer.gate_proj = torch.nn.Linear(128, 128, bias=False)
+
+        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
+            model,
+            modules_to_not_convert=_get_model_specific_fp8_exclusions(model),
+            quantization_config=QEffFP8Config(
+                quant_method="fp8",
+                activation_scheme="dynamic",
+                fmt="e4m3",
+                scale_fmt="ue8m0",
+                weight_block_size=[128, 128],
+            ),
+        )
+
+        assert has_been_replaced
+        assert isinstance(model.regular_proj, FP8BlockWiseDequantLinear)
+        assert type(model.self_attn.compressor.kv_proj) is torch.nn.Linear
+        assert type(model.self_attn.compressor.gate_proj) is torch.nn.Linear
+        assert type(model.self_attn.compressor.indexer.kv_proj) is torch.nn.Linear
+        assert type(model.self_attn.compressor.indexer.gate_proj) is torch.nn.Linear
+
+    def test_fp8_quantizer_dequantizes_deepseek_experts_before_merging(self):
+        from transformers.conversion_mapping import WeightConverter, get_checkpoint_conversion_mapping
+        from transformers.integrations.finegrained_fp8 import Fp8Dequantize
+
+        from QEfficient.transformers.quantizers.quantizer_compressed_tensors import QEffFP8Config, QEffFP8Quantizer
+
+        quantizer = QEffFP8Quantizer(
+            QEffFP8Config(
+                quant_method="fp8",
+                activation_scheme="dynamic",
+                fmt="e4m3",
+                scale_fmt="ue8m0",
+                weight_block_size=[128, 128],
+            )
+        )
+        conversions = quantizer.update_weight_conversions(get_checkpoint_conversion_mapping("deepseek_v4"))
+        expert_converter = next(
+            conversion
+            for conversion in conversions
+            if isinstance(conversion, WeightConverter) and "mlp.experts.*.w1.weight$" in conversion.source_patterns
+        )
+
+        assert "mlp.experts.*.w1.weight_scale_inv$" in expert_converter.source_patterns
+        assert "mlp.experts.*.w3.weight_scale_inv$" in expert_converter.source_patterns
+        assert isinstance(expert_converter.operations[0], Fp8Dequantize)
+
+    def test_dp_context_scatter_and_gather_preserve_rows(self):
+        from QEfficient.customop import ctx_gather_dp, ctx_scatter_dp
+
+        cache = torch.zeros(1, 2, 4, 3)
+        positions = torch.tensor([[[1], [3]]], dtype=torch.int32)
+        updates = torch.tensor([[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]]])
+
+        updated_cache = ctx_scatter_dp(cache, positions, updates)
+        gathered = ctx_gather_dp(updated_cache, positions)
+
+        torch.testing.assert_close(gathered, updates)
+
+    def test_dp_cp_context_scatter_and_gather_preserve_global_slot_order(self):
+        from QEfficient.customop import ctx_gather_dp_cp, ctx_scatter_dp_cp
+
+        cache = torch.zeros(1, 2, 6, 1)
+        positions = torch.tensor([[[0, 1, 2], [3, 4, 5]]], dtype=torch.int32)
+        updates = torch.arange(1, 7, dtype=torch.float32).reshape(1, 2, 3, 1)
+
+        updated_cache = ctx_scatter_dp_cp(cache, positions, updates, context_parallel=2)
+        gathered = ctx_gather_dp_cp(updated_cache, positions, context_parallel=2)
+
+        torch.testing.assert_close(gathered, updates)
+        assert updated_cache[0, 0, 3, 0] == 2
+        assert updated_cache[0, 1, 5, 0] == 6
 
     def test_all_transforms_have_mutate_classmethod(self):
         from QEfficient.transformers.quantizers.quant_transforms import (

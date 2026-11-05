@@ -18,19 +18,21 @@ ops = getattr(onnxscript, "opset" + str(constants.ONNX_LEGACY_EXPORT_OPSET))
 
 @qeff_custom_op("com.qti.aisw.onnx", 1)
 def CustomRMSNorm(hidden_states: onnxscript.FLOAT, weight: onnxscript.FLOAT, epsilon: float) -> onnxscript.FLOAT:
+    hidden_states_fp32 = ops.Cast(hidden_states, to=1)
     weight = ops.Cast(weight, to=1)
-    variance = ops.ReduceMean(ops.Pow(hidden_states, 2), axes=[-1], keepdims=1)
+    variance = ops.ReduceMean(ops.Pow(hidden_states_fp32, 2), axes=[-1], keepdims=1)
     epsilon = ops.Expand(epsilon, ops.Shape(variance))
-    hidden_states = hidden_states * ops.Reciprocal(ops.Sqrt(variance + epsilon))
-    return weight * hidden_states
+    hidden_states_fp32 = hidden_states_fp32 * ops.Reciprocal(ops.Sqrt(variance + epsilon))
+    return ops.CastLike(weight * hidden_states_fp32, hidden_states)
 
 
 class CustomRMSNormFunc(torch.autograd.Function):
     @staticmethod
     def forward(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float):
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + epsilon)
-        return weight * hidden_states
+        hidden_states_fp32 = hidden_states.float()
+        variance = hidden_states_fp32.pow(2).mean(-1, keepdim=True)
+        hidden_states_fp32 = hidden_states_fp32 * torch.rsqrt(variance + epsilon)
+        return (weight.float() * hidden_states_fp32).to(dtype=hidden_states.dtype)
 
     @staticmethod
     def setup_context(ctx, inputs, outputs):

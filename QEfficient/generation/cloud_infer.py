@@ -28,6 +28,14 @@ def _public_retained_state_name(output_name: str) -> Optional[str]:
     return None
 
 
+def is_retained_state_name(name: str) -> bool:
+    """Return True when an I/O binding participates in retained-state cache flow."""
+    name = name.rsplit("/", 1)[-1]
+    return name.startswith(("past_", "conv_state.", "recurrent_state.", "compressed_", "k_pe")) or name.endswith(
+        ("_RetainedState", "_InternalRetainedState")
+    )
+
+
 def _add_basename_binding_aliases(binding_index_map: Dict[str, int], bindings) -> None:
     """Allow callers to use unprefixed I/O names for prefixed ONNX graphs."""
     for binding in bindings:
@@ -94,7 +102,7 @@ class QAICInferenceSession:
         :device_ids: List[int]. Device Ids to be used for compilation. if devices > 1, it enables multiple card setup.
         :activate: bool. If false, activation will be disabled. Default=True.
         :enable_debug_logs: bool. If True, It will enable debug logs. Default=False.
-        :data_path_timeout_ms: int. Host wait timeout (in ms) for a data-path response from the device. Default=60000 (60s).
+        :data_path_timeout_ms: int. Host wait timeout (in ms) for a data-path response from the device. Default=60_000 (60,000s).
         :kv_dma_share: bool. If True, enable the DMA-based prefill->decode KV handoff
             path (`np_run` / `np_run_pipeline` / `set_data_for_kv_handoff`). When False
             (default) the session behaves exactly as before: the handoff members are
@@ -355,6 +363,19 @@ class QAICInferenceSession:
             yield
         finally:
             self.stop_profiling()
+
+    def _release_program_after_run_failure(self) -> None:
+        """Release device resources while preserving the original execution error."""
+        try:
+            self.deactivate()
+        except Exception as cleanup_error:
+            warn(f"Failed to deactivate QAIC program after execution error: {cleanup_error}", RuntimeWarning)
+
+        try:
+            if self.program.unload() != qaicrt.QStatus.QS_SUCCESS:
+                warn("Failed to unload QAIC program after execution error", RuntimeWarning)
+        except Exception as cleanup_error:
+            warn(f"Failed to unload QAIC program after execution error: {cleanup_error}", RuntimeWarning)
 
     def _release_program_after_run_failure(self) -> None:
         """Release device resources while preserving the original execution error."""

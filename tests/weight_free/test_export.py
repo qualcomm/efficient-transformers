@@ -19,6 +19,11 @@ CPU-only. No QAIC hardware required.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+
 import numpy as np
 import onnx
 import onnxruntime
@@ -28,8 +33,10 @@ from transformers import AutoTokenizer
 
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs, resolve_weight_spec_path
+from QEfficient.exporter.weight_free.export import _build_qeff_quantization_config
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
+from QEfficient.transformers.quantizers.quantizer_compressed_tensors import QEffFP8Config
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
 
@@ -66,6 +73,80 @@ _BLOCKING_GATHER_EXPORT_MODE_CASES = {
     "hkv": {"blocking_mode": "hkv", "head_block_size": 2, "num_kv_blocks": 2},
     "hqkv": {"blocking_mode": "hqkv", "head_block_size": 2, "num_kv_blocks": 2, "num_q_blocks": 2},
 }
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_export
+@pytest.mark.parametrize("model_type,model_id,pooling", WEIGHT_FREE_EMBEDDING_MODEL_PARAMS)
+def test_weight_free_embedding_export_ort_parity(model_type, model_id, pooling, tmp_export_dir):
+    """Export an embedding model without weights and validate HF-to-ORT parity."""
+    try:
+        model_hf = load_hf_embedding_model(model_id)
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        if model_type in {"jina", "nomic"}:
+            raise
+        skip_on_model_fetch_error(exc, model_id)
+
+    inputs = tokenizer("hello world", return_tensors="pt")
+    with torch.no_grad():
+        hf_hidden_states = model_hf(**inputs).last_hidden_state
+        hf_output = POOLING_MAP[pooling](hf_hidden_states, inputs["attention_mask"])
+
+    qeff_model = QEFFAutoModel.from_pretrained(model_id, pooling=pooling, weight_free=True)
+    onnx_path = exported_onnx_path(qeff_model.export(tmp_export_dir, dynamo=True, offload_pt_weights=False))
+    assert onnx_path.is_file(), f"Expected ONNX file at {onnx_path}"
+
+    weight_spec_path = resolve_weight_spec_path(onnx_path)
+    assert weight_spec_path.is_file(), f"Expected weight spec at {weight_spec_path}"
+
+    onnx_model = onnx.load(str(onnx_path), load_external_data=False)
+    graph_input_names = [value.name for value in onnx_model.graph.input]
+    assert len(graph_input_names) == len(set(graph_input_names))
+    assert {"input_ids", "attention_mask"}.issubset(graph_input_names)
+
+    session = onnxruntime.InferenceSession(str(onnx_path))
+    session_input_names = {value.name for value in session.get_inputs()}
+    ort_inputs = {name: value.detach().cpu().numpy() for name, value in inputs.items() if name in session_input_names}
+    ort_inputs = load_weight_free_ort_inputs(weight_spec_path, ort_inputs)
+    ort_output = session.run(None, ort_inputs)[0]
+
+    np.testing.assert_allclose(
+        hf_output.detach().cpu().numpy(),
+        ort_output,
+        rtol=1e-4,
+        atol=1e-4,
+        err_msg=f"HF PT vs weight-free ORT parity failed for {model_type}",
+    )
+
+
+def test_weight_free_fp8_config_accepts_checkpoint_scale_format():
+    quantization_config = _build_qeff_quantization_config(
+        QEffFP8Config,
+        {
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "quant_method": "fp8",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    )
+
+    assert quantization_config.activation_scheme == "dynamic"
+    assert quantization_config.fmt == "e4m3"
+    assert quantization_config.scale_fmt == "ue8m0"
+    assert quantization_config.weight_block_size == [128, 128]
+
+
+def test_weight_free_checkpoint_home_uses_documented_environment_variable(tmp_path):
+    environment = {**os.environ, "QEFF_CHECKPOINT_HOME": str(tmp_path), "QEFF_WF_HOME": ""}
+    output = subprocess.check_output(
+        [sys.executable, "-c", "from QEfficient.utils.cache import QEFF_CHECKPOINT_HOME; print(QEFF_CHECKPOINT_HOME)"],
+        env=environment,
+        text=True,
+    )
+
+    assert output.strip() == str(tmp_path)
 
 
 @pytest.mark.weight_free
@@ -246,6 +327,63 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
     )
 
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
+
+
+def test_qwen4_exp_weight_free_four_layer_export_and_ort_execution(tmp_path):
+    """Export and execute a locally generated four-layer Qwen4-Exp checkpoint."""
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
+
+    from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
+    from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+
+    source_dir = tmp_path / "qwen4_exp_checkpoint"
+    source_model, _ = make_tiny_qwen4_exp()
+    source_model.save_pretrained(source_dir, safe_serialization=True)
+
+    qeff_weight_free = QEFFAutoModelForCausalLM.from_pretrained(
+        str(source_dir), weight_free=True, torch_dtype=torch.float32
+    )
+    onnx_path = exported_onnx_path(
+        qeff_weight_free.export(
+            str(tmp_path / "export"),
+            use_onnx_subfunctions=False,
+            offload_pt_weights=False,
+        )
+    )
+    weight_spec_path = resolve_weight_spec_path(onnx_path)
+    assert weight_spec_path.is_file()
+    assert json.loads(weight_spec_path.read_text())["inputs"]
+
+    graph = onnx.load(str(onnx_path), load_external_data=False)
+    assert_retained_state_outputs(onnx_path, expected_count=11)
+    computed_suffixes = {"sin_cached", "cos_cached", "inv_freq", "original_inv_freq", "_qeff_conv_positions"}
+    assert all(initializer.name.rsplit(".", 1)[-1] in computed_suffixes for initializer in graph.graph.initializer)
+
+    source_model = source_model.__class__.from_pretrained(str(source_dir)).eval()
+    source_model, _ = KVCacheTransform.apply(source_model)
+    qeff_inputs = source_model.get_dummy_inputs(batch_size=2)
+    with torch.no_grad():
+        pytorch_output = source_model(**qeff_inputs)
+
+    retained = [state for layer in qeff_inputs["past_key_values"] for state in layer]
+    runtime_inputs = {
+        name: value.detach().cpu().numpy()
+        for name, value in zip(
+            source_model.get_onnx_dynamic_axes(),
+            [qeff_inputs["input_ids"], qeff_inputs["ngram_embeddings"], qeff_inputs["position_ids"], *retained],
+            strict=True,
+        )
+    }
+    ort_inputs = load_weight_free_ort_inputs(weight_spec_path, runtime_inputs)
+    import onnxruntime as ort
+
+    ort_outputs = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"]).run(None, ort_inputs)
+    expected_outputs = [
+        pytorch_output.logits.detach().cpu().numpy(),
+        *[state.detach().cpu().numpy() for layer in pytorch_output.past_key_values for state in layer],
+    ]
+    for expected, actual in zip(expected_outputs, ort_outputs, strict=True):
+        np.testing.assert_allclose(expected, actual, rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.weight_free
