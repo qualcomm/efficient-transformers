@@ -29,7 +29,10 @@ from QEfficient.blocking.blocked_attention_forwards import (
     blocked_bhqkv_attention_forward,
     blocked_hqkv_attention_forward,
     blocked_qkv_attention_forward,
+    blocked_qkv_attention_forward_prefill_online,
     repeat_kv,
+    update_running_softmax,
+    update_running_softmax_prefill,
 )
 from QEfficient.transformers.cache_utils import QEffDynamicCache, QEffDynamicLayer
 
@@ -47,6 +50,74 @@ class _DummyModule:
 
     def __init__(self, num_key_value_groups=1):
         self.num_key_value_groups = num_key_value_groups
+
+
+class _PrefillCache:
+    def __init__(self, key, value):
+        self.key = key
+        self.value = value
+
+    def read_only_blocked_K(self, start_index, end_index, layer_idx, cache_kwargs):
+        return self.key[:, :, start_index:end_index, :]
+
+    def read_only_blocked_V(self, start_index, end_index, layer_idx, cache_kwargs):
+        return self.value[:, :, start_index:end_index, :]
+
+
+class TestRunningSoftmaxMaskedRows:
+    @staticmethod
+    def _masked_inputs():
+        current_max = torch.full((1, 1, 1), float("-inf"))
+        attn_weights_block = torch.full((1, 1, 1, 2), float("-inf"))
+        current_denominator = torch.zeros(1, 1, 1)
+        output = torch.zeros(1, 1, 1, HEAD_DIM)
+        v_block = torch.ones(1, 1, 2, HEAD_DIM)
+        return current_max, attn_weights_block, current_denominator, output, v_block
+
+    def test_decoder_running_softmax_keeps_fully_masked_rows_finite(self):
+        inputs = self._masked_inputs()
+        current_max, denominator, output = update_running_softmax(*inputs)
+
+        assert torch.equal(current_max, inputs[0])
+        assert torch.equal(denominator, inputs[2])
+        assert torch.isfinite(output).all()
+        assert torch.count_nonzero(output) == 0
+
+    def test_prefill_running_softmax_keeps_fully_masked_rows_finite(self):
+        inputs = self._masked_inputs()
+        current_max, denominator, output = update_running_softmax_prefill(*inputs)
+
+        assert torch.equal(current_max, inputs[0])
+        assert torch.equal(denominator, inputs[2])
+        assert torch.isfinite(output).all()
+        assert torch.count_nonzero(output) == 0
+
+
+class TestPrefillOnlineMaskedRows:
+    def test_masked_rows_and_invalid_values_stay_finite(self):
+        key = torch.zeros(1, 1, 2, HEAD_DIM)
+        value = torch.cat([torch.ones(1, 1, 1, HEAD_DIM), torch.full((1, 1, 1, HEAD_DIM), float("nan"))], dim=2)
+        query = torch.zeros(1, 1, 2, HEAD_DIM)
+        position_ids = torch.tensor([[0, -1]])
+
+        output, _ = blocked_qkv_attention_forward_prefill_online(
+            module=_DummyModule(),
+            query=query,
+            key=key,
+            value=value,
+            attention_mask=None,
+            scaling=SCALING,
+            num_q_blocks=1,
+            num_kv_blocks=1,
+            cache_kwargs={"position_ids": position_ids},
+            layer_idx=0,
+            past_key_value=_PrefillCache(key, value),
+            ctx_len=2,
+        )
+
+        expected = torch.cat([torch.ones(1, 1, 1, HEAD_DIM), torch.zeros(1, 1, 1, HEAD_DIM)], dim=2).transpose(1, 2)
+        assert torch.isfinite(output).all()
+        assert torch.allclose(output, expected)
 
 
 def _make_paged_cache(heads, block_size=BLOCK_SIZE, num_phys_blocks=NUM_PHYS_BLOCKS, head_dim=HEAD_DIM):
