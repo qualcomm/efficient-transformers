@@ -204,6 +204,7 @@ class TestONNXTransformsModuleStructure:
 
         assert function_name in {function.name for function in model.functions}
         onnx.checker.check_model(model)
+
     def test_glm_integer_ops_export_through_dynamo_translation_table(self):
         from onnx import AttributeProto, TensorProto
 
@@ -286,6 +287,7 @@ class TestONNXTransformsModuleStructure:
             if value.type.HasField("tensor_type")
         }
         assert (2, 16, 4) not in materialized_shapes
+
     def test_custom_op_interface_uses_custom_path_during_torch_export(self, monkeypatch):
         from QEfficient.customop.utils import select_interface
 

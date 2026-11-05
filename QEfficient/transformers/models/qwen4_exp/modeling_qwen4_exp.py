@@ -103,9 +103,7 @@ def _qeff_recompose_mrope(frequencies, mrope_section, rotary_width):
     return torch.cat((recomposed, recomposed), dim=-1)
 
 
-def qeff_prepare_qwen4_exp_mrope(
-    cos_cached, sin_cached, position_ids, mrope_section, dtype=None, rotary_width=None
-):
+def qeff_prepare_qwen4_exp_mrope(cos_cached, sin_cached, position_ids, mrope_section, dtype=None, rotary_width=None):
     """Index model-owned RoPE caches and apply Qwen4-Exp's MRoPE recomposition."""
     # Avoid integer ``aten::clamp``/ONNX Clip, which QAIC does not accept for
     # int64 tensors. Exporting the equivalent Where keeps MRoPE indexing safe.
@@ -474,17 +472,24 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         slots = torch.div(positions_dp, cp, rounding_mode="trunc")
         ways = torch.zeros_like(positions_dp) if cp == 1 else positions_dp.remainder(cp)
         rows = dp * cp * rows_per_way
-        updates_rows = updates.reshape(batch_local, dp, rows_per_way, 1, dim).unsqueeze(2).expand(
-            batch_local, dp, cp, rows_per_way, 1, dim
-        ).reshape(batch_local, rows, 1, dim)
+        updates_rows = (
+            updates.reshape(batch_local, dp, rows_per_way, 1, dim)
+            .unsqueeze(2)
+            .expand(batch_local, dp, cp, rows_per_way, 1, dim)
+            .reshape(batch_local, rows, 1, dim)
+        )
         row = torch.arange(rows, device=positions.device).reshape(dp, cp, rows_per_way)
         row = row[None].expand(batch_local, -1, -1, -1)
         owner = ways[:, :, None, None] == torch.arange(cp, device=positions.device).view(1, 1, cp, 1)
         owner = owner.expand(batch_local, dp, cp, rows_per_way)
         if valid is not None:
             owner = owner & valid.reshape(batch_local, dp, 1, 1)
-        block_ids = torch.arange(batch_local, device=positions.device).view(batch_local, 1, 1).expand(batch_local, rows, 1)
-        block_ids = torch.where(owner.reshape(batch_local, rows, 1), block_ids, torch.full_like(block_ids, torch.iinfo(torch.int32).max))
+        block_ids = (
+            torch.arange(batch_local, device=positions.device).view(batch_local, 1, 1).expand(batch_local, rows, 1)
+        )
+        block_ids = torch.where(
+            owner.reshape(batch_local, rows, 1), block_ids, torch.full_like(block_ids, torch.iinfo(torch.int32).max)
+        )
         addresses = slots[:, :, None, None].expand(batch_local, dp, cp, rows_per_way).reshape(batch_local, rows, 1)
         return ctx_paged_scatter(cache, block_ids.to(torch.int32), addresses.to(torch.int32), updates_rows)
 
@@ -543,9 +548,21 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         )[1]
         pooled = self.indexer.k_layernorm(raw.reshape(batch, -1, ratio, raw.shape[-1]).float().mean(2).to(raw.dtype))
         pooled_pos = positions[:, ::ratio]
-        index_cache = index_cache.scatter(1, torch.div(pooled_pos, ratio, rounding_mode="trunc").unsqueeze(-1).expand(-1, -1, index_cache.shape[-1]), pooled)
-        key_cache = key_cache.scatter(2, positions[:, :, None, None].expand(batch, query_len, key.shape[2], key.shape[3]).transpose(1, 2), key.transpose(1, 2))
-        value_cache = value_cache.scatter(2, positions[:, :, None, None].expand(batch, query_len, value.shape[2], value.shape[3]).transpose(1, 2), value.transpose(1, 2))
+        index_cache = index_cache.scatter(
+            1,
+            torch.div(pooled_pos, ratio, rounding_mode="trunc").unsqueeze(-1).expand(-1, -1, index_cache.shape[-1]),
+            pooled,
+        )
+        key_cache = key_cache.scatter(
+            2,
+            positions[:, :, None, None].expand(batch, query_len, key.shape[2], key.shape[3]).transpose(1, 2),
+            key.transpose(1, 2),
+        )
+        value_cache = value_cache.scatter(
+            2,
+            positions[:, :, None, None].expand(batch, query_len, value.shape[2], value.shape[3]).transpose(1, 2),
+            value.transpose(1, 2),
+        )
         scores = torch.einsum("bqhd,bkhd->bhqk", query.float(), key.float()) / math.sqrt(self.head_dim)
         causal = positions[:, None, None, :] <= positions[:, None, :, None]
         probs = scores.masked_fill(~causal, MIN_MASKED_ATTENTION_VALUE).softmax(-1).to(query.dtype)
@@ -763,11 +780,21 @@ class QEffQwen4ExpDecodeExportMixin:
                 ]
                 states = [
                     torch.zeros(
-                        (batch_size // attn_dp, attn_dp * attn_cp * config.num_key_value_heads, context // attn_cp, config.head_dim),
+                        (
+                            batch_size // attn_dp,
+                            attn_dp * attn_cp * config.num_key_value_heads,
+                            context // attn_cp,
+                            config.head_dim,
+                        ),
                         dtype=dtype,
                     ),
                     torch.zeros(
-                        (batch_size // attn_dp, attn_dp * attn_cp * config.num_key_value_heads, context // attn_cp, config.head_dim),
+                        (
+                            batch_size // attn_dp,
+                            attn_dp * attn_cp * config.num_key_value_heads,
+                            context // attn_cp,
+                            config.head_dim,
+                        ),
                         dtype=dtype,
                     ),
                     torch.zeros(
@@ -914,9 +941,7 @@ class QEffQwen4ExpDecodeExportMixin:
         batch_size = example_inputs["input_ids"].shape[0]
         dtype = self.config.torch_dtype
         seq_len = example_inputs["input_ids"].shape[1]
-        example_inputs["ngram_embeddings"] = torch.zeros(
-            (batch_size, seq_len, self.config.ple_embed_dim), dtype=dtype
-        )
+        example_inputs["ngram_embeddings"] = torch.zeros((batch_size, seq_len, self.config.ple_embed_dim), dtype=dtype)
         example_inputs["position_ids"] = torch.zeros((4, batch_size, seq_len), dtype=torch.int64)
         dynamic_axes["ngram_embeddings"] = {0: "batch_size", 1: "seq_len"}
         dynamic_axes["position_ids"] = {1: "batch_size", 2: "seq_len"}

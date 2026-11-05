@@ -32,13 +32,26 @@ from tests.unit_test.models.test_model_quickcheck import _ort_session
 
 def _tiny_minimax_m3_text_config(dtype=torch.float32, microbench=False) -> MiniMaxM3VLTextConfig:
     config = MiniMaxM3VLTextConfig(
-        vocab_size=64, hidden_size=32, intermediate_size=16, dense_intermediate_size=64,
-        shared_intermediate_size=16, num_hidden_layers=2, num_attention_heads=4,
-        num_key_value_heads=2, head_dim=8, max_position_embeddings=32, num_local_experts=4,
-        num_experts_per_tok=2, routed_scaling_factor=1.0,
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=16,
+        dense_intermediate_size=64,
+        shared_intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=32,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        routed_scaling_factor=1.0,
         layer_types=["full_attention", "minimax_m3_sparse"],
-        mlp_layer_types=["dense", "sparse"], index_n_heads=2, index_head_dim=8,
-        index_block_size=4, index_topk_blocks=2, index_local_blocks=1,
+        mlp_layer_types=["dense", "sparse"],
+        index_n_heads=2,
+        index_head_dim=8,
+        index_block_size=4,
+        index_topk_blocks=2,
+        index_local_blocks=1,
     )
     if microbench:
         config.num_hidden_layers = 1
@@ -49,9 +62,7 @@ def _tiny_minimax_m3_text_config(dtype=torch.float32, microbench=False) -> MiniM
         config.index_head_dim = 16
         config.index_block_size = 8
         config.index_topk_blocks = 1
-        config.rope_parameters = {
-            "rope_type": "default", "rope_theta": 5_000_000.0, "partial_rotary_factor": 0.5
-        }
+        config.rope_parameters = {"rope_type": "default", "rope_theta": 5_000_000.0, "partial_rotary_factor": 0.5}
     config.torch_dtype = dtype
     return config
 
@@ -59,26 +70,52 @@ def _tiny_minimax_m3_text_config(dtype=torch.float32, microbench=False) -> MiniM
 def _tiny_minimax_m3_vlm_config(microbench=False) -> MiniMaxM3VLConfig:
     text_config = _tiny_minimax_m3_text_config(microbench=microbench)
     vision_config = MiniMaxM3VLVisionConfig(
-        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2,
-        image_size=28, patch_size=14, temporal_patch_size=1, spatial_merge_size=1, num_channels=3,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        image_size=28,
+        patch_size=14,
+        temporal_patch_size=1,
+        spatial_merge_size=1,
+        num_channels=3,
     )
     return MiniMaxM3VLConfig(
-        text_config=text_config, vision_config=vision_config, image_token_index=4,
+        text_config=text_config,
+        vision_config=vision_config,
+        image_token_index=4,
         projector_hidden_size=text_config.hidden_size,
     )
 
 
 def _tiny_minimax_m3_paged_dp_cp_config():
     args = SimpleNamespace(
-        num_kv_blocks=1, attn_dp=1, attn_cp=1, indexer_num_blocks=None, msa_num_kv_blocks=None,
-        skip_kv=False, non_dynamic_cache=False, msa_indexer_dp=1, msa_indexer_cp=2,
-        msa_attn_dp=2, msa_attn_cp=2, indexer_n_head=1, num_cores=1, gqa_num_pages=1,
-        msa_indexer_num_logical_pages=2, msa_attn_num_logical_pages=2, gqa_physical_pages=8,
-        msa_indexer_physical_pages=8, msa_attn_physical_pages=8, expert_parallel_chunk_size=4,
-        cores_per_expert=1, tree_reduce=True, static_export_dims=False,
+        num_kv_blocks=1,
+        attn_dp=1,
+        attn_cp=1,
+        indexer_num_blocks=None,
+        msa_num_kv_blocks=None,
+        skip_kv=False,
+        non_dynamic_cache=False,
+        msa_indexer_dp=1,
+        msa_indexer_cp=2,
+        msa_attn_dp=2,
+        msa_attn_cp=2,
+        indexer_n_head=1,
+        num_cores=1,
+        gqa_num_pages=1,
+        msa_indexer_num_logical_pages=2,
+        msa_attn_num_logical_pages=2,
+        gqa_physical_pages=8,
+        msa_indexer_physical_pages=8,
+        msa_attn_physical_pages=8,
+        expert_parallel_chunk_size=4,
+        cores_per_expert=1,
+        tree_reduce=True,
+        static_export_dims=False,
     )
     qaic_config = _build_qaic_config(args, 8, 4, 4)
-    for key in ('moe_config', 'indexer_num_blocks', 'msa_num_kv_blocks', 'skip_kv', 'non_dynamic_cache'):
+    for key in ("moe_config", "indexer_num_blocks", "msa_num_kv_blocks", "skip_kv", "non_dynamic_cache"):
         qaic_config.pop(key)
     return qaic_config
 
@@ -90,31 +127,32 @@ def _tiny_minimax_m3_paged_decode_inputs(qeff_model):
     inputs["input_ids"] = torch.tensor([[3], [5]], dtype=torch.int64)
     inputs["position_ids"] = torch.tensor([[7], [7]], dtype=torch.int64)
     table_generator = torch.Generator(device="cpu").manual_seed(11)
-    inputs['gqa_block_table'] = build_block_table(1, 1, 2, 1, table_generator, 2)
-    inputs['msa_indexer_block_table'] = build_block_table(1, 2, 2, 2, table_generator, 2)
-    inputs['msa_attn_block_table'] = build_block_table(2, 2, 2, 2, table_generator, 2)
+    inputs["gqa_block_table"] = build_block_table(1, 1, 2, 1, table_generator, 2)
+    inputs["msa_indexer_block_table"] = build_block_table(1, 2, 2, 2, table_generator, 2)
+    inputs["msa_attn_block_table"] = build_block_table(2, 2, 2, 2, table_generator, 2)
     return inputs
 
 
 def _flatten_minimax_paged_ort_inputs(session, inputs):
     ort_inputs = {}
-    input_names = set(session.input_names) if hasattr(session, "input_names") else {
-        item.name for item in session.get_inputs()
-    }
+    input_names = (
+        set(session.input_names) if hasattr(session, "input_names") else {item.name for item in session.get_inputs()}
+    )
     for name in input_names:
         if name in inputs and torch.is_tensor(inputs[name]):
             ort_inputs[name] = inputs[name].detach().numpy()
         elif name.startswith(("past_key.", "past_value.")):
-            layer_idx = int(name.split('.')[1])
-            cache_idx = 0 if name.startswith('past_key.') else 1
-            ort_inputs[name] = inputs['past_key_values'][layer_idx][cache_idx].detach().numpy()
-        elif name.startswith('index_key.'):
-            ort_inputs[name] = inputs['index_keys'][0].detach().numpy()
+            layer_idx = int(name.split(".")[1])
+            cache_idx = 0 if name.startswith("past_key.") else 1
+            ort_inputs[name] = inputs["past_key_values"][layer_idx][cache_idx].detach().numpy()
+        elif name.startswith("index_key."):
+            ort_inputs[name] = inputs["index_keys"][0].detach().numpy()
         elif name == "index_keys":
-            ort_inputs[name] = inputs['index_keys'][0].detach().numpy()
+            ort_inputs[name] = inputs["index_keys"][0].detach().numpy()
         else:
             raise AssertionError(f"Unhandled MiniMax ORT input: {name}")
     return ort_inputs
+
 
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
@@ -279,6 +317,8 @@ def test_minimax_m3_decode_qeff_pytorch_vs_aic(tmp_path):
         session.deactivate()
 
     np.testing.assert_allclose(aic_outputs["logits"], qeff_logits, atol=1e-3, rtol=1e-3)
+
+
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
 def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):

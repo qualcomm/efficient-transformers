@@ -513,9 +513,7 @@ def main() -> None:
     full_num_layers = int(config.num_hidden_layers)
     if args.full_model and args.num_layers is not None:
         raise ValueError("Use either --full-model or --num-layers, not both.")
-    args.num_layers = full_num_layers if args.full_model else (
-        args.num_layers if args.num_layers is not None else 4
-    )
+    args.num_layers = full_num_layers if args.full_model else (args.num_layers if args.num_layers is not None else 4)
     if args.num_layers < 1 or args.num_layers > full_num_layers:
         raise ValueError(
             f"--num-layers must be between 1 and the model's full layer count ({full_num_layers}), "

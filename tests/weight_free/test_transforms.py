@@ -1546,28 +1546,42 @@ class TestWeightFreeCheckpointTransforms:
     def test_resolver_strips_vlm_wrapper_prefix_before_visual_alias(self):
         backbone = MagicMock()
         backbone.base_model_prefix = "model"
-        assert find_checkpoint_key(
-            "model.vision_model.patch_embed.proj.weight",
-            {"visual.patch_embed.proj.weight": "model.safetensors"}, backbone,
-        ) == "visual.patch_embed.proj.weight"
+        assert (
+            find_checkpoint_key(
+                "model.vision_model.patch_embed.proj.weight",
+                {"visual.patch_embed.proj.weight": "model.safetensors"},
+                backbone,
+            )
+            == "visual.patch_embed.proj.weight"
+        )
 
     def test_resolver_maps_nested_qwen35_visual_prefix(self):
         backbone = MagicMock()
         backbone.base_model_prefix = "model"
-        assert find_checkpoint_key(
-            "model.model.visual.patch_embed.proj.weight",
-            {"model.language_model.visual.patch_embed.proj.weight": "model.safetensors"}, backbone,
-        ) == "model.language_model.visual.patch_embed.proj.weight"
+        assert (
+            find_checkpoint_key(
+                "model.model.visual.patch_embed.proj.weight",
+                {"model.language_model.visual.patch_embed.proj.weight": "model.safetensors"},
+                backbone,
+            )
+            == "model.language_model.visual.patch_embed.proj.weight"
+        )
 
     def test_resolver_strips_language_model_wrapper_for_tied_vlm_weights(self):
         backbone = MagicMock()
         backbone.base_model_prefix = "model"
-        assert find_checkpoint_key(
-            "model.language_model.embed_tokens.weight", {"model.embed_tokens.weight": "model.safetensors"}, backbone
-        ) == "model.embed_tokens.weight"
-        assert find_checkpoint_key(
-            "language_model.embed_tokens.weight", {"model.embed_tokens.weight": "model.safetensors"}, backbone
-        ) == "model.embed_tokens.weight"
+        assert (
+            find_checkpoint_key(
+                "model.language_model.embed_tokens.weight", {"model.embed_tokens.weight": "model.safetensors"}, backbone
+            )
+            == "model.embed_tokens.weight"
+        )
+        assert (
+            find_checkpoint_key(
+                "language_model.embed_tokens.weight", {"model.embed_tokens.weight": "model.safetensors"}, backbone
+            )
+            == "model.embed_tokens.weight"
+        )
 
     def test_non_persistent_buffers_are_classified_as_computed(self):
         import torch.nn as nn
@@ -1580,7 +1594,8 @@ class TestWeightFreeCheckpointTransforms:
 
     def test_resolver_prefers_exact_lm_head_over_tied_embedding_alias(self):
         checkpoint_index = {
-            "lm_head.weight": "model.safetensors", "model.embed_tokens.weight": "model.safetensors",
+            "lm_head.weight": "model.safetensors",
+            "model.embed_tokens.weight": "model.safetensors",
         }
         backbone = MagicMock()
         backbone.base_model_prefix = "model"
@@ -1604,10 +1619,14 @@ class TestWeightFreeCheckpointTransforms:
         checkpoint_name = "model.vision_tower.patch_embedder.position_embedding_table"
         backbone = MagicMock()
         backbone.base_model_prefix = "model"
-        assert find_checkpoint_key(
-            "model.vision_model.patch_embedder.position_embedding_table",
-            {checkpoint_name: "model.safetensors"}, backbone,
-        ) == checkpoint_name
+        assert (
+            find_checkpoint_key(
+                "model.vision_model.patch_embedder.position_embedding_table",
+                {checkpoint_name: "model.safetensors"},
+                backbone,
+            )
+            == checkpoint_name
+        )
 
     def test_resolver_combines_router_gate_alias_with_active_transform(self):
         checkpoint_name = "model.layers.0.block_sparse_moe.router.weight"

@@ -1960,9 +1960,7 @@ class DeepseekV4PrefillMoETransform(PytorchTransform):
         moe_config = (qaic_config or {}).get("moe_config", {}) or {}
         requested_flavour = moe_config.get("flavour")
         if requested_flavour not in (None, MoEFlavour.EXPERT_PARALLEL.value):
-            raise NotImplementedError(
-                "DeepSeek V4 prefill supports only moe_config['flavour']='expert_parallel'."
-            )
+            raise NotImplementedError("DeepSeek V4 prefill supports only moe_config['flavour']='expert_parallel'.")
         cores_per_expert = int(moe_config.get("cores_per_expert", 1))
         tree_reduce = moe_config.get("tree_reduce", False)
         if not isinstance(tree_reduce, bool):
@@ -2051,6 +2049,7 @@ class GatedDeltaConfigTransform:
             module.gdn_full_state_update = full_state_update
 
         return model, transformed
+
 
 class FFNBlockingTransform(PytorchTransform):
     """Configure DeepSeek V4 routed-expert FFN tiling from ``qaic_config``."""

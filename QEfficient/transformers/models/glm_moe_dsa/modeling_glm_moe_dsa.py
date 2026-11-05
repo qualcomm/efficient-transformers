@@ -423,9 +423,7 @@ class QEffGlmMoeDsaIndexer(GlmMoeDsaIndexer):
             cache_layer = indexer_key_cache.layers[indexer_key_cache.layer_to_cache_idx[self.layer_idx]]
             layer_config = cache_layer.layout_config
             if layer_config is not None and (
-                layer_config.indexer_prefill_parallel
-                or layer_config.indexer_dp > 1
-                or layer_config.indexer_cp > 1
+                layer_config.indexer_prefill_parallel or layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1
             ):
                 weights = self.weights_proj(hidden_states.to(self.weights_proj.weight.dtype)).float()
                 weights = weights * (self.n_heads**-0.5)
@@ -937,9 +935,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
                 local_context = seq_len
             caches.append(
                 (
-                    torch.zeros(
-                        (*prefix, local_context, config.kv_lora_rank), dtype=config.torch_dtype, device=device
-                    ),
+                    torch.zeros((*prefix, local_context, config.kv_lora_rank), dtype=config.torch_dtype, device=device),
                     torch.zeros(
                         (*prefix, local_context, config.qk_rope_head_dim), dtype=config.torch_dtype, device=device
                     ),
@@ -951,11 +947,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         caches = []
         for layer_idx in self.get_indexer_cache_layers(config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
-            if (
-                layer_config.indexer_prefill_parallel
-                or layer_config.indexer_dp > 1
-                or layer_config.indexer_cp > 1
-            ):
+            if layer_config.indexer_prefill_parallel or layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
                 shape = (
                     batch_size // layer_config.indexer_dp,
                     layer_config.indexer_dp * layer_config.indexer_cp,
@@ -1004,11 +996,7 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
         indexer_axes = {}
         for layer_idx in self.get_indexer_cache_layers(self.config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
-            if (
-                layer_config.indexer_prefill_parallel
-                or layer_config.indexer_dp > 1
-                or layer_config.indexer_cp > 1
-            ):
+            if layer_config.indexer_prefill_parallel or layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
                 axes = {}
                 if layer_config.indexer_dp == 1:
                     axes[0] = batch_symbol

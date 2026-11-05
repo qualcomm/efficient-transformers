@@ -898,10 +898,7 @@ class TestQwen4ExpDecode:
                     Binding("input_ids", (1, 1), "int64"),
                     Binding("ngram_embeddings", (1, 1, 2560), "f16"),
                     Binding("position_ids", (4, 1, 1), "int64"),
-                    *[
-                        Binding(name, parity_app.QWEN4_QAIC_STATE_SHAPES[name], "f16")
-                        for name in two_layer_states
-                    ],
+                    *[Binding(name, parity_app.QWEN4_QAIC_STATE_SHAPES[name], "f16") for name in two_layer_states],
                     Binding("logits", parity_app.QWEN4_QAIC_LOGITS_SHAPE, "f32"),
                     *[Binding(name, (1,), "f16") for name in two_layer_outputs],
                 ]

@@ -95,9 +95,7 @@ class Qwen4ExpQAICDecodeRunner:
         self.session.skip_buffers(skipped_names)
         session_inputs = {_binding_basename(name): name for name in self.session.input_names}
         self.host_input_names = {
-            name: session_inputs[name]
-            for name in QWEN4_QAIC_HOST_INPUT_NAMES
-            if name in session_inputs
+            name: session_inputs[name] for name in QWEN4_QAIC_HOST_INPUT_NAMES if name in session_inputs
         }
         missing_host_inputs = set(QWEN4_QAIC_HOST_INPUT_NAMES) - set(self.host_input_names)
         if missing_host_inputs:
@@ -120,7 +118,10 @@ class Qwen4ExpQAICDecodeRunner:
     def run_step(self, input_ids: np.ndarray, ngram_embeddings: torch.Tensor, position_ids: np.ndarray) -> np.ndarray:
         inputs = {
             self.host_input_names["input_ids"]: np.asarray(input_ids, dtype=np.int64),
-            self.host_input_names["ngram_embeddings"]: ngram_embeddings.detach().cpu().numpy().astype(np.float32, copy=False),
+            self.host_input_names["ngram_embeddings"]: ngram_embeddings.detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32, copy=False),
             self.host_input_names["position_ids"]: np.asarray(position_ids, dtype=np.int64),
         }
         for name, binding_name in self.host_input_names.items():
