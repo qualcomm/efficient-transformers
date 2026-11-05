@@ -29,7 +29,6 @@ from __future__ import annotations
 import inspect
 import json
 import random
-import time
 from pathlib import Path
 
 import numpy as np
@@ -946,7 +945,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     blocking_key,
     tmp_export_dir,
     manual_cleanup,
-    record_property,
     request,
 ):
     """Check HF/QAIC parity and artifacts for weight-free VLM decode blocking.
@@ -1055,7 +1053,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     runtime_compile_options = _vlm_blocking_compile_options(model_type, blocking_key)
     decode_compile_kwargs = dict(compile_kwargs)
     decode_compile_kwargs.update(runtime_compile_options)
-    compile_start = time.perf_counter()
     if head_blocked_single_qpc_vlm_with_vision:
         vision_compile_kwargs = dict(compile_kwargs)
         vision_compile_kwargs.update(num_devices=1, user_tiled=False)
@@ -1161,15 +1158,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
             prefill_seq_len=model_config["prompt_len"],
             qaic_config=qaic_config,
         )
-    compile_seconds = time.perf_counter() - compile_start
     language_onnx = Path(qeff_model.lang_model.onnx_path)
-    qpc_size_bytes = sum(
-        file.stat().st_size
-        for qpc_path in qpc_paths.values()
-        if qpc_path
-        for file in Path(qpc_path).rglob("*")
-        if file.is_file()
-    )
 
     blocking_config = qeff_model.lang_model.hash_params.get("blocking_kwargs")
     assert blocking_config is not None
@@ -1186,12 +1175,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         model_type, language_onnx, assert_subfunctions=compile_kwargs["use_onnx_subfunctions"]
     )
     assert_blocked_kv_ops_for_mode(language_onnx, qeff_model.lang_model, blocking_key)
-
-    for name, value in {
-        "qpc_compile_seconds": compile_seconds,
-        "qpc_size_bytes": qpc_size_bytes,
-    }.items():
-        record_property(name, value)
 
     if separate_qpcs or head_blocked_single_qpc_vlm_with_vision:
         qaic_tokens = _run_vlm_three_qpc(
