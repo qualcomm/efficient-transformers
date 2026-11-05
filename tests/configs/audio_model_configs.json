@@ -1,6 +1,7 @@
 {
    "speech_seq2seq_models": [
-        "openai/whisper-tiny"
+        "openai/whisper-tiny",
+        "CohereLabs/cohere-transcribe-03-2026"
     ],
     "audio_embedding_models": [
         "facebook/wav2vec2-base-960h"
