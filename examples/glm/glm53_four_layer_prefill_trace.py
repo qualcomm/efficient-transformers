@@ -292,8 +292,7 @@ def main() -> None:
 
     if args.attention_preset not in PREFILL_ATTENTION_PRESETS:
         raise ValueError(
-            f"Unknown attention preset {args.attention_preset!r}; "
-            f"choose one of {sorted(PREFILL_ATTENTION_PRESETS)}."
+            f"Unknown attention preset {args.attention_preset!r}; choose one of {sorted(PREFILL_ATTENTION_PRESETS)}."
         )
     qaic_config = copy.deepcopy(PREFILL_ATTENTION_PRESETS[args.attention_preset])
     if args.attention_qaic_json:

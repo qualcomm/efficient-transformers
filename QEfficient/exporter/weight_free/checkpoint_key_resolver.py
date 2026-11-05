@@ -533,8 +533,10 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
         onnx_name = tied_weight_map.get(name, name)
         checkpoint_key = find_checkpoint_key(onnx_name, checkpoint_index, backbone, active_transform)
         if checkpoint_key is None:
-            if name not in model_names or _is_computed_initializer(onnx_name) or _is_non_persistent_buffer(
-                qeff_model.model, name
+            if (
+                name not in model_names
+                or _is_computed_initializer(onnx_name)
+                or _is_non_persistent_buffer(qeff_model.model, name)
             ):
                 continue
             raise ValueError(

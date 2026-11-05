@@ -265,6 +265,8 @@ def test_preserve_mixed_export_subfunctions_restores_private_hooks():
 
     assert utils._hop_compile_and_call is original_hop_compile
     assert onnx_core._prepare_exported_program_for_export is original_prepare
+
+
 def test_preserve_mixed_export_subfunctions_is_scoped_to_supported_pytorch_hook():
     utils = importlib.import_module("torch._higher_order_ops.utils")
     onnx_core = importlib.import_module("torch.onnx._internal.exporter._core")
@@ -769,6 +771,7 @@ class TestPreserveNestedCacheRetainedStateTransform:
         model = _make_minimal_glm_onnx_with_repeated_subgraph()
         assert PreserveNestedCacheRetainedStateTransform.apply(model)
         assert not PreserveNestedCacheRetainedStateTransform.apply(model)
+
     def test_preserves_v4_retained_state_with_nested_subfunction(self):
         retained_state = "past_local_kv_cache.0_InternalRetainedState"
         state_input = "past_local_kv_cache.0"
@@ -867,7 +870,14 @@ class TestPreserveNestedCacheRetainedStateTransform:
             "past_indexer_kv_cache.0_RetainedState",
         ]
         state_inputs = [name.removesuffix("_RetainedState") for name in retained_states]
-        function_outputs = ["hidden_states", "local_kv", state_inputs[1], state_inputs[2], state_inputs[4], state_inputs[5]]
+        function_outputs = [
+            "hidden_states",
+            "local_kv",
+            state_inputs[1],
+            state_inputs[2],
+            state_inputs[4],
+            state_inputs[5],
+        ]
         function = helper.make_function(
             domain="",
             fname="repeated_subgraph0",

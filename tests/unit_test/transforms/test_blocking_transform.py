@@ -614,6 +614,7 @@ class TestBlockingWrapperFallbackAndParity:
             "Original and transformed model outputs diverged for same CPU input"
         )
 
+
 def test_glm_attention_config_resolves_dense_and_dsa_layers():
     from types import SimpleNamespace
 
@@ -1137,6 +1138,7 @@ def test_glm_parallel_mla_attention_matches_flat_absorbed_attention(prefill, onl
     expected = torch.matmul(latent, per_head_v_up[0]).transpose(1, 2).contiguous()
 
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
     @pytest.mark.parametrize(
         "blocking_cfg",
         [

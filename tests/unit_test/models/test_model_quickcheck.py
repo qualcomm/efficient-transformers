@@ -2422,20 +2422,10 @@ def test_causal_lm_cpu_runtime_parity_with_api_runner(model_type, model_id, tmp_
 
 
 @pytest.mark.llm_model
-
-
 @pytest.mark.llm_model
-
-
 @pytest.mark.llm_model
-
-
 @pytest.mark.llm_model
-
-
 @pytest.mark.cpu_only
-
-
 @pytest.mark.llm_model
 @pytest.mark.accuracy
 def test_minimax_m3_paged_dp_cp_qeff_pytorch_vs_ort(tmp_path):
@@ -2482,6 +2472,8 @@ def test_minimax_m3_paged_dp_cp_qeff_pytorch_vs_ort(tmp_path):
     assert qaic_config["msa_attn_dp"] == 2
     assert qaic_config["gqa_page_block_size"] == 8
     assert qaic_config["msa_indexer_page_block_size"] == 4
+
+
 @pytest.mark.llm_model
 @pytest.mark.accuracy
 def test_minimax_m3_contiguous_dp_cp_decode_hf_qeff_pytorch_parity():
@@ -2588,6 +2580,8 @@ def test_minimax_m3_contiguous_dp_cp_decode_hf_qeff_pytorch_parity():
     assert torch.isfinite(hf_logits).all()
     assert torch.isfinite(qeff_logits).all()
     torch.testing.assert_close(qeff_logits, hf_logits, atol=1e-5, rtol=1e-5)
+
+
 @pytest.mark.llm_model
 @pytest.mark.parametrize(
     ("vlm_name", "model_id"),

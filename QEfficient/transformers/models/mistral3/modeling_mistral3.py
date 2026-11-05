@@ -36,6 +36,7 @@ except ImportError:
             position_ids.append(torch.stack([hpos_ids.flatten(), wpos_ids.flatten()], dim=-1))
         return torch.cat(position_ids, dim=0)
 
+
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.logging_utils import QEFFLogger

@@ -219,9 +219,7 @@ def ctx_paged_scatter_op(
     rows = torch.arange(updates.shape[1], device=data.device).view(1, -1, 1).expand_as(block_id)
     safe_block = torch.where(valid, block_id, torch.zeros_like(block_id)).long()
     safe_addr = addr.long().clamp(0, data.shape[2] - 1)
-    out[safe_block, rows.long(), safe_addr] = torch.where(
-        valid.unsqueeze(-1), updates, torch.zeros_like(updates)
-    )
+    out[safe_block, rows.long(), safe_addr] = torch.where(valid.unsqueeze(-1), updates, torch.zeros_like(updates))
     return out
 
 
@@ -780,6 +778,8 @@ def fp8_dequantize_blocked_op(
 @fp8_dequantize_blocked_op.register_fake
 def _(weight: torch.Tensor, scale: torch.Tensor, row_block_size: int, col_block_size: int) -> torch.Tensor:
     return torch.empty(weight.shape, dtype=scale.dtype, device=weight.device)
+
+
 @torch.library.custom_op("qefficient::glm_folded_row_gather", mutates_args=())
 def glm_folded_row_gather_op(data: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     safe = torch.where(indices == torch.iinfo(torch.int32).max, 0, indices).long()
@@ -852,9 +852,7 @@ DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.fp8_dequantize_per_tensor.default: FP8DequantizePerTensorDynamo,
     torch.ops.qefficient.fp8_dequantize_per_axis.default: FP8DequantizePerAxisDynamo,
     torch.ops.qefficient.rms_norm.default: get_dynamo_onnxscript_func(CustomRMSNorm),
-    torch.ops.qefficient.compile_length_sequence_chunk.default: get_dynamo_onnxscript_func(
-        CompileLengthSequenceChunk
-    ),
+    torch.ops.qefficient.compile_length_sequence_chunk.default: get_dynamo_onnxscript_func(CompileLengthSequenceChunk),
     torch.ops.qefficient.ctx_scatter.default: get_dynamo_onnxscript_func(CtxScatter),
     torch.ops.qefficient.ctx_scatter_paged_attention.default: get_dynamo_onnxscript_func(CtxScatterPagedAttention),
     torch.ops.qefficient.ctx_scatter_3d.default: get_dynamo_onnxscript_func(CtxScatter3D),

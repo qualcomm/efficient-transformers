@@ -593,7 +593,6 @@ class TestQEFFBaseModelGetOnnxPath:
         assert str(onnx_path_1) == str(onnx_path_2)
 
 
-
 def _bounds_to_layer_counts(bounds: List[int], total_layers: int) -> List[int]:
     """Convert exclusive-upper-bound list from _layer_partition_bounds to per-partition layer counts."""
     pts = [0] + bounds + [total_layers]
