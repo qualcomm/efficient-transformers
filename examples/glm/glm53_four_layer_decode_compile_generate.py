@@ -254,6 +254,16 @@ def resolve_runtime_dimensions(args: argparse.Namespace) -> tuple[int, int, int,
     return batch_size, ctx_len, num_devices, generation_len
 
 
+def build_decode_qaic_config(attention_preset: str, attention_qaic_json: str | None = None) -> dict[str, Any]:
+    """Build decode QAIC config with expert parallel enabled unless explicitly overridden."""
+    qaic_config = copy.deepcopy(ATTENTION_PRESETS[attention_preset])
+    # Leave the chunk size unset so the library's standard EP packing default applies.
+    qaic_config["moe_config"] = {"flavour": "expert_parallel"}
+    if attention_qaic_json:
+        qaic_config.update(json.loads(attention_qaic_json))
+    return qaic_config
+
+
 def validate_attention_runtime_dimensions(
     qaic_config: dict[str, Any],
     *,
@@ -392,6 +402,7 @@ def compile_weight_free_decode_only(
     num_cores: int,
     cache_io_dtype: str,
     user_tiled: bool,
+    use_onnx_subfunctions: bool = False,
 ):
     """Compile the validated single-token GLM weight-free specialization."""
     custom_io = {}
@@ -417,6 +428,7 @@ def compile_weight_free_decode_only(
         mxint8_kv_cache=cache_io_dtype == "mxint8",
         allow_mxint8_mdp_io=cache_io_dtype == "mxint8",
         user_tiled=user_tiled,
+        use_onnx_subfunctions=use_onnx_subfunctions,
     )
 
 
@@ -491,9 +503,7 @@ def main() -> None:
     if args.export_only and not args.weight_free:
         raise ValueError("--export-only is supported only with --weight-free.")
     args.batch_size, args.ctx_len, args.num_devices, generation_len = resolve_runtime_dimensions(args)
-    qaic_config = copy.deepcopy(ATTENTION_PRESETS[args.attention_preset])
-    if args.attention_qaic_json:
-        qaic_config.update(json.loads(args.attention_qaic_json))
+    qaic_config = build_decode_qaic_config(args.attention_preset, args.attention_qaic_json)
     if args.ffn_token_block_size is not None and args.ffn_token_block_size < 1:
         raise ValueError("--ffn-token-block-size must be a positive integer.")
     qaic_config["ffn_blocking_mode"] = args.ffn_blocking_mode
@@ -650,6 +660,7 @@ def main() -> None:
             args.num_cores,
             args.cache_io_dtype,
             args.user_tiled,
+            args.use_onnx_subfunctions,
         )
     else:
         qpc_path = qeff_model.compile(

@@ -479,6 +479,20 @@ class TestWeightFreeCheckpointTransforms:
         )
         assert resolve_runtime_dimensions(args) == (32, 8192, 32, 7)
 
+    def test_glm_decode_qaic_config_defaults_to_expert_parallel(self):
+        from examples.glm.glm53_four_layer_decode_compile_generate import build_decode_qaic_config
+
+        config = build_decode_qaic_config("dsa_cp1")
+
+        assert config["moe_config"] == {"flavour": "expert_parallel"}
+
+    def test_glm_decode_qaic_json_can_override_expert_parallel_default(self):
+        from examples.glm.glm53_four_layer_decode_compile_generate import build_decode_qaic_config
+
+        config = build_decode_qaic_config("dsa_cp1", '{"moe_config": {"flavour": "tensor_parallel"}}')
+
+        assert config["moe_config"] == {"flavour": "tensor_parallel"}
+
     def test_glm_generation_perf_metrics_are_json_safe(self):
         from examples.glm.glm53_four_layer_decode_compile_generate import serialize_qeff_perf_metrics
 
@@ -520,6 +534,7 @@ class TestWeightFreeCheckpointTransforms:
             num_cores=16,
             cache_io_dtype="mxint8",
             user_tiled=False,
+            use_onnx_subfunctions=True,
         )
 
         compile_kwargs = qeff_model._compile.call_args.kwargs
@@ -537,6 +552,7 @@ class TestWeightFreeCheckpointTransforms:
         }
         assert compile_kwargs["mxint8_kv_cache"] is True
         assert compile_kwargs["allow_mxint8_mdp_io"] is True
+        assert compile_kwargs["use_onnx_subfunctions"] is True
 
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"

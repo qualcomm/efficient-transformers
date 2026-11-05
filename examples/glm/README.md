@@ -86,9 +86,9 @@ python examples/glm/glm53_four_layer_prefill_compile.py \
   --qeff-home "$QEFF_HOME"
 ```
 
-Use `dense_prefill_parallel_online` for the online prefill variant. This compile example intentionally uses a regular
-loaded-model path. For weight-free prefill export/compile and trace capture, use
-`glm53_four_layer_prefill_trace.py` with `--weight-free`.
+Use `dense_prefill_parallel_online` for the online prefill variant. Add `--weight-free` to load the prepared
+weight-free checkpoint, and `--use-onnx-subfunctions` to enable subfunctions for both export and QAIC compilation.
+For profiling and trace capture, use `glm53_four_layer_prefill_trace.py`.
 
 Run the folded DSA prefill path with:
 

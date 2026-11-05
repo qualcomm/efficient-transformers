@@ -125,6 +125,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-dir", default=None)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--skip-compile", action="store_true")
+    parser.add_argument(
+        "--weight-free",
+        action="store_true",
+        help="Load the prepared checkpoint via weight-free export.",
+    )
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
     parser.add_argument(
         "--attention-preset", choices=sorted(PREFILL_ATTENTION_PRESETS), default="dense_prefill_parallel"
@@ -173,6 +178,15 @@ def main() -> None:
     torch.set_grad_enabled(False)
 
     config = AutoConfig.from_pretrained(args.model_id, cache_dir=args.hf_cache)
+    # Weight-free export clears quantization_config, but GLM FP8 checkpoint
+    # preparation still needs its source block geometry.
+    source_quantization_config = getattr(config, "quantization_config", None)
+    if isinstance(source_quantization_config, dict):
+        source_block_size = source_quantization_config.get("weight_block_size")
+    else:
+        source_block_size = getattr(source_quantization_config, "weight_block_size", None)
+    if source_block_size is not None:
+        config._glm_moe_dsa_weight_block_size = tuple(int(size) for size in source_block_size)
     config.num_hidden_layers = args.num_layers
     if args.attention_preset.startswith("dense"):
         config.layer_types = ["full_attention"] * args.num_layers
@@ -196,25 +210,36 @@ def main() -> None:
                 "qeff_home": os.environ["QEFF_HOME"],
                 "attention_preset": args.attention_preset,
                 "qaic_config": qaic_config,
-                "weight_free": False,
+                "weight_free": args.weight_free,
             }
         ),
         flush=True,
     )
 
-    install_partial_fp8_dequant_patch()
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        args.model_id,
-        config=config,
-        cache_dir=args.hf_cache,
-        torch_dtype=args.torch_dtype,
-        device_map="cpu",
-    ).eval()
-    qeff_model = QEFFAutoModelForCausalLM(
-        hf_model,
-        pretrained_model_name_or_path=args.model_id,
-        qaic_config=qaic_config,
-    )
+    if args.weight_free:
+        config.quantization_config = None
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            config=config,
+            cache_dir=args.hf_cache,
+            torch_dtype=args.torch_dtype,
+            weight_free=True,
+            qaic_config=qaic_config,
+        )
+    else:
+        install_partial_fp8_dequant_patch()
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            config=config,
+            cache_dir=args.hf_cache,
+            torch_dtype=args.torch_dtype,
+            device_map="cpu",
+        ).eval()
+        qeff_model = QEFFAutoModelForCausalLM(
+            hf_model,
+            pretrained_model_name_or_path=args.model_id,
+            qaic_config=qaic_config,
+        )
     qeff_model.transform(
         ctx_len=ctx_len,
         seq_len=args.prefill_seq_len,
@@ -240,6 +265,7 @@ def main() -> None:
 
     compile_dir = Path(args.compile_dir) if args.compile_dir is not None else Path(args.qeff_home) / "prefill_compile"
     qpc_path = qeff_model.compile(
+        onnx_path=str(onnx_path),
         compile_dir=str(compile_dir),
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=ctx_len,
@@ -249,6 +275,7 @@ def main() -> None:
         prefill_only=True,
         offload_pt_weights=False,
         user_tiled=True,
+        use_onnx_subfunctions=args.use_onnx_subfunctions,
     )
     print(json.dumps({"event": "compile_done", "qpc_path": str(qpc_path)}), flush=True)
 

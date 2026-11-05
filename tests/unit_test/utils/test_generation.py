@@ -88,6 +88,7 @@ def _make_mock_session(
 
     session.bindings = bindings
     session.binding_index_map = {b.name: i for i, b in enumerate(bindings)}
+    session.aic_to_np_dtype_mapping = {1: np.dtype(np.float32), 10: np.dtype(np.float16)}
     session.allowed_shapes = []  # use bindings dims directly
     session.input_names = [b.name for b in bindings if b.dir == "input"]
     session.output_names = [b.name for b in bindings if b.dir == "output"]
@@ -1036,6 +1037,31 @@ class TestSetOutputBuffers:
         obj._set_output_buffers(batch_size=1, sequence_length=1)
         call_args = mock_session.set_buffers.call_args[0][0]
         assert call_args["logits"].dtype == np.float32
+
+    def test_set_output_buffers_uses_qpc_float16_dtype(self):
+        obj, _, mock_session = _make_base_instance()
+        mock_session.bindings[mock_session.binding_index_map["logits"]].type = 10
+
+        obj._set_output_buffers(batch_size=2, sequence_length=4)
+
+        logits = mock_session.set_buffers.call_args[0][0]["logits"]
+        assert logits.dtype == np.float16
+        assert logits.nbytes == 2 * 4 * VOCAB_SIZE * np.dtype(np.float16).itemsize
+
+    def test_tlm_decode_output_buffer_uses_qpc_float16_dtype(self):
+        obj, _, mock_session = _make_base_instance()
+        mock_session.bindings[mock_session.binding_index_map["logits"]].type = 10
+        obj.is_tlm = True
+        obj._decode_seq_len = 1
+
+        obj.run_decode(
+            {"input_ids": np.array([[1]]), "position_ids": np.array([[0]])},
+            generation_len=1,
+            automation=True,
+        )
+
+        logits = mock_session.set_buffers.call_args[0][0]["logits"]
+        assert logits.dtype == np.float16
 
 
 # ---------------------------------------------------------------------------

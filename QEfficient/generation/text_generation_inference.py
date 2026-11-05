@@ -747,6 +747,12 @@ class QEffTextGenerationBase:
 
             _ = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
 
+    def _get_output_dtype(self, output_name: str) -> np.dtype:
+        """Return the NumPy dtype required by an output binding in the loaded QPC."""
+        binding_index = self._session.binding_index_map[output_name]
+        binding = self._session.bindings[binding_index]
+        return self._session.aic_to_np_dtype_mapping[binding.type]
+
     def _set_output_buffers(self, batch_size: int = 1, sequence_length: int = 1):
         """
         Sets the sizes of the output buffers.
@@ -756,12 +762,18 @@ class QEffTextGenerationBase:
         """
         if self.include_sampler:
             if self.return_pdfs:
-                probs_out_placeholder = np.zeros((batch_size, sequence_length, self._vocab_size), dtype=np.float32)
+                probs_out_placeholder = np.zeros(
+                    (batch_size, sequence_length, self._vocab_size), dtype=self._get_output_dtype("probs")
+                )
                 self._session.set_buffers({"probs": probs_out_placeholder})
-            next_tokens_out_placeholder = np.zeros((batch_size, sequence_length, 1), dtype=np.int64)
+            next_tokens_out_placeholder = np.zeros(
+                (batch_size, sequence_length, 1), dtype=self._get_output_dtype("next_tokens")
+            )
             self._session.set_buffers({"next_tokens": next_tokens_out_placeholder})
         else:
-            logits_out_placeholder = np.zeros((batch_size, sequence_length, self._vocab_size), dtype=np.float32)
+            logits_out_placeholder = np.zeros(
+                (batch_size, sequence_length, self._vocab_size), dtype=self._get_output_dtype("logits")
+            )
             self._session.set_buffers({"logits": logits_out_placeholder})
 
     def run_prefill(self, prompt, generation_len, prefill_logit_bs=1, decode_batch_id=None):
@@ -998,7 +1010,7 @@ class QEffTextGenerationBase:
         """
         if self.is_tlm:
             logits_out_placeholder = np.zeros(
-                (self.batch_size, self._decode_seq_len, self._vocab_size), dtype=np.float32
+                (self.batch_size, self._decode_seq_len, self._vocab_size), dtype=self._get_output_dtype("logits")
             )
             self._session.set_buffers({"logits": logits_out_placeholder})
         finished_sequences = decode_inputs["input_ids"] == self.tokenizer.eos_token_id

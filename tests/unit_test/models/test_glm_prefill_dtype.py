@@ -1,3 +1,5 @@
+import sys
+
 import ml_dtypes
 import numpy as np
 import onnx
@@ -23,6 +25,21 @@ def test_resolve_prefill_torch_dtype(name, expected):
 def test_resolve_prefill_torch_dtype_rejects_unknown_value():
     with pytest.raises(ValueError, match="Unsupported dtype"):
         resolve_prefill_torch_dtype("float8")
+
+
+def test_prefill_compile_accepts_weight_free_subfunctions(monkeypatch):
+    from examples.glm.glm53_four_layer_prefill_compile import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["glm53_four_layer_prefill_compile.py", "--weight-free", "--use-onnx-subfunctions"],
+    )
+
+    args = parse_args()
+
+    assert args.weight_free is True
+    assert args.use_onnx_subfunctions is True
 
 
 def test_onnx_bfloat16_uses_two_byte_numpy_dtype():
