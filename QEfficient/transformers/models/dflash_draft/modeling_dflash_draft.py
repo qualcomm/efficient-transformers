@@ -36,6 +36,7 @@ def _create_mask(
     # valid_kv_length: int,
     sliding_window: int | None = None,
     start_index: int | None = 0,
+    is_causal: bool = False,
 ):
     """
     Args:
@@ -44,6 +45,7 @@ def _create_mask(
         valid_kv_length: number of valid KV cache positions
         sliding_window: optional local attention window
         start_index: offset into KV cache (default 0)
+        is_causal: restrict each query to its own position and earlier keys
 
     Returns:
         attention_mask: [1, 1, num_queries, target_length]
@@ -52,12 +54,23 @@ def _create_mask(
     num_queries = position_ids.shape[1]  # = block_size (B)
     bsz = position_ids.shape[0]
 
-    kv_positions = torch.arange(start_index, start_index + target_length)
+    kv_positions = torch.arange(start_index, start_index + target_length, device=position_ids.device)
     row_max = position_ids.max(dim=-1, keepdim=True).values  # [bsz, 1]
     valid_kv_mask = kv_positions.view(1, target_length) > (start_index + row_max)  # [bsz, target_length]
 
     # ---- Step 2: Expand to [bsz, num_queries, target_length] ----
     attention_mask = valid_kv_mask.unsqueeze(1).expand(bsz, num_queries, target_length)
+
+    # Full DFlash layers see the whole noise block. Local layers use a per-query
+    # window, with causality selected from the draft config as in upstream DFlash.
+    query_positions = (start_index + position_ids).unsqueeze(-1)
+    key_positions = kv_positions.view(1, 1, target_length)
+    if is_causal:
+        attention_mask = attention_mask | (key_positions > query_positions)
+    if sliding_window is not None:
+        attention_mask = attention_mask | (key_positions <= query_positions - sliding_window)
+        if not is_causal:
+            attention_mask = attention_mask | (key_positions >= query_positions + sliding_window)
 
     # ---- Step 4: Add head dimension ----
     # Final shape: [bsz, 1, B, 3B] — broadcasts over heads in eager attention.
@@ -226,6 +239,11 @@ class QEffDFlashAttention(Qwen3Attention):
 
     def __qeff_init__(self):
         self.dflash_dlm = True
+        layer_types = getattr(self.config, "layer_types", None)
+        layer_type = layer_types[self.layer_idx] if layer_types else "full_attention"
+        is_causal = getattr(self.config, "is_causal", None)
+        self.is_causal = layer_type == "sliding_attention" if is_causal is None else bool(is_causal)
+        self.sliding_window = self.config.sliding_window if layer_type == "sliding_attention" else None
 
     def forward(
         self,
@@ -425,9 +443,17 @@ class QEffDFlashModel(Qwen3Model):
             position_ids = cache_position.unsqueeze(0)
 
         target_length = attention_mask.shape[-1] if isinstance(attention_mask, torch.Tensor) else past_seen_tokens
-        causal_mask = _create_mask(
-            position_ids=position_ids, target_length=target_length, sliding_window=self.config.sliding_window
-        )
+        attention_masks = {}
+        for decoder_layer in self.layers:
+            attn = decoder_layer.self_attn
+            mask_key = (attn.is_causal, attn.sliding_window)
+            if mask_key not in attention_masks:
+                attention_masks[mask_key] = _create_mask(
+                    position_ids=position_ids,
+                    target_length=target_length,
+                    sliding_window=attn.sliding_window,
+                    is_causal=attn.is_causal,
+                )
         hidden_states = noise_embeds
 
         # Pass the whole rotary table down: `qeff_apply_rope_two_streams` gathers it once per stream
@@ -448,7 +474,9 @@ class QEffDFlashModel(Qwen3Model):
                 hidden_states,
                 target_hidden=target_hidden,
                 position_ids_target=position_ids_target,
-                attention_mask=causal_mask,
+                attention_mask=attention_masks[
+                    (decoder_layer.self_attn.is_causal, decoder_layer.self_attn.sliding_window)
+                ],
                 position_ids=position_ids,
                 past_key_value=past_key_values,
                 comp_ctx_lengths=comp_ctx_lengths,

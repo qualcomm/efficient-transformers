@@ -21,6 +21,7 @@ from QEfficient.generation.cloud_infer import (
     QAICInferenceSession,
     is_retained_state_name,
 )
+from QEfficient.generation.dflash_generation import get_qwen35_target_seq_len
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
@@ -30,8 +31,13 @@ logger = QEFFLogger.get_logger("INFRA")
 # when known; otherwise None and must be supplied via --tlm_hf_path.
 # ─────────────────────────────────────────────────────────────────────────────
 MODEL_MAP = {
+    "gpt-oss-20b": ("openai/gpt-oss-20b", "z-lab/gpt-oss-20b-DFlash"),
+    "gpt-oss-120b": ("openai/gpt-oss-120b", "z-lab/gpt-oss-120b-DFlash"),
     "gemma-4-31B-it": ("google/gemma-4-31B-it", "z-lab/gemma-4-31B-it-DFlash"),
     "Qwen3-4B": ("Qwen/Qwen3-4B", "z-lab/Qwen3-4B-DFlash-b16"),
+    "Qwen3.5-4B": ("Qwen/Qwen3.5-4B", "z-lab/Qwen3.5-4B-DFlash"),
+    "Qwen3.6-27B": ("Qwen/Qwen3.6-27B", "z-lab/Qwen3.6-27B-DFlash"),
+    "Qwen3.6-35B-A3B": ("Qwen/Qwen3.6-35B-A3B", "z-lab/Qwen3.6-35B-A3B-DFlash"),
     "Qwen3-8B": ("Qwen/Qwen3-8B", "z-lab/Qwen3-8B-DFlash-b16"),
     "Llama-3.1-8B-Instruct": ("meta-llama/Llama-3.1-8B-Instruct", "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat"),
     "Qwen3-VL-32B-Instruct": (
@@ -54,19 +60,21 @@ def _build_aliases(model_map):
 MODEL_ALIASES = _build_aliases(MODEL_MAP)
 
 
+def load_spd_session(qpc: str, devices: list[int]):
+    session = QAICInferenceSession(qpc, devices)
+    session.skip_buffers(
+        [
+            name
+            for name in session.input_names + session.output_names
+            if is_retained_state_name(name) or name.endswith("_RetainedState")
+        ]
+    )
+    return session
+
+
 def load_spd_sessions(tlm_qpc: str, dlm_qpc: str, tlm_devices: list[int], dlm_devices: list[int]):
     """Create DFlash sessions and enable retained-state cache handling."""
-    dlm_session = QAICInferenceSession(dlm_qpc, dlm_devices)
-    tlm_session = QAICInferenceSession(tlm_qpc, tlm_devices)
-    for session in (dlm_session, tlm_session):
-        session.skip_buffers(
-            [
-                name
-                for name in session.input_names + session.output_names
-                if is_retained_state_name(name) or name.endswith("_RetainedState")
-            ]
-        )
-    return dlm_session, tlm_session
+    return load_spd_session(dlm_qpc, dlm_devices), load_spd_session(tlm_qpc, tlm_devices)
 
 
 def get_spd_prompt_chunk_size(tlm_session: QAICInferenceSession) -> int:
@@ -79,9 +87,18 @@ def get_spd_prompt_chunk_size(tlm_session: QAICInferenceSession) -> int:
 
 def validate_spd_decode_specialization(tlm_session: QAICInferenceSession, block_size: int) -> None:
     """Require a TLM specialization that verifies one complete DFlash block."""
+    if "cache_commit" in getattr(tlm_session, "input_names", ()):
+        seq_len = get_qwen35_target_seq_len(tlm_session, block_size)
+        logger.info(
+            f"TLM uses concatenated replay + verification: {seq_len} input positions, {block_size} predictions."
+        )
+        return
     input_index = tlm_session.binding_index_map["input_ids"]
     sequence_lengths = sorted({shape[input_index][1][1] for shape in tlm_session.allowed_shapes})
-    logger.info(f"TLM input_ids seq_lens (allowed shapes): {sequence_lengths}")
+    if not sequence_lengths:
+        # Single-specialization QPCs report their fixed shape only in bindings.
+        sequence_lengths = [tlm_session.bindings[input_index].dims[1]]
+    logger.info(f"TLM input_ids seq_lens: {sequence_lengths}")
     if block_size not in sequence_lengths:
         raise ValueError(
             f"TLM QPC has no decode specialization with seq_len={block_size} "
@@ -160,12 +177,57 @@ def load_dflash_checkpoint(dflash_model_path: str) -> tuple[dict, dict]:
     return state_dict, cfg
 
 
+def get_dflash_block_size(config):
+    config = config if isinstance(config, dict) else config.to_dict()
+    block_size = config.get("block_size") or config.get("dflash_config", {}).get("block_size")
+    if not isinstance(block_size, int) or block_size < 2:
+        raise ValueError("DFlash config must provide block_size >= 2 (top-level or under dflash_config).")
+    return block_size
+
+
 def read_dlm_meta(dlm_repo: str, hf_token: str | None = None):
     """Load a DFlash checkpoint and return (state_dict, target_layer_ids, block_size)."""
     state_dict, cfg = load_dflash_checkpoint(dlm_repo)
     target_layer_ids = cfg.get("dflash_config", {}).get("target_layer_ids", [])
-    block_size = cfg.get("block_size", None)
+    block_size = get_dflash_block_size(cfg)
     return state_dict, target_layer_ids, block_size
+
+
+def get_dlm_target_seq_len(block_size: int, prefill_seq_len: int, target_seq_len: int | None = None) -> int:
+    target_seq_len = prefill_seq_len if target_seq_len is None else target_seq_len
+    if (
+        type(prefill_seq_len) is not int
+        or prefill_seq_len < block_size
+        or type(target_seq_len) is not int
+        or target_seq_len < block_size
+        or target_seq_len % block_size
+        or prefill_seq_len % target_seq_len
+    ):
+        raise ValueError("DLM target length must be a positive multiple of block_size and divide prefill_seq_len.")
+    return target_seq_len
+
+
+def validate_dlm_target_seq_len(dlm_session, block_size, prefill_seq_len, requested=None):
+    index = dlm_session.binding_index_map["target_hidden"]
+    width = int(dlm_session.bindings[index].dims[1])
+    get_dlm_target_seq_len(block_size, prefill_seq_len, width)
+    if requested is not None and requested != width:
+        raise ValueError(f"DLM QPC target length is {width}, but {requested} was requested. Recompile the DLM.")
+    logger.info(f"DLM target length={width}, noise length={block_size}, prefill calls/chunk={prefill_seq_len // width}")
+
+
+def _compile_tlm_phases(model, compile_kwargs, disagg_tlm):
+    if not disagg_tlm:
+        return model.compile(**compile_kwargs)
+    compile_kwargs = compile_kwargs.copy()
+    specializations = compile_kwargs.pop("specializations")
+    qpcs = {}
+    for phase, spec in zip(("prefill", "decode"), specializations):
+        qpc = model.compile(
+            **compile_kwargs, specializations=[spec], split_retained_state_io=True, offload_pt_weights=False
+        )
+        qpcs[phase] = dict(qpc) if isinstance(qpc, dict) else str(qpc)
+    return qpcs
 
 
 def compile_tlm_qpc(
@@ -177,7 +239,8 @@ def compile_tlm_qpc(
     num_cores: int,
     num_devices: int,
     hf_token: str | None = None,
-) -> str:
+    disagg_tlm: bool = False,
+) -> str | dict[str, str]:
     """Build the TLM and compile it to a QPC. fc/hidden_norm are injected by
     QEfficient's DFlashTLMTransform (weights from dflash_dlm_repo)."""
     from QEfficient import QEFFAutoModelForCausalLM
@@ -186,13 +249,36 @@ def compile_tlm_qpc(
     tlm_target_ids = [i + 1 for i in target_layer_ids]
 
     logger.info(f"[compile_tlm] base={tlm_repo}  dlm={dlm_repo}  block_size={block_size}")
+    config = AutoConfig.from_pretrained(tlm_repo, token=hf_token)
+    if disagg_tlm and config.model_type != "gpt_oss":
+        raise ValueError("Split text DFlash TLM compilation currently supports GPT-OSS only.")
+    qaic_config = {"target_layer_ids": tlm_target_ids, "dflash_dlm_repo": dlm_repo}
+    compile_kwargs = {}
+    if config.model_type == "gpt_oss":
+        compile_kwargs = {
+            "qaic_config": qaic_config,
+            "prefill_only": True,
+            "enable_chunking": True,
+            "use_onnx_subfunctions": False,
+            "specializations": [
+                {
+                    "batch_size": 1,
+                    "seq_len": length,
+                    "ctx_len": ctx_len,
+                    "sliding_window": config.sliding_window,
+                    "num_logits_to_keep": num_logits,
+                }
+                for length, num_logits in ((prefill_seq_len, 1), (block_size, block_size))
+            ],
+        }
     tlm_qeff = QEFFAutoModelForCausalLM.from_pretrained(
         tlm_repo,
+        config=config,
         torch_dtype=torch.float32,
         token=hf_token,
-        qaic_config={"target_layer_ids": tlm_target_ids, "dflash_dlm_repo": dlm_repo},
+        qaic_config=qaic_config,
     )
-    qpc = tlm_qeff.compile(
+    compile_kwargs.update(
         prefill_seq_len=prefill_seq_len,
         ctx_len=ctx_len,
         num_cores=num_cores,
@@ -202,7 +288,9 @@ def compile_tlm_qpc(
         mos=1,
         dflash_block_size=block_size,
     )
-    qpc = str(qpc)
+    qpc = _compile_tlm_phases(tlm_qeff, compile_kwargs, disagg_tlm)
+    if not disagg_tlm:
+        qpc = str(qpc)
     logger.info(f"[compile_tlm] qpc={qpc}")
     return qpc
 
@@ -214,6 +302,8 @@ def compile_dlm_qpc(
     ctx_len: int,
     num_cores: int,
     num_devices: int,
+    prefill_seq_len: int = 128,
+    target_seq_len: int | None = None,
     hf_token: str | None = None,
 ) -> str:
     """Build the DLM and compile it to a QPC. lm_head/embed_tokens are injected
@@ -222,12 +312,17 @@ def compile_dlm_qpc(
 
     _, _, block_size = read_dlm_meta(dlm_repo, hf_token)
 
+    target_seq_len = get_dlm_target_seq_len(block_size, prefill_seq_len, target_seq_len)
+    qaic_config = {"dflash_dlm": True, "dflash_tlm_repo": tlm_repo}
+    if target_seq_len != block_size:
+        qaic_config["dflash_target_seq_len"] = target_seq_len
+
     logger.info(f"[compile_dlm] dlm={dlm_repo}  block_size={block_size}")
     dlm_qeff = QEFFAutoModelForCausalLM.from_pretrained(
         dlm_repo,
         torch_dtype=torch.float32,
         token=hf_token,
-        qaic_config={"dflash_dlm": True, "dflash_tlm_repo": tlm_repo},
+        qaic_config=qaic_config,
     )
     qpc = dlm_qeff.compile(
         prefill_seq_len=block_size,
@@ -289,7 +384,7 @@ def compile_gemma_vlm_qpcs(
         kv_offload=True,
         ignore_mismatched_sizes=True,
         token=hf_token,
-        qaic_config={"target_layer_ids": tlm_target_ids},
+        qaic_config={"target_layer_ids": tlm_target_ids, "dflash_dlm_repo": dlm_repo},
     )
 
     # DFlashTLMTransform attached fc/hidden_norm but left them random; copy in the real
@@ -313,7 +408,7 @@ def compile_gemma_vlm_qpcs(
         mxint8_kv_cache=True,
         aic_enable_depth_first=True,
         mos=1,
-        use_onnx_subfunctions=False,
+        use_onnx_subfunctions=config.model_type == "gemma4",
         split_model_io=True,
         batch_size=1,
         dflash_block_size=block_size,
@@ -336,8 +431,9 @@ def compile_qwen3vl_vlm_qpcs(
     height: int | None = None,
     width: int | None = None,
     hf_token: str | None = None,
-) -> tuple[str, str]:
-    """Build the qwen3-vl TLM — vision encoder + language decoder — and compile it for
+    disagg_tlm: bool = False,
+) -> tuple[str | dict[str, str], str]:
+    """Build the Qwen3-VL or Qwen3.5 TLM vision encoder + language decoder for
     SPD. Returns ``(lang_qpc, vision_qpc)``.
 
     Same DFlashTLMTransform-attaches-random / inject-real-weights pattern as
@@ -358,6 +454,19 @@ def compile_qwen3vl_vlm_qpcs(
 
     logger.info(f"[compile_qwen3vl_tlm] base={tlm_repo}  dlm={dlm_repo}  block_size={block_size}")
     config = AutoConfig.from_pretrained(tlm_repo, trust_remote_code=True, token=hf_token)
+    is_qwen35 = config.model_type == "qwen3_5"
+    is_qwen35_moe = config.model_type == "qwen3_5_moe"
+    if disagg_tlm and not is_qwen35_moe:
+        raise ValueError("Split VLM DFlash TLM compilation currently supports Qwen3.5-MoE only.")
+    qaic_config = {"target_layer_ids": tlm_target_ids, "dflash_dlm_repo": dlm_repo}
+    if is_qwen35 or is_qwen35_moe:
+        if block_size < 2 or block_size & (block_size - 1):
+            raise ValueError("Qwen3.5 DFlash requires a power-of-two draft block_size >= 2.")
+        if prefill_seq_len < 2 * block_size or prefill_seq_len % block_size:
+            raise ValueError(
+                f"Qwen3.5 DFlash requires prefill_seq_len to be a multiple of {block_size} and at least {2 * block_size}."
+            )
+        logger.info("Qwen3.5 DFlash combines accepted-prefix replay and verification in one TLM call.")
     tlm_qeff = QEFFAutoModelForImageTextToText.from_pretrained(
         tlm_repo,
         config=config,
@@ -366,11 +475,10 @@ def compile_qwen3vl_vlm_qpcs(
         kv_offload=True,
         ignore_mismatched_sizes=True,
         token=hf_token,
-        qaic_config={"target_layer_ids": tlm_target_ids},
+        qaic_config=qaic_config,
     )
 
-    # DFlashTLMTransform attached fc/hidden_norm but left them random; copy in the real
-    # DFlash weights and scale fc into fp16 range.
+    # Apply the DLM projection weights with the same fp16-range scaling as the transform.
     text_model = tlm_qeff.lang_model.model.language_model
     text_model.fc.weight.data.copy_(state_dict["fc.weight"].to(torch.float32))
     with torch.no_grad():
@@ -380,7 +488,6 @@ def compile_qwen3vl_vlm_qpcs(
         text_model.fc.weight.data.div_(s)
     text_model.hidden_norm.weight.data.copy_(state_dict["hidden_norm.weight"].to(torch.float32))
     logger.info(f"[compile_qwen3vl_tlm] fc/hidden_norm injected (fc scale s={s:.6f})")
-
     compile_kwargs = {
         "prefill_seq_len": prefill_seq_len,
         "ctx_len": ctx_len,
@@ -393,14 +500,36 @@ def compile_qwen3vl_vlm_qpcs(
         "split_model_io": True,
         "dflash_block_size": block_size,
     }
+    if is_qwen35 or is_qwen35_moe:
+        # Concatenated replay and verification use chunk attention.
+        compile_kwargs["prefill_only"] = True
+    if is_qwen35_moe:
+        compile_kwargs["qaic_config"] = qaic_config
+        compile_kwargs["enable_chunking"] = True
     if height is not None:
         compile_kwargs["height"] = height
     if width is not None:
         compile_kwargs["width"] = width
 
-    qpc = tlm_qeff.compile(**compile_kwargs)
-    lang_qpc = str(qpc["lang_qpc_path"])
-    vision_qpc = str(qpc["vision_qpc_path"])
+    if disagg_tlm:
+        text_model.dflash_chunk_size = block_size
+        specializations, _ = tlm_qeff.model.get_specializations(
+            batch_size=1,
+            prefill_seq_len=prefill_seq_len,
+            ctx_len=ctx_len,
+            height=height,
+            width=width,
+            kv_offload=True,
+        )
+        compile_kwargs["specializations"] = specializations["lang"]
+
+    qpc = _compile_tlm_phases(tlm_qeff, compile_kwargs, disagg_tlm)
+    if disagg_tlm:
+        lang_qpc = {phase: str(paths["lang_prefill_qpc_path"]) for phase, paths in qpc.items()}
+        vision_qpc = str(qpc["prefill"]["vision_qpc_path"])
+    else:
+        lang_qpc = str(qpc["lang_prefill_qpc_path"] if is_qwen35 or is_qwen35_moe else qpc["lang_qpc_path"])
+        vision_qpc = str(qpc["vision_qpc_path"])
     logger.info(f"[compile_qwen3vl_tlm] lang_qpc={lang_qpc}  vision_qpc={vision_qpc}")
     return lang_qpc, vision_qpc
 
@@ -526,6 +655,8 @@ def compile_gemma_vlm_dlm_qpc(
     ctx_len: int,
     num_cores: int,
     num_devices: int,
+    prefill_seq_len: int = 128,
+    target_seq_len: int | None = None,
     hf_token: str | None = None,
 ) -> str:
     """Build + compile the DFlash DLM (draft) for a vision-language model base.
@@ -540,6 +671,11 @@ def compile_gemma_vlm_dlm_qpc(
 
     _, _, block_size = read_dlm_meta(dlm_repo, hf_token)
 
+    target_seq_len = get_dlm_target_seq_len(block_size, prefill_seq_len, target_seq_len)
+    qaic_config = {"dflash_dlm": True}
+    if target_seq_len != block_size:
+        qaic_config["dflash_target_seq_len"] = target_seq_len
+
     logger.info(f"[compile_vlm_dlm] base={tlm_repo}  dlm={dlm_repo}  block_size={block_size}")
     base_model = AutoModelForCausalLM.from_pretrained(tlm_repo, torch_dtype=torch.float32, token=hf_token)
     lm_head_w, lm_head_b = extract_lm_head(base_model)
@@ -547,7 +683,7 @@ def compile_gemma_vlm_dlm_qpc(
     del base_model
 
     dlm_model = build_dlm_model(dlm_repo, lm_head_w, lm_head_b, embed_w)
-    dlm_qeff = QEFFAutoModelForCausalLM(dlm_model, qaic_config={"dflash_dlm": True})
+    dlm_qeff = QEFFAutoModelForCausalLM(dlm_model, qaic_config=qaic_config)
     qpc = dlm_qeff.compile(
         prefill_seq_len=block_size,
         ctx_len=ctx_len,
@@ -570,9 +706,11 @@ def compile_qwen3vl_vlm_dlm_qpc(
     ctx_len: int,
     num_cores: int,
     num_devices: int,
+    prefill_seq_len: int = 128,
+    target_seq_len: int | None = None,
     hf_token: str | None = None,
 ) -> str:
-    """Build + compile the DFlash DLM (draft) for the qwen3-vl TLM.
+    """Build + compile the DFlash DLM for a Qwen3-VL or Qwen3.5 TLM.
 
     Same VLM-aware lm_head/embed injection as ``compile_gemma_vlm_dlm_qpc``, kept as a
     separate function since qwen3-vl's config is not registered under
@@ -583,6 +721,11 @@ def compile_qwen3vl_vlm_dlm_qpc(
 
     _, _, block_size = read_dlm_meta(dlm_repo, hf_token)
 
+    target_seq_len = get_dlm_target_seq_len(block_size, prefill_seq_len, target_seq_len)
+    qaic_config = {"dflash_dlm": True}
+    if target_seq_len != block_size:
+        qaic_config["dflash_target_seq_len"] = target_seq_len
+
     logger.info(f"[compile_qwen3vl_dlm] base={tlm_repo}  dlm={dlm_repo}  block_size={block_size}")
     base_model = AutoModelForImageTextToText.from_pretrained(tlm_repo, torch_dtype=torch.float32, token=hf_token)
     lm_head_w, lm_head_b = extract_lm_head(base_model)
@@ -590,7 +733,7 @@ def compile_qwen3vl_vlm_dlm_qpc(
     del base_model
 
     dlm_model = build_dlm_model(dlm_repo, lm_head_w, lm_head_b, embed_w)
-    dlm_qeff = QEFFAutoModelForCausalLM(dlm_model, qaic_config={"dflash_dlm": True})
+    dlm_qeff = QEFFAutoModelForCausalLM(dlm_model, qaic_config=qaic_config)
     qpc = dlm_qeff.compile(
         prefill_seq_len=block_size,
         ctx_len=ctx_len,
