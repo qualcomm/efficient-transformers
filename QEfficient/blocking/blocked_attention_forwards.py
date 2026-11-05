@@ -917,7 +917,10 @@ def blocked_qkv_attention_forward_prefill_online(
             k_block, v_block = _get_kv_states(module, k_block, v_block, num_repeat=kv_repeat)
 
             k_abs = torch.arange(start_index, end_index, device=query.device)
-            causal = k_abs[None, None, None, :] > pos_sub[:, None, :, None]
+            if attention_mask is not None:
+                causal = attention_mask[..., t_start:t_end, start_index:end_index]
+            else:
+                causal = k_abs[None, None, None, :] > pos_sub[:, None, :, None]
 
             for acc in accs:
                 rc = acc["rc"]

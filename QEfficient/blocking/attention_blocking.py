@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from transformers.cache_utils import Cache
@@ -372,6 +372,7 @@ def generic_blocked_attention_interface(
     mla_kwargs: dict[str, Any] | None = None,
     is_mla: bool = False,
     prefill_only: bool = False,
+    skip_kv: Optional[bool] = None,
     **kwargs,
 ):
     blocking_mode = BlockingMode.resolve(blocking_config.mode)
@@ -488,7 +489,7 @@ def generic_blocked_attention_interface(
         configured_split=blocking_config.headpar_split,
         ctx_len=blocking_config.ctx_len,
         kv_block_unroll=blocking_config.kv_block_unroll,
-        skip_kv=blocking_config.skip_kv or False,
+        skip_kv=(blocking_config.skip_kv or False) if skip_kv is None else skip_kv,
         paged_attention=blocking_config.paged_attention,
         # prefill-specific — omit when None so function default (1) applies
         **({"n_rep_chunk": blocking_config.n_rep_chunk} if blocking_config.n_rep_chunk is not None else {}),
