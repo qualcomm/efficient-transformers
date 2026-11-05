@@ -22,6 +22,9 @@ import sys
 
 sys.path.insert(0, os.path.abspath(".."))
 
+# Optional dependency of QEfficient/tts (installed from git, see examples/audio/README.md)
+autodoc_mock_imports = ["chatterbox"]
+
 
 # -- Project information -----------------------------------------------------
 
