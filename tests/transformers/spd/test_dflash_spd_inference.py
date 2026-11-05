@@ -15,6 +15,7 @@ to real QPCs, and drives them through the SPD decode loop.
 import os
 import runpy
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -40,6 +41,62 @@ CTX_LEN = 32
 PAD_TOKEN_ID = 0
 EOS_TOKEN_ID = 1
 MASK_TOKEN_ID = 2
+
+
+@pytest.mark.parametrize("lang_only", [True, False])
+def test_dflash2_target_helper_preserves_vision_paths(monkeypatch, lang_only):
+    from examples.performance.dflash import utils
+
+    compile_calls = []
+    paths = {"vision_qpc_path": Path("vision.qpc"), "lang_qpc_path": Path("lang.qpc")}
+    text_model = SimpleNamespace(
+        target_layer_ids=[0, 1], config=SimpleNamespace(hidden_size=4), fc=SimpleNamespace(in_features=8)
+    )
+
+    def compile_target(**kwargs):
+        compile_calls.append(kwargs)
+        return paths
+
+    model = SimpleNamespace(dflash_tlm=True, model=SimpleNamespace(language_model=text_model), compile=compile_target)
+    monkeypatch.setattr(utils, "read_dflash2_compile_meta", lambda *args: {"block_size": 8})
+    monkeypatch.setattr(utils, "validate_dflash2_tlm_pair", lambda *args: SimpleNamespace())
+    monkeypatch.setattr(utils.QEFFAutoModelForImageTextToText, "from_pretrained", lambda *args, **kwargs: model)
+    result = utils.compile_dflash2_tlm_qpc(
+        "target",
+        "draft",
+        target_auto_class="image_text_to_text",
+        prefill_seq_len=128,
+        ctx_len=4096,
+        num_devices=4,
+        num_cores=8,
+        vision_num_devices=4,
+        vision_num_cores=4,
+        lang_only=lang_only,
+    )
+    assert result == ("lang.qpc" if lang_only else {name: str(path) for name, path in paths.items()})
+    assert compile_calls[0]["num_devices"] == 4
+    assert compile_calls[0]["num_cores"] == 8
+    assert compile_calls[0]["vision_num_devices"] == 4
+    assert compile_calls[0]["vision_num_cores"] == 4
+    assert compile_calls[0].get("skip_vision", False) is lang_only
+
+
+@pytest.mark.parametrize("target_auto_class,kv_offload", [("causal_lm", True), ("image_text_to_text", False)])
+def test_dflash2_target_helper_rejects_non_split_vision_resources(target_auto_class, kv_offload):
+    from examples.performance.dflash import utils
+
+    with pytest.raises(ValueError, match="Independent vision resources"):
+        utils.compile_dflash2_tlm_qpc(
+            "target",
+            "draft",
+            target_auto_class=target_auto_class,
+            kv_offload=kv_offload,
+            prefill_seq_len=128,
+            ctx_len=4096,
+            num_devices=4,
+            num_cores=8,
+            vision_num_cores=4,
+        )
 
 
 @pytest.mark.parametrize("config", [{}, {"dflash_config": {}}], ids=["missing-block-size", "empty-dflash-config"])

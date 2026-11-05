@@ -1178,6 +1178,8 @@ def compile_dflash2_tlm_qpc(
     ctx_len: int,
     num_cores: int,
     num_devices: int,
+    vision_num_cores: int | None = None,
+    vision_num_devices: int | None = None,
     block_size: int | None = None,
     compile_dir: str | None = None,
     mxfp6_matmul: bool = True,
@@ -1192,8 +1194,12 @@ def compile_dflash2_tlm_qpc(
     hf_token: str | None = None,
     local_files_only: bool = False,
     check_only: bool = False,
-) -> str | None:
+) -> str | dict[str, str] | None:
     """Load, validate, and compile a DFlash-2 target QPC."""
+    if (vision_num_cores is not None or vision_num_devices is not None) and (
+        target_auto_class != "image_text_to_text" or not kv_offload
+    ):
+        raise ValueError("Independent vision resources require image_text_to_text with kv_offload=True.")
     draft_meta = read_dflash2_compile_meta(draft_model, hf_token, local_files_only)
     tlm_config = validate_dflash2_tlm_pair(tlm_model, draft_meta, hf_token, local_files_only)
     block_size = block_size or draft_meta["block_size"]
@@ -1268,6 +1274,8 @@ def compile_dflash2_tlm_qpc(
         )
         if kv_offload and lang_only:
             compile_kwargs["skip_vision"] = True
+        if kv_offload:
+            compile_kwargs.update(vision_num_cores=vision_num_cores, vision_num_devices=vision_num_devices)
     qpc = qeff_model.compile(**compile_kwargs)
 
     if hasattr(inner, "get_output_names"):
@@ -1277,5 +1285,7 @@ def compile_dflash2_tlm_qpc(
             raise RuntimeError(f"DFlash-2 hidden-state output is missing: {lang_outputs}")
     logger.info(f"[compile_dflash2_tlm] qpc={qpc}")
     if isinstance(qpc, dict):
+        if not lang_only:
+            return {name: str(path) for name, path in qpc.items() if path is not None}
         return str(qpc.get("lang_prefill_qpc_path") or qpc["lang_qpc_path"])
     return str(qpc)

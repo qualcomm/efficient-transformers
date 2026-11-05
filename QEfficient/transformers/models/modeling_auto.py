@@ -1921,6 +1921,17 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             )
         return self.onnx_path
 
+    @staticmethod
+    def _resolve_vision_resources(num_devices, num_cores, vision_num_devices, vision_num_cores):
+        if vision_num_devices is not None and (type(vision_num_devices) is not int or vision_num_devices < 1):
+            raise ValueError("vision_num_devices must be a positive integer.")
+        if vision_num_cores is not None and (type(vision_num_cores) is not int or not 1 <= vision_num_cores <= 16):
+            raise ValueError("vision_num_cores must be an integer between 1 and 16.")
+        return (
+            num_devices if vision_num_devices is None else vision_num_devices,
+            num_cores if vision_num_cores is None else vision_num_cores,
+        )
+
     def transform(
         self,
         ctx_len: int | None = None,
@@ -1928,15 +1939,23 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         bs: int | None = 1,
         num_devices: int = 1,
         qaic_config: dict | None = None,
+        vision_num_devices: int | None = None,
+        vision_num_cores: int | None = None,
         **compiler_options,
     ):
+        vision_devices, vision_cores = self._resolve_vision_resources(
+            num_devices, compiler_options.get("aic_num_cores", 16), vision_num_devices, vision_num_cores
+        )
+        vision_compiler_options = dict(compiler_options)
+        if vision_num_cores is not None:
+            vision_compiler_options["aic_num_cores"] = vision_cores
         self.vision_model.transform(
             ctx_len=ctx_len,
             seq_len=seq_len,
             bs=bs,
-            num_devices=num_devices,
+            num_devices=vision_devices,
             qaic_config=qaic_config,
-            **compiler_options,
+            **vision_compiler_options,
         )
 
         if (
@@ -2105,6 +2124,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         kv_cache_batch_size: int | None = None,
         num_devices: int = 1,
         num_cores: int = 16,  # FIXME: Make this mandatory arg
+        vision_num_devices: int | None = None,
+        vision_num_cores: int | None = None,
         mxfp6_matmul: bool = False,
         mxint8_kv_cache: bool = False,
         skip_vision: bool | None = False,
@@ -2150,6 +2171,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             Total number of devices to compile for. Default is 1.
         num_cores : int, optional
             Number of cores to use for compilation.
+        vision_num_devices : int, optional
+            Number of devices for the separate vision QPC. Defaults to ``num_devices``.
+        vision_num_cores : int, optional
+            Cores per device for the separate vision QPC. Defaults to ``num_cores``.
         mxfp6_matmul : bool, optional
             Use MXFP6 compression for weights in the language model. Default is False.
         mxint8_kv_cache : bool, optional
@@ -2183,6 +2208,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             compiler_options["artifacts"] = True
         if skip_lang and skip_vision:
             raise ValueError("Expected at least one of 'skip_lang' or 'skip_vision' to be False")
+        vision_devices, vision_cores = self._resolve_vision_resources(
+            num_devices, num_cores, vision_num_devices, vision_num_cores
+        )
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         if self.dflash_tlm and dflash_block_size is None and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             dflash_block_size = getattr(self.model.model.language_model, "dflash_chunk_size", 16)
@@ -2229,6 +2257,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                     kv_cache_batch_size=kv_cache_batch_size,
                     num_devices=num_devices,
                     num_cores=num_cores,
+                    vision_num_devices=vision_num_devices,
+                    vision_num_cores=vision_num_cores,
                     mxfp6_matmul=mxfp6_matmul,
                     mxint8_kv_cache=mxint8_kv_cache,
                     skip_vision=skip_vision,
@@ -2261,6 +2291,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 kv_cache_batch_size=kv_cache_batch_size,
                 num_devices=num_devices,
                 num_cores=num_cores,
+                vision_num_devices=vision_num_devices,
+                vision_num_cores=vision_num_cores,
                 mxfp6_matmul=mxfp6_matmul,
                 mxint8_kv_cache=mxint8_kv_cache,
                 skip_vision=skip_vision,
@@ -2317,6 +2349,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             bs=batch_size,
             moe_batch_size=moe_batch_size,
             num_devices=num_devices,
+            vision_num_devices=vision_num_devices,
+            vision_num_cores=vision_num_cores,
             qaic_config=qaic_config,
             aic_num_cores=num_cores,
             mdp_num_partitions=compiler_options.get("mdp_num_partitions", 1),
@@ -2412,8 +2446,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 specialization_module_name="Vision",
                 convert_to_fp16=_should_convert_to_fp16(target_dtype, compiler_options),
                 mxfp6_matmul=constants.VISION_MXFP6_MATMUL,
-                mdp_ts_num_devices=num_devices,
-                aic_num_cores=num_cores,
+                mdp_ts_num_devices=vision_devices,
+                aic_num_cores=vision_cores,
                 custom_io=custom_io_vision,
                 mxint8_kv_cache=mxint8_kv_cache,
                 use_onnx_subfunctions=use_onnx_subfunctions,

@@ -82,6 +82,37 @@ Qwen3.5-MoE's default split TLM adds a fourth QPC for language prefill.
 > export QEFF_HOME=/local/mnt/workspace/<user>/qeff_home
 > ```
 
+### Independent language and vision resources
+
+With `kv_offload=True`, the dual-QPC API accepts `vision_num_devices` and
+`vision_num_cores` independently of the language `num_devices` and `num_cores`.
+Omitting either vision setting inherits the corresponding language setting.
+These controls apply to both model transforms and compilation, including layerwise
+compilation; they do not apply to a single combined vision/language QPC.
+
+For a shared-card TS4C8 language / TS4C4 draft / TS4C4 vision layout:
+
+```python
+qpc_paths = target.compile(
+    num_devices=4,
+    num_cores=8,
+    vision_num_devices=4,
+    vision_num_cores=4,
+    prefill_seq_len=128,
+    ctx_len=4096,
+    dflash_block_size=8,
+)
+```
+
+Compile the DFlash-2 draft separately with `num_devices=4, num_cores=4`.
+TS means QAIC devices, and C means cores per device. At runtime, place all
+three QPCs on the same four devices: each uses `8 + 4 + 4 = 16` cores.
+Check device availability and physical-card grouping before activation.
+
+`compile_dflash2_tlm_qpc` also accepts the independent vision settings. Its
+default `lang_only=True` preserves the language-path string return; use
+`lang_only=False` to compile both components and retain their named QPC paths.
+
 ### Single prompt (text through the VLM)
 
 ```bash
