@@ -108,7 +108,7 @@ class VisionHandler:
         for k in keys:
             if k not in vision_inputs:
                 continue
-            if self._vision_session.binding_is_bfloat16(k):
+            if self._vision_session is not None and self._vision_session.binding_is_bfloat16(k):
                 vision_inputs[k] = (
                     torch.from_numpy(vision_inputs[k]).to(torch.bfloat16).view(torch.int16).numpy().view(np.float16)
                 )
