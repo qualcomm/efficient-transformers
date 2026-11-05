@@ -12,7 +12,7 @@ import os
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Mapping, Optional, Tuple
 
 import requests
 import torch
