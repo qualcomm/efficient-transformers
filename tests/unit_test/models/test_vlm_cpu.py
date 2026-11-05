@@ -270,6 +270,7 @@ class TestInternalVLMClassesStructure:
 
         qeff_model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
         qeff_model.model = _QwenLikeVLM()
+        qeff_model.dflash_tlm = False
         qeff_model.lang_model = _Decoder()
         qeff_model.vision_model = _Vision()
         qeff_model.continuous_batching = False
@@ -389,6 +390,7 @@ class TestQEffAutoModelForImageTextToTextDualQPCStructure:
         calls = []
         qeff_model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
         qeff_model.model = _CompileOnlyVLM()
+        qeff_model.dflash_tlm = False
         qeff_model.vision_model = _CompileOnlyModule("vision", calls)
         qeff_model.lang_model = _CompileOnlyModule("lang", calls)
         qeff_model.continuous_batching = False
