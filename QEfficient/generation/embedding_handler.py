@@ -88,7 +88,7 @@ class VisionHandler:
         if isinstance(image_source, Image.Image):
             return image_source.convert("RGB")
         if isinstance(image_source, str) and image_source.startswith(("http://", "https://")):
-            response = requests.get(image_source, stream=True)
+            response = requests.get(image_source, stream=True, timeout=30)
             response.raise_for_status()
             return Image.open(BytesIO(response.content)).convert("RGB")
         return Image.open(image_source).convert("RGB")
