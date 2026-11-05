@@ -2536,7 +2536,6 @@ def test_qwen3_5_linear_conv_state_shapes_match_retained_state_contract():
     assert tuple(dummy_conv_state.shape) == expected_shape
 
 
-@pytest.mark.on_qaic
 @pytest.mark.reproducer
 def test_qwen3_5_linear_conv_state_export_compile_reproducer(tmp_path):
     """Reproduce the Qwen3.5 linear conv retained-state compiler assertion."""
