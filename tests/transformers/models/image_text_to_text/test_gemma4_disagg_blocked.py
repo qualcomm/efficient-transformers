@@ -13,6 +13,8 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor
 
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
+
 from .test_image_text_to_text_models import model_config_dict
 
 MODEL_NAME = "tiny-random/gemma-4-moe"
@@ -304,7 +306,7 @@ def test_gemma4_disagg_lang_prefill_qkv_decode_qkv_single_device_qaic_vs_hf_fp32
             batch_size=1,
             prefill_seq_len=prefill_seq_len,
             ctx_len=ctx_len,
-            num_cores=16,
+            num_cores=DEFAULT_AIC_NUM_CORES,
             num_devices=1,
             retain_full_kv=True,
             split_model_io=True,
@@ -327,7 +329,7 @@ def test_gemma4_disagg_lang_prefill_qkv_decode_qkv_single_device_qaic_vs_hf_fp32
             batch_size=1,
             prefill_seq_len=1,
             ctx_len=ctx_len,
-            num_cores=16,
+            num_cores=DEFAULT_AIC_NUM_CORES,
             num_devices=1,
             retain_full_kv=True,
             split_model_io=True,

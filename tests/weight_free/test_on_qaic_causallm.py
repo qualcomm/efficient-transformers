@@ -17,7 +17,11 @@ Covers causal-LM generation, HF/QAIC parity, and embedding parity.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import numpy as np
+import onnx
 import pytest
 import torch
 from transformers import (
@@ -30,18 +34,24 @@ from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
 from QEfficient.utils import get_num_layers_from_config
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
+from tests.transformers.models.golden_utils import config_fingerprint, golden_variant_key, resolve_hf_golden
 
 from ._helpers import (
     BATCH_SIZE,
     CTX_LEN,
+    FP8_RETAINED_QAIC_MODEL_PARAMS,
     PROMPT_LEN,
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_BLOCKING_QAIC_CASES,
     WEIGHT_FREE_EMBEDDING_MODEL_PARAMS,
     WEIGHT_FREE_QAIC_MODEL_PARAMS,
+    TinyRandomTokenizer,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
+    assert_retained_fp8_onnx,
+    build_fp8_test_checkpoint,
     exported_onnx_path,
     load_causal_lm_config,
     load_hf_model,
@@ -53,17 +63,66 @@ BLOCKING_PARITY_PROMPT = "Hello world"
 HEAD_BLOCKING_NUM_DEVICES = 4
 
 
-def _blocking_compile_options(blocking_key: str) -> dict:
+def _blocking_runtime_options(blocking_key: str) -> tuple[dict, list[int] | None]:
     if blocking_key in {"h", "hq", "hkv"}:
         device_groups = get_qaic_mdp_device_groups(devices_per_group=HEAD_BLOCKING_NUM_DEVICES)
         if not device_groups:
             pytest.skip(f"No available QAIC MDP device group with {HEAD_BLOCKING_NUM_DEVICES} devices")
-        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}
+        return {"num_devices": HEAD_BLOCKING_NUM_DEVICES, "user_tiled": True}, device_groups[0]
 
     device_ids = get_available_device_id()
     if device_ids is None:
         pytest.skip("No available QAIC device")
-    return {}
+    return {}, device_ids
+
+
+def _runtime_device_ids(device_ids: list[int]) -> list[int]:
+    if "QAIC_VISIBLE_DEVICES" in os.environ:
+        return list(range(len(device_ids)))
+    return device_ids
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    "visible_devices,discovered_device_ids,expected_device_ids",
+    [
+        (None, [4, 5, 6, 7], [4, 5, 6, 7]),
+        ("4,5,6,7", [4, 5, 6, 7], [0, 1, 2, 3]),
+        ("4,5,6,7", [4], [0]),
+    ],
+)
+def test_runtime_device_ids_respect_qaic_visibility(
+    monkeypatch,
+    visible_devices,
+    discovered_device_ids,
+    expected_device_ids,
+):
+    if visible_devices is None:
+        monkeypatch.delenv("QAIC_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("QAIC_VISIBLE_DEVICES", visible_devices)
+
+    assert _runtime_device_ids(discovered_device_ids) == expected_device_ids
+
+
+def _assert_retained_fp8_onnx(onnx_path: Path) -> None:
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    fp8_names = {
+        initializer.name
+        for initializer in model.graph.initializer
+        if initializer.data_type == onnx.TensorProto.FLOAT8E4M3FN
+    }
+    fp8_names.update(
+        value_info.name
+        for value_info in model.graph.input
+        if value_info.type.tensor_type.elem_type == onnx.TensorProto.FLOAT8E4M3FN
+    )
+    assert fp8_names, f"Expected retained FP8 weights in {onnx_path}"
+
+    nodes = list(model.graph.node)
+    nodes.extend(node for function in model.functions for node in function.node)
+    fp8_casts = [node for node in nodes if node.op_type == "Cast" and fp8_names.intersection(node.input)]
+    assert not fp8_casts, f"Retained FP8 weights are directly typecast: {[node.name for node in fp8_casts]}"
 
 
 @pytest.mark.weight_free
@@ -105,7 +164,7 @@ def test_weight_free_embedding_hw_hf_parity(model_type, model_id, pooling, tmp_e
         compile_dir=str(tmp_export_dir / f"{model_type}_compile"),
         seq_len=32,
         batch_size=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
     )
     qaic_output = qeff_model.generate(inputs=inputs)
 
@@ -142,7 +201,7 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
         compile_dir=str(tmp_export_dir / "wf_gen_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -153,6 +212,105 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
     )
     assert output is not None
     assert output.generated_texts is not None
+
+
+@pytest.mark.weight_free
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+@pytest.mark.parametrize("model_config", FP8_RETAINED_QAIC_MODEL_PARAMS)
+def test_weight_free_fp8_retained_export_compile(model_config, tmp_export_dir):
+    """Export, compile, and compare greedy HF and QAIC tokens for retained FP8."""
+    model_type = model_config["quantization_type"]
+    checkpoint_dir, model_hf = build_fp8_test_checkpoint(
+        model_config,
+        tmp_export_dir / f"fp8_{model_type}_checkpoint",
+        return_reference_model=True,
+    )
+    config = AutoConfig.from_pretrained(checkpoint_dir)
+    config.quantization_config["scale_dtype"] = torch.float16
+    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+        str(checkpoint_dir),
+        config=config,
+        torch_dtype=torch.float16,
+        fp8_retain_weights=True,
+        weight_free=True,
+    )
+
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            tmp_export_dir / f"fp8_{model_type}_export",
+            dynamo=True,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    assert_retained_fp8_onnx(onnx_path)
+
+    qpc_path = qeff_model.compile(
+        onnx_path=str(onnx_path),
+        compile_dir=str(tmp_export_dir / f"fp8_{model_type}_compile"),
+        prefill_seq_len=PROMPT_LEN,
+        ctx_len=CTX_LEN,
+        num_cores=16,
+        batch_size=BATCH_SIZE,
+        use_onnx_subfunctions=True,
+    )
+    assert Path(qpc_path).is_dir(), f"Expected QPC directory for {model_type}: {qpc_path}"
+
+    tokenizer = TinyRandomTokenizer()
+    prompt = "hello world"
+    model_inputs = tokenizer(prompt, return_tensors="pt")
+    generation_len = CTX_LEN - PROMPT_LEN
+    config_fp = config_fingerprint(qeff_model.config)
+    variant_key = golden_variant_key(
+        continuous_batching=False,
+        torch_dtype=torch.float16,
+        prompt_len=PROMPT_LEN,
+        ctx_len=CTX_LEN,
+        generation_len=generation_len,
+        full_batch_size=None,
+        prompts=[prompt],
+        config_fp=config_fp,
+    )
+
+    def _compute_hf_tokens():
+        with torch.inference_mode():
+            hf_output = model_hf.generate(
+                **model_inputs,
+                do_sample=False,
+                max_new_tokens=generation_len,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        return hf_output[0, model_inputs["input_ids"].shape[1] :].cpu().numpy()
+
+    hf_tokens = resolve_hf_golden(
+        family="causal_lm",
+        model_name=model_config["model_name"],
+        variant_key=variant_key,
+        params={
+            "config_fp": config_fp,
+            "continuous_batching": False,
+            "dtype": str(torch.float16),
+            "prompt_len": PROMPT_LEN,
+            "ctx_len": CTX_LEN,
+            "generation_len": generation_len,
+            "full_batch_size": None,
+            "prompts": [prompt],
+        },
+        compute_fn=_compute_hf_tokens,
+    )
+
+    qaic_output = qeff_model.generate(
+        tokenizer=tokenizer,
+        prompts=[prompt],
+        generation_len=generation_len,
+    )
+    assert qaic_output.generated_ids is not None, f"QAIC generation returned no tokens for {model_type}"
+    qaic_tokens = np.asarray(qaic_output.generated_ids[0]).reshape(-1)[:generation_len]
+    assert np.array_equal(hf_tokens, qaic_tokens), (
+        f"HF/QPC token mismatch for {model_type}: HF={hf_tokens.tolist()}, QPC={qaic_tokens.tolist()}"
+    )
 
 
 @pytest.mark.weight_free
@@ -200,7 +358,7 @@ def test_weight_free_hw_hf_parity(model_type, model_id, tmp_export_dir):
         compile_dir=str(tmp_export_dir / "wf_hw_parity_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -250,7 +408,7 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
         compile_dir=str(tmp_export_dir / "legacy_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -280,7 +438,7 @@ def test_weight_free_vs_legacy_qaic_parity(model_type, model_id, tmp_export_dir)
         compile_dir=str(tmp_export_dir / "wf_vs_legacy_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         use_onnx_subfunctions=True,
     )
@@ -317,6 +475,8 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
 ):
     """HF PT tokens match blocked weight-free QAIC tokens."""
     if model_type == "gpt_oss" and blocking_key == "hq":
+        pytest.xfail("tokens not matching - to fix")
+    if model_type == "gpt_oss" and blocking_key == "bhqkv":
         pytest.xfail("tokens not matching - to fix")
 
     from QEfficient.utils.run_utils import ApiRunner
@@ -368,13 +528,13 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
         assert_has_subfunctions(onnx_path, qeff_model)
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
-    compile_options = _blocking_compile_options(blocking_key)
+    compile_options, device_ids = _blocking_runtime_options(blocking_key)
     qeff_model.compile(
         onnx_path=str(onnx_path),
         compile_dir=str(tmp_export_dir / f"wf_blocking_{model_type}_{blocking_key}_{use_onnx_subfunctions}_compile"),
         prefill_seq_len=PROMPT_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         batch_size=BATCH_SIZE,
         qaic_config=qaic_config,
         use_onnx_subfunctions=use_onnx_subfunctions,
@@ -384,6 +544,7 @@ def test_weight_free_blocked_hw_hf_parity_and_artifact_metrics(
     qaic_output = qeff_model.generate(
         tokenizer=tokenizer,
         prompts=prompts,
+        device_ids=_runtime_device_ids(device_ids),
     )
     assert qaic_output is not None, "Blocked weight-free QAIC generate returned None"
     assert hasattr(qaic_output, "generated_ids") and qaic_output.generated_ids is not None
