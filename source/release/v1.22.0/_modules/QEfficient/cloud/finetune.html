@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.cloud.finetune &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#note">Note</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AI 100</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.cloud.finetune</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.cloud.finetune</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># -----------------------------------------------------------------------------</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Union</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.optim</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">optim</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.utils.data</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PeftModel</span><span class="p">,</span> <span class="n">get_peft_model</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch.optim.lr_scheduler</span><span class="w"> </span><span class="kn">import</span> <span class="n">StepLR</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModel</span><span class="p">,</span> <span class="n">AutoModelForCausalLM</span><span class="p">,</span> <span class="n">AutoModelForSequenceClassification</span><span class="p">,</span> <span class="n">AutoTokenizer</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.configs.training</span><span class="w"> </span><span class="kn">import</span> <span class="n">TrainConfig</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.config_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">generate_dataset_config</span><span class="p">,</span>
+    <span class="n">generate_peft_config</span><span class="p">,</span>
+    <span class="n">update_config</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.dataset_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_dataloader</span><span class="p">,</span> <span class="n">get_longest_seq_length</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.device_map</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_device_map</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.helper</span><span class="w"> </span><span class="kn">import</span> <span class="n">Task_Mode</span><span class="p">,</span> <span class="n">get_local_rank</span><span class="p">,</span> <span class="n">get_local_world_size</span><span class="p">,</span> <span class="n">get_rank</span><span class="p">,</span> <span class="n">get_world_size</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.logging_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.parser</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_finetune_parser</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.train_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">print_model_size</span><span class="p">,</span> <span class="n">print_trainable_parameters</span><span class="p">,</span> <span class="n">train</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils._utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">hf_download</span>
+
+<span class="c1"># Try importing QAIC-specific module, proceed without it if unavailable</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">torch_qaic</span>  <span class="c1"># noqa: F401</span>
+<span class="k">except</span> <span class="ne">ImportError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">log_rank_zero</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;Unable to import &#39;torch_qaic&#39; package due to exception: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">. Moving ahead without the torch_qaic extension.&quot;</span><span class="p">,</span>
+        <span class="n">logging</span><span class="o">.</span><span class="n">WARNING</span><span class="p">,</span>
+    <span class="p">)</span>
+
+
+<span class="c1"># Suppress all warnings</span>
+<span class="n">warnings</span><span class="o">.</span><span class="n">filterwarnings</span><span class="p">(</span><span class="s2">&quot;ignore&quot;</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">setup_distributed_training</span><span class="p">(</span><span class="n">train_config</span><span class="p">:</span> <span class="n">TrainConfig</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Initialize the distributed training environment if Distributed Data Parallel (DDP) is enabled.</span>
+
+<span class="sd">    Supports single-node and multi-node training launched via torchrun</span>
+<span class="sd">    (uses WORLD_SIZE, RANK, LOCAL_RANK, LOCAL_WORLD_SIZE environment variables).</span>
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    train_config : TrainConfig</span>
+<span class="sd">        Training configuration object containing settings for distributed training.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    AssertionError</span>
+<span class="sd">        If the number of required devices exceeds the total available devices.</span>
+<span class="sd">        If pipeline parallelism (`num_pp_stages`) is enabled but set to 1.</span>
+<span class="sd">        If DDP is enabled with a CPU device or with a specific device index (DDP requires device type only).</span>
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    - If `train_config.enable_ddp` is False, this function performs no action.</span>
+<span class="sd">    - Sets the appropriate device for each process in a distributed setup.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">torch_device</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">(</span><span class="n">train_config</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+
+    <span class="c1"># Validate pipeline parallelism settings</span>
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">enable_pp</span><span class="p">:</span>
+        <span class="k">assert</span> <span class="n">train_config</span><span class="o">.</span><span class="n">num_pp_stages</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">,</span> <span class="p">(</span>
+            <span class="sa">f</span><span class="s2">&quot;For pipeline parallelism, num_pp_stages should be greater than 1. Got </span><span class="si">{</span><span class="n">train_config</span><span class="o">.</span><span class="n">num_pp_stages</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="p">)</span>
+
+    <span class="c1"># If DDP is disabled, nothing to initialize here</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">train_config</span><span class="o">.</span><span class="n">enable_ddp</span><span class="p">:</span>
+        <span class="c1"># Non-DDP path: allow explicit device index, just set it if present</span>
+        <span class="k">if</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">type</span> <span class="o">!=</span> <span class="s2">&quot;cpu&quot;</span> <span class="ow">and</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">index</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="nb">getattr</span><span class="p">(</span><span class="n">torch</span><span class="p">,</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">type</span><span class="p">)</span><span class="o">.</span><span class="n">set_device</span><span class="p">(</span><span class="n">torch_device</span><span class="o">.</span><span class="n">index</span><span class="p">)</span>
+        <span class="k">return</span>
+
+    <span class="c1"># ---- DDP path (single- or multi-node) ----</span>
+    <span class="k">assert</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">type</span> <span class="o">!=</span> <span class="s2">&quot;cpu&quot;</span><span class="p">,</span> <span class="s2">&quot;Host doesn&#39;t support single-node DDP&quot;</span>
+    <span class="k">assert</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">index</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;DDP requires only device type (qaic/cuda), got: </span><span class="si">{</span><span class="n">torch_device</span><span class="si">}</span><span class="s2">&quot;</span>
+
+    <span class="c1"># Torchrun-provided env vars</span>
+    <span class="n">world_size</span> <span class="o">=</span> <span class="n">get_world_size</span><span class="p">()</span>
+    <span class="n">rank</span> <span class="o">=</span> <span class="n">get_rank</span><span class="p">()</span>
+    <span class="n">local_rank</span> <span class="o">=</span> <span class="n">get_local_rank</span><span class="p">()</span>
+    <span class="n">local_world_size</span> <span class="o">=</span> <span class="n">get_local_world_size</span><span class="p">()</span>
+
+    <span class="c1"># Per-node device validation</span>
+    <span class="n">num_available_devices</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">torch</span><span class="p">,</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">type</span><span class="p">)</span><span class="o">.</span><span class="n">device_count</span><span class="p">()</span>
+    <span class="k">assert</span> <span class="n">local_world_size</span> <span class="o">*</span> <span class="n">train_config</span><span class="o">.</span><span class="n">num_pp_stages</span> <span class="o">&lt;=</span> <span class="n">num_available_devices</span><span class="p">,</span> <span class="p">(</span>
+        <span class="s2">&quot;Number of devices required per node (LOCAL_WORLD_SIZE * num_pp_stages) should be &lt;= locally available devices.&quot;</span>
+    <span class="p">)</span>
+
+    <span class="n">dist_backend_map</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;cpu&quot;</span><span class="p">:</span> <span class="s2">&quot;gloo&quot;</span><span class="p">,</span> <span class="s2">&quot;qaic&quot;</span><span class="p">:</span> <span class="s2">&quot;qccl&quot;</span><span class="p">,</span> <span class="s2">&quot;cuda&quot;</span><span class="p">:</span> <span class="s2">&quot;gloo&quot;</span><span class="p">}</span>
+    <span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span><span class="n">dist_backend_map</span><span class="p">[</span><span class="n">torch_device</span><span class="o">.</span><span class="n">type</span><span class="p">],</span> <span class="n">rank</span><span class="o">=</span><span class="n">rank</span><span class="p">,</span> <span class="n">world_size</span><span class="o">=</span><span class="n">world_size</span><span class="p">)</span>
+
+    <span class="c1"># Set the base device index for this process on this node</span>
+    <span class="c1"># For PP: each process controls num_pp_stages devices starting from base_device_index</span>
+    <span class="n">base_device_index</span> <span class="o">=</span> <span class="n">local_rank</span> <span class="o">*</span> <span class="n">train_config</span><span class="o">.</span><span class="n">num_pp_stages</span>
+    <span class="c1"># from here onward &quot;qaic/cuda&quot; will automatically map to &quot;qaic:i/cuda:i&quot;, where i = process rank</span>
+    <span class="nb">getattr</span><span class="p">(</span><span class="n">torch</span><span class="p">,</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">type</span><span class="p">)</span><span class="o">.</span><span class="n">set_device</span><span class="p">(</span><span class="n">base_device_index</span><span class="p">)</span>
+
+    <span class="c1"># persist rank info in the config</span>
+    <span class="n">train_config</span><span class="o">.</span><span class="n">rank</span> <span class="o">=</span> <span class="n">rank</span>
+    <span class="n">train_config</span><span class="o">.</span><span class="n">local_rank</span> <span class="o">=</span> <span class="n">local_rank</span>
+    <span class="n">train_config</span><span class="o">.</span><span class="n">world_size</span> <span class="o">=</span> <span class="n">world_size</span>
+    <span class="n">train_config</span><span class="o">.</span><span class="n">local_world_size</span> <span class="o">=</span> <span class="n">local_world_size</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">setup_seeds</span><span class="p">(</span><span class="n">seed</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Set random seeds across multiple libraries for reproducibility.</span>
+
+<span class="sd">    This function ensures that random number generation is deterministic across PyTorch,</span>
+<span class="sd">    Python&#39;s built-in `random` module, and NumPy for consistent experiment results.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    seed : int</span>
+<span class="sd">        The seed value to set for all random number generators.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">torch</span><span class="o">.</span><span class="n">use_deterministic_algorithms</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+    <span class="c1"># With this flag, PP+DDP works only for meta-llama/Llama-3.2-1B and mistralai/Mistral-7B-Instruct-v0.3</span>
+    <span class="c1"># and throws error during loading model for meta-llama/Llama-3.1-8B and bigger size models.</span>
+
+    <span class="n">torch</span><span class="o">.</span><span class="n">manual_seed</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span>
+    <span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span>
+    <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">load_model_and_tokenizer</span><span class="p">(</span>
+    <span class="n">train_config</span><span class="p">:</span> <span class="n">TrainConfig</span><span class="p">,</span> <span class="n">dataset_config</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">AutoModelForCausalLM</span><span class="p">,</span> <span class="n">AutoTokenizer</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Load the pre-trained Hugging Face model and its corresponding tokenizer.</span>
+
+<span class="sd">    This function handles model download, configuration (e.g., precision, caching),</span>
+<span class="sd">    and tokenizer setup. It also applies PEFT if enabled in the training configuration.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    train_config : TrainConfig</span>
+<span class="sd">        Training configuration object containing model and tokenizer names, task mode, etc.</span>
+<span class="sd">    dataset_config : Any</span>
+<span class="sd">        A dataclass object representing the dataset configuration, used for task-specific</span>
+<span class="sd">        model setup (e.g., number of labels for sequence classification).</span>
+<span class="sd">    **kwargs :</span>
+<span class="sd">        Additional arguments to override PEFT configuration parameters.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    tuple[Union[AutoModelForCausalLM, AutoModelForSequenceClassification], AutoTokenizer]</span>
+<span class="sd">        A tuple containing:</span>
+<span class="sd">        - The loaded model (either `AutoModelForCausalLM` or `AutoModelForSequenceClassification`).</span>
+<span class="sd">        - The model&#39;s tokenizer (`AutoTokenizer`).</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    RuntimeError</span>
+<span class="sd">        If the Hugging Face model for sequence classification does not have</span>
+<span class="sd">        a `base_model_prefix` attribute when `task_mode` is `SEQ_CLASSIFICATION`.</span>
+<span class="sd">        If gradient checkpointing is enabled but the model does not support it.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">log_rank_zero</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Loading HuggingFace model for </span><span class="si">{</span><span class="n">train_config</span><span class="o">.</span><span class="n">model_name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="n">pretrained_model_path</span> <span class="o">=</span> <span class="n">hf_download</span><span class="p">(</span>
+        <span class="n">train_config</span><span class="o">.</span><span class="n">model_name</span><span class="p">,</span>
+        <span class="n">ignore_patterns</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;*.txt&quot;</span><span class="p">,</span> <span class="s2">&quot;*.onnx&quot;</span><span class="p">,</span> <span class="s2">&quot;*.ot&quot;</span><span class="p">,</span> <span class="s2">&quot;*.md&quot;</span><span class="p">,</span> <span class="s2">&quot;*.tflite&quot;</span><span class="p">,</span> <span class="s2">&quot;*.pdf&quot;</span><span class="p">,</span> <span class="s2">&quot;*.msgpack&quot;</span><span class="p">,</span> <span class="s2">&quot;*.h5&quot;</span><span class="p">,</span> <span class="s2">&quot;*.pth&quot;</span><span class="p">],</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">task_mode</span> <span class="o">==</span> <span class="n">Task_Mode</span><span class="o">.</span><span class="n">SEQ_CLASSIFICATION</span><span class="p">:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForSequenceClassification</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+            <span class="n">pretrained_model_path</span><span class="p">,</span>
+            <span class="n">num_labels</span><span class="o">=</span><span class="n">dataset_config</span><span class="o">.</span><span class="n">num_labels</span><span class="p">,</span>
+            <span class="n">attn_implementation</span><span class="o">=</span><span class="s2">&quot;sdpa&quot;</span><span class="p">,</span>
+            <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;base_model_prefix&quot;</span><span class="p">):</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">raise_error</span><span class="p">(</span><span class="s2">&quot;Given huggingface model does not have &#39;base_model_prefix&#39; attribute.&quot;</span><span class="p">,</span> <span class="ne">RuntimeError</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">param</span> <span class="ow">in</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">model</span><span class="o">.</span><span class="n">base_model_prefix</span><span class="p">)</span><span class="o">.</span><span class="n">parameters</span><span class="p">():</span>
+            <span class="n">param</span><span class="o">.</span><span class="n">requires_grad</span> <span class="o">=</span> <span class="kc">False</span>
+
+        <span class="k">for</span> <span class="n">param</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">():</span>
+            <span class="k">if</span> <span class="n">param</span><span class="o">.</span><span class="n">requires_grad</span><span class="p">:</span>
+                <span class="n">param</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">param</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">device_map</span> <span class="o">=</span> <span class="n">get_device_map</span><span class="p">(</span><span class="n">train_config</span><span class="p">)</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="n">AutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+            <span class="n">pretrained_model_path</span><span class="p">,</span>
+            <span class="n">use_cache</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">attn_implementation</span><span class="o">=</span><span class="s2">&quot;sdpa&quot;</span><span class="p">,</span>
+            <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float16</span><span class="p">,</span>
+            <span class="n">device_map</span><span class="o">=</span><span class="n">device_map</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="n">tokenizer</span> <span class="o">=</span> <span class="n">AutoTokenizer</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+        <span class="n">train_config</span><span class="o">.</span><span class="n">model_name</span> <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">tokenizer_name</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">train_config</span><span class="o">.</span><span class="n">tokenizer_name</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">tokenizer</span><span class="o">.</span><span class="n">pad_token_id</span><span class="p">:</span>
+        <span class="n">tokenizer</span><span class="o">.</span><span class="n">pad_token_id</span> <span class="o">=</span> <span class="n">tokenizer</span><span class="o">.</span><span class="n">eos_token_id</span>
+
+    <span class="c1"># If there is a mismatch between tokenizer vocab size and embedding matrix,</span>
+    <span class="c1"># throw a warning and then expand the embedding matrix</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">tokenizer</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">model</span><span class="o">.</span><span class="n">get_input_embeddings</span><span class="p">()</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]:</span>
+        <span class="n">logger</span><span class="o">.</span><span class="n">log_rank_zero</span><span class="p">(</span><span class="s2">&quot;Resizing the embedding matrix to match the tokenizer vocab size.&quot;</span><span class="p">,</span> <span class="n">logging</span><span class="o">.</span><span class="n">WARNING</span><span class="p">)</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">resize_token_embeddings</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">tokenizer</span><span class="p">))</span>
+
+    <span class="n">print_model_size</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+    <span class="c1"># Note: Need to call this before calling PeftModel.from_pretrained or get_peft_model.</span>
+    <span class="c1"># Because, both makes model.is_gradient_checkpointing = True which is used in peft library to</span>
+    <span class="c1"># apply gradient checkpointing related hooks to the input embeddings. Without this we will get</span>
+    <span class="c1"># &quot;No inf checks were recorded for this optimizer.&quot; error.</span>
+    <span class="c1"># Enable gradient checkpointing</span>
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">gradient_checkpointing</span><span class="p">:</span>
+        <span class="c1"># Note: below attribute and method is only available in HuggingFace Transformer models.</span>
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;supports_gradient_checkpointing&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="n">model</span><span class="o">.</span><span class="n">supports_gradient_checkpointing</span><span class="p">:</span>
+            <span class="n">model</span><span class="o">.</span><span class="n">gradient_checkpointing_enable</span><span class="p">(</span><span class="n">gradient_checkpointing_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;preserve_rng_state&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">})</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">raise_error</span><span class="p">(</span>
+                <span class="s2">&quot;Given model doesn&#39;t support gradient checkpointing. Please disable it and run it.&quot;</span><span class="p">,</span> <span class="ne">RuntimeError</span>
+            <span class="p">)</span>
+
+    <span class="n">model</span> <span class="o">=</span> <span class="n">apply_peft</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">train_config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">model</span><span class="p">,</span> <span class="n">tokenizer</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">apply_peft</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="n">AutoModel</span><span class="p">,</span> <span class="n">train_config</span><span class="p">:</span> <span class="n">TrainConfig</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Union</span><span class="p">[</span><span class="n">AutoModel</span><span class="p">,</span> <span class="n">PeftModel</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Apply Parameter-Efficient Fine-Tuning (PEFT) to the model if enabled in the training configuration.</span>
+
+<span class="sd">    This function configures and applies PEFT methods (e.g., LoRA) to the base model,</span>
+<span class="sd">    either from a pre-trained PEFT checkpoint or by generating a new PEFT configuration.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    model : AutoModel</span>
+<span class="sd">        The Hugging Face model to which PEFT will be applied.</span>
+<span class="sd">    train_config : TrainConfig</span>
+<span class="sd">        Training configuration object, specifying whether to use PEFT and if a checkpoint exists.</span>
+<span class="sd">    **kwargs :</span>
+<span class="sd">        Additional arguments to override PEFT configuration parameters.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    Union[AutoModel, PeftModel]</span>
+<span class="sd">        If `train_config.use_peft` is True, a `PeftModel` object is returned.</span>
+<span class="sd">        Otherwise, the original `AutoModel` object is returned.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">train_config</span><span class="o">.</span><span class="n">use_peft</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">model</span>
+
+    <span class="c1"># Load the pre-trained peft model checkpoint and setup its configuration</span>
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">from_peft_checkpoint</span><span class="p">:</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="n">PeftModel</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">train_config</span><span class="o">.</span><span class="n">from_peft_checkpoint</span><span class="p">,</span> <span class="n">is_trainable</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">peft_config</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">peft_config</span>
+    <span class="c1"># Generate the peft config and start fine-tuning from original model</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">peft_config</span> <span class="o">=</span> <span class="n">generate_peft_config</span><span class="p">(</span><span class="n">train_config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="n">get_peft_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">peft_config</span><span class="p">)</span>
+    <span class="n">print_trainable_parameters</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">model</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">setup_dataloaders</span><span class="p">(</span>
+    <span class="n">train_config</span><span class="p">:</span> <span class="n">TrainConfig</span><span class="p">,</span>
+    <span class="n">dataset_config</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
+    <span class="n">tokenizer</span><span class="p">:</span> <span class="n">AutoTokenizer</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">DataLoader</span><span class="p">,</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">DataLoader</span><span class="p">],</span> <span class="nb">int</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Set up training and optional validation DataLoaders based on the provided configurations.</span>
+
+<span class="sd">    This function prepares `DataLoader` instances for both training and validation datasets,</span>
+<span class="sd">    applying necessary preprocessing and batching. It also determines the longest sequence</span>
+<span class="sd">    length in the combined dataset.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    train_config : TrainConfig</span>
+<span class="sd">        Training configuration object containing DataLoader settings (batch size, etc.)</span>
+<span class="sd">        and validation preferences.</span>
+<span class="sd">    dataset_config : Any</span>
+<span class="sd">        Configuration for the dataset, used to fetch and prepare splits.</span>
+<span class="sd">    tokenizer : AutoTokenizer</span>
+<span class="sd">        Tokenizer for preprocessing and tokenizing the dataset samples.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    tuple[torch.utils.data.DataLoader, Optional[torch.utils.data.DataLoader], int]</span>
+<span class="sd">        A tuple containing:</span>
+<span class="sd">        - `train_dataloader`: The DataLoader for the training dataset.</span>
+<span class="sd">        - `eval_dataloader`: The DataLoader for the validation dataset, or `None` if validation is disabled.</span>
+<span class="sd">        - `longest_seq_length`: The length of the longest sequence found in the dataset(s).</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        If validation is enabled but the resulting validation DataLoader is empty.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">train_dataloader</span> <span class="o">=</span> <span class="n">get_dataloader</span><span class="p">(</span><span class="n">tokenizer</span><span class="p">,</span> <span class="n">dataset_config</span><span class="p">,</span> <span class="n">train_config</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s2">&quot;train&quot;</span><span class="p">)</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">log_rank_zero</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Number of Training Set Batches loaded = </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">train_dataloader</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="n">eval_dataloader</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">run_validation</span><span class="p">:</span>
+        <span class="n">eval_dataloader</span> <span class="o">=</span> <span class="n">get_dataloader</span><span class="p">(</span><span class="n">tokenizer</span><span class="p">,</span> <span class="n">dataset_config</span><span class="p">,</span> <span class="n">train_config</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s2">&quot;val&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">eval_dataloader</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">raise_error</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;The eval set size is too small for dataloader to load even one batch. Please increase the size of eval set. (</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">eval_dataloader</span><span class="p">)</span><span class="si">=}</span><span class="s2">)&quot;</span><span class="p">,</span>
+                <span class="ne">ValueError</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">log_rank_zero</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Number of Validation Set Batches loaded = </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">eval_dataloader</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="n">longest_seq_length</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">get_longest_seq_length</span><span class="p">(</span>
+            <span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">ConcatDataset</span><span class="p">([</span><span class="n">train_dataloader</span><span class="o">.</span><span class="n">dataset</span><span class="p">,</span> <span class="n">eval_dataloader</span><span class="o">.</span><span class="n">dataset</span><span class="p">])</span>
+        <span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">longest_seq_length</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">get_longest_seq_length</span><span class="p">(</span><span class="n">train_dataloader</span><span class="o">.</span><span class="n">dataset</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">train_dataloader</span><span class="p">,</span> <span class="n">eval_dataloader</span><span class="p">,</span> <span class="n">longest_seq_length</span>
+
+
+<div class="viewcode-block" id="main"><a class="viewcode-back" href="../../../source/cli_api.html#QEfficient.cloud.finetune.main">[docs]</a><span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Fine-tune a Hugging Face model on Qualcomm AI 100 hardware with configurable training</span>
+<span class="sd">    and Parameter-Efficient Fine-Tuning (PEFT) parameters.</span>
+
+<span class="sd">    This is the main entry point for the fine-tuning script. It orchestrates the</span>
+<span class="sd">    setup of distributed training, model and tokenizer loading, DataLoader creation,</span>
+<span class="sd">    optimizer and scheduler initialization, and the training loop.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    **kwargs :</span>
+<span class="sd">        Additional arguments used to override default parameters in `TrainConfig`</span>
+<span class="sd">        and PEFT configuration. These are typically parsed from command-line arguments.</span>
+
+<span class="sd">    Example</span>
+<span class="sd">    -------</span>
+<span class="sd">    To fine-tune a model using a YAML configuration file for PEFT:</span>
+
+<span class="sd">    .. code-block:: bash</span>
+
+<span class="sd">        python -m QEfficient.cloud.finetune \\</span>
+<span class="sd">            --model_name &quot;meta-llama/Llama-3.2-1B&quot; \\</span>
+<span class="sd">            --lr 5e-4 \\</span>
+<span class="sd">            --peft_config_file &quot;lora_config.yaml&quot;</span>
+
+<span class="sd">    To fine-tune a model using a default LoRA configuration:</span>
+
+<span class="sd">    .. code-block:: bash</span>
+
+<span class="sd">        python -m QEfficient.cloud.finetune \\</span>
+<span class="sd">            --model_name &quot;meta-llama/Llama-3.2-1B&quot; \\</span>
+<span class="sd">            --lr 5e-4</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">train_config</span> <span class="o">=</span> <span class="n">TrainConfig</span><span class="p">()</span>
+    <span class="n">update_config</span><span class="p">(</span><span class="n">train_config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="n">custom_dataset_config_file</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;custom_dataset_config&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="n">dataset_config</span> <span class="o">=</span> <span class="n">generate_dataset_config</span><span class="p">(</span><span class="n">train_config</span><span class="o">.</span><span class="n">dataset</span><span class="p">,</span> <span class="n">custom_dataset_config_file</span><span class="p">)</span>
+
+    <span class="n">logger</span><span class="o">.</span><span class="n">prepare_for_logs</span><span class="p">(</span><span class="n">train_config</span><span class="o">.</span><span class="n">output_dir</span><span class="p">,</span> <span class="n">train_config</span><span class="o">.</span><span class="n">dump_logs</span><span class="p">,</span> <span class="n">train_config</span><span class="o">.</span><span class="n">log_level</span><span class="p">)</span>
+
+    <span class="n">setup_distributed_training</span><span class="p">(</span><span class="n">train_config</span><span class="p">)</span>
+    <span class="n">setup_seeds</span><span class="p">(</span><span class="n">train_config</span><span class="o">.</span><span class="n">seed</span><span class="p">)</span>
+    <span class="n">model</span><span class="p">,</span> <span class="n">tokenizer</span> <span class="o">=</span> <span class="n">load_model_and_tokenizer</span><span class="p">(</span><span class="n">train_config</span><span class="p">,</span> <span class="n">dataset_config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+    <span class="c1"># Create DataLoaders for the training and validation dataset</span>
+    <span class="n">train_dataloader</span><span class="p">,</span> <span class="n">eval_dataloader</span><span class="p">,</span> <span class="n">longest_seq_length</span> <span class="o">=</span> <span class="n">setup_dataloaders</span><span class="p">(</span><span class="n">train_config</span><span class="p">,</span> <span class="n">dataset_config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">)</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">log_rank_zero</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;The longest sequence length in the train data is </span><span class="si">{</span><span class="n">longest_seq_length</span><span class="si">}</span><span class="s2">, &quot;</span>
+        <span class="sa">f</span><span class="s2">&quot;passed context length is </span><span class="si">{</span><span class="n">train_config</span><span class="o">.</span><span class="n">context_length</span><span class="si">}</span><span class="s2"> and overall model&#39;s context length is &quot;</span>
+        <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_position_embeddings</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="p">)</span>
+
+    <span class="c1"># Figure out the concrete device for this process</span>
+    <span class="n">torch_device</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">(</span><span class="n">train_config</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">enable_ddp</span> <span class="ow">and</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">type</span> <span class="o">!=</span> <span class="s2">&quot;cpu&quot;</span><span class="p">:</span>
+        <span class="c1"># setup_distributed_training has already set the current device based on LOCAL_RANK</span>
+        <span class="n">current_idx</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">torch</span><span class="p">,</span> <span class="n">torch_device</span><span class="o">.</span><span class="n">type</span><span class="p">)</span><span class="o">.</span><span class="n">current_device</span><span class="p">()</span>
+        <span class="n">device</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span><span class="p">(</span><span class="n">torch_device</span><span class="o">.</span><span class="n">type</span><span class="p">,</span> <span class="n">current_idx</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">device</span> <span class="o">=</span> <span class="n">torch_device</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">train_config</span><span class="o">.</span><span class="n">enable_pp</span><span class="p">:</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">device</span><span class="p">)</span>
+
+    <span class="n">optimizer</span> <span class="o">=</span> <span class="n">optim</span><span class="o">.</span><span class="n">AdamW</span><span class="p">(</span>
+        <span class="n">model</span><span class="o">.</span><span class="n">parameters</span><span class="p">(),</span>
+        <span class="n">lr</span><span class="o">=</span><span class="n">train_config</span><span class="o">.</span><span class="n">lr</span><span class="p">,</span>
+        <span class="n">weight_decay</span><span class="o">=</span><span class="n">train_config</span><span class="o">.</span><span class="n">weight_decay</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">scheduler</span> <span class="o">=</span> <span class="n">StepLR</span><span class="p">(</span><span class="n">optimizer</span><span class="p">,</span> <span class="n">step_size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">gamma</span><span class="o">=</span><span class="n">train_config</span><span class="o">.</span><span class="n">gamma</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">enable_ddp</span><span class="p">:</span>
+        <span class="n">ignore_names</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">param</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">named_parameters</span><span class="p">():</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">param</span><span class="o">.</span><span class="n">requires_grad</span><span class="p">:</span>
+                <span class="n">ignore_names</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+        <span class="c1"># Adding params in ignore list will enforce DDP to ignore them during synchronization,</span>
+        <span class="c1"># which will further reduce the tensor exchange across devices.</span>
+        <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">parallel</span><span class="o">.</span><span class="n">DistributedDataParallel</span><span class="o">.</span><span class="n">_set_params_and_buffers_to_ignore_for_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">ignore_names</span><span class="p">)</span>
+
+        <span class="n">model</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">parallel</span><span class="o">.</span><span class="n">DistributedDataParallel</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+    <span class="n">results</span> <span class="o">=</span> <span class="n">train</span><span class="p">(</span>
+        <span class="n">model</span><span class="p">,</span>
+        <span class="n">tokenizer</span><span class="p">,</span>
+        <span class="n">train_dataloader</span><span class="p">,</span>
+        <span class="n">eval_dataloader</span><span class="p">,</span>
+        <span class="n">optimizer</span><span class="p">,</span>
+        <span class="n">scheduler</span><span class="p">,</span>
+        <span class="n">train_config</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">train_config</span><span class="o">.</span><span class="n">enable_ddp</span><span class="p">:</span>
+        <span class="n">dist</span><span class="o">.</span><span class="n">destroy_process_group</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">results</span></div>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">parser</span> <span class="o">=</span> <span class="n">get_finetune_parser</span><span class="p">()</span>
+    <span class="n">args</span> <span class="o">=</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse_args</span><span class="p">()</span>
+    <span class="n">args_dict</span> <span class="o">=</span> <span class="nb">vars</span><span class="p">(</span><span class="n">args</span><span class="p">)</span>
+    <span class="n">main</span><span class="p">(</span><span class="o">**</span><span class="n">args_dict</span><span class="p">)</span>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.22.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../../v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../../../v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.diffusers.pipelines.pipeline_module &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/release_docs.html">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/validate.html#note">Note</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AI 100</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.diffusers.pipelines.pipeline_module</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.diffusers.pipelines.pipeline_module</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># ----------------------------------------------------------------------------</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Tuple</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.modeling_qeff</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEFFBaseModel</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.onnx_transforms</span><span class="w"> </span><span class="kn">import</span> <span class="n">FP16ClipTransform</span><span class="p">,</span> <span class="n">SplitTensorsTransform</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.models.pytorch_transforms</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">AttentionTransform</span><span class="p">,</span>
+    <span class="n">CLIPTextTransform</span><span class="p">,</span>
+    <span class="n">CustomOpsTransform</span><span class="p">,</span>
+    <span class="n">NormalizationTransform</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.transformers.models.pytorch_transforms</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">T5ModelTransform</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">constants</span>
+
+
+<div class="viewcode-block" id="QEffTextEncoder"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffTextEncoder</span><span class="p">(</span><span class="n">QEFFBaseModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Wrapper for text encoder models with ONNX export and QAIC compilation capabilities.</span>
+
+<span class="sd">    This class handles text encoder models (CLIP, T5) with specific transformations and</span>
+<span class="sd">    optimizations for efficient inference on Qualcomm AI hardware. It applies custom</span>
+<span class="sd">    PyTorch and ONNX transformations to prepare models for deployment.</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        model (nn.Module): The wrapped text encoder model (deep copy of original)</span>
+<span class="sd">        _pytorch_transforms (List): PyTorch transformations applied before ONNX export</span>
+<span class="sd">        _onnx_transforms (List): ONNX transformations applied after export</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_pytorch_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">CLIPTextTransform</span><span class="p">,</span> <span class="n">CustomOpsTransform</span><span class="p">,</span> <span class="n">T5ModelTransform</span><span class="p">]</span>
+    <span class="n">_onnx_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">FP16ClipTransform</span><span class="p">,</span> <span class="n">SplitTensorsTransform</span><span class="p">]</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_model_config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the model configuration as a dictionary.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Dict: The configuration dictionary of the underlying text encoder model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="vm">__dict__</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">:</span> <span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the text encoder wrapper.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model (nn.Module): The text encoder model to wrap (CLIP or T5)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">model</span>
+
+<div class="viewcode-block" id="QEffTextEncoder.get_onnx_params"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.get_onnx_params">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_onnx_params</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate ONNX export configuration for the text encoder.</span>
+
+<span class="sd">        Creates example inputs, dynamic axes specifications, and output names</span>
+<span class="sd">        tailored to the specific text encoder type (CLIP vs T5).</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Tuple containing:</span>
+<span class="sd">                - example_inputs (Dict): Sample inputs for ONNX export</span>
+<span class="sd">                - dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">                - output_names (List[str]): Names of model outputs</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">bs</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">ONNX_EXPORT_EXAMPLE_BATCH_SIZE</span>
+
+        <span class="c1"># Create example input with max sequence length</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">bs</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_position_embeddings</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">),</span>
+        <span class="p">}</span>
+
+        <span class="c1"># Define which dimensions can vary at runtime</span>
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;seq_len&quot;</span><span class="p">}}</span>
+
+        <span class="c1"># T5 only outputs hidden states, CLIP outputs both hidden states and pooled output</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;T5EncoderModel&quot;</span><span class="p">:</span>
+            <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;last_hidden_state&quot;</span><span class="p">]</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;last_hidden_state&quot;</span><span class="p">,</span> <span class="s2">&quot;pooler_output&quot;</span><span class="p">]</span>
+            <span class="n">example_inputs</span><span class="p">[</span><span class="s2">&quot;output_hidden_states&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span>
+
+        <span class="k">return</span> <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span></div>
+
+<div class="viewcode-block" id="QEffTextEncoder.export"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">output_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">dynamic_axes</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">export_dir</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">export_kwargs</span><span class="p">:</span> <span class="n">Dict</span> <span class="o">=</span> <span class="p">{},</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Export the text encoder model to ONNX format.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            inputs (Dict): Example inputs for ONNX export</span>
+<span class="sd">            output_names (List[str]): Names of model outputs</span>
+<span class="sd">            dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">            export_dir (str, optional): Directory to save ONNX model</span>
+<span class="sd">            export_kwargs (Dict, optional): Additional export arguments</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the exported ONNX model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_export</span><span class="p">(</span>
+            <span class="n">example_inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+            <span class="n">output_names</span><span class="o">=</span><span class="n">output_names</span><span class="p">,</span>
+            <span class="n">dynamic_axes</span><span class="o">=</span><span class="n">dynamic_axes</span><span class="p">,</span>
+            <span class="n">export_dir</span><span class="o">=</span><span class="n">export_dir</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">export_kwargs</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffTextEncoder.compile"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffTextEncoder.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">specializations</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">],</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compile the ONNX model for Qualcomm AI hardware.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            specializations (List[Dict]): Model specialization configurations</span>
+<span class="sd">            **compiler_options: Additional compiler options (e.g., num_cores, aic_num_of_activations)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compile</span><span class="p">(</span><span class="n">specializations</span><span class="o">=</span><span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span></div></div>
+
+
+<div class="viewcode-block" id="QEffUNet"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffUNet</span><span class="p">(</span><span class="n">QEFFBaseModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Wrapper for UNet models with ONNX export and QAIC compilation capabilities.</span>
+
+<span class="sd">    This class handles UNet models with specific transformations and optimizations</span>
+<span class="sd">    for efficient inference on Qualcomm AI hardware. UNet is commonly used in</span>
+<span class="sd">    diffusion models for image generation tasks.</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        model (nn.Module): The wrapped UNet model</span>
+<span class="sd">        _pytorch_transforms (List): PyTorch transformations applied before ONNX export</span>
+<span class="sd">        _onnx_transforms (List): ONNX transformations applied after export</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_pytorch_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">CustomOpsTransform</span><span class="p">]</span>
+    <span class="n">_onnx_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">FP16ClipTransform</span><span class="p">,</span> <span class="n">SplitTensorsTransform</span><span class="p">]</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_model_config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the model configuration as a dictionary.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Dict: The configuration dictionary of the underlying UNet model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="vm">__dict__</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">:</span> <span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the UNet wrapper.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model (nn.Module): The pipeline model containing the UNet</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">unet</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">unet</span>
+
+<div class="viewcode-block" id="QEffUNet.export"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">output_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">dynamic_axes</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">export_dir</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">export_kwargs</span><span class="p">:</span> <span class="n">Dict</span> <span class="o">=</span> <span class="p">{},</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Export the UNet model to ONNX format.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            inputs (Dict): Example inputs for ONNX export</span>
+<span class="sd">            output_names (List[str]): Names of model outputs</span>
+<span class="sd">            dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">            export_dir (str, optional): Directory to save ONNX model</span>
+<span class="sd">            export_kwargs (Dict, optional): Additional export arguments</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the exported ONNX model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_export</span><span class="p">(</span>
+            <span class="n">example_inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+            <span class="n">output_names</span><span class="o">=</span><span class="n">output_names</span><span class="p">,</span>
+            <span class="n">dynamic_axes</span><span class="o">=</span><span class="n">dynamic_axes</span><span class="p">,</span>
+            <span class="n">export_dir</span><span class="o">=</span><span class="n">export_dir</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">export_kwargs</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffUNet.compile"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffUNet.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">specializations</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">],</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compile the ONNX model for Qualcomm AI hardware.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            specializations (List[Dict]): Model specialization configurations</span>
+<span class="sd">            **compiler_options: Additional compiler options</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compile</span><span class="p">(</span><span class="n">specializations</span><span class="o">=</span><span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span></div></div>
+
+
+<div class="viewcode-block" id="QEffVAE"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffVAE</span><span class="p">(</span><span class="n">QEFFBaseModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Wrapper for Variational Autoencoder (VAE) models with ONNX export and QAIC compilation.</span>
+
+<span class="sd">    This class handles VAE models with specific transformations and optimizations</span>
+<span class="sd">    for efficient inference on Qualcomm AI hardware. VAE models are used in diffusion</span>
+<span class="sd">    pipelines for encoding images to latent space and decoding latents back to images.</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        model (nn.Module): The wrapped VAE model (deep copy of original)</span>
+<span class="sd">        type (str): VAE operation type (&quot;encoder&quot; or &quot;decoder&quot;)</span>
+<span class="sd">        _pytorch_transforms (List): PyTorch transformations applied before ONNX export</span>
+<span class="sd">        _onnx_transforms (List): ONNX transformations applied after export</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_pytorch_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">CustomOpsTransform</span><span class="p">,</span> <span class="n">AttentionTransform</span><span class="p">]</span>
+    <span class="n">_onnx_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">FP16ClipTransform</span><span class="p">,</span> <span class="n">SplitTensorsTransform</span><span class="p">]</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_model_config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the model configuration as a dictionary.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Dict: The configuration dictionary of the underlying VAE model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="vm">__dict__</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">:</span> <span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">,</span> <span class="nb">type</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the VAE wrapper.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model (nn.Module): The pipeline model containing the VAE</span>
+<span class="sd">            type (str): VAE operation type (&quot;encoder&quot; or &quot;decoder&quot;)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">type</span> <span class="o">=</span> <span class="nb">type</span>
+        <span class="c1"># TODO: add vae type in hash file</span>
+
+<div class="viewcode-block" id="QEffVAE.get_onnx_params"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_onnx_params">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_onnx_params</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span><span class="p">,</span> <span class="n">latent_width</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">32</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate ONNX export configuration for the VAE decoder.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            latent_height (int): Height of latent representation (default: 32)</span>
+<span class="sd">            latent_width (int): Width of latent representation (default: 32)</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Tuple containing:</span>
+<span class="sd">                - example_inputs (Dict): Sample inputs for ONNX export</span>
+<span class="sd">                - dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">                - output_names (List[str]): Names of model outputs</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">bs</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">ONNX_EXPORT_EXAMPLE_BATCH_SIZE</span>
+
+        <span class="c1"># VAE decoder takes latent representation as input</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;latent_sample&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">bs</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span><span class="p">),</span>
+            <span class="s2">&quot;return_dict&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="p">}</span>
+
+        <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;sample&quot;</span><span class="p">]</span>
+
+        <span class="c1"># All dimensions except channels can be dynamic</span>
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;latent_sample&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;channels&quot;</span><span class="p">,</span> <span class="mi">2</span><span class="p">:</span> <span class="s2">&quot;latent_height&quot;</span><span class="p">,</span> <span class="mi">3</span><span class="p">:</span> <span class="s2">&quot;latent_width&quot;</span><span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span></div>
+
+<div class="viewcode-block" id="QEffVAE.get_img_encoder_onnx_params"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_img_encoder_onnx_params">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_img_encoder_onnx_params</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate ONNX export configuration for the VAE Encoder.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Tuple containing:</span>
+<span class="sd">                - example_inputs (Dict): Sample inputs for ONNX export</span>
+<span class="sd">                - dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">                - output_names (List[str]): Names of model outputs</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">bs</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">ONNX_EXPORT_EXAMPLE_BATCH_SIZE</span>
+        <span class="n">num_frames</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_FRAMES</span>
+        <span class="n">height</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_HEIGHT_45P</span>
+        <span class="n">width</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_WIDTH_45P</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;image&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">bs</span><span class="p">,</span>
+                <span class="mi">3</span><span class="p">,</span>  <span class="c1"># channels</span>
+                <span class="n">num_frames</span><span class="p">,</span>
+                <span class="n">height</span><span class="p">,</span>
+                <span class="n">width</span><span class="p">,</span>
+            <span class="p">),</span>
+        <span class="p">}</span>
+        <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;latents&quot;</span><span class="p">]</span>
+        <span class="c1"># All dimensions except channels can be dynamic</span>
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;image&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span>
+                <span class="c1"># 1: &quot;num_channels&quot;,</span>
+                <span class="mi">2</span><span class="p">:</span> <span class="s2">&quot;num_frames&quot;</span><span class="p">,</span>
+                <span class="mi">3</span><span class="p">:</span> <span class="s2">&quot;height&quot;</span><span class="p">,</span>
+                <span class="mi">4</span><span class="p">:</span> <span class="s2">&quot;width&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span></div>
+
+<div class="viewcode-block" id="QEffVAE.get_video_onnx_params"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.get_video_onnx_params">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_video_onnx_params</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate ONNX export configuration for the VAE decoder.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            latent_height (int): Height of latent representation (default: 32)</span>
+<span class="sd">            latent_width (int): Width of latent representation (default: 32)</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Tuple containing:</span>
+<span class="sd">                - example_inputs (Dict): Sample inputs for ONNX export</span>
+<span class="sd">                - dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">                - output_names (List[str]): Names of model outputs</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">bs</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">ONNX_EXPORT_EXAMPLE_BATCH_SIZE</span>
+        <span class="n">latent_frames</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_FRAMES</span>
+        <span class="n">latent_height</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_HEIGHT_45P</span>
+        <span class="n">latent_width</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_WIDTH_45P</span>
+
+        <span class="c1"># VAE decoder takes latent representation as input</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;latent_sample&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">bs</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="n">latent_frames</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span><span class="p">),</span>
+            <span class="s2">&quot;return_dict&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="p">}</span>
+
+        <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;sample&quot;</span><span class="p">]</span>
+
+        <span class="c1"># All dimensions except channels can be dynamic</span>
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;latent_sample&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">2</span><span class="p">:</span> <span class="s2">&quot;latent_frames&quot;</span><span class="p">,</span> <span class="mi">3</span><span class="p">:</span> <span class="s2">&quot;latent_height&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">:</span> <span class="s2">&quot;latent_width&quot;</span><span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span></div>
+
+<div class="viewcode-block" id="QEffVAE.export"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">output_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">dynamic_axes</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">export_dir</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">export_kwargs</span><span class="p">:</span> <span class="n">Dict</span> <span class="o">=</span> <span class="p">{},</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Export the VAE model to ONNX format.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            inputs (Dict): Example inputs for ONNX export</span>
+<span class="sd">            output_names (List[str]): Names of model outputs</span>
+<span class="sd">            dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">            export_dir (str, optional): Directory to save ONNX model</span>
+<span class="sd">            export_kwargs (Dict, optional): Additional export arguments</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the exported ONNX model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="p">,</span> <span class="s2">&quot;_use_default_values&quot;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;_use_default_values&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">sort</span><span class="p">()</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_export</span><span class="p">(</span>
+            <span class="n">example_inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+            <span class="n">output_names</span><span class="o">=</span><span class="n">output_names</span><span class="p">,</span>
+            <span class="n">dynamic_axes</span><span class="o">=</span><span class="n">dynamic_axes</span><span class="p">,</span>
+            <span class="n">export_dir</span><span class="o">=</span><span class="n">export_dir</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">export_kwargs</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffVAE.compile"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffVAE.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">specializations</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">],</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compile the ONNX model for Qualcomm AI hardware.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            specializations (List[Dict]): Model specialization configurations</span>
+<span class="sd">            **compiler_options: Additional compiler options</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compile</span><span class="p">(</span><span class="n">specializations</span><span class="o">=</span><span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span></div></div>
+
+
+<div class="viewcode-block" id="QEffFluxTransformerModel"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffFluxTransformerModel</span><span class="p">(</span><span class="n">QEFFBaseModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Wrapper for Flux Transformer2D models with ONNX export and QAIC compilation capabilities.</span>
+
+<span class="sd">    This class handles Flux Transformer2D models with specific transformations and optimizations</span>
+<span class="sd">    for efficient inference on Qualcomm AI hardware. Flux uses a transformer-based diffusion</span>
+<span class="sd">    architecture instead of traditional UNet, with dual transformer blocks and adaptive layer</span>
+<span class="sd">    normalization (AdaLN) for conditioning.</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        model (nn.Module): The wrapped Flux transformer model</span>
+<span class="sd">        _pytorch_transforms (List): PyTorch transformations applied before ONNX export</span>
+<span class="sd">        _onnx_transforms (List): ONNX transformations applied after export</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_pytorch_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">AttentionTransform</span><span class="p">,</span> <span class="n">NormalizationTransform</span><span class="p">,</span> <span class="n">CustomOpsTransform</span><span class="p">]</span>
+    <span class="n">_onnx_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">FP16ClipTransform</span><span class="p">,</span> <span class="n">SplitTensorsTransform</span><span class="p">]</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_model_config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the model configuration as a dictionary.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Dict: The configuration dictionary of the underlying Flux transformer model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="vm">__dict__</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">:</span> <span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the Flux transformer wrapper.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model (nn.Module): The Flux transformer model to wrap</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+<div class="viewcode-block" id="QEffFluxTransformerModel.get_onnx_params"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.get_onnx_params">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_onnx_params</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">batch_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">ONNX_EXPORT_EXAMPLE_BATCH_SIZE</span><span class="p">,</span>
+        <span class="n">seq_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">FLUX_ONNX_EXPORT_SEQ_LENGTH</span><span class="p">,</span>
+        <span class="n">cl</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">FLUX_ONNX_EXPORT_COMPRESSED_LATENT_DIM</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Dict</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate ONNX export configuration for the Flux transformer.</span>
+
+<span class="sd">        Creates example inputs for all Flux-specific inputs including hidden states,</span>
+<span class="sd">        text embeddings, timestep conditioning, and AdaLN embeddings.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            batch_size (int): Batch size for example inputs (default: FLUX_ONNX_EXPORT_BATCH_SIZE)</span>
+<span class="sd">            seq_length (int): Text sequence length (default: FLUX_ONNX_EXPORT_SEQ_LENGTH)</span>
+<span class="sd">            cl (int): Compressed latent dimension (default: FLUX_ONNX_EXPORT_COMPRESSED_LATENT_DIM)</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Tuple containing:</span>
+<span class="sd">                - example_inputs (Dict): Sample inputs for ONNX export</span>
+<span class="sd">                - dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">                - output_names (List[str]): Names of model outputs</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="c1"># Latent representation of the image</span>
+            <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">cl</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">in_channels</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span> <span class="n">seq_length</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">joint_attention_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+            <span class="p">),</span>
+            <span class="s2">&quot;pooled_projections&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">pooled_projection_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="s2">&quot;timestep&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([</span><span class="mf">1.0</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="s2">&quot;img_ids&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">cl</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="s2">&quot;txt_ids&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">seq_length</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="c1"># AdaLN embeddings for dual transformer blocks</span>
+            <span class="c1"># Shape: [num_layers, FLUX_ADALN_DUAL_BLOCK_CHUNKS, FLUX_ADALN_HIDDEN_DIM]</span>
+            <span class="s2">&quot;adaln_emb&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;num_layers&quot;</span><span class="p">],</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">FLUX_ADALN_DUAL_BLOCK_CHUNKS</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">FLUX_ADALN_HIDDEN_DIM</span><span class="p">,</span>
+                <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="p">),</span>
+            <span class="c1"># AdaLN embeddings for single transformer blocks</span>
+            <span class="c1"># Shape: [num_single_layers, FLUX_ADALN_SINGLE_BLOCK_CHUNKS, FLUX_ADALN_HIDDEN_DIM]</span>
+            <span class="s2">&quot;adaln_single_emb&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;num_single_layers&quot;</span><span class="p">],</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">FLUX_ADALN_SINGLE_BLOCK_CHUNKS</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">FLUX_ADALN_HIDDEN_DIM</span><span class="p">,</span>
+                <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="p">),</span>
+            <span class="c1"># Output AdaLN embedding</span>
+            <span class="c1"># Shape: [batch_size, FLUX_ADALN_OUTPUT_DIM] for final projection</span>
+            <span class="s2">&quot;adaln_out&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">FLUX_ADALN_OUTPUT_DIM</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+        <span class="p">}</span>
+
+        <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;output&quot;</span><span class="p">]</span>
+
+        <span class="c1"># Define dynamic dimensions for runtime flexibility</span>
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;cl&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;seq_len&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;pooled_projections&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;timestep&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;steps&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;img_ids&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;cl&quot;</span><span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span></div>
+
+<div class="viewcode-block" id="QEffFluxTransformerModel.export"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">output_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">dynamic_axes</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">export_dir</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Export the Flux transformer model to ONNX format.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            inputs (Dict): Example inputs for ONNX export</span>
+<span class="sd">            output_names (List[str]): Names of model outputs</span>
+<span class="sd">            dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">            export_dir (str, optional): Directory to save ONNX model</span>
+<span class="sd">            use_onnx_subfunctions (bool): Whether to export transformer blocks as ONNX functions</span>
+<span class="sd">                                     for better modularity and potential optimization</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the exported ONNX model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="c1"># Sort _use_default_values in config to ensure consistent hash generation during export</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s2">&quot;_use_default_values&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">sort</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_export</span><span class="p">(</span>
+            <span class="n">example_inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+            <span class="n">output_names</span><span class="o">=</span><span class="n">output_names</span><span class="p">,</span>
+            <span class="n">dynamic_axes</span><span class="o">=</span><span class="n">dynamic_axes</span><span class="p">,</span>
+            <span class="n">export_dir</span><span class="o">=</span><span class="n">export_dir</span><span class="p">,</span>
+            <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">,</span>
+            <span class="n">offload_pt_weights</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>  <span class="c1"># As weights are needed with AdaLN changes</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffFluxTransformerModel.compile"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffFluxTransformerModel.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">specializations</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">],</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compile the ONNX model for Qualcomm AI hardware.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            specializations (List[Dict]): Model specialization configurations</span>
+<span class="sd">            **compiler_options: Additional compiler options (e.g., num_cores, aic_num_of_activations)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compile</span><span class="p">(</span><span class="n">specializations</span><span class="o">=</span><span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span></div></div>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">QEffWanTransformer</span><span class="p">(</span><span class="n">QEFFBaseModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Wrapper for a single WAN Transformer3D model with ONNX export and QAIC compilation.</span>
+
+<span class="sd">    This wrapper is used by the non-unified WAN pipeline mode where high-noise and low-noise</span>
+<span class="sd">    transformers are exported/compiled/executed as separate modules.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_pytorch_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">AttentionTransform</span><span class="p">,</span> <span class="n">CustomOpsTransform</span><span class="p">,</span> <span class="n">NormalizationTransform</span><span class="p">]</span>
+    <span class="n">_onnx_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">FP16ClipTransform</span><span class="p">,</span> <span class="n">SplitTensorsTransform</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">transformer</span><span class="p">,</span> <span class="n">module_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;transformer&quot;</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">transformer</span><span class="p">,</span> <span class="n">module_name</span><span class="o">=</span><span class="n">module_name</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">transformer</span>
+        <span class="c1"># Ensure high/low non-unified transformers get distinct export hashes/paths</span>
+        <span class="c1"># even when configs are identical.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">hash_params</span><span class="p">[</span><span class="s2">&quot;module_name&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">module_name</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_model_config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="vm">__dict__</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_onnx_params</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">batch_size</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_BATCH_SIZE</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">in_channels</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_FRAMES</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_HEIGHT_45P</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_WIDTH_45P</span><span class="p">,</span>
+                <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="p">),</span>
+            <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_SEQ_LEN</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_TEXT_EMBED_DIM</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+            <span class="p">),</span>
+            <span class="s2">&quot;rotary_emb&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="mi">2</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_CL_45P</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_ROTARY_DIM</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+            <span class="p">),</span>
+            <span class="s2">&quot;temb&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_TEXT_EMBED_DIM</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="s2">&quot;timestep_proj&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_PROJECTION_DIM</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_TEXT_EMBED_DIM</span><span class="p">,</span>
+                <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="p">),</span>
+            <span class="s2">&quot;return_dict&quot;</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="p">}</span>
+
+        <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;output&quot;</span><span class="p">]</span>
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span>
+                <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;num_channels&quot;</span><span class="p">,</span>
+                <span class="mi">2</span><span class="p">:</span> <span class="s2">&quot;latent_frames&quot;</span><span class="p">,</span>
+                <span class="mi">3</span><span class="p">:</span> <span class="s2">&quot;latent_height&quot;</span><span class="p">,</span>
+                <span class="mi">4</span><span class="p">:</span> <span class="s2">&quot;latent_width&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;sequence_length&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;rotary_emb&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;cl&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;temb&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;timestep_proj&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">output_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">dynamic_axes</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">export_dir</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_export</span><span class="p">(</span>
+            <span class="n">example_inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+            <span class="n">output_names</span><span class="o">=</span><span class="n">output_names</span><span class="p">,</span>
+            <span class="n">dynamic_axes</span><span class="o">=</span><span class="n">dynamic_axes</span><span class="p">,</span>
+            <span class="n">export_dir</span><span class="o">=</span><span class="n">export_dir</span><span class="p">,</span>
+            <span class="n">offload_pt_weights</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">,</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compile</span><span class="p">(</span><span class="n">specializations</span><span class="o">=</span><span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="QEffWanUnifiedTransformer"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffWanUnifiedTransformer</span><span class="p">(</span><span class="n">QEFFBaseModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Wrapper for WAN Unified Transformer with ONNX export and QAIC compilation capabilities.</span>
+
+<span class="sd">    This class handles the unified WAN transformer model that combines high and low noise transformers</span>
+<span class="sd">    into a single model for efficient deployment. Based on the timestep shape, the model dynamically</span>
+<span class="sd">    selects between high and low noise transformers during inference.</span>
+
+<span class="sd">    The wrapper applies specific transformations and optimizations for efficient inference on</span>
+<span class="sd">    Qualcomm AI hardware, particularly for video diffusion models.</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        model (nn.Module): The QEffWanUnifiedWrapper model that combines high/low noise transformers</span>
+<span class="sd">        _pytorch_transforms (List): PyTorch transformations applied before ONNX export</span>
+<span class="sd">        _onnx_transforms (List): ONNX transformations applied after export</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_pytorch_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">AttentionTransform</span><span class="p">,</span> <span class="n">CustomOpsTransform</span><span class="p">,</span> <span class="n">NormalizationTransform</span><span class="p">]</span>
+    <span class="n">_onnx_transforms</span> <span class="o">=</span> <span class="p">[</span><span class="n">FP16ClipTransform</span><span class="p">,</span> <span class="n">SplitTensorsTransform</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">unified_transformer</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the Wan unified transformer.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model (nn.Module): Wan unified transformer model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">unified_transformer</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">unified_transformer</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_model_config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the model configuration as a dictionary.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Dict: The configuration dictionary of the underlying Wan transformer model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="vm">__dict__</span>
+
+<div class="viewcode-block" id="QEffWanUnifiedTransformer.get_onnx_params"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.get_onnx_params">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">get_onnx_params</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate ONNX export configuration for the Wan transformer.</span>
+
+<span class="sd">        Creates example inputs for all Wan-specific inputs including hidden states,</span>
+<span class="sd">        text embeddings, timestep conditioning,</span>
+<span class="sd">        Returns:</span>
+<span class="sd">            Tuple containing:</span>
+<span class="sd">                - example_inputs (Dict): Sample inputs for ONNX export</span>
+<span class="sd">                - dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">                - output_names (List[str]): Names of model outputs</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">batch_size</span> <span class="o">=</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_BATCH_SIZE</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="c1"># hidden_states = [ bs, in_channels, frames, latent_height, latent_width]</span>
+            <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">in_channels</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_FRAMES</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_HEIGHT_45P</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_LATENT_WIDTH_45P</span><span class="p">,</span>
+                <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="p">),</span>
+            <span class="c1"># encoder_hidden_states = [BS, seq len , text dim]</span>
+            <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_SEQ_LEN</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_TEXT_EMBED_DIM</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+            <span class="p">),</span>
+            <span class="c1"># Rotary position embeddings: [2, context_length, 1, rotary_dim]; 2 is from tuple of cos, sin freqs</span>
+            <span class="s2">&quot;rotary_emb&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="mi">2</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_CL_45P</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_ONNX_EXPORT_ROTARY_DIM</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+            <span class="p">),</span>
+            <span class="c1"># Timestep embeddings: [batch_size=1, embedding_dim]</span>
+            <span class="s2">&quot;temb&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">WAN_TEXT_EMBED_DIM</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="c1"># Projected timestep embeddings: [batch_size=1, projection_dim, embedding_dim]</span>
+            <span class="s2">&quot;timestep_proj&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_PROJECTION_DIM</span><span class="p">,</span>
+                <span class="n">constants</span><span class="o">.</span><span class="n">WAN_TEXT_EMBED_DIM</span><span class="p">,</span>
+                <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="p">),</span>
+            <span class="c1"># Timestep parameter: Controls high/low noise transformer selection based on shape</span>
+            <span class="s2">&quot;tsp&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">),</span>
+        <span class="p">}</span>
+
+        <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;output&quot;</span><span class="p">]</span>
+
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span>
+                <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;num_channels&quot;</span><span class="p">,</span>
+                <span class="mi">2</span><span class="p">:</span> <span class="s2">&quot;latent_frames&quot;</span><span class="p">,</span>
+                <span class="mi">3</span><span class="p">:</span> <span class="s2">&quot;latent_height&quot;</span><span class="p">,</span>
+                <span class="mi">4</span><span class="p">:</span> <span class="s2">&quot;latent_width&quot;</span><span class="p">,</span>
+            <span class="p">},</span>
+            <span class="s2">&quot;timestep&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;steps&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;sequence_length&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;rotary_emb&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;cl&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;tsp&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;model_type&quot;</span><span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span></div>
+
+<div class="viewcode-block" id="QEffWanUnifiedTransformer.export"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">output_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">dynamic_axes</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
+        <span class="n">export_dir</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Export the Wan transformer model to ONNX format.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            inputs (Dict): Example inputs for ONNX export</span>
+<span class="sd">            output_names (List[str]): Names of model outputs</span>
+<span class="sd">            dynamic_axes (Dict): Specification of dynamic dimensions</span>
+<span class="sd">            export_dir (str, optional): Directory to save ONNX model</span>
+<span class="sd">            use_onnx_subfunctions (bool): Whether to export transformer blocks as ONNX functions</span>
+<span class="sd">                                     for better modularity and potential optimization</span>
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the exported ONNX model</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_export</span><span class="p">(</span>
+            <span class="n">example_inputs</span><span class="o">=</span><span class="n">inputs</span><span class="p">,</span>
+            <span class="n">output_names</span><span class="o">=</span><span class="n">output_names</span><span class="p">,</span>
+            <span class="n">dynamic_axes</span><span class="o">=</span><span class="n">dynamic_axes</span><span class="p">,</span>
+            <span class="n">export_dir</span><span class="o">=</span><span class="n">export_dir</span><span class="p">,</span>
+            <span class="n">offload_pt_weights</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffWanUnifiedTransformer.compile"><a class="viewcode-back" href="../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.pipeline_module.QEffWanUnifiedTransformer.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compile the ONNX model for Qualcomm AI hardware.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            specializations (List[Dict]): Model specialization configurations</span>
+<span class="sd">            **compiler_options: Additional compiler options (e.g., num_cores, aic_num_of_activations)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compile</span><span class="p">(</span><span class="n">specializations</span><span class="o">=</span><span class="n">specializations</span><span class="p">,</span> <span class="o">**</span><span class="n">compiler_options</span><span class="p">)</span></div></div>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.22.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../../index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../../../v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../../../../v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

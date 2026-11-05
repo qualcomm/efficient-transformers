@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.cloud.export &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../v1.23.0/source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.cloud.export</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.cloud.export</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># -----------------------------------------------------------------------------</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">argparse</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Optional</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEFFCommonLoader</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.cloud</span><span class="w"> </span><span class="kn">import</span> <span class="n">warn_deprecated_cloud_api</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">check_and_assign_cache_dir</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.custom_yaml</span><span class="w"> </span><span class="kn">import</span> <span class="n">generate_custom_io</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.logging_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
+
+<span class="c1"># Specifically for Docker images.</span>
+<span class="n">ROOT_DIR</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">))</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_onnx_path_and_setup_customIO</span><span class="p">(</span>
+    <span class="n">model_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">cache_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">hf_token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">full_batch_size</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">local_model_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">mxint8_kv_cache</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Exports the PyTorch model to ONNX format if a pre-exported file is not found,</span>
+<span class="sd">    and returns the path to the ONNX model.</span>
+
+<span class="sd">    This function loads a Hugging Face model via QEFFCommonLoader, then calls</span>
+<span class="sd">    its export method to generate the ONNX graph.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    model_name : str</span>
+<span class="sd">        Hugging Face Model Card name (e.g., ``gpt2``).</span>
+
+<span class="sd">    Other Parameters</span>
+<span class="sd">    ----------------</span>
+<span class="sd">    cache_dir : str, optional</span>
+<span class="sd">        Cache directory where downloaded HuggingFace files are stored. Default is None.</span>
+<span class="sd">    hf_token : str, optional</span>
+<span class="sd">        HuggingFace login token to access private repositories. Default is None.</span>
+<span class="sd">    full_batch_size : int, optional</span>
+<span class="sd">        Sets the full batch size to enable continuous batching mode. Default is None.</span>
+<span class="sd">    local_model_dir : str, optional</span>
+<span class="sd">        Path to custom model weights and config files. Default is None.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    str</span>
+<span class="sd">        Path of the generated ONNX graph file.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warn_deprecated_cloud_api</span><span class="p">(</span><span class="s2">&quot;export&quot;</span><span class="p">)</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Exporting Pytorch </span><span class="si">{</span><span class="n">model_name</span><span class="si">}</span><span class="s2"> model to ONNX...&quot;</span><span class="p">)</span>
+
+    <span class="n">qeff_model</span> <span class="o">=</span> <span class="n">QEFFCommonLoader</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+        <span class="n">pretrained_model_name_or_path</span><span class="o">=</span><span class="n">model_name</span><span class="p">,</span>
+        <span class="n">cache_dir</span><span class="o">=</span><span class="n">cache_dir</span><span class="p">,</span>
+        <span class="n">hf_token</span><span class="o">=</span><span class="n">hf_token</span><span class="p">,</span>
+        <span class="n">full_batch_size</span><span class="o">=</span><span class="n">full_batch_size</span><span class="p">,</span>
+        <span class="n">local_model_dir</span><span class="o">=</span><span class="n">local_model_dir</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">onnx_model_path</span> <span class="o">=</span> <span class="n">qeff_model</span><span class="o">.</span><span class="n">export</span><span class="p">()</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Generated onnx_path: </span><span class="si">{</span><span class="n">onnx_model_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="c1"># Generating Custom IO for the compile.</span>
+    <span class="n">generate_custom_io</span><span class="p">(</span><span class="n">qeff_model</span><span class="p">,</span> <span class="n">mxint8_kv_cache</span><span class="o">=</span><span class="n">mxint8_kv_cache</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">onnx_model_path</span>
+
+
+<div class="viewcode-block" id="main"><a class="viewcode-back" href="../../../source/cli_api.html#QEfficient.cloud.export.main">[docs]</a><span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span>
+    <span class="n">model_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">cache_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">hf_token</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">local_model_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">full_batch_size</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">mxint8_kv_cache</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">bool</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Main function for the QEfficient ONNX export CLI application.</span>
+
+<span class="sd">    This function serves as the entry point for exporting a PyTorch model, loaded</span>
+<span class="sd">    via QEFFCommonLoader, to the ONNX format. It prepares the necessary</span>
+<span class="sd">    paths and calls `get_onnx_path_and_setup_customIO`.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    model_name : str</span>
+<span class="sd">        Hugging Face Model Card name (e.g., ``gpt2``).</span>
+
+<span class="sd">    Other Parameters</span>
+<span class="sd">    ----------------</span>
+<span class="sd">    cache_dir : str, optional</span>
+<span class="sd">        Cache directory where downloaded HuggingFace files are stored. Default is None.</span>
+<span class="sd">    hf_token : str, optional</span>
+<span class="sd">        HuggingFace login token to access private repositories. Default is None.</span>
+<span class="sd">    local_model_dir : str, optional</span>
+<span class="sd">        Path to custom model weights and config files. Default is None.</span>
+<span class="sd">    full_batch_size : int, optional</span>
+<span class="sd">        Sets the full batch size to enable continuous batching mode. Default is None.</span>
+
+<span class="sd">    Example</span>
+<span class="sd">    -------</span>
+<span class="sd">    To export a model from the command line:</span>
+
+<span class="sd">    .. code-block:: bash</span>
+
+<span class="sd">        python -m QEfficient.cloud.export --model-name gpt2 --cache-dir /path/to/cache</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warn_deprecated_cloud_api</span><span class="p">(</span><span class="s2">&quot;export&quot;</span><span class="p">)</span>
+    <span class="n">cache_dir</span> <span class="o">=</span> <span class="n">check_and_assign_cache_dir</span><span class="p">(</span><span class="n">local_model_dir</span><span class="p">,</span> <span class="n">cache_dir</span><span class="p">)</span>
+    <span class="n">get_onnx_path_and_setup_customIO</span><span class="p">(</span>
+        <span class="n">model_name</span><span class="o">=</span><span class="n">model_name</span><span class="p">,</span>
+        <span class="n">cache_dir</span><span class="o">=</span><span class="n">cache_dir</span><span class="p">,</span>
+        <span class="n">hf_token</span><span class="o">=</span><span class="n">hf_token</span><span class="p">,</span>
+        <span class="n">full_batch_size</span><span class="o">=</span><span class="n">full_batch_size</span><span class="p">,</span>
+        <span class="n">local_model_dir</span><span class="o">=</span><span class="n">local_model_dir</span><span class="p">,</span>
+        <span class="n">mxint8_kv_cache</span><span class="o">=</span><span class="n">mxint8_kv_cache</span><span class="p">,</span>
+    <span class="p">)</span></div>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="n">parser</span> <span class="o">=</span> <span class="n">argparse</span><span class="o">.</span><span class="n">ArgumentParser</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;Export script.&quot;</span><span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s2">&quot;--model_name&quot;</span><span class="p">,</span> <span class="s2">&quot;--model-name&quot;</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;HF Model card name/id&quot;</span><span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--local-model-dir&quot;</span><span class="p">,</span> <span class="s2">&quot;--local_model_dir&quot;</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Path to custom model weights and config files&quot;</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--cache_dir&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--cache-dir&quot;</span><span class="p">,</span>
+        <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Cache_dir to store the HF files&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--hf-token&quot;</span><span class="p">,</span> <span class="s2">&quot;--hf_token&quot;</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="nb">str</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s2">&quot;HF token id for private HF models&quot;</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--full_batch_size&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--full-batch-size&quot;</span><span class="p">,</span>
+        <span class="nb">type</span><span class="o">=</span><span class="nb">int</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Set full batch size to enable continuous batching mode, default is None&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span>
+        <span class="s2">&quot;--mxint8_kv_cache&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;--mxint8-kv-cache&quot;</span><span class="p">,</span>
+        <span class="n">required</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+        <span class="n">help</span><span class="o">=</span><span class="s2">&quot;Compress Present/Past KV to MXINT8 using CustomIO config, default is False&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">args</span> <span class="o">=</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse_args</span><span class="p">()</span>
+    <span class="n">main</span><span class="p">(</span><span class="o">**</span><span class="n">args</span><span class="o">.</span><span class="vm">__dict__</span><span class="p">)</span>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.2.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../index.html">release/v1.23.2.0</a></dd>
+        <dd><a href="../../../../v1.23.0/index.html">release/v1.23.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

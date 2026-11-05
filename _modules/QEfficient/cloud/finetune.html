@@ -44,6 +44,8 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release/v1.23.2.0/source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
@@ -53,8 +55,8 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html">Validated Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#note">Note</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Installation</span></p>
@@ -63,7 +65,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#installation">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#sanity-check">Sanity Check</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxx (AI100, AI200 and so on)</span></p>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/quick_start.html">Quick Start</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
@@ -142,6 +144,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">torch.optim.lr_scheduler</span><span class="w"> </span><span class="kn">import</span> <span class="n">StepLR</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoModel</span><span class="p">,</span> <span class="n">AutoModelForCausalLM</span><span class="p">,</span> <span class="n">AutoModelForSequenceClassification</span><span class="p">,</span> <span class="n">AutoTokenizer</span>
 
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.cloud</span><span class="w"> </span><span class="kn">import</span> <span class="n">warn_deprecated_cloud_api</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.configs.training</span><span class="w"> </span><span class="kn">import</span> <span class="n">TrainConfig</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.finetune.utils.config_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">generate_dataset_config</span><span class="p">,</span>
@@ -489,6 +492,7 @@
 <span class="sd">            --model_name &quot;meta-llama/Llama-3.2-1B&quot; \\</span>
 <span class="sd">            --lr 5e-4</span>
 <span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warn_deprecated_cloud_api</span><span class="p">(</span><span class="s2">&quot;finetune&quot;</span><span class="p">,</span> <span class="n">force</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
     <span class="n">train_config</span> <span class="o">=</span> <span class="n">TrainConfig</span><span class="p">()</span>
     <span class="n">update_config</span><span class="p">(</span><span class="n">train_config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
     <span class="n">custom_dataset_config_file</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;custom_dataset_config&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
@@ -587,8 +591,15 @@
     <div class="rst-other-versions">
       Versions
       <dl>
-        <dd><a href="../index.html">main</a></dd>
-        <dd><a href="release/v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../index.html">main</a></dd>
+        <dd><a href="../../../source/release/v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../source/release/v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../source/release/v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../source/release/v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../source/release/v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../source/release/v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../source/release/v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../../source/release/v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
       </dl>
     </div>
 </div><script>

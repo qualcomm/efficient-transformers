@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Validated Models &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../_static/doctools.js?v=888ff710"></script>
+        <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Pre-requisites" href="installation.html" />
+    <link rel="prev" title="Supported Features" href="supported_features.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../v1.23.0/source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Validated Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#text-only-language-models">Text-only Language Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#text-generation-task">Text Generation Task</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#embedding-models">Embedding Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#text-embedding-task">Text Embedding Task</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#sequence-classification-models">Sequence Classification Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#text-classification-task">Text Classification Task</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#multimodal-language-models">Multimodal Language Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#vision-language-models-text-image-generation">Vision-Language Models (Text + Image Generation)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#vision-language-reranker-models-text-image-scoring">Vision-Language Reranker Models (Text + Image Scoring)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#audio-models">Audio Models</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#diffusion-models">Diffusion Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#image-generation-models">Image Generation Models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#video-generation-models">Video Generation Models</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#text-to-video-generation-models">Text to Video Generation Models</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#image-to-video-generation-models">Image to Video Generation Models</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Validated Models</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/source/validate.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="validated-models">
+<span id="id1"></span><h1>Validated Models<a class="headerlink" href="#validated-models" title="Permalink to this heading"></a></h1>
+<section id="text-only-language-models">
+<h2>Text-only Language Models<a class="headerlink" href="#text-only-language-models" title="Permalink to this heading"></a></h2>
+<section id="text-generation-task">
+<h3>Text Generation Task<a class="headerlink" href="#text-generation-task" title="Permalink to this heading"></a></h3>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForCausalLM</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p><a class="reference external" href="https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Installation/vLLM/vLLM/index.html">vLLM Support</a></p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>MolmoForCausalLM</strong> **</p></td>
+<td><p>Molmo①</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/allenai/Molmo-7B-D-0924">allenai/Molmo-7B-D-0924</a></p></td>
+<td><p>✕</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Olmo2ForCausalLM</strong></p></td>
+<td><p>OLMo-2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/allenai/OLMo-2-0425-1B">allenai/OLMo-2-0425-1B</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>FalconForCausalLM</strong></p></td>
+<td><p>Falcon②</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/tiiuae/falcon-40b">tiiuae/falcon-40b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Qwen3MoeForCausalLM</strong></p></td>
+<td><p>Qwen3Moe</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507">Qwen/Qwen3-30B-A3B-Instruct-2507</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>GemmaForCausalLM</strong></p></td>
+<td><p>CodeGemma</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/google/codegemma-2b">google/codegemma-2b</a><br><a class="reference external" href="https://huggingface.co/google/codegemma-7b">google/codegemma-7b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p>Gemma③</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/google/gemma-2b">google/gemma-2b</a><br><a class="reference external" href="https://huggingface.co/google/gemma-7b">google/gemma-7b</a><br><a class="reference external" href="https://huggingface.co/google/gemma-2-2b">google/gemma-2-2b</a><br><a class="reference external" href="https://huggingface.co/google/gemma-2-9b">google/gemma-2-9b</a><br><a class="reference external" href="https://huggingface.co/google/gemma-2-27b">google/gemma-2-27b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>GptOssForCausalLM</strong></p></td>
+<td><p>GPT-OSS</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/openai/gpt-oss-20b">openai/gpt-oss-20b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>GPTBigCodeForCausalLM</strong></p></td>
+<td><p>Starcoder1.5</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/bigcode/starcoder">bigcode/starcoder</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p>Starcoder2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/bigcode/starcoder2-15b">bigcode/starcoder2-15b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>GPTJForCausalLM</strong></p></td>
+<td><p>GPT-J</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/EleutherAI/gpt-j-6b">EleutherAI/gpt-j-6b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>GPT2LMHeadModel</strong></p></td>
+<td><p>GPT-2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/openai-community/gpt2">openai-community/gpt2</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>GraniteForCausalLM</strong></p></td>
+<td><p>Granite 3.1</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/ibm-granite/granite-3.1-8b-instruct">ibm-granite/granite-3.1-8b-instruct</a><br><a class="reference external" href="https://huggingface.co/ibm-granite/granite-guardian-3.1-8b">ibm-granite/granite-guardian-3.1-8b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p>Granite 20B</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/ibm-granite/granite-20b-code-base-8k">ibm-granite/granite-20b-code-base-8k</a><br><a class="reference external" href="https://huggingface.co/ibm-granite/granite-20b-code-instruct-8k">ibm-granite/granite-20b-code-instruct-8k</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>InternVLChatModel</strong> **</p></td>
+<td><p>Intern-VL①</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/OpenGVLab/InternVL2_5-1B">OpenGVLab/InternVL2_5-1B</a> <br> <a class="reference external" href="https://huggingface.co/OpenGVLab/InternVL3_5-1B">OpenGVLab/InternVL3_5-1B</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>LlamaForCausalLM</strong></p></td>
+<td><p>CodeLlama</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/codellama/CodeLlama-7b-hf">codellama/CodeLlama-7b-hf</a><br><a class="reference external" href="https://huggingface.co/codellama/CodeLlama-13b-hf">codellama/CodeLlama-13b-hf</a><br><a class="reference external" href="https://huggingface.co/codellama/CodeLlama-34b-hf">codellama/CodeLlama-34b-hf</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p>DeepSeek-R1-Distill-Llama</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B">deepseek-ai/DeepSeek-R1-Distill-Llama-70B</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p>InceptionAI-Adapted</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/inceptionai/jais-adapted-7b">inceptionai/jais-adapted-7b</a><br><a class="reference external" href="https://huggingface.co/inceptionai/jais-adapted-13b-chat">inceptionai/jais-adapted-13b-chat</a><br><a class="reference external" href="https://huggingface.co/inceptionai/jais-adapted-70b">inceptionai/jais-adapted-70b</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p>Llama 3.3</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct">meta-llama/Llama-3.3-70B-Instruct</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p>Llama 3.2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.2-1B">meta-llama/Llama-3.2-1B</a><br><a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.2-3B">meta-llama/Llama-3.2-3B</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p>Llama 3.1</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.1-8B">meta-llama/Llama-3.1-8B</a><br><a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.1-70B">meta-llama/Llama-3.1-70B</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p>Llama 3</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Meta-Llama-3-8B">meta-llama/Meta-Llama-3-8B</a><br><a class="reference external" href="https://huggingface.co/meta-llama/Meta-Llama-3-70B">meta-llama/Meta-Llama-3-70B</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p>Llama 2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Llama-2-7b-chat-hf">meta-llama/Llama-2-7b-chat-hf</a><br><a class="reference external" href="https://huggingface.co/meta-llama/Llama-2-13b-chat-hf">meta-llama/Llama-2-13b-chat-hf</a><br><a class="reference external" href="https://huggingface.co/meta-llama/Llama-2-70b-chat-hf">meta-llama/Llama-2-70b-chat-hf</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p></p></td>
+<td><p>Vicuna</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/lmsys/vicuna-13b-delta-v0">lmsys/vicuna-13b-delta-v0</a><br><a class="reference external" href="https://huggingface.co/lmsys/vicuna-13b-v1.3">lmsys/vicuna-13b-v1.3</a><br><a class="reference external" href="https://huggingface.co/lmsys/vicuna-13b-v1.5">lmsys/vicuna-13b-v1.5</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>MistralForCausalLM</strong></p></td>
+<td><p>Mistral</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.1">mistralai/Mistral-7B-Instruct-v0.1</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>MixtralForCausalLM</strong></p></td>
+<td><p>Codestral<br>Mixtral</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/mistralai/Codestral-22B-v0.1">mistralai/Codestral-22B-v0.1</a><br><a class="reference external" href="https://huggingface.co/mistralai/Mixtral-8x7B-v0.1">mistralai/Mixtral-8x7B-v0.1</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Phi3ForCausalLM</strong></p></td>
+<td><p>Phi-3②, Phi-3.5②</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/microsoft/Phi-3-mini-4k-instruct">microsoft/Phi-3-mini-4k-instruct</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>QwenForCausalLM</strong></p></td>
+<td><p>DeepSeek-R1-Distill-Qwen</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B">DeepSeek-R1-Distill-Qwen-32B</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p></p></td>
+<td><p>Qwen2, Qwen2.5</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen2-1.5B-Instruct">Qwen/Qwen2-1.5B-Instruct</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>LlamaSwiftKVForCausalLM</strong></p></td>
+<td><p>swiftkv</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct">Snowflake/Llama-3.1-SwiftKV-8B-Instruct</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Grok1ModelForCausalLM</strong> **</p></td>
+<td><p>grok-1②</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/hpcai-tech/grok-1">hpcai-tech/grok-1</a></p></td>
+<td><p>✕</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Glm4MoeForCausalLM</strong></p></td>
+<td><p>GLM-4.5</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/zai-org/GLM-4.5">zai-org/GLM-4.5</a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<hr class="docutils" />
+<section id="embedding-models">
+<h2>Embedding Models<a class="headerlink" href="#embedding-models" title="Permalink to this heading"></a></h2>
+<section id="text-embedding-task">
+<h3>Text Embedding Task<a class="headerlink" href="#text-embedding-task" title="Permalink to this heading"></a></h3>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEFFAutoModel</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>vLLM Support</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>BertModel</strong></p></td>
+<td><p>BERT-based</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/BAAI/bge-base-en-v1.5">BAAI/bge-base-en-v1.5</a><br> <a class="reference external" href="https://huggingface.co/BAAI/bge-large-en-v1.5">BAAI/bge-large-en-v1.5</a><br><a class="reference external" href="https://huggingface.co/BAAI/bge-small-en-v1.5">BAAI/bge-small-en-v1.5</a> <br><a class="reference external" href="https://huggingface.co/intfloat/e5-large-v2">e5-large-v2</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>MPNetForMaskedLM</strong></p></td>
+<td><p>MPNet</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/sentence-transformers/multi-qa-mpnet-base-cos-v1">sentence-transformers/multi-qa-mpnet-base-cos-v1</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>NomicBertModel</strong> **</p></td>
+<td><p>NomicBERT②</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5">nomic-ai/nomic-embed-text-v1.5</a></p></td>
+<td><p>✕</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>RobertaModel</strong></p></td>
+<td><p>RoBERTa</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/ibm-granite/granite-embedding-30m-english">ibm-granite/granite-embedding-30m-english</a><br> <a class="reference external" href="https://huggingface.co/ibm-granite/granite-embedding-125m-english">ibm-granite/granite-embedding-125m-english</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>XLMRobertaForSequenceClassification</strong></p></td>
+<td><p>XLM-RoBERTa</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/BAAI/bge-reranker-v2-m3">bge-reranker-v2-m3bge-reranker-v2-m3</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>XLMRobertaModel</strong></p></td>
+<td><p>XLM-RoBERTa</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/ibm-granite/granite-embedding-107m-multilingual">ibm-granite/granite-embedding-107m-multilingual</a><br> <a class="reference external" href="https://huggingface.co/ibm-granite/granite-embedding-278m-multilingual">ibm-granite/granite-embedding-278m-multilingual</a> <br> <a class="reference external" href="https://huggingface.co/intfloat/multilingual-e5-large">intfloat/multilingual-e5-large</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>JinaBertForMaskedLM</strong> **</p></td>
+<td><p>Jina Embeddings v2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/jinaai/jina-embeddings-v2-base-code">jinaai/jina-embeddings-v2-base-code</a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<hr class="docutils" />
+<section id="sequence-classification-models">
+<h2>Sequence Classification Models<a class="headerlink" href="#sequence-classification-models" title="Permalink to this heading"></a></h2>
+<section id="text-classification-task">
+<h3>Text Classification Task<a class="headerlink" href="#text-classification-task" title="Permalink to this heading"></a></h3>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForSequenceClassification</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>vLLM Support</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>DebertaV2ForSequenceClassification</strong></p></td>
+<td><p>Llama Prompt Guard</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-22M">meta-llama/Llama-Prompt-Guard-2-22M</a></p></td>
+<td><p>✕</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<hr class="docutils" />
+<section id="multimodal-language-models">
+<h2>Multimodal Language Models<a class="headerlink" href="#multimodal-language-models" title="Permalink to this heading"></a></h2>
+<section id="vision-language-models-text-image-generation">
+<h3>Vision-Language Models (Text + Image Generation)<a class="headerlink" href="#vision-language-models-text-image-generation" title="Permalink to this heading"></a></h3>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForImageTextToText</span></code></p>
+<blockquote>
+<div><p><strong>⚠️ Deprecation Notice:</strong> Support for <strong>MllamaForConditionalGeneration</strong> (Llama 3.2 Vision) is deprecated and will be removed in a future release. Users are encouraged to migrate to <a class="reference external" href="https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct">Llama-4</a> which provides equivalent vision-language capabilities with continued support.</p>
+</div></blockquote>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>Qeff Single Qpc</p></th>
+<th class="head"><p>Qeff Dual Qpc</p></th>
+<th class="head"><p>vllm Single Qpc</p></th>
+<th class="head"><p>vllm Dual Qpc</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>LlavaForConditionalGeneration</strong></p></td>
+<td><p>LLaVA-1.5</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/llava-hf/llava-1.5-7b-hf">llava-hf/llava-1.5-7b-hf</a></p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>MllamaForConditionalGeneration</strong> ⚠️ <em>(Deprecated)</em></p></td>
+<td><p>Llama 3.2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct">meta-llama/Llama-3.2-11B-Vision Instruct</a><br><a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.2-90B-Vision-Instruct">meta-llama/Llama-3.2-90B-Vision-Instruct</a></p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>LlavaNextForConditionalGeneration</strong></p></td>
+<td><p>Granite Vision</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/ibm-granite/granite-vision-3.2-2b">ibm-granite/granite-vision-3.2-2b</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Llama4ForConditionalGeneration</strong></p></td>
+<td><p>Llama-4-Scout</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct">Llama-4-Scout-17B-16E-Instruct</a></p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Gemma3ForConditionalGeneration</strong></p></td>
+<td><p>Gemma3③</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/google/gemma-3-4b-it">google/gemma-3-4b-it</a></p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✕</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Gemma4ForConditionalGeneration</strong></p></td>
+<td><p>Gemma4</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/google/gemma-4-31B-it">google/gemma-4-31B-it</a><br><a class="reference external" href="https://huggingface.co/google/gemma-4-26B-A4B-it">google/gemma-4-26B-A4B-it</a><br><a class="reference external" href="https://huggingface.co/google/gemma-4-E4B-it">google/gemma-4-E4B-it</a><br><a class="reference external" href="https://huggingface.co/google/gemma-4-E2B-it">google/gemma-4-E2B-it</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Qwen2_5_VLForConditionalGeneration</strong></p></td>
+<td><p>Qwen2.5-VL</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct">Qwen/Qwen2.5-VL-3B-Instruct</a></p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Qwen3VLForConditionalGeneration</strong></p></td>
+<td><p>Qwen3-VL</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct">Qwen/Qwen3-VL-235B-A22B-Instruct</a><br><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct">Qwen/Qwen3-VL-30B-A3B-Instruct</a><br><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct">Qwen/Qwen3-VL-2B-Instruct</a><br><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-VL-Embedding-8B">Qwen/Qwen3-VL-Embedding-8B</a></p></td>
+<td><p>✔️</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✕</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Qwen3_5ForConditionalGeneration</strong></p></td>
+<td><p>Qwen3.5</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3.5-27B">Qwen/Qwen3.5-27B</a><br><a class="reference external" href="https://huggingface.co/Qwen/Qwen3.5-0.8B">Qwen/Qwen3.5-0.8B</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Qwen3_5MoeForConditionalGeneration</strong></p></td>
+<td><p>Qwen3.5</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3.5-122B-A10B">Qwen/Qwen3.5-122B-A10B</a><br><a class="reference external" href="https://huggingface.co/Qwen/Qwen3.5-35B-A3B">Qwen/Qwen3.5-35B-A3B</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Qwen3_5ForConditionalGeneration</strong></p></td>
+<td><p>Qwen3.6</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3.6-27B">Qwen/Qwen3.6-27B</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Qwen3_5MoeForConditionalGeneration</strong></p></td>
+<td><p>Qwen3.6</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3.6-35B-A3B">Qwen/Qwen3.6-35B-A3B</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>KimiK25ForConditionalGeneration</strong></p></td>
+<td><p>Kimi-K2.5</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/moonshotai/Kimi-K2.5">moonshotai/Kimi-K2.5</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Mistral3ForConditionalGeneration</strong></p></td>
+<td><p>Mistral3</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503">mistralai/Mistral-Small-3.1-24B-Instruct-2503</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✕</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="vision-language-reranker-models-text-image-scoring">
+<h3>Vision-Language Reranker Models (Text + Image Scoring)<a class="headerlink" href="#vision-language-reranker-models-text-image-scoring" title="Permalink to this heading"></a></h3>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForImageTextToText</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>Qeff Single Qpc</p></th>
+<th class="head"><p>Qeff Dual Qpc</p></th>
+<th class="head"><p>vllm Single Qpc</p></th>
+<th class="head"><p>vllm Dual Qpc</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Qwen3VLForConditionalGeneration</strong></p></td>
+<td><p>Qwen3-VL Reranker</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-VL-Reranker-2B">Qwen/Qwen3-VL-Reranker-2B</a><br><a class="reference external" href="https://huggingface.co/Qwen/Qwen3-VL-Reranker-8B">Qwen/Qwen3-VL-Reranker-8B</a></p></td>
+<td><p>✕</p></td>
+<td><p>✔️</p></td>
+<td><p>✕</p></td>
+<td><p>✕</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Dual QPC:</strong>
+In the Dual QPC(Qualcomm Program Container) setup, the model is split across two  configurations:</p>
+<ul class="simple">
+<li><p>The <strong>Vision Encoder</strong> runs in one QPC.</p></li>
+<li><p>The <strong>Language Model</strong> (responsible for output generation) runs in a separate QPC.</p></li>
+<li><p>The outputs from the Vision Encoder are transferred to the Language Model.</p></li>
+<li><p>The dual QPC approach introduces the flexibility to run the vision and language components independently.</p></li>
+</ul>
+<p><strong>Single QPC:</strong>
+In the single QPC(Qualcomm Program Container) setup, the entire model—including both image encoding and text generation—runs within a single QPC. There is no model splitting, and all components operate within the same execution environment.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The choice between Single and Dual QPC is determined during model instantiation using the <code class="docutils literal notranslate"><span class="pre">kv_offload</span></code> setting.
+If the <code class="docutils literal notranslate"><span class="pre">kv_offload</span></code> is set to <code class="docutils literal notranslate"><span class="pre">True</span></code> it runs in dual QPC and if its set to <code class="docutils literal notranslate"><span class="pre">False</span></code> model runs in single QPC mode.</p>
+</div>
+</section>
+<section id="audio-models">
+<h3>Audio Models<a class="headerlink" href="#audio-models" title="Permalink to this heading"></a></h3>
+<p>(Automatic Speech Recognition) - Transcription Task</p>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForSpeechSeq2Seq</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>vLLM Support</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Whisper</strong></p></td>
+<td><p>Whisper</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/openai/whisper-tiny">openai/whisper-tiny</a><br><a class="reference external" href="https://huggingface.co/openai/whisper-base">openai/whisper-base</a><br><a class="reference external" href="https://huggingface.co/openai/whisper-small">openai/whisper-small</a><br><a class="reference external" href="https://huggingface.co/openai/whisper-medium">openai/whisper-medium</a><br><a class="reference external" href="https://huggingface.co/openai/whisper-large">openai/whisper-large</a><br><a class="reference external" href="https://huggingface.co/openai/whisper-large-v3-turbo">openai/whisper-large-v3-turbo</a></p></td>
+<td><p>✔️</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Wav2Vec2</strong></p></td>
+<td><p>Wav2Vec2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/facebook/wav2vec2-base">facebook/wav2vec2-base</a><br><a class="reference external" href="https://huggingface.co/facebook/wav2vec2-large">facebook/wav2vec2-large</a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<hr class="docutils" />
+<section id="diffusion-models">
+<h2>Diffusion Models<a class="headerlink" href="#diffusion-models" title="Permalink to this heading"></a></h2>
+<section id="image-generation-models">
+<h3>Image Generation Models<a class="headerlink" href="#image-generation-models" title="Permalink to this heading"></a></h3>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEffFluxPipeline</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>vLLM Support</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>FluxPipeline</strong></p></td>
+<td><p>FLUX.1</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/black-forest-labs/FLUX.1-schnell">black-forest-labs/FLUX.1-schnell</a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+<p>Supported modes:</p>
+<ul class="simple">
+<li><p>Baseline FLUX pipeline.</p></li>
+<li><p>FLUX first-block-cache mode (<code class="docutils literal notranslate"><span class="pre">enable_first_block_cache=True</span></code>) with call-time <code class="docutils literal notranslate"><span class="pre">cache_threshold</span></code>.</p></li>
+</ul>
+<p>Reference examples:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/diffusers/flux/flux_1_schnell.py">flux_1_schnell.py</a></p></li>
+<li><p><a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/diffusers/flux/flux_1_schnell_first_block_cache.py">flux_1_schnell_first_block_cache.py</a></p></li>
+</ul>
+</section>
+<section id="video-generation-models">
+<h3>Video Generation Models<a class="headerlink" href="#video-generation-models" title="Permalink to this heading"></a></h3>
+<section id="text-to-video-generation-models">
+<h4>Text to Video Generation Models<a class="headerlink" href="#text-to-video-generation-models" title="Permalink to this heading"></a></h4>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEffWanPipeline</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>vLLM Support</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>WanPipeline</strong></p></td>
+<td><p>Wan2.2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B-Diffusers">Wan-AI/Wan2.2-T2V-A14B-Diffusers</a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+<p>Supported modes:</p>
+<ul class="simple">
+<li><p>Unified WAN (<code class="docutils literal notranslate"><span class="pre">use_unified=True</span></code>): single transformer module.</p></li>
+<li><p>Non-unified WAN (<code class="docutils literal notranslate"><span class="pre">use_unified=False</span></code>): separate high/low transformer modules.</p></li>
+<li><p>Non-unified first-block-cache (<code class="docutils literal notranslate"><span class="pre">use_unified=False</span></code>, <code class="docutils literal notranslate"><span class="pre">enable_first_block_cache=True</span></code>) with
+<code class="docutils literal notranslate"><span class="pre">cache_threshold_high</span></code> and <code class="docutils literal notranslate"><span class="pre">cache_threshold_low</span></code>.</p></li>
+</ul>
+<p>Reference examples:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/diffusers/wan/wan_lightning.py">wan_lightning.py</a></p></li>
+<li><p><a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/diffusers/wan/wan_lightning_custom.py">wan_lightning_custom.py</a></p></li>
+<li><p><a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/diffusers/wan/wan_first_block_cache.py">wan_first_block_cache.py</a></p></li>
+</ul>
+</section>
+<section id="image-to-video-generation-models">
+<h4>Image to Video Generation Models<a class="headerlink" href="#image-to-video-generation-models" title="Permalink to this heading"></a></h4>
+<p><strong>QEff Auto Class:</strong> <code class="docutils literal notranslate"><span class="pre">QEffWanImageToVideoPipeline</span></code></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+<th class="head"><p>vLLM Support</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>WanImageToVideoPipeline</strong></p></td>
+<td><p>Wan2.2</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers">Wan-AI/Wan2.2-I2V-A14B-Diffusers</a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+<hr class="docutils" />
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Models marked with <code class="docutils literal notranslate"><span class="pre">**</span></code> are currently not functional on the <code class="docutils literal notranslate"><span class="pre">main</span></code> and <code class="docutils literal notranslate"><span class="pre">release/1.22.0</span></code> branches due to failures with Transformers 5.x.<br />
+To run these models, please use:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">release/v1.21.6</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">release/v1.22.0_tf_4.57.3</span></code></p></li>
+</ul>
+<p>① Intern-VL and Molmo models are Vision-Language Models but use <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForCausalLM</span></code> for inference to stay compatible with HuggingFace Transformers.</p>
+<p>② Set <code class="docutils literal notranslate"><span class="pre">trust_remote_code=True</span></code> for end-to-end inference with vLLM.</p>
+<p>③ Pass <code class="docutils literal notranslate"><span class="pre">disable_sliding_window</span></code> for few family models when using vLLM.</p>
+</div>
+<hr class="docutils" />
+</section>
+</section>
+</section>
+</section>
+<section id="models-coming-soon">
+<span id="id2"></span><h1>Models Coming Soon<a class="headerlink" href="#models-coming-soon" title="Permalink to this heading"></a></h1>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>Model Family</p></th>
+<th class="head"><p>Representative Models</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>NemotronHForCausalLM</strong></p></td>
+<td><p>NVIDIA Nemotron v3</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/collections/nvidia/nvidia-nemotron-v3">NVIDIA Nemotron v3</a></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Sam3Model</strong></p></td>
+<td><p>facebook/sam3</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/facebook/sam3">facebook/sam3</a></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>StableDiffusionModel</strong></p></td>
+<td><p>HiDream-ai</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/HiDream-ai/HiDream-I1-Full">HiDream-ai/HiDream-I1-Full</a></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>MistralLarge3Model</strong></p></td>
+<td><p>Mistral Large 3</p></td>
+<td><p><a class="reference external" href="https://huggingface.co/collections/mistralai/mistral-large-3">mistralai/mistral-large-3</a></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="supported_features.html" class="btn btn-neutral float-left" title="Supported Features" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="installation.html" class="btn btn-neutral float-right" title="Pre-requisites" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.2.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../index.html">main</a></dd>
+        <dd><a href="../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../index.html">release/v1.23.2.0</a></dd>
+        <dd><a href="../../v1.23.0/index.html">release/v1.23.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

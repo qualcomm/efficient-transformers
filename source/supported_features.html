@@ -47,6 +47,8 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release/v1.23.2.0/source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
@@ -56,8 +58,8 @@
 <ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="validate.html#note">Note</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Installation</span></p>
@@ -66,7 +68,7 @@
 <li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxx (AI100, AI200 and so on)</span></p>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
 <li class="toctree-l1"><a class="reference internal" href="features_enablement.html">Fetaures Enablement Guide</a></li>
@@ -156,74 +158,171 @@
 <tr class="row-even"><td><p><a class="reference external" href="https://quic.github.io/efficient-transformers/source/quick_start.html#draft-based-speculative-decoding">SpD, multiprojection heads</a></p></td>
 <td><p>Implemented post-attention hidden size projections to speculate tokens ahead of the base model. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/performance/speculative_decoding/multi_projection.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/374">QNN Compilation support</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main/examples/performance/dflash">DFlash: Block Diffusion Speculative Decoding</a></p></td>
+<td><p>Block-diffusion speculative decoding where a lightweight draft model predicts a block of tokens jointly with a two-stream (context/noise) attention mechanism, verified by the target model in a single pass. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/performance/dflash/README.md">sample script</a> for more <strong>details</strong>.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/374">QNN Compilation support</a></p></td>
 <td><p>Enabled for AutoModel classes QNN compilation capabilities for multi-models, embedding models and causal models.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/365">Disaggregated serving</a></p></td>
+<tr class="row-odd"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/365">Disaggregated serving</a></p></td>
 <td><p>It support for separate prefill and decode compilation for encoder (vision) and language models.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/368">GGUF model execution</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/368">GGUF model execution</a></p></td>
 <td><p>Supported GGUF model execution (without quantized weights). Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/text_generation/gguf_models.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-even"><td><p>Replication of KV</p></td>
+<tr class="row-odd"><td><p>Replication of KV</p></td>
 <td><p>Enabled FP8 model support on <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main/scripts/replicate_kv_head">replicate_kv_heads script</a>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/338">gradient checkpointing</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://github.com/quic/efficient-transformers/pull/338">gradient checkpointing</a></p></td>
 <td><p>Supports gradient checkpointing in the finetuning script</p></td>
 </tr>
-<tr class="row-even"><td><p>Swift KV <a class="reference external" href="https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct">Snowflake/Llama-3.1-SwiftKV-8B-Instruct</a></p></td>
+<tr class="row-odd"><td><p>Swift KV <a class="reference external" href="https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct">Snowflake/Llama-3.1-SwiftKV-8B-Instruct</a></p></td>
 <td><p>Reduces computational overhead during inference by optimizing key-value pair processing, leading to improved throughput. Support for both <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/367">continuous and non-continuous batching execution</a> in SwiftKV</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautomodelforimagetexttotext"><span class="std std-ref">Vision Language Model</span></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautomodelforimagetexttotext"><span class="std std-ref">Vision Language Model</span></a></p></td>
 <td><p>Provides support for the AutoModelForImageTextToText class from the transformers library, enabling advanced vision-language tasks. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/image_text_to_text/basic_vlm_inference.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautomodelforspeechseq2seq"><span class="std std-ref">Speech Sequence to Sequence Model</span></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautomodelforspeechseq2seq"><span class="std std-ref">Speech Sequence to Sequence Model</span></a></p></td>
 <td><p>Provides support for the QEFFAutoModelForSpeechSeq2Seq Facilitates speech-to-text sequence models. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/audio/speech_to_text.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-odd"><td><p>Support for FP8 Execution</p></td>
+<tr class="row-even"><td><p>Support for FP8 Execution</p></td>
 <td><p>Enables execution with FP8 precision, significantly improving performance and reducing memory usage for computational tasks.</p></td>
 </tr>
-<tr class="row-even"><td><p>Prefill caching</p></td>
+<tr class="row-odd"><td><p>Prefill caching</p></td>
 <td><p>Enhances inference speed by caching key-value pairs for shared prefixes, reducing redundant computations and improving efficiency.</p></td>
 </tr>
-<tr class="row-odd"><td><p>On Device Sampling</p></td>
+<tr class="row-even"><td><p>On Device Sampling</p></td>
 <td><p>Enables sampling operations to be executed directly on the QAIC device rather than the host CPU for QEffForCausalLM models. This enhancement significantly reduces host-device communication overhead and improves inference throughput and scalability. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/on_device_sampling.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-even"><td><p>Prompt-Lookup Decoding</p></td>
+<tr class="row-odd"><td><p>Prompt-Lookup Decoding</p></td>
 <td><p>Speeds up text generation by using overlapping parts of the input prompt and the generated text, making the process faster without losing quality. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/performance/speculative_decoding/prompt_lookup.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautopeftmodelforcausallm"><span class="std std-ref">PEFT LoRA support</span></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautopeftmodelforcausallm"><span class="std std-ref">PEFT LoRA support</span></a></p></td>
 <td><p>Enables parameter-efficient fine-tuning using low-rank adaptation techniques, reducing the computational and memory requirements for fine-tuning large models. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/peft/single_adapter.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="features_enablement.html#id-qnn-compilation-via-python-api"><span class="std std-ref">QNN support</span></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="features_enablement.html#id-qnn-compilation-via-python-api"><span class="std std-ref">QNN support</span></a></p></td>
 <td><p>Enables compilation using QNN SDK, making Qeff adaptable for various backends in the future.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautomodel"><span class="std std-ref">Embedding model support</span></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautomodel"><span class="std std-ref">Embedding model support</span></a></p></td>
 <td><p>Facilitates the generation of vector embeddings for retrieval tasks.</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="features_enablement.html#id-draft-based-speculative-decoding"><span class="std std-ref">Speculative Decoding</span></a></p></td>
+<tr class="row-odd"><td><p><a class="reference internal" href="features_enablement.html#id-draft-based-speculative-decoding"><span class="std std-ref">Speculative Decoding</span></a></p></td>
 <td><p>Accelerates text generation by using a draft model to generate preliminary predictions, which are then verified by the target model, reducing latency and improving efficiency. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/performance/speculative_decoding/draft_based.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautoloramodelforcausallm"><span class="std std-ref">Finite lorax</span></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="qeff_autoclasses.html#qeffautoloramodelforcausallm"><span class="std std-ref">Finite lorax</span></a></p></td>
 <td><p>Users can activate multiple LoRA adapters and compile them with the base model. At runtime, they can specify which prompt should use which adapter, enabling mixed adapter usage within the same batch. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/peft/multi_adapter.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-even"><td><p>Python and CPP Inferencing API support</p></td>
+<tr class="row-odd"><td><p>Python and CPP Inferencing API support</p></td>
 <td><p>Provides flexibility while running inference with Qeff and enabling integration with various applications and improving accessibility for developers. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/performance/cpp_execution/text_inference_cpp.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="features_enablement.html#id-continuous-batching"><span class="std std-ref">Continuous batching</span></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="features_enablement.html#id-continuous-batching"><span class="std std-ref">Continuous batching</span></a></p></td>
 <td><p>Optimizes throughput and latency by dynamically batching requests, ensuring efficient use of computational resources.</p></td>
 </tr>
-<tr class="row-even"><td><p>AWQ and GPTQ support</p></td>
+<tr class="row-odd"><td><p>AWQ and GPTQ support</p></td>
 <td><p>Supports advanced quantization techniques, improving model efficiency and performance on AI 100.</p></td>
 </tr>
-<tr class="row-odd"><td><p>Support serving successive requests in same session</p></td>
+<tr class="row-even"><td><p>Support serving successive requests in same session</p></td>
 <td><p>An API that yields tokens as they are generated, facilitating seamless integration with various applications and enhancing accessibility for developers.</p></td>
 </tr>
-<tr class="row-even"><td><p>Perplexity calculation</p></td>
+<tr class="row-odd"><td><p>Perplexity calculation</p></td>
 <td><p>A script for computing the perplexity of a model, allowing for the evaluation of model performance and comparison across different models and datasets. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/scripts/perplexity_computation/calculate_perplexity.py">sample script</a> for more <strong>details</strong>.</p></td>
 </tr>
-<tr class="row-odd"><td><p>KV Heads Replication Script</p></td>
+<tr class="row-even"><td><p>KV Heads Replication Script</p></td>
 <td><p>A sample script for replicating key-value (KV) heads for the Llama-3-8B-Instruct model, running inference with the original model, replicating KV heads, validating changes, and exporting the modified model to ONNX format. Refer <a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/scripts/replicate_kv_head/replicate_kv_heads.py">sample script</a> for more <strong>details</strong>.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="moe-execution-flavour-support-matrix">
+<h1>MOE Execution Flavour Support Matrix<a class="headerlink" href="#moe-execution-flavour-support-matrix" title="Permalink to this heading"></a></h1>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 18.3%" />
+<col style="width: 10.0%" />
+<col style="width: 10.0%" />
+<col style="width: 11.7%" />
+<col style="width: 15.0%" />
+<col style="width: 35.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model family</p></th>
+<th class="head"><p><code class="docutils literal notranslate"><span class="pre">decode_bmm</span></code></p></th>
+<th class="head"><p><code class="docutils literal notranslate"><span class="pre">simple_loop</span></code></p></th>
+<th class="head"><p><code class="docutils literal notranslate"><span class="pre">expert_parallel</span></code></p></th>
+<th class="head"><p><code class="docutils literal notranslate"><span class="pre">legacy_ffn_blocking</span></code></p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Qwen3-MOE</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>Config-derived block quicktests cover all three shared MOE flavours.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Qwen3-VL-MOE</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>Text MOE block is covered with tiny text-only config-derived quicktests.</p></td>
+</tr>
+<tr class="row-even"><td><p>Qwen3.5-MOE</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>Text MOE block is covered with tiny text-only config-derived quicktests.</p></td>
+</tr>
+<tr class="row-odd"><td><p>GLM4-MOE</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>Config-derived block quicktests cover all three shared MOE flavours.</p></td>
+</tr>
+<tr class="row-even"><td><p>GPT-OSS</p></td>
+<td><p>No</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>Optimized MOE flavour selection covers <code class="docutils literal notranslate"><span class="pre">simple_loop</span></code> and <code class="docutils literal notranslate"><span class="pre">expert_parallel</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Mixtral</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>No</p></td>
+<td><p>Shared MOE block supports decode gather/BMM and prefill simple-loop execution.</p></td>
+</tr>
+<tr class="row-even"><td><p>Granite-MOE</p></td>
+<td><p>No</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>No</p></td>
+<td><p>Granite-MOE uses the shared simple-loop flavour.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Llama4</p></td>
+<td><p>No</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>No</p></td>
+<td><p>Llama4 uses pre-scaled routing and explicitly disables <code class="docutils literal notranslate"><span class="pre">decode_bmm</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>DeepSeek-V3/KIMI language-only</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>External string-mapper quicktests cover shared flavours; legacy FFN blocking is covered separately.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Grok-1</p></td>
+<td><p>Yes</p></td>
+<td><p>Yes</p></td>
+<td><p>No</p></td>
+<td><p>No</p></td>
+<td><p>Covered through synthetic Grok-like <code class="docutils literal notranslate"><span class="pre">MoeBlock</span></code> tests using the optimized MOE adapter path.</p></td>
 </tr>
 </tbody>
 </table>
@@ -267,6 +366,9 @@
         <dd><a href="release/v1.20/index.html">release/v1.20</a></dd>
         <dd><a href="release/v1.21/index.html">release/v1.21</a></dd>
         <dd><a href="release/v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="release/v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="release/v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="release/v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
       </dl>
     </div>
 </div><script>

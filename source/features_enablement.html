@@ -47,6 +47,8 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release/v1.23.2.0/source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
@@ -56,8 +58,8 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
 <li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="validate.html#note">Note</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Installation</span></p>
@@ -66,12 +68,13 @@
 <li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxx (AI100, AI200 and so on)</span></p>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
 <ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Fetaures Enablement Guide</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#continuous-batching">Continuous Batching</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#multi-qranium-inference">Multi-Qranium Inference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#weight-free-causallm-export">Weight-Free CausalLM Export</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#qnn-compilation-via-python-api">QNN Compilation via Python API</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#draft-based-speculative-decoding">Draft-Based Speculative Decoding</a></li>
 </ul>
@@ -157,6 +160,38 @@
 </div>
 <hr class="docutils" />
 </section>
+<section id="weight-free-causallm-export">
+<span id="id-weight-free-export"></span><h2>Weight-Free CausalLM Export<a class="headerlink" href="#weight-free-causallm-export" title="Permalink to this heading"></a></h2>
+<p>Weight-free export traces a CausalLM model with meta tensors and keeps model
+weights outside the ONNX graph. The export writes a <code class="docutils literal notranslate"><span class="pre">weight_spec.json</span></code> sidecar
+beside the ONNX file so compile and ONNX Runtime validation can load the real
+checkpoint tensors only when needed.</p>
+<p>Use the <code class="docutils literal notranslate"><span class="pre">compile()</span></code> flag when exporting large CausalLM models where holding all
+weights in memory during ONNX export is not practical:</p>
+<div class="highlight-Python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEFFAutoModelForCausalLM</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">QEFFAutoModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="s2">&quot;Qwen/Qwen2-1.5B-Instruct&quot;</span><span class="p">,</span> <span class="n">weight_free</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">qpc_path</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+    <span class="n">prefill_seq_len</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+    <span class="n">ctx_len</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+    <span class="n">num_cores</span><span class="o">=</span><span class="mi">16</span><span class="p">,</span>
+    <span class="n">dynamo</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">weight_free=True</span></code> forces the dynamo export path. When constructing a
+QEfficient wrapper manually from a meta-device model, pass
+<code class="docutils literal notranslate"><span class="pre">pretrained_model_name_or_path</span></code> so the exporter can resolve the checkpoint files
+referenced by <code class="docutils literal notranslate"><span class="pre">weight_spec.json</span></code>.</p>
+<p>For ONNX Runtime validation, use
+<code class="docutils literal notranslate"><span class="pre">QEfficient.exporter.weight_free.load_weight_free_ort_inputs()</span></code> to merge runtime
+inputs with the external checkpoint tensors. The helper resolves weights from an
+explicit <code class="docutils literal notranslate"><span class="pre">weights_root</span></code> argument first. If that is not provided, it checks
+<code class="docutils literal notranslate"><span class="pre">AIC_EXTERNAL_DATA_ROOT</span></code>, the ONNX export directory, and the original checkpoint
+location recorded in <code class="docutils literal notranslate"><span class="pre">weight_spec.json</span></code>.</p>
+<hr class="docutils" />
+</section>
 <section id="qnn-compilation-via-python-api">
 <span id="id-qnn-compilation-via-python-api"></span><h2>QNN Compilation via Python API<a class="headerlink" href="#qnn-compilation-via-python-api" title="Permalink to this heading"></a></h2>
 <p>Users can also use python API to export, compile and execute onnx models using QNN SDK.</p>
@@ -240,6 +275,9 @@
         <dd><a href="release/v1.20/index.html">release/v1.20</a></dd>
         <dd><a href="release/v1.21/index.html">release/v1.21</a></dd>
         <dd><a href="release/v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="release/v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="release/v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="release/v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
       </dl>
     </div>
 </div><script>

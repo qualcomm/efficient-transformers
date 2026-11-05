@@ -47,6 +47,8 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release/v1.23.2.0/source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
@@ -56,6 +58,7 @@
 <ul class="current">
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
 <li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
 </ul>
@@ -141,7 +144,9 @@ We support wide range of <a class="reference internal" href="validate.html#valid
 </ol>
 <p><em>Latest news</em> : <br></p>
 <ul class="simple">
-<li><p>[07/2026] Added <code class="docutils literal notranslate"><span class="pre">dynamo</span></code> flag to <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForCausalLM.export()</span></code> to support <code class="docutils literal notranslate"><span class="pre">torch.onnx.export</span></code> dynamo-based ONNX export for CausalLM models</p></li>
+<li><p>[08/2026] Direct QEff model <code class="docutils literal notranslate"><span class="pre">.export()</span></code> calls are deprecated. Use <code class="docutils literal notranslate"><span class="pre">.compile()</span></code> so export uses the complete model and compiler configuration.</p></li>
+<li><p>[07/2026] Added support for Kimi-K2.5 vision-language model <a class="reference external" href="https://huggingface.co/moonshotai/Kimi-K2.5">moonshotai/Kimi-K2.5</a> via <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForImageTextToText</span></code>.</p></li>
+<li><p>[07/2026] Added <code class="docutils literal notranslate"><span class="pre">dynamo</span></code> support to <code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForCausalLM.compile()</span></code> for torch.onnx.export dynamo-based ONNX export of CausalLM models</p></li>
 <li><p>[06/2026] Added support for Gemma4 models, <a class="reference external" href="https://huggingface.co/google/gemma-4-E2B">google/gemma-4-E2B-it</a>, <a class="reference external" href="https://huggingface.co/google/gemma-4-26B-A4B-it">google/gemma-4-26B-A4B-it</a></p></li>
 <li><p>[06/2026] Added support for Qwen3.6 model <a class="reference external" href="https://huggingface.co/Qwen/Qwen3.6-35B-A3B">Qwen/Qwen3.6-35B-A3B</a></p></li>
 <li><p>[06/2026] Added support for Qwen3.5 model<a class="reference external" href="https://huggingface.co/Qwen/Qwen3.5-0.8B">Qwen/Qwen3.5-0.8B</a></p></li>
@@ -249,6 +254,9 @@ We support wide range of <a class="reference internal" href="validate.html#valid
         <dd><a href="release/v1.20/index.html">release/v1.20</a></dd>
         <dd><a href="release/v1.21/index.html">release/v1.21</a></dd>
         <dd><a href="release/v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="release/v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="release/v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="release/v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
       </dl>
     </div>
 </div><script>

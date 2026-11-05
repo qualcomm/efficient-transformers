@@ -44,6 +44,8 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release/v1.23.2.0/source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
@@ -53,8 +55,8 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html">Validated Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#note">Note</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Installation</span></p>
@@ -63,7 +65,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#installation">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#sanity-check">Sanity Check</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxx (AI100, AI200 and so on)</span></p>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/quick_start.html">Quick Start</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
@@ -132,6 +134,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Optional</span>
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEFFCommonLoader</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.cloud</span><span class="w"> </span><span class="kn">import</span> <span class="n">warn_deprecated_cloud_api</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">check_and_assign_cache_dir</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.custom_yaml</span><span class="w"> </span><span class="kn">import</span> <span class="n">generate_custom_io</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.logging_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
@@ -176,6 +179,7 @@
 <span class="sd">    str</span>
 <span class="sd">        Path of the generated ONNX graph file.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warn_deprecated_cloud_api</span><span class="p">(</span><span class="s2">&quot;export&quot;</span><span class="p">)</span>
     <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Exporting Pytorch </span><span class="si">{</span><span class="n">model_name</span><span class="si">}</span><span class="s2"> model to ONNX...&quot;</span><span class="p">)</span>
 
     <span class="n">qeff_model</span> <span class="o">=</span> <span class="n">QEFFCommonLoader</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
@@ -233,6 +237,7 @@
 <span class="sd">        python -m QEfficient.cloud.export --model-name gpt2 --cache-dir /path/to/cache</span>
 
 <span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">warn_deprecated_cloud_api</span><span class="p">(</span><span class="s2">&quot;export&quot;</span><span class="p">)</span>
     <span class="n">cache_dir</span> <span class="o">=</span> <span class="n">check_and_assign_cache_dir</span><span class="p">(</span><span class="n">local_model_dir</span><span class="p">,</span> <span class="n">cache_dir</span><span class="p">)</span>
     <span class="n">get_onnx_path_and_setup_customIO</span><span class="p">(</span>
         <span class="n">model_name</span><span class="o">=</span><span class="n">model_name</span><span class="p">,</span>
@@ -304,8 +309,15 @@
     <div class="rst-other-versions">
       Versions
       <dl>
-        <dd><a href="../index.html">main</a></dd>
-        <dd><a href="release/v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../index.html">main</a></dd>
+        <dd><a href="../../../source/release/v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../source/release/v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../source/release/v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../source/release/v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../source/release/v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../source/release/v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../source/release/v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../../source/release/v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
       </dl>
     </div>
 </div><script>

@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CLI API Reference &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../_static/doctools.js?v=888ff710"></script>
+        <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Finetune Infra" href="finetune.html" />
+    <link rel="prev" title="Diffuser Classes" href="diffuser_classes.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html#note">Note</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AI 100</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">CLI API Reference</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#qefficient-cloud-infer"><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.infer</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#qefficient-cloud-execute"><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.execute</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#qefficient-cloud-compile"><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.compile</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#qefficient-cloud-export"><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.export</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#qefficient-cloud-finetune"><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.finetune</span></code></a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">CLI API Reference</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/source/cli_api.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="cli-api-reference">
+<h1>CLI API Reference<a class="headerlink" href="#cli-api-reference" title="Permalink to this heading"></a></h1>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Use <code class="docutils literal notranslate"><span class="pre">bash</span> <span class="pre">terminal</span></code>, else if using <code class="docutils literal notranslate"><span class="pre">ZSH</span> <span class="pre">terminal</span></code> then <code class="docutils literal notranslate"><span class="pre">device_group</span></code> should be in single quotes e.g.  <code class="docutils literal notranslate"><span class="pre">'--device_group</span> <span class="pre">[0]'</span></code></p>
+</div>
+<section id="qefficient-cloud-infer">
+<span id="infer-api"></span><h2><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.infer</span></code><a class="headerlink" href="#qefficient-cloud-infer" title="Permalink to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py">
+<span class="sig-prename descclassname"><span class="pre">QEfficient.cloud.infer.</span></span><span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_name</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_cores</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device_group</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompt</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompts_txt_file_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aic_enable_depth_first</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mos</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">full_batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompt_len</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">32</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ctx_len</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">128</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">generation_len</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mxfp6</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mxint8</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_model_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cache_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hf_token</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allow_mxint8_mdp_io</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">enable_qnn</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qnn_config</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trust_remote_code</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ccl_enabled</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_onnx_subfunctions</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/cloud/infer.html#main"><span class="viewcode-link"><span class="pre">[source]</span></span></a></dt>
+<dd><p>Main entry point for the QEfficient inference script.</p>
+<p>This function handles the end-to-end process of downloading, optimizing,
+compiling, and executing a HuggingFace model on Cloud AI 100 hardware.
+The process follows these steps:</p>
+<ol class="arabic simple">
+<li><p>Checks for an existing compiled QPC package. If found, it jumps directly to execution.</p></li>
+<li><p>Checks for an existing exported ONNX file. If true, it proceeds to compilation then execution.</p></li>
+<li><p>Checks if the HuggingFace model exists in the cache. If true, it performs model transformation, ONNX export, compilation, and then execution.</p></li>
+<li><p>If none of the above, it downloads the HuggingFace model, then performs transformation, ONNX export, compilation, and execution.</p></li>
+</ol>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_name</strong> (<em>str</em>) – Hugging Face Model Card name (e.g., <code class="docutils literal notranslate"><span class="pre">gpt2</span></code>) or path to a local model.</p></li>
+<li><p><strong>num_cores</strong> (<em>int</em>) – Number of cores to compile the model on.</p></li>
+<li><p><strong>device_group</strong> (<em>List</em><em>[</em><em>int</em><em>]</em><em>, </em><em>optional</em>) – List of device IDs to be used for compilation and inference. If <code class="docutils literal notranslate"><span class="pre">len(device_group)</span> <span class="pre">&gt;</span> <span class="pre">1</span></code>,
+a multiple card setup is enabled. Default is None.</p></li>
+<li><p><strong>prompt</strong> (<em>str</em><em>, </em><em>optional</em>) – Sample prompt(s) for the model text generation. For batch size &gt; 1,
+pass multiple prompts separated by a pipe (<code class="docutils literal notranslate"><span class="pre">|</span></code>) symbol. Default is None.</p></li>
+<li><p><strong>prompts_txt_file_path</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to a text file containing multiple input prompts, one per line. Default is None.</p></li>
+<li><p><strong>aic_enable_depth_first</strong> (<em>bool</em><em>, </em><em>optional</em>) – Enables Depth-First Search (DFS) with default memory size during compilation. Default is False.</p></li>
+<li><p><strong>mos</strong> (<em>int</em><em>, </em><em>optional</em>) – Effort level to reduce on-chip memory. Default is 1.</p></li>
+<li><p><strong>batch_size</strong> (<em>int</em><em>, </em><em>optional</em>) – Batch size to compile the model for. Default is 1.</p></li>
+<li><p><strong>full_batch_size</strong> (<em>int</em><em>, </em><em>optional</em>) – Sets the full batch size to enable continuous batching mode. Default is None.</p></li>
+<li><p><strong>prompt_len</strong> (<em>int</em><em>, </em><em>optional</em>) – Prompt length for the model to compile. Default is 32.</p></li>
+<li><p><strong>ctx_len</strong> (<em>int</em><em>, </em><em>optional</em>) – Maximum context length to compile the model for. Default is 128.</p></li>
+<li><p><strong>generation_len</strong> (<em>int</em><em>, </em><em>optional</em>) – Maximum number of tokens to be generated during inference. Default is None.</p></li>
+<li><p><strong>mxfp6</strong> (<em>bool</em><em>, </em><em>optional</em>) – Enables compilation for MXFP6 precision for constant MatMul weights. Default is False.
+A warning is issued as <code class="docutils literal notranslate"><span class="pre">--mxfp6</span></code> is deprecated; use <code class="docutils literal notranslate"><span class="pre">--mxfp6-matmul</span></code> instead.</p></li>
+<li><p><strong>mxint8</strong> (<em>bool</em><em>, </em><em>optional</em>) – Compresses Present/Past KV to <code class="docutils literal notranslate"><span class="pre">MXINT8</span></code> using <code class="docutils literal notranslate"><span class="pre">CustomIO</span></code> config. Default is False.
+A warning is issued as <code class="docutils literal notranslate"><span class="pre">--mxint8</span></code> is deprecated; use <code class="docutils literal notranslate"><span class="pre">--mxint8-kv-cache</span></code> instead.</p></li>
+<li><p><strong>local_model_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to custom model weights and config files. Default is None.</p></li>
+<li><p><strong>cache_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Cache directory where downloaded HuggingFace files are stored. Default is None.</p></li>
+<li><p><strong>hf_token</strong> (<em>str</em><em>, </em><em>optional</em>) – HuggingFace login token to access private repositories. Default is None.</p></li>
+<li><p><strong>allow_mxint8_mdp_io</strong> (<em>bool</em><em>, </em><em>optional</em>) – Allows MXINT8 compression of MDP IO traffic during compilation. Default is False.</p></li>
+<li><p><strong>enable_qnn</strong> (<em>bool</em><em> or </em><em>str</em><em>, </em><em>optional</em>) – Enables QNN compilation. Can be passed as a flag (True) or with a configuration file path (str).
+If a string path is provided, it’s treated as <code class="docutils literal notranslate"><span class="pre">qnn_config</span></code>. Default is False.</p></li>
+<li><p><strong>qnn_config</strong> (<em>str</em><em>, </em><em>optional</em>) – Path of the QNN Config parameters file. Default is None.</p></li>
+<li><p><strong>trust_remote_code</strong> (<em>bool</em><em>, </em><em>optional</em>) – If True, trusts remote code when loading models from HuggingFace. Default is False.</p></li>
+<li><p><strong>use_onnx_subfunctions</strong> (<em>bool</em><em>, </em><em>optional</em>) – Enables ONNX subfunctions during export and compile. Default is False.</p></li>
+<li><p><strong>**kwargs</strong> – <p>Additional compiler options passed directly to <cite>qaic-compile</cite>. Any flag supported by
+<cite>qaic-compile</cite> can be passed. Parameters are converted to flags as follows:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">-allocator_dealloc_delay=1</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">-allocator-dealloc-delay=1</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-qpc_crc=True</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">-qpc-crc</span></code></p></li>
+</ul>
+</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<p>To run inference from the command line:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>QEfficient.cloud.infer<span class="w"> </span>--model-name<span class="w"> </span>gpt2<span class="w"> </span>--num-cores<span class="w"> </span><span class="m">16</span><span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Hello world&quot;</span>
+</pre></div>
+</div>
+<p>For advanced compilation options:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>QEfficient.cloud.infer<span class="w"> </span>--model-name<span class="w"> </span>meta-llama/Llama-3.2-11B-Vision-Instruct<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--num-cores<span class="w"> </span><span class="m">16</span><span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Describe this image.&quot;</span><span class="w"> </span>--image-url<span class="w"> </span><span class="s2">&quot;https://example.com/image.jpg&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--ctx-len<span class="w"> </span><span class="m">512</span><span class="w"> </span>--img-size<span class="w"> </span><span class="m">560</span><span class="w"> </span>--mxfp6-matmul
+</pre></div>
+</div>
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qefficient-cloud-execute">
+<span id="execute-api"></span><h2><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.execute</span></code><a class="headerlink" href="#qefficient-cloud-execute" title="Permalink to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py">
+<span class="sig-prename descclassname"><span class="pre">QEfficient.cloud.execute.</span></span><span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_name</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qpc_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device_group</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_model_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompt</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompts_txt_file_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">generation_len</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cache_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hf_token</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">full_batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/QEfficient/cloud/execute.html#main"><span class="viewcode-link"><span class="pre">[source]</span></span></a></dt>
+<dd><p>Main function for the QEfficient execution CLI application.</p>
+<p>This function serves as the entry point for running a compiled model
+(QPC package) on the Cloud AI 100 Platform. It loads the necessary
+tokenizer and then orchestrates the text generation inference.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_name</strong> (<em>str</em>) – Hugging Face Model Card name (e.g., <code class="docutils literal notranslate"><span class="pre">gpt2</span></code>) for loading the tokenizer.</p></li>
+<li><p><strong>qpc_path</strong> (<em>str</em>) – Path to the generated binary (QPC package) after compilation.</p></li>
+<li><p><strong>device_group</strong> (<em>List</em><em>[</em><em>int</em><em>]</em><em>, </em><em>optional</em>) – List of device IDs to be used for inference. If <cite>len(device_group) &gt; 1</cite>,
+a multi-card setup is enabled. Default is None.</p></li>
+<li><p><strong>local_model_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to custom model weights and config files, used if not loading tokenizer
+from Hugging Face Hub. Default is None.</p></li>
+<li><p><strong>prompt</strong> (<em>str</em><em>, </em><em>optional</em>) – Sample prompt(s) for the model text generation. For batch size &gt; 1,
+pass multiple prompts separated by a pipe (<code class="docutils literal notranslate"><span class="pre">|</span></code>) symbol. Default is None.</p></li>
+<li><p><strong>prompts_txt_file_path</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to a text file containing multiple input prompts, one per line. Default is None.</p></li>
+<li><p><strong>generation_len</strong> (<em>int</em><em>, </em><em>optional</em>) – Maximum number of tokens to be generated during inference. Default is None.</p></li>
+<li><p><strong>cache_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Cache directory where downloaded HuggingFace files (like tokenizer) are stored.
+Default is None.</p></li>
+<li><p><strong>hf_token</strong> (<em>str</em><em>, </em><em>optional</em>) – HuggingFace login token to access private repositories. Default is None.</p></li>
+<li><p><strong>full_batch_size</strong> (<em>int</em><em>, </em><em>optional</em>) – Ignored in this context as continuous batching is managed by the compiled QPC.
+However, it might be passed through from CLI arguments. Default is None.</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<p>To execute a compiled model from the command line:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>QEfficient.cloud.execute<span class="w"> </span>--model-name<span class="w"> </span>gpt2<span class="w"> </span>--qpc-path<span class="w"> </span>/path/to/qpc/binaries<span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Hello world&quot;</span>
+</pre></div>
+</div>
+<p>For multi-device inference:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>QEfficient.cloud.execute<span class="w"> </span>--model-name<span class="w"> </span>gpt2<span class="w"> </span>--qpc-path<span class="w"> </span>/path/to/qpc/binaries<span class="w"> </span>--device-group<span class="w"> </span><span class="s2">&quot;[0,1]&quot;</span><span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Hello | Hi&quot;</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qefficient-cloud-compile">
+<span id="compile-api"></span><h2><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.compile</span></code><a class="headerlink" href="#qefficient-cloud-compile" title="Permalink to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py">
+<span class="sig-prename descclassname"><span class="pre">QEfficient.compile.compile_helper.</span></span><span class="sig-name descname"><span class="pre">compile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qpc_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_cores</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device_group</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aic_enable_depth_first</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mos</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">-1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prompt_len</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">32</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ctx_len</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">128</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mxfp6</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mxint8</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">custom_io_file_path</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">full_batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allow_mxint8_mdp_io</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">enable_qnn</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qnn_config</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference internal" href="../_modules/QEfficient/compile/compile_helper.html#compile"><span class="viewcode-link"><span class="pre">[source]</span></span></a></dt>
+<dd><p>Compiles the given ONNX model using either the Cloud AI 100 platform SDK compiler
+or the QNN compiler, and saves the compiled QPC package.</p>
+<p>This function handles the creation of specialization files, selection of custom IO
+configurations, and execution of the appropriate compiler (QAIC or QNN).
+It supports multi-device compilation for tensor slicing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_path</strong> (<em>str</em>) – Path to the generated ONNX model file.</p></li>
+<li><p><strong>qpc_path</strong> (<em>str</em>) – Target directory path for saving the compiled QPC binaries.</p></li>
+<li><p><strong>num_cores</strong> (<em>int</em>) – Number of cores to use for compilation.</p></li>
+<li><p><strong>device_group</strong> (<em>List</em><em>[</em><em>int</em><em>]</em><em>, </em><em>optional</em>) – List of device IDs. Used to determine the number of devices for multi-device compilation.
+Default is None.</p></li>
+<li><p><strong>aic_enable_depth_first</strong> (<em>bool</em><em>, </em><em>optional</em>) – If True, enables Depth-First Search (DFS) optimization with default memory size during QAIC compilation.
+Default is False.</p></li>
+<li><p><strong>mos</strong> (<em>int</em><em>, </em><em>optional</em>) – Effort level to reduce on-chip memory during QAIC compilation. A value greater than 0 applies this effort.
+Default is -1 (no effort).</p></li>
+<li><p><strong>batch_size</strong> (<em>int</em><em>, </em><em>optional</em>) – Batch size to compile the model for. Default is 1.</p></li>
+<li><p><strong>full_batch_size</strong> (<em>int</em><em>, </em><em>optional</em>) – Sets the full batch size to enable continuous batching mode. If provided, <cite>batch_size</cite> must be 1.
+Default is None.</p></li>
+<li><p><strong>prompt_len</strong> (<em>int</em><em>, </em><em>optional</em>) – Prompt length for the model to compile. Default is 32.</p></li>
+<li><p><strong>ctx_len</strong> (<em>int</em><em>, </em><em>optional</em>) – Maximum context length to compile the model for. Default is 128.</p></li>
+<li><p><strong>mxfp6</strong> (<em>bool</em><em>, </em><em>optional</em>) – If True, enables MXFP6 precision for MatMul weights during compilation. Default is True.</p></li>
+<li><p><strong>mxint8</strong> (<em>bool</em><em>, </em><em>optional</em>) – If True, compresses Present/Past KV to MXINT8 using a CustomIO configuration. Default is False.</p></li>
+<li><p><strong>custom_io_file_path</strong> (<em>str</em><em>, </em><em>optional</em>) – Explicit path to a Custom IO file (e.g., YAML format). If None, it’s inferred based on <cite>mxint8</cite>.
+Default is None.</p></li>
+<li><p><strong>allow_mxint8_mdp_io</strong> (<em>bool</em><em>, </em><em>optional</em>) – If True, allows MXINT8 compression of MDP IO traffic during QAIC compilation. Default is False.</p></li>
+<li><p><strong>enable_qnn</strong> (<em>bool</em><em>, </em><em>optional</em>) – If True, enables compilation using the QNN compiler instead of QAIC. Default is False.</p></li>
+<li><p><strong>qnn_config</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to the QNN Config parameters file, used if <cite>enable_qnn</cite> is True. Default is None.</p></li>
+<li><p><strong>**kwargs</strong> – Additional compiler options passed directly to the chosen compiler.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Path to the compiled QPC package directory.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>ValueError</strong> – If both <cite>batch_size</cite> and <cite>full_batch_size</cite> are greater than one (mutually exclusive in some contexts).</p></li>
+<li><p><strong>FileNotFoundError</strong> – If required Custom IO files are not found.</p></li>
+</ul>
+</dd>
+</dl>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<dl class="simple">
+<dt>DeprecationWarning</dt><dd><p>This method will be removed soon; use <cite>QEFFAutoModelForCausalLM.compile</cite> instead.</p>
+</dd>
+</dl>
+</div>
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qefficient-cloud-export">
+<span id="export-api"></span><h2><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.export</span></code><a class="headerlink" href="#qefficient-cloud-export" title="Permalink to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py">
+<span class="sig-prename descclassname"><span class="pre">QEfficient.cloud.export.</span></span><span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_name</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cache_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hf_token</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_model_dir</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">full_batch_size</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mxint8_kv_cache</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/cloud/export.html#main"><span class="viewcode-link"><span class="pre">[source]</span></span></a></dt>
+<dd><p>Main function for the QEfficient ONNX export CLI application.</p>
+<p>This function serves as the entry point for exporting a PyTorch model, loaded
+via QEFFCommonLoader, to the ONNX format. It prepares the necessary
+paths and calls <cite>get_onnx_path_and_setup_customIO</cite>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_name</strong> (<em>str</em>) – Hugging Face Model Card name (e.g., <code class="docutils literal notranslate"><span class="pre">gpt2</span></code>).</p></li>
+<li><p><strong>cache_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Cache directory where downloaded HuggingFace files are stored. Default is None.</p></li>
+<li><p><strong>hf_token</strong> (<em>str</em><em>, </em><em>optional</em>) – HuggingFace login token to access private repositories. Default is None.</p></li>
+<li><p><strong>local_model_dir</strong> (<em>str</em><em>, </em><em>optional</em>) – Path to custom model weights and config files. Default is None.</p></li>
+<li><p><strong>full_batch_size</strong> (<em>int</em><em>, </em><em>optional</em>) – Sets the full batch size to enable continuous batching mode. Default is None.</p></li>
+</ul>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<p>To export a model from the command line:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>QEfficient.cloud.export<span class="w"> </span>--model-name<span class="w"> </span>gpt2<span class="w"> </span>--cache-dir<span class="w"> </span>/path/to/cache
+</pre></div>
+</div>
+</dd></dl>
+
+<hr class="docutils" />
+</section>
+<section id="qefficient-cloud-finetune">
+<span id="finetune-api"></span><h2><code class="docutils literal notranslate"><span class="pre">QEfficient.cloud.finetune</span></code><a class="headerlink" href="#qefficient-cloud-finetune" title="Permalink to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py">
+<span class="sig-prename descclassname"><span class="pre">QEfficient.cloud.finetune.</span></span><span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../_modules/QEfficient/cloud/finetune.html#main"><span class="viewcode-link"><span class="pre">[source]</span></span></a></dt>
+<dd><p>Fine-tune a Hugging Face model on Qualcomm AI 100 hardware with configurable training
+and Parameter-Efficient Fine-Tuning (PEFT) parameters.</p>
+<p>This is the main entry point for the fine-tuning script. It orchestrates the
+setup of distributed training, model and tokenizer loading, DataLoader creation,
+optimizer and scheduler initialization, and the training loop.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>**kwargs</strong> – Additional arguments used to override default parameters in <cite>TrainConfig</cite>
+and PEFT configuration. These are typically parsed from command-line arguments.</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<p>To fine-tune a model using a YAML configuration file for PEFT:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>QEfficient.cloud.finetune<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model_name<span class="w"> </span><span class="s2">&quot;meta-llama/Llama-3.2-1B&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--lr<span class="w"> </span>5e-4<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--peft_config_file<span class="w"> </span><span class="s2">&quot;lora_config.yaml&quot;</span>
+</pre></div>
+</div>
+<p>To fine-tune a model using a default LoRA configuration:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>QEfficient.cloud.finetune<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model_name<span class="w"> </span><span class="s2">&quot;meta-llama/Llama-3.2-1B&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--lr<span class="w"> </span>5e-4
+</pre></div>
+</div>
+</dd></dl>
+
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="diffuser_classes.html" class="btn btn-neutral float-left" title="Diffuser Classes" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="finetune.html" class="btn btn-neutral float-right" title="Finetune Infra" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.22.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../index.html">main</a></dd>
+        <dd><a href="../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

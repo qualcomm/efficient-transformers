@@ -1,0 +1,40 @@
+/* Limit content width for better readability on very wide screens,
+   while allowing it to be larger than the default RTD theme. */
+.wy-nav-content {
+    max-width: 1200px !important;
+}
+
+/* Make Parameters, Returns, and Example sections align with page content */
+.wy-nav-content .rst-content .field-list,
+.wy-nav-content .rst-content .field-list .field-name,
+.wy-nav-content .rst-content .field-list .field-body,
+.wy-nav-content .rst-content .field-list p,
+.wy-nav-content .rst-content .field-list ul,
+.wy-nav-content .rst-content .field-list li {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+    max-width: 100% !important;
+    white-space: normal !important;
+    word-break: break-word !important;
+    overflow-wrap: break-word !important;
+}
+
+/* Make code blocks (examples) use full width and wrap if needed */
+.wy-nav-content .rst-content pre {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    max-width: 100% !important;
+    overflow-x: auto !important;
+}
+
+
+/* Force table cells to wrap long text, overriding RTD theme */
+.rst-content table.docutils td,
+.rst-content table.docutils th,
+.wy-table-responsive table td,
+.wy-table-responsive table th,
+.docutils .list-table td,
+.docutils .list-table th {
+    white-space: normal !important;
+    word-break: break-word !important;
+}

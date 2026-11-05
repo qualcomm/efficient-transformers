@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Introduction Qualcomm efficient-transformers library &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../_static/doctools.js?v=888ff710"></script>
+        <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Supported Features" href="supported_features.html" />
+    <link rel="prev" title="Efficient Transformer Library - 1.21.0 Release Notes" href="release_docs.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html#note">Note</a></li>
+<li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AI 100</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/source/introduction.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <p><img alt="alt text" src="../_images/Cloud_AI_100.png" /></p>
+<section id="introduction-qualcomm-efficient-transformers-library">
+<h1>Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library<a class="headerlink" href="#introduction-qualcomm-efficient-transformers-library" title="Permalink to this heading"></a></h1>
+<p><strong>Train anywhere, Infer on Qualcomm Cloud AI with a Developer-centric Toolchain</strong></p>
+<p>This library provides reimplemented blocks of LLMs which are used to make the models functional and highly performant on Qualcomm Cloud AI 100.
+We support wide range of <a class="reference internal" href="validate.html#validated-models"><span class="std std-ref">models</span></a> architectures, for easy efficient deployment on Cloud AI 100 cards. Users only need to provide model card from HuggingFace or Path to the local model and the library will take care of transforming model to it’s efficient implementation for Cloud AI 100.</p>
+<p>For other models, there is comprehensive documentation to inspire upon the changes needed and How-To(s).</p>
+<p><strong>Typically for LLMs, the library provides:</strong></p>
+<ol class="arabic simple">
+<li><p>Reimplemented blocks from Transformers which enable efficient on-device retention of intermediate states.</p></li>
+<li><p>Graph transformations to enable execution of key operations in lower precision</p></li>
+<li><p>Graph transformations to replace some operations to other mathematically equivalent operations that are efficient/supported on HW backend</p></li>
+<li><p>Handling for underflow and overflows in lower precision</p></li>
+<li><p>Patcher modules to map weights of original model’s operations to updated model’s operations</p></li>
+<li><p>Exporter module to export the model source into a <code class="docutils literal notranslate"><span class="pre">ONNX</span></code> Graph.</p></li>
+<li><p>Sample example applications and demo notebooks</p></li>
+<li><p>Unit test templates.</p></li>
+</ol>
+<p><em><strong>Latest news</strong></em> : <br></p>
+<ul class="simple">
+<li><p>[coming soon] Support for more popular <a class="reference internal" href="validate.html#models-coming-soon"><span class="std std-ref">models</span></a><br></p></li>
+<li><p>[04/2026] Added WAN non-unified execution support in <code class="docutils literal notranslate"><span class="pre">QEffWanPipeline</span></code> with separate <code class="docutils literal notranslate"><span class="pre">transformer_high</span></code> and <code class="docutils literal notranslate"><span class="pre">transformer_low</span></code> modules</p></li>
+<li><p>[04/2026] Added first-block-cache support for WAN non-unified mode and FLUX (<code class="docutils literal notranslate"><span class="pre">QEffWanPipeline</span></code>, <code class="docutils literal notranslate"><span class="pre">QEffFluxPipeline</span></code>)</p></li>
+<li><p>[12/2025] Enabled <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main/examples/disagg_serving">disaggregated serving</a> for GPT-OSS model</p></li>
+<li><p>[12/2025] Added support for wav2vec2 Audio Model <a class="reference external" href="https://huggingface.co/facebook/wav2vec2-base-960h">facebook/wav2vec2-base-960h</a></p></li>
+<li><p>[12/2025] Added support for diffuser video generation model <a class="reference external" href="https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B-Diffusers">WAN 2.2 Model Card</a></p></li>
+<li><p>[12/2025] Added support for diffuser image generation model <a class="reference external" href="https://huggingface.co/black-forest-labs/FLUX.1-schnell">FLUX.1 Model Card</a></p></li>
+<li><p>[12/2025] Added support for <a class="reference external" href="https://huggingface.co/openai/gpt-oss-20b">openai/gpt-oss-20b</a></p></li>
+<li><p>[12/2025] Added support for <a class="reference external" href="https://huggingface.co/OpenGVLab/InternVL3_5-1B">OpenGVLab/InternVL3_5-1B</a></p></li>
+<li><p>[12/2025] Added support for Olmo Model <a class="reference external" href="https://huggingface.co/allenai/OLMo-2-0425-1B">allenai/OLMo-2-0425-1B</a></p></li>
+<li><p>[10/2025] Added support for Qwen3 MOE Model <a class="reference external" href="https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507">Qwen/Qwen3-30B-A3B-Instruct-2507</a></p></li>
+<li><p>[10/2025] Added support for Qwen2.5VL Multi-Model <a class="reference external" href="https://huggingface.co/Qwen/Qwen2.5-VL-32B-Instruct">Qwen/Qwen2.5-VL-32B-Instruct</a></p></li>
+<li><p>[10/2025] Added support for Mistral3 Multi-Model <a class="reference external" href="https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503">mistralai/Mistral-Small-3.1-24B-Instruct-2503</a></p></li>
+<li><p>[10/2025] Added support for Molmo Multi-Model <a class="reference external" href="https://huggingface.co/allenai/Molmo-7B-D-0924">allenai/Molmo-7B-D-0924</a></p></li>
+</ul>
+<details>
+<summary>More</summary>
+<ul class="simple">
+<li><p>[06/2025] Added support for Llama4 Multi-Model <a class="reference external" href="https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct">meta-llama/Llama-4-Scout-17B-16E-Instruct</a></p></li>
+<li><p>[06/2025] Added support for Gemma3 Multi-Modal-Model <a class="reference external" href="https://huggingface.co/google/gemma-3-4b-it">google/gemma-3-4b-it</a></p></li>
+<li><p>[06/2025] Added support of model <code class="docutils literal notranslate"><span class="pre">hpcai-tech/grok-1</span></code> <a class="reference external" href="https://huggingface.co/hpcai-tech/grok-1">hpcai-tech/grok-1</a></p></li>
+<li><p>[06/2025] Added support for sentence embedding which improves efficiency, Flexible/Custom Pooling configuration and compilation with multiple sequence lengths, <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/424">Embedding model</a></p></li>
+<li><p>[04/2025] Support for <a class="reference external" href="https://quic.github.io/efficient-transformers/source/quick_start.html#draft-based-speculative-decoding">SpD, multiprojection heads</a>. Implemented post-attention hidden size projections to speculate tokens ahead of the base model</p></li>
+<li><p>[04/2025] <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/374">QNN Compilation support</a> for AutoModel classes. QNN compilation capabilities for multi-models, embedding models and causal models.</p></li>
+<li><p>[04/2025] Added support for separate prefill and decode compilation for encoder (vision) and language models. This feature will be utilized for <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/365">disaggregated serving</a>.</p></li>
+<li><p>[04/2025] SwiftKV Support for both <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/367">continuous and non-continuous batching execution</a> in SwiftKV.</p></li>
+<li><p>[04/2025] Support for <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/368">GGUF model execution</a> (without quantized weights)</p></li>
+<li><p>[04/2025] Enabled FP8 model support on <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main/scripts/replicate_kv_head">replicate_kv_heads script</a></p></li>
+<li><p>[04/2025] Added support for <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/338">gradient checkpointing</a> in the finetuning script</p></li>
+<li><p>[03/2025] Added support for swiftkv model <a class="reference external" href="https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct">Snowflake/Llama-3.1-SwiftKV-8B-Instruct</a></p></li>
+<li><p>[02/2025] <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/267">VLMs support</a> added for the models <a class="reference external" href="https://huggingface.co/OpenGVLab/InternVL2_5-1B">InternVL-1B</a>, <a class="reference external" href="https://huggingface.co/llava-hf/llava-1.5-7b-hf">Llava</a> and <a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct">Mllama</a> <em>(Mllama support is deprecated — please migrate to Llama-4)</em></p></li>
+<li><p>[01/2025] <a class="reference external" href="https://huggingface.co/collections/neuralmagic/fp8-llms-for-vllm-666742ed2b78b7ac8df13127">FP8 models support</a> Added support for inference of FP8 models.</p></li>
+<li><p>[01/2025] Added support for <a class="reference external" href="https://huggingface.co/ibm-granite/granite-3.1-8b-instruct">Ibm-Granite</a></p></li>
+<li><p>[01/2025] Added support for <a class="reference external" href="https://huggingface.co/ibm-granite/granite-guardian-3.1-8b">Ibm-Granite-Guardian</a></p></li>
+<li><p>[11/2024] <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/153">finite adapters support</a> allows mixed adapter usage for peft models.</p></li>
+<li><p>[11/2024] <a class="reference external" href="https://github.com/quic/efficient-transformers/pull/119">Speculative decoding TLM</a> QEFFAutoModelForCausalLM model can be compiled for returning more than 1 logits during decode for TLM.</p></li>
+<li><p>[11/2024] Added support for <a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct">Meta-Llama-3.3-70B-Instruct</a>, <a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.2-1B">Meta-Llama-3.2-1B</a> and <a class="reference external" href="https://huggingface.co/meta-llama/Llama-3.2-3B">Meta-Llama-3.2-3B</a></p></li>
+<li><p>[09/2024] <a class="reference external" href="https://arxiv.org/abs/2306.00978">AWQ</a>/<a class="reference external" href="https://arxiv.org/abs/2210.17323">GPTQ</a> 4-bit quantized models are supported</p></li>
+<li><p>[09/2024] Now we support <a class="reference external" href="https://huggingface.co/docs/peft/index">PEFT</a> models</p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/collections/google/gemma-2-release-667d6600fd5220e7b967f315">Gemma-2-Family</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/collections/google/codegemma-release-66152ac7b683e2667abdee11">CodeGemma-Family</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/collections/google/gemma-release-65d5efbccdbb8c4202ec078b">Gemma-Family</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/meta-llama/Meta-Llama-3.1-8B">Meta-Llama-3.1-8B</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct">Meta-Llama-3.1-8B-Instruct</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct">Meta-Llama-3.1-70B-Instruct</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/ibm-granite/granite-20b-code-base-8k">granite-20b-code-base</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/ibm-granite/granite-20b-code-instruct-8k">granite-20b-code-instruct-8k</a></p></li>
+<li><p>[09/2024] Added support for <a class="reference external" href="https://huggingface.co/bigcode/starcoder">Starcoder1-15B</a></p></li>
+<li><p>[08/2024] Added support for inference optimization technique <code class="docutils literal notranslate"><span class="pre">continuous</span> <span class="pre">batching</span></code></p></li>
+<li><p>[08/2024] Added support for <a class="reference external" href="https://huggingface.co/inceptionai/jais-adapted-70b">Jais-adapted-70b</a></p></li>
+<li><p>[08/2024] Added support for <a class="reference external" href="https://huggingface.co/inceptionai/jais-adapted-13b-chat">Jais-adapted-13b-chat</a></p></li>
+<li><p>[08/2024] Added support for <a class="reference external" href="https://huggingface.co/inceptionai/jais-adapted-7b">Jais-adapted-7b</a></p></li>
+<li><p>[06/2024] Added support for <a class="reference external" href="https://huggingface.co/EleutherAI/gpt-j-6b">GPT-J-6B</a></p></li>
+<li><p>[06/2024] Added support for <a class="reference external" href="https://huggingface.co/Qwen/Qwen2-1.5B-Instruct">Qwen2-1.5B-Instruct</a></p></li>
+<li><p>[06/2024] Added support for <a class="reference external" href="https://huggingface.co/bigcode/starcoder2-15b">StarCoder2-15B</a></p></li>
+<li><p>[06/2024] Added support for <a class="reference external" href="https://huggingface.co/microsoft/Phi-3-mini-4k-instruct">Phi3-Mini-4K-Instruct</a></p></li>
+<li><p>[06/2024] Added support for <a class="reference external" href="https://huggingface.co/mistralai/Codestral-22B-v0.1">Codestral-22B-v0.1</a></p></li>
+<li><p>[06/2024] Added support for <a class="reference external" href="https://huggingface.co/lmsys/vicuna-13b-v1.5">Vicuna-v1.5</a></p></li>
+<li><p>[05/2024] Added support for <a class="reference external" href="https://huggingface.co/mistralai/Mixtral-8x7B-v0.1">Mixtral-8x7B</a> &amp; <a class="reference external" href="https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.1">Mistral-7B-Instruct-v0.1</a>.</p></li>
+<li><p>[04/2024] Initial release of <a class="reference external" href="https://github.com/quic/efficient-transformers">efficient transformers</a> for seamless inference on pre-trained LLMs.</p></li>
+</ul>
+</details>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="release_docs.html" class="btn btn-neutral float-left" title="Efficient Transformer Library - 1.21.0 Release Notes" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="supported_features.html" class="btn btn-neutral float-right" title="Supported Features" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.22.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../index.html">main</a></dd>
+        <dd><a href="../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

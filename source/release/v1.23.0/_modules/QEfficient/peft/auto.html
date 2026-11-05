@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.peft.auto &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.peft.auto</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.peft.auto</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># ----------------------------------------------------------------------------</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Union</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">peft</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoPeftModelForCausalLM</span><span class="p">,</span> <span class="n">PeftConfig</span><span class="p">,</span> <span class="n">PeftModelForCausalLM</span><span class="p">,</span> <span class="n">load_peft_weights</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torch</span><span class="w"> </span><span class="kn">import</span> <span class="n">nn</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">GenerationConfig</span><span class="p">,</span> <span class="n">StoppingCriteria</span><span class="p">,</span> <span class="n">StoppingCriteriaList</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">transformers.generation.streamers</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseStreamer</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.modeling_qeff</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEFFBaseModel</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.onnx_transforms</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">AdapterWeightsToInputsTransform</span><span class="p">,</span>
+    <span class="n">BaseOnnxTransform</span><span class="p">,</span>
+    <span class="n">FP16ClipTransform</span><span class="p">,</span>
+    <span class="n">SplitTensorsTransform</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.base.pytorch_transforms</span><span class="w"> </span><span class="kn">import</span> <span class="n">PytorchTransform</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.generation.cloud_infer</span><span class="w"> </span><span class="kn">import</span> <span class="n">QAICInferenceSession</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.peft.lora</span><span class="w"> </span><span class="kn">import</span> <span class="n">QEffAutoLoraModelForCausalLM</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.peft.pytorch_transforms</span><span class="w"> </span><span class="kn">import</span> <span class="n">PeftModelInputsTransform</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.transformers.models.pytorch_transforms</span><span class="w"> </span><span class="kn">import</span> <span class="n">CustomOpsTransform</span><span class="p">,</span> <span class="n">KVCacheTransform</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">constants</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils._utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_padding_shape_from_config</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.hash_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">to_hashable</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="QEffAutoPeftModelForCausalLM"><a class="viewcode-back" href="../../../source/qeff_autoclasses.html#QEfficient.peft.auto.QEffAutoPeftModelForCausalLM">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffAutoPeftModelForCausalLM</span><span class="p">(</span><span class="n">QEFFBaseModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    QEfficient class for loading and running Causal Language Models with PEFT adapters (currently only LoRA is supported).</span>
+
+<span class="sd">    This class enables efficient inference and deployment of PEFT-adapted models on Cloud AI 100 hardware.</span>
+<span class="sd">    Once exported and compiled for an adapter, the same base model can be reused with other compatible adapters.</span>
+
+<span class="sd">    Example:</span>
+<span class="sd">        .. code-block:: python</span>
+
+<span class="sd">            from transformers import AutoTokenizer, TextStreamer</span>
+<span class="sd">            from QEfficient import QEffAutoPeftModelForCausalLM</span>
+
+<span class="sd">            base_model_name = &quot;mistralai/Mistral-7B-v0.1&quot;</span>
+<span class="sd">            tokenizer = AutoTokenizer.from_pretrained(base_model_name)</span>
+<span class="sd">            streamer = TextStreamer(tokenizer)</span>
+
+<span class="sd">            m = QEffAutoPeftModelForCausalLM.from_pretrained(&quot;predibase/magicoder&quot;, &quot;magicoder&quot;)</span>
+<span class="sd">            m.export()</span>
+<span class="sd">            m.compile(prefill_seq_len=32, ctx_len=1024)</span>
+
+<span class="sd">            # Magicoder adapter</span>
+<span class="sd">            m.set_adapter(&quot;magicoder&quot;)</span>
+<span class="sd">            inputs = tokenizer(&quot;def fibonacci&quot;, return_tensors=&quot;pt&quot;)</span>
+<span class="sd">            m.generate(**inputs, streamer=streamer, max_new_tokens=1024)</span>
+
+<span class="sd">            # Math problems</span>
+<span class="sd">            m.load_adapter(&quot;predibase/gsm8k&quot;, &quot;gsm8k&quot;)</span>
+<span class="sd">            m.set_adapter(&quot;gsm8k&quot;)</span>
+<span class="sd">            inputs = tokenizer(&quot;James decides to run 3 sprints 3 times a week. He runs 60 meters each sprint. How many total meters does he run a week?&quot;,return_tensors=&quot;pt&quot;)</span>
+<span class="sd">            m.generate(**inputs, streamer=streamer, max_new_tokens=1024)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_pytorch_transforms</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">PytorchTransform</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">CustomOpsTransform</span><span class="p">,</span> <span class="n">KVCacheTransform</span><span class="p">,</span> <span class="n">PeftModelInputsTransform</span><span class="p">]</span>
+    <span class="n">_onnx_transforms</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">BaseOnnxTransform</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">FP16ClipTransform</span><span class="p">,</span>
+        <span class="n">AdapterWeightsToInputsTransform</span><span class="p">,</span>
+        <span class="n">SplitTensorsTransform</span><span class="p">,</span>
+    <span class="p">]</span>
+    <span class="n">_hf_auto_class</span> <span class="o">=</span> <span class="n">AutoPeftModelForCausalLM</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">:</span> <span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the QEffAutoPeftModelForCausalLM instance.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model (nn.Module): A PyTorch model of type PeftModelForCausalLM with a LoRA adapter.</span>
+<span class="sd">        Raises:</span>
+<span class="sd">            TypeError: If the provided model is not a PeftModelForCausalLM.</span>
+<span class="sd">            NotImplementedError: If the adapter type is not LoRA.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">PeftModelForCausalLM</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Required pytorch module of type PeftModel, got </span><span class="si">{</span><span class="nb">type</span><span class="p">(</span><span class="n">model</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">model</span><span class="o">.</span><span class="n">active_peft_config</span><span class="o">.</span><span class="n">peft_type</span> <span class="o">!=</span> <span class="s2">&quot;LORA&quot;</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span><span class="s2">&quot;Only LoRA models are supported&quot;</span><span class="p">)</span>
+
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">num_layers</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">num_hidden_layers</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">exported_peft_config</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">adapter_weights</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">adapter_name</span><span class="p">:</span> <span class="p">{</span>
+                <span class="n">name</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;.</span><span class="si">{</span><span class="n">adapter_name</span><span class="si">}</span><span class="s2">.weight&quot;</span><span class="p">,</span> <span class="s2">&quot;.weight&quot;</span><span class="p">):</span> <span class="n">param</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="s2">&quot;float16&quot;</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">param</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">named_parameters</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">name</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;.</span><span class="si">{</span><span class="n">adapter_name</span><span class="si">}</span><span class="s2">.weight&quot;</span><span class="p">)</span>
+            <span class="p">}</span>
+            <span class="k">for</span> <span class="n">adapter_name</span> <span class="ow">in</span> <span class="n">model</span><span class="o">.</span><span class="n">peft_config</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="fm">__repr__</span><span class="p">()</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">model_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the model name with &quot;-lora&quot; suffix.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: The base model class name with &quot;-lora&quot; appended.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">mname</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">get_base_model</span><span class="p">()</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">+</span> <span class="s2">&quot;-lora&quot;</span>
+        <span class="k">if</span> <span class="n">mname</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;QEff&quot;</span><span class="p">):</span>
+            <span class="n">mname</span> <span class="o">=</span> <span class="n">mname</span><span class="p">[</span><span class="mi">4</span><span class="p">:]</span>
+        <span class="k">return</span> <span class="n">mname</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">model_hash</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compute a unique hash for the model configuration and adapter.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: A 16-character SHA256 hash string.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># NOTE: model_config.to_diff_dict() has &quot;_name_or_path&quot; attribute which is the model card name or path.</span>
+        <span class="c1"># Using same card name will result in same hash. But, using a relative path for one run and</span>
+        <span class="c1"># absolute path for another run will result in different hash.</span>
+        <span class="c1"># The added complexity to resolve different paths to same location is not worth pursuing.</span>
+        <span class="c1"># Instead, advise the user to always provide same relative paths or absolute paths for local models.</span>
+
+        <span class="c1"># Compute the hash with: model_config, peft_config, transforms</span>
+        <span class="n">mhash</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">()</span>
+        <span class="n">mhash</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">to_hashable</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">get_base_model</span><span class="p">()</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">to_diff_dict</span><span class="p">()))</span>
+        <span class="n">mhash</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">to_hashable</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">active_peft_config</span><span class="o">.</span><span class="n">to_dict</span><span class="p">()))</span>
+        <span class="n">mhash</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">to_hashable</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_transform_names</span><span class="p">()))</span>
+        <span class="n">mhash</span> <span class="o">=</span> <span class="n">mhash</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()[:</span><span class="mi">16</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">mhash</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_model_config</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the configuration dictionary of the underlying base model.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            dict: The configuration dictionary.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">get_base_model</span><span class="p">()</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="vm">__dict__</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">active_adapter</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the currently active adapter name.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Name of the active adapter.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">active_adapter</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">load_adapter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">adapter_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Load a new adapter from the HuggingFace Hub or a local path.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model_id (str): Adapter model ID from HuggingFace Hub or local path.</span>
+<span class="sd">            adapter_name (str): Name to assign to the loaded adapter.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">load_adapter</span><span class="p">(</span><span class="n">model_id</span><span class="p">,</span> <span class="n">adapter_name</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">adapter_weights</span><span class="p">[</span><span class="n">adapter_name</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">k</span><span class="p">:</span> <span class="n">v</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="s2">&quot;float16&quot;</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">load_peft_weights</span><span class="p">(</span><span class="n">model_id</span><span class="p">)</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
+        <span class="p">}</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_adapter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">adapter_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Set the active adapter from the loaded adapters.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            adapter_name (str): Name of the adapter to activate.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            ValueError: If the adapter is incompatible with the export-time adapter.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">exported_peft_config</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">exported_peft_config</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">peft_config</span><span class="p">[</span><span class="n">adapter_name</span><span class="p">]:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;Unable to activate incompatible adapter. &quot;</span>
+                <span class="s2">&quot;Use an adapter compatible with export-time adapter &quot;</span>
+                <span class="s2">&quot;or re-export with this adapter&quot;</span>
+            <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">set_adapter</span><span class="p">(</span><span class="n">adapter_name</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">disable_adapter</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Disable the currently active adapter.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            NotImplementedError: Disabling adapters is not currently supported.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># TODO: Set zero tensors as adapter weights</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span><span class="s2">&quot;Disabling adapters not supported currently&quot;</span><span class="p">)</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_from_pretrained</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">pretrained_name_or_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="c1"># Base class</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">_hf_auto_class</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span><span class="n">pretrained_name_or_path</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+
+<div class="viewcode-block" id="QEffAutoPeftModelForCausalLM.from_pretrained"><a class="viewcode-back" href="../../../source/qeff_autoclasses.html#QEfficient.peft.auto.QEffAutoPeftModelForCausalLM.from_pretrained">[docs]</a>    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_pretrained</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">pretrained_name_or_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Load a QEffAutoPeftModelForCausalLM from a pretrained model and adapter.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            pretrained_name_or_path (str): Model card name from HuggingFace or local path to model directory.</span>
+<span class="sd">            finite_adapters (bool, optional): Set True to enable finite adapter mode with QEffAutoLoraModelForCausalLM class.</span>
+<span class="sd">            adapter_name (str, optional): Name used to identify the loaded adapter.</span>
+<span class="sd">            *args: Additional positional arguments for peft.AutoPeftModelForCausalLM.</span>
+<span class="sd">            **kwargs: Additional keyword arguments for peft.AutoPeftModelForCausalLM.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            QEffAutoPeftModelForCausalLM: An instance initialized with the pretrained weights and adapter.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            NotImplementedError: If continuous batching is requested (not supported).</span>
+<span class="sd">            TypeError: If adapter name is missing in finite adapter mode.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;full_batch_size&quot;</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span><span class="s2">&quot;Continuous batching currently not supported for PEFT models&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;use_cache&quot;</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">False</span><span class="p">:</span>
+            <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span><span class="s2">&quot;Overriding to use_cache=True&quot;</span><span class="p">)</span>
+        <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;use_cache&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">True</span>
+
+        <span class="k">if</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;finite_adapters&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">):</span>  <span class="c1"># initialize through finite_adapters class</span>
+            <span class="n">obj</span> <span class="o">=</span> <span class="n">QEffAutoLoraModelForCausalLM</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+                <span class="n">pretrained_model_name_or_path</span><span class="o">=</span><span class="n">PeftConfig</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+                    <span class="n">pretrained_name_or_path</span>
+                <span class="p">)</span><span class="o">.</span><span class="n">base_model_name_or_path</span><span class="p">,</span>
+                <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">adapter_name</span> <span class="o">:=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;adapter_name&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">):</span>
+                <span class="n">obj</span><span class="o">.</span><span class="n">load_adapter</span><span class="p">(</span><span class="n">pretrained_name_or_path</span><span class="p">,</span> <span class="n">adapter_name</span><span class="o">=</span><span class="n">adapter_name</span><span class="p">)</span>
+                <span class="k">return</span> <span class="n">obj</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">args</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">args</span><span class="p">)[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">str</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span><span class="s2">&quot;Required adapter name argument in string format&quot;</span><span class="p">)</span>
+            <span class="n">obj</span><span class="o">.</span><span class="n">load_adapter</span><span class="p">(</span><span class="n">pretrained_name_or_path</span><span class="p">,</span> <span class="nb">list</span><span class="p">(</span><span class="n">args</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">obj</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">_from_pretrained</span><span class="p">(</span><span class="n">pretrained_name_or_path</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">obj</span></div>
+
+<div class="viewcode-block" id="QEffAutoPeftModelForCausalLM.export"><a class="viewcode-back" href="../../../source/qeff_autoclasses.html#QEfficient.peft.auto.QEffAutoPeftModelForCausalLM.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">export_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Export the model with the active adapter to ONNX format.</span>
+
+<span class="sd">        This method prepares example inputs and dynamic axes based on the model and adapter configuration,</span>
+<span class="sd">        then exports the model to an ONNX graph suitable for compilation and deployment on Cloud AI 100 hardware.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            export_dir (str, optional): Directory path where the exported ONNX graph will be saved.</span>
+<span class="sd">                If not provided, the default export directory is used.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the generated ONNX graph file.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">exported_peft_config</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">active_peft_config</span>
+
+        <span class="n">example_shape</span> <span class="o">=</span> <span class="p">(</span><span class="n">constants</span><span class="o">.</span><span class="n">ONNX_EXPORT_EXAMPLE_BATCH_SIZE</span><span class="p">,</span> <span class="n">constants</span><span class="o">.</span><span class="n">ONNX_EXPORT_EXAMPLE_SEQ_LEN</span><span class="p">)</span>
+        <span class="n">kv_cache_shape</span> <span class="o">=</span> <span class="n">get_padding_shape_from_config</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="p">,</span> <span class="o">*</span><span class="n">example_shape</span><span class="p">)</span>
+        <span class="n">example_inputs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">example_shape</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">),</span>
+            <span class="s2">&quot;position_ids&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">example_shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">example_shape</span><span class="p">),</span>
+            <span class="s2">&quot;past_key_values&quot;</span><span class="p">:</span> <span class="p">[[]</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">num_layers</span><span class="p">)],</span>
+        <span class="p">}</span>
+        <span class="n">dynamic_axes</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;seq_len&quot;</span><span class="p">},</span>
+            <span class="s2">&quot;position_ids&quot;</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;seq_len&quot;</span><span class="p">},</span>
+        <span class="p">}</span>
+        <span class="n">output_names</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;logits&quot;</span><span class="p">]</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">num_layers</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">kv</span> <span class="ow">in</span> <span class="p">[</span><span class="s2">&quot;key&quot;</span><span class="p">,</span> <span class="s2">&quot;value&quot;</span><span class="p">]:</span>
+                <span class="n">example_inputs</span><span class="p">[</span><span class="s2">&quot;past_key_values&quot;</span><span class="p">][</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">kv_cache_shape</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">))</span>
+                <span class="n">dynamic_axes</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;past_</span><span class="si">{</span><span class="n">kv</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;batch_size&quot;</span><span class="p">,</span> <span class="mi">2</span><span class="p">:</span> <span class="s2">&quot;ctx_len&quot;</span><span class="p">}</span>
+                <span class="n">output_names</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;past_</span><span class="si">{</span><span class="n">kv</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">_RetainedState&quot;</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_export</span><span class="p">(</span>
+            <span class="n">example_inputs</span><span class="p">,</span>
+            <span class="n">output_names</span><span class="o">=</span><span class="n">output_names</span><span class="p">,</span>
+            <span class="n">dynamic_axes</span><span class="o">=</span><span class="n">dynamic_axes</span><span class="p">,</span>
+            <span class="n">do_constant_folding</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>  <span class="c1"># To avoid merging adapter weights with base weights</span>
+            <span class="n">onnx_transform_kwargs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;adapter_name&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">active_adapter</span><span class="p">},</span>
+            <span class="n">export_dir</span><span class="o">=</span><span class="n">export_dir</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffAutoPeftModelForCausalLM.compile"><a class="viewcode-back" href="../../../source/qeff_autoclasses.html#QEfficient.peft.auto.QEffAutoPeftModelForCausalLM.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">onnx_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">compile_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">batch_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">prefill_seq_len</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+        <span class="n">ctx_len</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+        <span class="n">num_devices</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">num_cores</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="n">mxfp6_matmul</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">mxint8_kv_cache</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">dynamo</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">compiler_options</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compile the exported ONNX model for Cloud AI 100 hardware.</span>
+
+<span class="sd">        This method generates a QPC package. If the model has not been exported yet, this method will handle the export process.</span>
+<span class="sd">        Additional arguments for the QAIC compiler can be passed as keyword arguments.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            onnx_path (str, optional): Path to a pre-exported ONNX model.</span>
+<span class="sd">            compile_dir (str, optional): Directory to save the generated QPC package.</span>
+<span class="sd">            batch_size (int, optional): Batch size for compilation. Default is 1.</span>
+<span class="sd">            prefill_seq_len (int): Length of the prefill prompt.</span>
+<span class="sd">            ctx_len (int): Maximum context length the compiled model can remember.</span>
+<span class="sd">            num_devices (int, optional): Number of devices to compile for. Default is 1.</span>
+<span class="sd">            num_cores (int, optional): Number of cores to use for compilation. Default is 16.</span>
+<span class="sd">            mxfp6_matmul (bool, optional): Use MXFP6 compression for weights. Default is False.</span>
+<span class="sd">            mxint8_kv_cache (bool, optional): Use MXINT8 compression for KV cache. Default is False.</span>
+<span class="sd">            **compiler_options: Additional compiler options for QAIC.</span>
+
+<span class="sd">                **For QAIC Compiler:** Extra arguments for qaic-compile can be passed. Some common options include:</span>
+
+<span class="sd">                - mos (int, optional): Effort level to reduce on-chip memory. Defaults to -1, meaning no effort. Defaults to -1.</span>
+<span class="sd">                - aic_enable_depth_first (bool, optional): Enables DFS with default memory size. Defaults to False.</span>
+<span class="sd">                - allow_mxint8_mdp_io (bool, optional): Allows MXINT8 compression of MDP IO traffic. Defaults to False.</span>
+
+<span class="sd">                Params are converted to flags as below:</span>
+
+<span class="sd">                - ``aic_num_cores=16`` -&gt; ``-aic-num-cores=16``</span>
+<span class="sd">                - ``convert_to_fp16=True`` -&gt; ``-convert-to-fp16``</span>
+
+<span class="sd">                **For QNN Compiler:** Following arguments can be passed as:</span>
+
+<span class="sd">                - enable_qnn (bool): Enables QNN Compilation.</span>
+<span class="sd">                - qnn_config (str): Path of QNN Config parameters file. Any extra parameters for QNN compilation can be passed via this file.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Path to the compiled QPC package.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Specializations</span>
+        <span class="n">specializations</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="p">{</span><span class="s2">&quot;batch_size&quot;</span><span class="p">:</span> <span class="n">batch_size</span><span class="p">,</span> <span class="s2">&quot;seq_len&quot;</span><span class="p">:</span> <span class="n">prefill_seq_len</span><span class="p">,</span> <span class="s2">&quot;ctx_len&quot;</span><span class="p">:</span> <span class="n">ctx_len</span><span class="p">},</span>
+            <span class="p">{</span><span class="s2">&quot;batch_size&quot;</span><span class="p">:</span> <span class="n">batch_size</span><span class="p">,</span> <span class="s2">&quot;seq_len&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;ctx_len&quot;</span><span class="p">:</span> <span class="n">ctx_len</span><span class="p">},</span>
+        <span class="p">]</span>
+
+        <span class="c1"># Custom IO</span>
+        <span class="n">custom_io</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="n">kv_cache_dtype</span> <span class="o">=</span> <span class="s2">&quot;mxint8&quot;</span> <span class="k">if</span> <span class="n">mxint8_kv_cache</span> <span class="k">else</span> <span class="s2">&quot;float16&quot;</span>
+        <span class="k">for</span> <span class="n">suffix</span> <span class="ow">in</span> <span class="p">[</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="s2">&quot;_RetainedState&quot;</span><span class="p">]:</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">num_layers</span><span class="p">):</span>
+                <span class="k">for</span> <span class="n">kv</span> <span class="ow">in</span> <span class="p">[</span><span class="s2">&quot;key&quot;</span><span class="p">,</span> <span class="s2">&quot;value&quot;</span><span class="p">]:</span>
+                    <span class="n">custom_io</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;past_</span><span class="si">{</span><span class="n">kv</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">i</span><span class="si">}{</span><span class="n">suffix</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">kv_cache_dtype</span>
+            <span class="k">for</span> <span class="n">weight_name</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">adapter_weights</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">active_adapter</span><span class="p">]:</span>
+                <span class="n">custom_io</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">weight_name</span><span class="si">}{</span><span class="n">suffix</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;float16&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compile</span><span class="p">(</span>
+            <span class="n">onnx_path</span><span class="p">,</span>
+            <span class="n">compile_dir</span><span class="p">,</span>
+            <span class="n">retained_state</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">specializations</span><span class="o">=</span><span class="n">specializations</span><span class="p">,</span>
+            <span class="n">convert_to_fp16</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">mxfp6_matmul</span><span class="o">=</span><span class="n">mxfp6_matmul</span><span class="p">,</span>
+            <span class="n">custom_io</span><span class="o">=</span><span class="n">custom_io</span><span class="p">,</span>
+            <span class="n">mdp_ts_num_devices</span><span class="o">=</span><span class="n">num_devices</span><span class="p">,</span>
+            <span class="n">aic_num_cores</span><span class="o">=</span><span class="n">num_cores</span><span class="p">,</span>
+            <span class="n">mxint8_kv_cache</span><span class="o">=</span><span class="n">mxint8_kv_cache</span><span class="p">,</span>
+            <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">,</span>
+            <span class="n">dynamo</span><span class="o">=</span><span class="n">dynamo</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">compiler_options</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffAutoPeftModelForCausalLM.generate"><a class="viewcode-back" href="../../../source/qeff_autoclasses.html#QEfficient.peft.auto.QEffAutoPeftModelForCausalLM.generate">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">generate</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">inputs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">device_ids</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">generation_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">GenerationConfig</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">stopping_criteria</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">StoppingCriteria</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">streamer</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">BaseStreamer</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate tokens from the compiled binary using the active adapter.</span>
+
+<span class="sd">        This method takes similar parameters as HuggingFace&#39;s ``model.generate()`` method.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            inputs (torch.Tensor or np.ndarray, optional): Input IDs for generation.</span>
+<span class="sd">            device_ids (List[int], optional): Device IDs for running inference.</span>
+<span class="sd">            generation_config (GenerationConfig, optional): Generation configuration to merge with model-specific config.</span>
+<span class="sd">            stopping_criteria (StoppingCriteria, optional): Custom stopping criteria for generation.</span>
+<span class="sd">            streamer (BaseStreamer, optional): Streamer to receive generated tokens.</span>
+<span class="sd">            **kwargs: Additional parameters for generation_config or to be passed to the model.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            np.ndarray: Generated token IDs.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Initialize session</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">qpc_path</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="s2">&quot;Please compile the model with `model.compile(...)`&quot;</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="p">)</span>
+
+            <span class="c1"># Skip buffers</span>
+            <span class="n">retained_buffers</span> <span class="o">=</span> <span class="p">[</span><span class="n">x</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">output_names</span> <span class="k">if</span> <span class="n">x</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s2">&quot;_RetainedState&quot;</span><span class="p">)]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">skip_buffers</span><span class="p">([</span><span class="n">x</span><span class="p">[:</span> <span class="o">-</span><span class="nb">len</span><span class="p">(</span><span class="s2">&quot;_RetainedState&quot;</span><span class="p">)]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">retained_buffers</span><span class="p">])</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">skip_buffers</span><span class="p">(</span><span class="n">retained_buffers</span><span class="p">)</span>
+
+        <span class="n">generation_config</span> <span class="o">=</span> <span class="n">generation_config</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">generation_config</span>
+        <span class="n">generation_config</span><span class="p">,</span> <span class="n">model_kwargs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">_prepare_generation_config</span><span class="p">(</span><span class="n">generation_config</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">_prepare_special_tokens</span><span class="p">(</span><span class="n">generation_config</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cpu&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">generation_config</span><span class="o">.</span><span class="n">do_sample</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span><span class="s2">&quot;do_sample=True not supported currently&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">generation_config</span><span class="o">.</span><span class="n">num_beams</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span><span class="s2">&quot;num_beams&gt;1 not supported currently&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">generation_config</span><span class="o">.</span><span class="n">max_new_tokens</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">generation_config</span><span class="o">.</span><span class="n">max_new_tokens</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Required max_new_tokens&gt;0 value in generation_config&quot;</span><span class="p">)</span>
+
+        <span class="n">stopping_criteria</span> <span class="o">=</span> <span class="n">stopping_criteria</span> <span class="ow">or</span> <span class="n">StoppingCriteriaList</span><span class="p">()</span>
+        <span class="n">stopping_criteria</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">_get_stopping_criteria</span><span class="p">(</span><span class="n">generation_config</span><span class="p">,</span> <span class="n">stopping_criteria</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">inputs</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">inputs</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="n">inputs</span><span class="p">}</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">inputs</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="n">inputs</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">model_kwargs</span><span class="p">)</span>
+        <span class="n">inputs</span> <span class="o">=</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">v</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="k">else</span> <span class="n">v</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">inputs</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+
+        <span class="n">batch_size</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">x</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">binding_index_map</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]][</span><span class="mi">1</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">allowed_shapes</span><span class="p">]</span>
+            <span class="o">+</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">bindings</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">binding_index_map</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]]</span><span class="o">.</span><span class="n">dims</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span>
+        <span class="p">)</span>
+        <span class="n">passed_batch_size</span> <span class="o">=</span> <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">passed_batch_size</span> <span class="o">!=</span> <span class="n">batch_size</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Model compiled for batch_size: </span><span class="si">{</span><span class="n">batch_size</span><span class="si">}</span><span class="s2">, but passed batch_size: </span><span class="si">{</span><span class="n">passed_batch_size</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="n">prefill_seq_len</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">x</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">binding_index_map</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]][</span><span class="mi">1</span><span class="p">][</span><span class="mi">1</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">allowed_shapes</span><span class="p">]</span>
+            <span class="o">+</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">bindings</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">binding_index_map</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]]</span><span class="o">.</span><span class="n">dims</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span>
+        <span class="p">)</span>
+
+        <span class="n">input_len</span> <span class="o">=</span> <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">num_chunks</span> <span class="o">=</span> <span class="o">-</span><span class="p">(</span><span class="n">input_len</span> <span class="o">//</span> <span class="o">-</span><span class="n">prefill_seq_len</span><span class="p">)</span>  <span class="c1"># Ceil divide without float</span>
+        <span class="n">padded_len</span> <span class="o">=</span> <span class="n">num_chunks</span> <span class="o">*</span> <span class="n">prefill_seq_len</span>  <span class="c1"># Convert to a multiple of prompt_len</span>
+        <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">],</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">padded_len</span> <span class="o">-</span> <span class="n">input_len</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">dtype</span><span class="p">)],</span> <span class="mi">1</span>
+        <span class="p">)</span>
+        <span class="n">next_position_ids</span> <span class="o">=</span> <span class="n">inputs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;attention_mask&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">padded_len</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">next_position_ids</span><span class="p">,</span> <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">generated_ids</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">generation_config</span><span class="o">.</span><span class="n">max_new_tokens</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="s2">&quot;int64&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">streamer</span><span class="p">:</span>
+            <span class="n">streamer</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">][:,</span> <span class="p">:</span><span class="n">input_len</span><span class="p">])</span>
+
+        <span class="c1"># Set adapter weights</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">adapter_weights</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">active_adapter</span><span class="p">])</span>
+
+        <span class="c1"># Run prefill</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_chunks</span><span class="p">):</span>
+            <span class="n">chunk_inputs</span> <span class="o">=</span> <span class="n">inputs</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+            <span class="n">chunk_inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">][:,</span> <span class="n">i</span> <span class="o">*</span> <span class="n">prefill_seq_len</span> <span class="p">:</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">prefill_seq_len</span><span class="p">]</span>
+            <span class="n">chunk_inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">][:,</span> <span class="n">i</span> <span class="o">*</span> <span class="n">prefill_seq_len</span> <span class="p">:</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">prefill_seq_len</span><span class="p">]</span>
+            <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">chunk_inputs</span><span class="p">)</span>
+
+        <span class="c1"># Get first token</span>
+        <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;logits&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+        <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">next_position_ids</span>
+        <span class="n">generated_ids</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">squeeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">streamer</span><span class="p">:</span>
+            <span class="n">streamer</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">])</span>
+
+        <span class="c1"># Skip adapter weights</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">skip_buffers</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">adapter_weights</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">active_adapter</span><span class="p">]))</span>
+
+        <span class="c1"># Decode loop</span>
+        <span class="k">for</span> <span class="n">num_token</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">generation_config</span><span class="o">.</span><span class="n">max_new_tokens</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">stopping_criteria</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]),</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;logits&quot;</span><span class="p">]))</span><span class="o">.</span><span class="n">all</span><span class="p">():</span>
+                <span class="k">break</span>
+
+            <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>
+
+            <span class="c1"># Prepare inputs for next iteration</span>
+            <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;logits&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+            <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;position_ids&quot;</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="n">generated_ids</span><span class="p">[:,</span> <span class="n">num_token</span><span class="p">]</span> <span class="o">=</span> <span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">squeeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">streamer</span><span class="p">:</span>
+                <span class="n">streamer</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;input_ids&quot;</span><span class="p">])</span>
+
+        <span class="k">if</span> <span class="n">streamer</span><span class="p">:</span>
+            <span class="n">streamer</span><span class="o">.</span><span class="n">end</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">generated_ids</span></div></div>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.23.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../v1.18/index.html">release/v1.18</a></dd>
+        <dd><a href="../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../../v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../../../v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

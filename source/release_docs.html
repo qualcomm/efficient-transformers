@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Efficient Transformer Library - 1.22.0 Release Notes &mdash; efficient-transformers main documentation</title>
+  <title>Efficient Transformer Library - 1.23.0 Release Notes &mdash; efficient-transformers main documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../_static/my_theme.css?v=f6ee2d30" />
@@ -47,31 +47,38 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
 <ul class="current">
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Efficient Transformer Library - 1.22.0 Release Notes</a><ul>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Efficient Transformer Library - 1.23.0 Release Notes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#branch-summary">Branch Summary</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#key-features-enhancements">Key Features &amp; Enhancements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#mainline-delta-not-included-in-release-v1-23-0">Mainline Delta (Not Included In release/v1.23.0)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="release/v1.23.2.0/source/release_docs.html">Efficient Transformer Library - 1.23.2.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="#efficient-transformer-library-1-22-0-release-notes">Efficient Transformer Library - 1.22.0 Release Notes</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#newly-supported-models">Newly Supported Models</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#deprecations">Deprecations</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#key-features-enhancements">Key Features &amp; Enhancements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id1">Key Features &amp; Enhancements</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#example-scripts">Example Scripts</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#branch-summary">Branch Summary</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#id1">Key Features &amp; Enhancements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id2">Branch Summary</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id3">Key Features &amp; Enhancements</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#validation-quality-updates">Validation &amp; Quality Updates</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#id2">Newly Supported Models</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#id3">Key Features &amp; Enhancements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id4">Newly Supported Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id5">Key Features &amp; Enhancements</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#embedding-model-upgrades">Embedding Model Upgrades</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#fine-tuning-support">Fine-Tuning Support</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#id4">Newly Supported Models</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#id5">Key Features &amp; Enhancements</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#id6">Embedding Model Upgrades</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#id7">Fine-Tuning Support</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id6">Newly Supported Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id7">Key Features &amp; Enhancements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id8">Embedding Model Upgrades</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#id9">Fine-Tuning Support</a></li>
 </ul>
 </li>
 </ul>
@@ -79,8 +86,8 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
 <li class="toctree-l1"><a class="reference internal" href="supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="supported_features.html#moe-execution-flavour-support-matrix">MOE Execution Flavour Support Matrix</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html">Validated Models</a></li>
-<li class="toctree-l1"><a class="reference internal" href="validate.html#note">Note</a></li>
 <li class="toctree-l1"><a class="reference internal" href="validate.html#models-coming-soon">Models Coming Soon</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Installation</span></p>
@@ -89,7 +96,7 @@
 <li class="toctree-l1"><a class="reference internal" href="installation.html#installation">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="installation.html#sanity-check">Sanity Check</a></li>
 </ul>
-<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxx (AI100, AI200 and so on)</span></p>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AIxxx</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="quick_start.html">Quick Start</a></li>
 <li class="toctree-l1"><a class="reference internal" href="features_enablement.html">Fetaures Enablement Guide</a></li>
@@ -135,7 +142,7 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
-      <li class="breadcrumb-item active">Efficient Transformer Library - 1.22.0 Release Notes</li>
+      <li class="breadcrumb-item active">Efficient Transformer Library - 1.23.0 Release Notes</li>
       <li class="wy-breadcrumbs-aside">
             <a href="../_sources/source/release_docs.md.txt" rel="nofollow"> View page source</a>
       </li>
@@ -145,7 +152,78 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
              
-  <section id="efficient-transformer-library-1-22-0-release-notes">
+  <section id="efficient-transformer-library-1-23-0-release-notes">
+<h1>Efficient Transformer Library - 1.23.0 Release Notes<a class="headerlink" href="#efficient-transformer-library-1-23-0-release-notes" title="Permalink to this heading"></a></h1>
+<p>Welcome to the official release of <strong>Efficient Transformer Library v1.23.0</strong>! This release focuses on serving/runtime hardening for large models, stronger ONNX subfunction and blocked-attention paths, improved disaggregated serving, and continued stabilization for Gemma4 and Qwen VLM/CausalLM flows.</p>
+<blockquote>
+<div><p>✅ The exact release content is available on the <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/release/v1.23.0"><code class="docutils literal notranslate"><span class="pre">release/v1.23.0</span></code></a> branch.</p>
+</div></blockquote>
+<hr class="docutils" />
+<section id="branch-summary">
+<h2>Branch Summary<a class="headerlink" href="#branch-summary" title="Permalink to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Release branch</strong>: <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/release/v1.23.0"><code class="docutils literal notranslate"><span class="pre">release/v1.23.0</span></code></a></p></li>
+<li><p><strong>Release head</strong>: <code class="docutils literal notranslate"><span class="pre">3727a6e</span></code> (<code class="docutils literal notranslate"><span class="pre">Adding</span> <span class="pre">mdp</span> <span class="pre">fix</span> <span class="pre">for</span> <span class="pre">PP</span> <span class="pre">+</span> <span class="pre">Blocking</span> <span class="pre">+</span> <span class="pre">Subfunction</span></code>)</p></li>
+<li><p><strong>Previous release baseline used for this summary</strong>: <code class="docutils literal notranslate"><span class="pre">release/v1.22.0</span></code></p></li>
+<li><p><strong>Mainline comparison</strong>: <code class="docutils literal notranslate"><span class="pre">release/v1.23.0</span></code> is 5 commits behind <code class="docutils literal notranslate"><span class="pre">upstream/main</span></code> at compare time and contains 0 release-only commits vs <code class="docutils literal notranslate"><span class="pre">upstream/main</span></code></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="key-features-enhancements">
+<h2>Key Features &amp; Enhancements<a class="headerlink" href="#key-features-enhancements" title="Permalink to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Disaggregated serving and cache/runtime improvements</strong></p>
+<ul>
+<li><p>Added efficient KV handoff support for disaggregated serving.</p></li>
+<li><p>Fixed QPC key mismatch behavior between vLLM and QEff runtime paths.</p></li>
+<li><p>Added MDP generation and follow-up fixes for <code class="docutils literal notranslate"><span class="pre">mdp_strategy=intersection</span></code> and PP + blocking + subfunction combinations.</p></li>
+</ul>
+</li>
+<li><p><strong>Attention blocking and subfunction path strengthening</strong></p>
+<ul>
+<li><p>Landed blocked-attention forward-path performance optimizations.</p></li>
+<li><p>Added head-parallel and batch-fold blocking support for Qwen3-VL-MoE.</p></li>
+<li><p>Added multiple ONNX subfunction correctness fixes (including ReduceSum axes localization and Qwen3.5 Conv1D ConstantOfShape export fixes).</p></li>
+</ul>
+</li>
+<li><p><strong>Weight-free and export pipeline updates</strong></p>
+<ul>
+<li><p>Added weight-free ONNX export support for CausalLM models.</p></li>
+<li><p>Added guardrails for unsupported weight-free model classes/features.</p></li>
+<li><p>Reduced MoE export RAM by aliasing fused expert weights as views.</p></li>
+</ul>
+</li>
+<li><p><strong>Model-flow stability updates</strong></p>
+<ul>
+<li><p>Added/updated Gemma4 path fixes (cache rotary embedding handling, decode-MoE changes, blocking enablement, and sliding-window follow-ups).</p></li>
+<li><p>Improved Qwen3.5/Qwen3.6 and Qwen3-VL family stability and execution behavior, including vision-language batch decoupling fixes.</p></li>
+<li><p>Added support updates for Kimi K2.5 vision runtime/export flows.</p></li>
+</ul>
+</li>
+<li><p><strong>Toolchain and dependency alignment</strong></p>
+<ul>
+<li><p>Removed deprecated <code class="docutils literal notranslate"><span class="pre">compile_only</span></code> compiler flag usage.</p></li>
+<li><p>Updated pinned <code class="docutils literal notranslate"><span class="pre">numpy</span></code>/<code class="docutils literal notranslate"><span class="pre">protobuf</span></code> versions used by the release branch.</p></li>
+<li><p>Made <code class="docutils literal notranslate"><span class="pre">dataPathTimeoutMs</span></code> configurable (default 120s).</p></li>
+</ul>
+</li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="mainline-delta-not-included-in-release-v1-23-0">
+<h2>Mainline Delta (Not Included In release/v1.23.0)<a class="headerlink" href="#mainline-delta-not-included-in-release-v1-23-0" title="Permalink to this heading"></a></h2>
+<p>Compared to <code class="docutils literal notranslate"><span class="pre">upstream/main</span></code> at <code class="docutils literal notranslate"><span class="pre">b3d60f4</span></code>, the following mainline commits are not part of <code class="docutils literal notranslate"><span class="pre">release/v1.23.0</span></code>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">b3d60f4</span></code> - <code class="docutils literal notranslate"><span class="pre">fix(vlm):</span> <span class="pre">use</span> <span class="pre">decoder</span> <span class="pre">vocab</span> <span class="pre">size</span> <span class="pre">for</span> <span class="pre">sampler</span> <span class="pre">export</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">90f37b9</span></code> - <code class="docutils literal notranslate"><span class="pre">Fix</span> <span class="pre">bfloat16</span> <span class="pre">pixel_values/image_masks</span> <span class="pre">corruption</span> <span class="pre">in</span> <span class="pre">VLM</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">b378401</span></code> - <code class="docutils literal notranslate"><span class="pre">Add</span> <span class="pre">DISAGG</span> <span class="pre">TESTS</span> <span class="pre">Report</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">8c1b35f</span></code> - <code class="docutils literal notranslate"><span class="pre">Adding</span> <span class="pre">PagedAttention</span> <span class="pre">support</span> <span class="pre">for</span> <span class="pre">CausalLM</span> <span class="pre">models</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">cc39555</span></code> - <code class="docutils literal notranslate"><span class="pre">Remove</span> <span class="pre">QNN</span> <span class="pre">tests</span> <span class="pre">from</span> <span class="pre">CI</span> <span class="pre">suites</span></code></p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="efficient-transformer-library-1-22-0-release-notes">
 <h1>Efficient Transformer Library - 1.22.0 Release Notes<a class="headerlink" href="#efficient-transformer-library-1-22-0-release-notes" title="Permalink to this heading"></a></h1>
 <p>Welcome to the official release of <strong>Efficient Transformer Library v1.22.0</strong>! This release delivers major new model support including Gemma 4, Qwen3-VL, and GLM4-MOE, a full rebase to Transformers v5.5.4, Python 3.12 support, advanced attention blocking, Multi-head Latent Attention (MLA), and numerous performance and export improvements.</p>
 <blockquote>
@@ -198,8 +276,8 @@
 </ul>
 </section>
 <hr class="docutils" />
-<section id="key-features-enhancements">
-<h2>Key Features &amp; Enhancements<a class="headerlink" href="#key-features-enhancements" title="Permalink to this heading"></a></h2>
+<section id="id1">
+<h2>Key Features &amp; Enhancements<a class="headerlink" href="#id1" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><strong>Framework Upgrades</strong></p>
 <ul>
@@ -212,7 +290,7 @@
 <ul>
 <li><p>New KV, Q, Head, and Batch blocking strategies for CausalLM models</p></li>
 <li><p>Supported architectures: Llama3, GPT-OSS, Gemma, Gemma2, Granite, GraniteMOE, Mistral</p></li>
-<li><p>Configurable via <code class="docutils literal notranslate"><span class="pre">qaic_config</span></code> with <code class="docutils literal notranslate"><span class="pre">enable_blocking:</span> <span class="pre">True</span></code>; disabled by default</p></li>
+<li><p>Configurable via <code class="docutils literal notranslate"><span class="pre">qaic_config</span></code> with <code class="docutils literal notranslate"><span class="pre">blocking_mode</span></code>; omit <code class="docutils literal notranslate"><span class="pre">blocking_mode</span></code> to disable it</p></li>
 <li><p>Automatic blocking configurator with <code class="docutils literal notranslate"><span class="pre">skip_kv</span></code> enabled by default</p></li>
 <li><p>Optimized nested loop implementation for attention blocking</p></li>
 </ul>
@@ -220,7 +298,7 @@
 <li><p><strong>NSP-Blocked Expert Dispatch for MoE Prefill</strong></p>
 <ul>
 <li><p>Batched packed-prefix expert dispatch for Qwen3MOE and GPT-OSS chunked prefill</p></li>
-<li><p>Configurable via <code class="docutils literal notranslate"><span class="pre">num_cores</span></code> and <code class="docutils literal notranslate"><span class="pre">moe_prefill_packed_chunk_size</span></code> in compile API</p></li>
+<li><p>Configurable via <code class="docutils literal notranslate"><span class="pre">num_cores</span></code> and <code class="docutils literal notranslate"><span class="pre">qaic_config[&quot;moe_config&quot;][&quot;expert_parallel_chunk_size&quot;]</span></code></p></li>
 <li><p>Replaces sequential per-expert loop for improved throughput</p></li>
 </ul>
 </li>
@@ -336,8 +414,8 @@
 <div><p>✅ The exact release content is available on the <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/release/v1.21.6"><code class="docutils literal notranslate"><span class="pre">release/v1.21.6</span></code></a> branch. The package version for this branch is <code class="docutils literal notranslate"><span class="pre">1.21.6.0</span></code>.</p>
 </div></blockquote>
 <hr class="docutils" />
-<section id="branch-summary">
-<h2>Branch Summary<a class="headerlink" href="#branch-summary" title="Permalink to this heading"></a></h2>
+<section id="id2">
+<h2>Branch Summary<a class="headerlink" href="#id2" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><strong>Release branch</strong>: <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/release/v1.21.6"><code class="docutils literal notranslate"><span class="pre">release/v1.21.6</span></code></a></p></li>
 <li><p><strong>Release head</strong>: <code class="docutils literal notranslate"><span class="pre">25e7c53</span></code> (<code class="docutils literal notranslate"><span class="pre">Updated</span> <span class="pre">release</span> <span class="pre">version</span> <span class="pre">to</span> <span class="pre">1.21.6.0</span></code>)</p></li>
@@ -345,8 +423,8 @@
 </ul>
 </section>
 <hr class="docutils" />
-<section id="id1">
-<h2>Key Features &amp; Enhancements<a class="headerlink" href="#id1" title="Permalink to this heading"></a></h2>
+<section id="id3">
+<h2>Key Features &amp; Enhancements<a class="headerlink" href="#id3" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><strong>Multi-specialization vision compilation for Qwen VLMs</strong></p>
 <ul>
@@ -417,8 +495,8 @@
 <div><p>✅ All features and models listed below are available on the <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/release/v1.21.0"><code class="docutils literal notranslate"><span class="pre">release/v1.21.0</span></code></a> branch and <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main"><code class="docutils literal notranslate"><span class="pre">mainline</span></code></a>.</p>
 </div></blockquote>
 <hr class="docutils" />
-<section id="id2">
-<h2>Newly Supported Models<a class="headerlink" href="#id2" title="Permalink to this heading"></a></h2>
+<section id="id4">
+<h2>Newly Supported Models<a class="headerlink" href="#id4" title="Permalink to this heading"></a></h2>
 <ul>
 <li><p><strong>Flux (Diffusers - Image Generation)</strong></p>
 <ul class="simple">
@@ -444,6 +522,14 @@
 <ul class="simple">
 <li><p>Executable via <a class="reference internal" href="qeff_autoclasses.html#qeffautomodelforimagetexttotext"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForImageTextToText</span></code></span></a></p></li>
 <li><p><a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/image_text_to_text/models/mistral_vision/mistral3_example.py">Mistral-3.1 Example Script</a></p></li>
+</ul>
+</li>
+<li><p><strong>Kimi-K2.5 (Vision Language)</strong></p>
+<ul class="simple">
+<li><p>Executable via <a class="reference internal" href="qeff_autoclasses.html#qeffautomodelforimagetexttotext"><span class="std std-ref"><code class="docutils literal notranslate"><span class="pre">QEFFAutoModelForImageTextToText</span></code></span></a></p></li>
+<li><p>Supports <code class="docutils literal notranslate"><span class="pre">moonshotai/Kimi-K2.5</span></code> with <code class="docutils literal notranslate"><span class="pre">KimiK25ForConditionalGeneration</span></code></p></li>
+<li><p>Supports dual-QPC (<code class="docutils literal notranslate"><span class="pre">kv_offload=True</span></code>) vision-language compilation</p></li>
+<li><p><a class="reference external" href="https://github.com/quic/efficient-transformers/blob/main/examples/kimi_k2/export_kimi_k25_vision.py">Kimi-K2.5 Vision Example Script</a></p></li>
 </ul>
 </li>
 <li><p><strong>Disaggregated serving ready via vLLM GPT-OSS</strong></p>
@@ -503,8 +589,8 @@
 </ul>
 </section>
 <hr class="docutils" />
-<section id="id3">
-<h2>Key Features &amp; Enhancements<a class="headerlink" href="#id3" title="Permalink to this heading"></a></h2>
+<section id="id5">
+<h2>Key Features &amp; Enhancements<a class="headerlink" href="#id5" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><strong>Framework Upgrades</strong>: Transformers <code class="docutils literal notranslate"><span class="pre">4.55</span></code>, PyTorch <code class="docutils literal notranslate"><span class="pre">2.7.0+cpu</span></code>, Torchvision <code class="docutils literal notranslate"><span class="pre">0.22.0+cpu</span></code></p></li>
 <li><p><strong>Python Support</strong>:  Requires Python <code class="docutils literal notranslate"><span class="pre">3.10</span></code></p></li>
@@ -515,7 +601,7 @@
 <li><p><strong>Prefill/Decode Separation</strong>: Support for GPT OSS using disaggregate serving models</p></li>
 <li><p><strong>Continuous Batching (VLMs)</strong>: Extended to Vision Language Models with multi-image handling</p>
 <ul>
-<li><p>Supported models: Llava, Llava_Next, Gemma3, Mistral3, InternVL2_5, InternVL3_5, Molmo</p></li>
+<li><p>Supported models: Llava, Llava_Next, Gemma3, Mistral3, InternVL2_5, InternVL3_5, Molmo, Kimi-K2.5</p></li>
 </ul>
 </li>
 <li><p><strong>ONNX Sub-Functions</strong>: Feature enabling more efficient model compilation and execution on hardware. Users can enable the feature by passing <code class="docutils literal notranslate"><span class="pre">use_onnx_subfunctions=True</span></code> during export</p></li>
@@ -562,8 +648,8 @@ Simplified setup and deployment process for new users</p>
 <div><p>✅ All features and models listed below are available on the <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/release/v1.20.0"><code class="docutils literal notranslate"><span class="pre">release/v1.20.0</span></code></a> branch and <a class="reference external" href="https://github.com/quic/efficient-transformers/tree/main"><code class="docutils literal notranslate"><span class="pre">mainline</span></code></a>.</p>
 </div></blockquote>
 <hr class="docutils" />
-<section id="id4">
-<h2>Newly Supported Models<a class="headerlink" href="#id4" title="Permalink to this heading"></a></h2>
+<section id="id6">
+<h2>Newly Supported Models<a class="headerlink" href="#id6" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><strong>Llama-4-Scout-17B-16E-Instruct</strong></p>
 <ul>
@@ -608,8 +694,8 @@ Simplified setup and deployment process for new users</p>
 </ul>
 </section>
 <hr class="docutils" />
-<section id="id5">
-<h2>Key Features &amp; Enhancements<a class="headerlink" href="#id5" title="Permalink to this heading"></a></h2>
+<section id="id7">
+<h2>Key Features &amp; Enhancements<a class="headerlink" href="#id7" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><strong>Transformer Upgrade</strong>: Now using version <code class="docutils literal notranslate"><span class="pre">4.51.3</span></code></p></li>
 <li><p><strong>SpD &amp; Multi-Projection Heads</strong>: Token speculation via post-attention projections</p></li>
@@ -619,8 +705,8 @@ Simplified setup and deployment process for new users</p>
 </ul>
 </section>
 <hr class="docutils" />
-<section id="id6">
-<h2>Embedding Model Upgrades<a class="headerlink" href="#id6" title="Permalink to this heading"></a></h2>
+<section id="id8">
+<h2>Embedding Model Upgrades<a class="headerlink" href="#id8" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p><strong>Flexible Pooling</strong>: Choose from standard or custom strategies</p></li>
 <li><p><strong>Sentence Embedding</strong>: Now runs directly on AI100</p></li>
@@ -628,8 +714,8 @@ Simplified setup and deployment process for new users</p>
 </ul>
 </section>
 <hr class="docutils" />
-<section id="id7">
-<h2>Fine-Tuning Support<a class="headerlink" href="#id7" title="Permalink to this heading"></a></h2>
+<section id="id9">
+<h2>Fine-Tuning Support<a class="headerlink" href="#id9" title="Permalink to this heading"></a></h2>
 <ul class="simple">
 <li><p>BERT fine-tuning support with templates and documentation</p></li>
 <li><p>Gradient checkpointing, device-aware <code class="docutils literal notranslate"><span class="pre">GradScaler</span></code>, and CLI <code class="docutils literal notranslate"><span class="pre">--help</span></code> added</p></li>
@@ -675,6 +761,9 @@ Simplified setup and deployment process for new users</p>
         <dd><a href="release/v1.20/index.html">release/v1.20</a></dd>
         <dd><a href="release/v1.21/index.html">release/v1.21</a></dd>
         <dd><a href="release/v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="release/v1.22.0/index.html">release/v1.22.0</a></dd>
+        <dd><a href="release/v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="release/v1.23.2.0/index.html">release/v1.23.2.0</a></dd>
       </dl>
     </div>
 </div><script>
