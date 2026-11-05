@@ -27,7 +27,7 @@ from transformers.models.gemma3.modeling_gemma3 import (
 )
 from transformers.utils import logging
 
-# logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 from QEfficient.customop.rms_norm import CustomRMSNorm
 from QEfficient.transformers.cache_utils import QEffSlidingWindowCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask

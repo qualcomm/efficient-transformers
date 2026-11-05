@@ -309,7 +309,7 @@ class TestQEFFTransformersBase:
         }
         assert captured["example_inputs"]["input_ids"].shape[0] >= 2
 
-def test_direct_init_keeps_dtype_and_torch_dtype_in_sync(self):
+    def test_direct_init_keeps_dtype_and_torch_dtype_in_sync(self):
         """Direct wrappers must not leave config.dtype stale for weight-free export."""
         model, cfg = make_tiny_llama()
         cfg.dtype = torch.float16
