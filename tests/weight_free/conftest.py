@@ -25,8 +25,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.cache import QEFF_HOME
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.device_utils import get_available_device_id
 
 
