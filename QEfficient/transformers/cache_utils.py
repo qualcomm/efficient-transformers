@@ -1964,9 +1964,12 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         # Gather
         ctx_len = position_ids.shape[1] + sliding_window_len
         ctx_indices = torch.arange(ctx_len, dtype=position_ids.dtype, device=position_ids.device)[None, None, ...]
-        first_pos_idx = position_ids[0][0]
-        add_idx = torch.where(first_pos_idx >= sliding_window_len, first_pos_idx - sliding_window_len, 0)
-        ctx_indices += add_idx
+        if cache_kwargs.get("dflash", False):
+            ctx_indices = ctx_indices + torch.clamp(position_ids[:, :1] - sliding_window_len, min=0).unsqueeze(1)
+        else:
+            first_pos_idx = position_ids[0][0]
+            add_idx = torch.where(first_pos_idx >= sliding_window_len, first_pos_idx - sliding_window_len, 0)
+            ctx_indices += add_idx
         gather_limit = position_ids.max(1, keepdim=True).values.unsqueeze(1).to(torch.int32)
         invalid_mask = ctx_indices > gather_limit
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
@@ -1976,6 +1979,10 @@ class QEffGPTOSSDynamicLayer(QEffDynamicLayer):
         else:
             k_out = ctx_gather(k_out, ctx_indices, ctx_len)
             v_out = ctx_gather(v_out, ctx_indices, ctx_len)
+        if cache_kwargs.get("dflash", False):
+            # CtxGather inherits the full-cache shape; DFlash uses a variable-length window.
+            k_out = k_out.reshape(key_states.shape[0], key_states.shape[1], ctx_len, key_states.shape[-1])
+            v_out = v_out.reshape(value_states.shape[0], value_states.shape[1], ctx_len, value_states.shape[-1])
         v_out = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(v_out, dtype=v_out.dtype), v_out)
 
         return k_out, v_out
