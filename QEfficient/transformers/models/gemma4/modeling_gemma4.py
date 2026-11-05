@@ -48,6 +48,7 @@ from QEfficient.transformers.moe import (
     silu_glu_mlp,
 )
 from QEfficient.transformers.spd.dflash import compute_dflash_target_hidden_states
+from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
 from QEfficient.utils import constants
 
 
@@ -796,6 +797,14 @@ class QEffGemma4TextModel(Gemma4TextModel):
         elif use_cache and past_key_values is None:
             past_key_values = QEffGemma4DynamicCache(config=self.config)
 
+        if getattr(self, "target_layer_ids", None) and past_key_values is not None:
+            # Derive DFlash's cache capacity inside each update so subfunctions
+            # resolve it from their KV input shape, not a captured scalar tensor.
+            # The attention window remains unchanged.
+            for layer in past_key_values.layers:
+                if layer.is_sliding and layer.keys is not None:
+                    layer.sliding_window = None
+
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
@@ -1181,6 +1190,7 @@ class QEffGemma4ForCausalLM(Gemma4ForCausalLM):
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
+        num_logits_to_keep: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs,
     ) -> CausalLMOutputWithPast:
@@ -1196,8 +1206,11 @@ class QEffGemma4ForCausalLM(Gemma4ForCausalLM):
         )
 
         hidden_states = outputs.last_hidden_state
-        # DFlash TLM emits full per-position logits; the plain path keeps last-token logits.
-        if not getattr(self.model, "target_layer_ids", None):
+        # DFlash selects one prefill position or the full verification block.
+        if getattr(self.model, "target_layer_ids", None):
+            if num_logits_to_keep is not None:
+                hidden_states = filter_hidden_states(hidden_states, position_ids, num_logits_to_keep)
+        else:
             if position_ids is not None:
                 logit_index = position_ids.to(torch.int32).argmax(1, keepdim=True)
                 hidden_states = hidden_states[torch.arange(position_ids.shape[0]).view(-1, 1), logit_index]
@@ -1236,6 +1249,7 @@ class QEffGemma4DecoderWrapper(nn.Module):
         mm_token_type_ids=None,
         batch_index: torch.LongTensor | None = None,
         comp_ctx_lengths: list[int] | None = None,
+        num_logits_to_keep: torch.LongTensor | None = None,
         **kwargs,
     ):
         del kwargs
@@ -1300,9 +1314,11 @@ class QEffGemma4DecoderWrapper(nn.Module):
             )
         finally:
             _DISABLE_EXPORT_FP16_CLAMP = restore_disable_clamp
-        # DFlash TLM emits full per-position logits; the plain path keeps last-token logits.
+        # DFlash selects one prefill position or the full verification block.
         if getattr(self.language_model, "target_layer_ids", None):
             hidden_states = outputs[0]
+            if num_logits_to_keep is not None:
+                hidden_states = filter_hidden_states(hidden_states, position_ids, num_logits_to_keep)
         else:
             logit_index = position_ids.to(torch.int32).argmax(1, keepdim=True)
             hidden_states = outputs[0][torch.arange(position_ids.shape[0]).view(-1, 1), logit_index]
@@ -1478,11 +1494,20 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         # Preserve the legacy shape when callers do not request a separate vision batch.
         vision_batch_size = batch_size if vision_batch_size is None else vision_batch_size
         prefill_seq_len = prefill_seq_len if prefill_seq_len else 32
-        enable_chunking = compiler_options.pop("enable_chunking", False)
+        # DFlash already advances image/text inputs in fixed prompt chunks.
+        enable_chunking = compiler_options.pop(
+            "enable_chunking", bool(getattr(self.model.language_model, "target_layer_ids", None))
+        )
         if not enable_chunking:
             prefill_seq_len = max(prefill_seq_len, prefill_seq_len + self._get_mm_tokens_per_image())
         ctx_len = ctx_len if ctx_len else constants.INTERN_CTX_LEN
         max_patches = self._get_vision_max_patches()
+        dflash_block_size = None
+        if getattr(self.model.language_model, "target_layer_ids", None):
+            dflash_block_size = compiler_options.pop("dflash_block_size", None)
+        sliding_cache_len = self.model.language_model.config.sliding_window
+        if dflash_block_size is not None:
+            sliding_cache_len = min(ctx_len, sliding_cache_len + max(prefill_seq_len, dflash_block_size) - 1)
         user_vision_size = compiler_options.pop("vision_size", None)
         if user_vision_size:
             if user_vision_size >= ctx_len:
@@ -1498,10 +1523,12 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
                 "batch_size": 1 if continuous_batching else batch_size,
                 "seq_len": prefill_seq_len,
                 "ctx_len": ctx_len,
-                "sliding_window": self.model.language_model.config.sliding_window,
+                "sliding_window": sliding_cache_len,
                 "vision_batch_size": vision_batch_size,
                 "vision_size": vision_size,
             }
+            if dflash_block_size is not None:
+                spec["num_logits_to_keep"] = 1
             if comp_ctx_lengths is not None:
                 spec["comp_ctx_lengths"] = comp_ctx_lengths
             if continuous_batching:
@@ -1515,12 +1542,14 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         def build_lang_decode_spec(comp_ctx_lengths: int | None = None):
             spec = {
                 "batch_size": full_batch_size if continuous_batching else batch_size,
-                "seq_len": compiler_options.pop("dflash_block_size", None) or "1",
+                "seq_len": dflash_block_size or "1",
                 "ctx_len": ctx_len,
-                "sliding_window": self.model.language_model.config.sliding_window,
+                "sliding_window": sliding_cache_len,
                 "vision_batch_size": vision_batch_size,
                 "vision_size": vision_size,
             }
+            if dflash_block_size is not None:
+                spec["num_logits_to_keep"] = dflash_block_size
             if comp_ctx_lengths is not None:
                 spec["comp_ctx_lengths"] = comp_ctx_lengths
             if continuous_batching:
@@ -1583,6 +1612,7 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         return lang_output_names
 
     def get_dummy_pkv_cache(self, config, batch_size, seq_len):
+        dflash_tlm = bool(getattr(self.model.language_model, "target_layer_ids", None))
         past_key_values = []
         for i, layer_type in enumerate(config.layer_types):
             hidden_size = _get_gemma4_config_attr(config, "hidden_size", layer_idx=i)
@@ -1593,7 +1623,7 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
                 n_heads = _get_gemma4_config_attr(config, "num_key_value_heads", layer_idx=i)
                 d_head = _get_gemma4_config_attr(config, "head_dim", default_head_dim, i)
                 sliding_window = _get_gemma4_config_attr(config, "sliding_window", seq_len, i)
-                layer_seq_len = min(sliding_window or seq_len, seq_len)
+                layer_seq_len = seq_len if dflash_tlm else min(sliding_window or seq_len, seq_len)
             else:
                 use_alternative_attention = _get_gemma4_config_attr(config, "attention_k_eq_v", False, i)
                 global_kv_heads = _get_gemma4_config_attr(config, "num_global_key_value_heads", None, i)

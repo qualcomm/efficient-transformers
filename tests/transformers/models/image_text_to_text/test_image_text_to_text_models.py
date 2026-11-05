@@ -24,6 +24,7 @@ from transformers import (
 from urllib3.util.retry import Retry
 
 from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.utils.hardware_utils import get_default_num_cores
 from QEfficient.utils.run_utils import ApiRunnerInternVL, ApiRunnerMolmo, ApiRunnerVlm
 from QEfficient.utils.test_utils import (
     InternProcessor,
@@ -233,7 +234,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
     aic_hw_version = "ai200" if torch_dtype == torch.bfloat16 else "ai100"
     compile_kwargs = {
         "num_devices": num_devices,
-        "num_cores": 4 if aic_hw_version == "ai200" else 16,
+        "num_cores": get_default_num_cores(aic_hw_version),
         "aic_hw_version": aic_hw_version,
         "prefill_seq_len": prompt_len,
         "ctx_len": ctx_len,

@@ -50,6 +50,8 @@ from QEfficient.transformers.moe import (
     resolve_routing,
     unpack_moe_weights_from_expert_parallel,
 )
+from QEfficient.transformers.spd.dflash import compute_dflash_target_hidden_states
+from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 from QEfficient.utils.logging_utils import QEFFLogger
 
@@ -381,9 +383,16 @@ def _prepare_gpt_oss_sliding_chunked_attention_mask(
     sliding_mask: torch.Tensor,
     position_ids: torch.LongTensor,
     sliding_window: int,
+    dflash: bool = False,
 ) -> torch.Tensor:
     ctx_len = position_ids.shape[1] + sliding_window
     ctx_indices = torch.arange(ctx_len, device=position_ids.device)
+    if dflash:
+        start = torch.clamp(position_ids[:, :1] - sliding_window, min=0)
+        indices = ctx_indices.view(1, 1, 1, -1) + start[:, None, None, :]
+        indices = indices.expand(-1, sliding_mask.shape[1], position_ids.shape[1], -1)
+        outside_cache = indices >= sliding_mask.shape[-1]
+        return torch.gather(sliding_mask, -1, indices.clamp(max=sliding_mask.shape[-1] - 1)) | outside_cache
     first_pos_idx = position_ids[0][0]
     add_idx = torch.where(first_pos_idx >= sliding_window, first_pos_idx - sliding_window, 0)
     ctx_indices += add_idx
@@ -434,6 +443,7 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                 "config": self.config,
                 "is_sliding": self.sliding_window is not None,
                 "sliding_window": self.sliding_window,
+                "dflash": kwargs.pop("dflash", False),
             }
             if self.sliding_window is not None:
                 key_states, value_states = past_key_values.sliding_window_update_chunked(
@@ -773,16 +783,22 @@ class QEffPrefillOnlyGptOssModel(GptOssModel):
         sin = self.sin_cached[position_ids].unsqueeze(1).to(device=hidden_states.device)
         cos = self.cos_cached[position_ids].unsqueeze(1).to(device=hidden_states.device)
         layer_sliding_mask = sliding_mask
+        target_layer_ids = getattr(self, "target_layer_ids", None)
+        target_hidden_list = []
         if isinstance(self.layers[0].self_attn, QEffPrefillOnlyChunkedGptOssAttention):
             layer_sliding_mask = _prepare_gpt_oss_sliding_chunked_attention_mask(
                 sliding_mask=sliding_mask,
                 position_ids=position_ids,
                 sliding_window=self.config.sliding_window,
+                dflash=bool(target_layer_ids),
             )
 
-        for decoder_layer in self.layers:
+        for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
+
+            if target_layer_ids and layer_idx in target_layer_ids:
+                target_hidden_list.append(hidden_states)
 
             self_attn = decoder_layer.self_attn
             if self_attn.sliding_window is None:
@@ -803,6 +819,7 @@ class QEffPrefillOnlyGptOssModel(GptOssModel):
                 cache_position=cache_position,
                 sin_cached=sin,
                 cos_cached=cos,
+                dflash=bool(target_layer_ids),
                 **kwargs,
             )
             hidden_states = layer_outputs[0]
@@ -821,6 +838,11 @@ class QEffPrefillOnlyGptOssModel(GptOssModel):
         return MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
+            hidden_states=(
+                compute_dflash_target_hidden_states(target_hidden_list, self.fc, self.hidden_norm)
+                if target_layer_ids
+                else None
+            ),
         )
 
 
@@ -969,6 +991,7 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
         return_dict: bool | None = None,
         output_router_logits: bool | None = None,
         cache_position: torch.LongTensor | None = None,
+        num_logits_to_keep: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeCausalLMOutputWithPast:
@@ -1005,6 +1028,12 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
             output_router_logits if output_router_logits is not None else self.config.output_router_logits
         )
 
+        is_dflash = bool(getattr(self.model, "target_layer_ids", None))
+        if is_dflash:
+            if not isinstance(self.model.layers[0].self_attn, QEffPrefillOnlyChunkedGptOssAttention):
+                raise ValueError("GPT-OSS DFlash requires prefill_only=True with chunked, full-context KV caches.")
+            output_hidden_states = False
+
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs: MoeModelOutputWithPast = self.model(
             input_ids=input_ids,
@@ -1026,6 +1055,19 @@ class QEffGptOssForCausalLM(GptOssForCausalLM):
         )
 
         hidden_states = outputs.last_hidden_state
+
+        if is_dflash:
+            if num_logits_to_keep is not None:
+                hidden_states = filter_hidden_states(hidden_states, position_ids, num_logits_to_keep)
+            logits = self.lm_head(hidden_states).float()
+            qaic_config = getattr(self, "qaic_config", None) or {}
+            return MoeCausalLMOutputWithPast(
+                logits=logits
+                if qaic_config.get("speculative_model_type") == "target"
+                else logits.argmax(-1).to(torch.int32),
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+            )
 
         logit_index = position_ids.to(torch.int32).argmax(1, keepdim=True)
         hidden_states = outputs[0][torch.arange(position_ids.shape[0]).view(-1, 1), logit_index]
