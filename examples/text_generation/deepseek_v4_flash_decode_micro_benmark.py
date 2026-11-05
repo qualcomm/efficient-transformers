@@ -87,13 +87,5 @@ def parse_microbench_mode() -> str:
     return args.mode
 
 
-def parse_microbench_mode() -> str:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--mode", choices=MICROBENCH_DEFAULTS_BY_MODE, default="decode")
-    args, remaining_args = parser.parse_known_args()
-    sys.argv = [sys.argv[0], *remaining_args]
-    return args.mode
-
-
 if __name__ == "__main__":
     main(MICROBENCH_DEFAULTS_BY_MODE[parse_microbench_mode()])

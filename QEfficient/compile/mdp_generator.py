@@ -24,7 +24,7 @@ _LAYER_NAME_RE = re.compile(r"(?:^|[/.])layers\.(\d+)(?=$|[/.])")
 _GPT2_LAYER_NAME_RE = re.compile(r"(?:^|/)h\.(\d+)(?=$|/)")
 _SUBFUNCTION_LAYER_NAME_RE = re.compile(r"(?:^|/)layer_(\d+)(?=$|/)")
 _RETAINED_STATE_NAME_RE = re.compile(
-    r"^(?:past_key|past_value|compressed_kv|k_pe|conv_state|recurrent_state)\.(\d+)(?:_|$)"
+    r"^(?:past_key|past_value|compressed_kv|k_pe|conv_state|recurrent_state|indexer_key|index_key)\.(\d+)(?:_|$)"
 )
 
 
