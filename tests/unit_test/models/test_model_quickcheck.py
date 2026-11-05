@@ -2507,6 +2507,108 @@ def test_qwen3_5_moe_get_submodules_for_export_keeps_decoder_layer_for_mixed_lay
     assert wrapper.get_submodules_for_export() == {QEffQwen3_5MoeDecoderLayer}
 
 
+def test_qwen3_5_linear_conv_state_shapes_match_retained_state_contract():
+    qeff_model = _tiny_qwen_qeff_model("qwen3_5")
+    causal_lm = QEFFAutoModelForCausalLM(
+        AutoModelForCausalLM.from_config(_tiny_qwen3_5_text_config(), **MODEL_KWARGS).eval(),
+        continuous_batching=False,
+    )
+    batch_size = 2
+    seq_len = 4
+    layer_idx = qeff_model.model.config.text_config.layer_types.index("linear_attention")
+    linear_layer = qeff_model.model.model.language_model.layers[layer_idx].linear_attn
+    expected_shape = (batch_size, linear_layer.conv_dim, linear_layer.conv_kernel_size)
+
+    retained_state_specs = causal_lm.model.get_onnx_retained_state_specs(
+        batch_size=batch_size,
+        seq_len=seq_len,
+        kv_cache_shape=(batch_size, 1, 8, 8),
+    )
+    retained_conv_state = retained_state_specs["past_key_values"][layer_idx][0]
+    assert tuple(retained_conv_state.shape) == expected_shape
+
+    dummy_inputs = qeff_model.model.get_dummy_inputs(
+        batch_size=batch_size,
+        prefill_seq_len=seq_len,
+        kv_offload=True,
+    )
+    dummy_conv_state = dummy_inputs["lang"]["past_key_values"][layer_idx][0]
+    assert tuple(dummy_conv_state.shape) == expected_shape
+
+
+@pytest.mark.reproducer
+def test_qwen3_5_linear_conv_state_export_compile_reproducer(tmp_path, monkeypatch):
+    """Verify Qwen3.5 linear conv retained states reach the compile interface."""
+    config = _tiny_qwen3_5_text_config()
+    config.num_hidden_layers = 24
+    config.layer_types = [
+        "full_attention" if (layer_idx + 1) % 4 == 0 else "linear_attention" for layer_idx in range(24)
+    ]
+    config.hidden_size = 128
+    config.intermediate_size = 256
+    config.num_attention_heads = 4
+    config.num_key_value_heads = 2
+    config.head_dim = 32
+    config.linear_key_head_dim = 32
+    config.linear_value_head_dim = 32
+    config.linear_num_key_heads = 4
+    config.linear_num_value_heads = 4
+    hf_model = AutoModelForCausalLM.from_config(config, **MODEL_KWARGS).eval()
+    qeff_model = QEFFAutoModelForCausalLM(hf_model, continuous_batching=False)
+
+    qeff_model.transform(
+        ctx_len=4096,
+        seq_len=64,
+        bs=1,
+        num_devices=2,
+        num_cores=16,
+        mdp_num_partitions=2,
+        mdp_strategy="intersection",
+    )
+    onnx_path = _exported_onnx_path(
+        qeff_model.export(
+            export_dir=tmp_path / "qwen3-5-linear-conv-state",
+            prefill_seq_len=64,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+        )
+    )
+    captured_kwargs = {}
+
+    def fake_compile(**kwargs):
+        captured_kwargs.update(kwargs)
+        return tmp_path / "qpc"
+
+    monkeypatch.setattr(qeff_model, "_compile", fake_compile)
+    qpc_paths = qeff_model.compile(
+        onnx_path=str(onnx_path),
+        prefill_seq_len=64,
+        ctx_len=4096,
+        use_onnx_subfunctions=True,
+        compile_dir=str(tmp_path),
+        num_devices=2,
+        num_cores=16,
+        mdp_num_partitions=2,
+        mdp_strategy="intersection",
+    )
+
+    assert qpc_paths == tmp_path / "qpc"
+    assert captured_kwargs["onnx_path"] == str(onnx_path)
+    assert captured_kwargs["retained_state"] is True
+    assert captured_kwargs["mdp_num_partitions"] == 2
+    assert captured_kwargs["mdp_strategy"] == "intersection"
+    assert captured_kwargs["use_onnx_subfunctions"] is True
+
+    custom_io = captured_kwargs["custom_io"]
+    for layer_idx, layer_type in enumerate(config.layer_types):
+        if layer_type != "linear_attention":
+            continue
+        assert f"conv_state.{layer_idx}" in custom_io
+        assert any(
+            f"conv_state.{layer_idx}{suffix}" in custom_io for suffix in ("_RetainedState", "_InternalRetainedState")
+        )
+
+
 def test_qwen3_5_moe_get_specializations_supports_multi_resolution():
     from types import SimpleNamespace
 
