@@ -1662,7 +1662,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         batch_size, sequence_length, _ = hidden_states.shape
         ratio = self.compressor.compress_rate
         q_block_size = int(getattr(self.config, "qeff_hca_prefill_q_block_size", self.sliding_window))
-        compressed_block_size = int(getattr(self.config, "qeff_hca_prefill_comp_kv_block_size", 128))
+        compressed_block_size = int(getattr(self.config, "qeff_hca_prefill_comp_kv_block_size", 1024))
         cos, sin = position_embeddings["compress"]
 
         q_residual = self.q_a_norm(self.q_a_proj(hidden_states)).to(hidden_states.dtype)

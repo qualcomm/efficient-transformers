@@ -945,7 +945,9 @@ class CSAJointAttentionFunc(torch.autograd.Function):
             query.shape[0], query.shape[1], 1, local_kv.shape[-1], dtype=torch.float32, device=query.device
         )
         all_values = torch.cat((local_values, sink_values, compressed_kv.float()), dim=2)
-        return torch.einsum("bsht,bstd->bshd", torch.softmax(all_scores, dim=3), all_values)
+        probabilities = torch.softmax(all_scores.float(), dim=3).to(local_kv.dtype)
+        output = torch.einsum("bsht,bstd->bshd", probabilities.float(), all_values.float())
+        return output.to(local_kv.dtype)
 
     @staticmethod
     def setup_context(ctx, inputs, outputs):

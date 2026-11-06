@@ -880,14 +880,15 @@ def test_deepseek_v4_compressed_cache_dynamic_shape_uses_compressed_capacity():
     assert compressed_capacity.max == 16
 
 
-def test_deepseek_v4_csa_joint_attention_uses_one_softmax():
-    local_kv = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_deepseek_v4_csa_joint_attention_uses_one_softmax(dtype):
+    local_kv = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype=dtype)
     local_valid = torch.tensor([[[True, True], [True, False]]])
-    compressed_cache = torch.tensor([[[0.5, 0.5], [1.0, 1.0], [-1.0, 0.5]]])
+    compressed_cache = torch.tensor([[[0.5, 0.5], [1.0, 1.0], [-1.0, 0.5]]], dtype=dtype)
     compressed_indices = torch.tensor([[[0, 1], [2, 0]]], dtype=torch.int32)
     compressed_valid = torch.tensor([[[True, True], [True, False]]])
-    query = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]], [[0.5, 1.0], [1.0, 0.5]]]])
-    sinks = torch.tensor([0.25, -0.5])
+    query = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]], [[0.5, 1.0], [1.0, 0.5]]]], dtype=dtype)
+    sinks = torch.tensor([0.25, -0.5], dtype=dtype)
     scale = torch.tensor(0.75)
     masked_logit = torch.tensor(-3.0e4)
 
@@ -904,21 +905,24 @@ def test_deepseek_v4_csa_joint_attention_uses_one_softmax():
     )
 
     compressed_kv = compressed_cache[0, compressed_indices[0].long()].unsqueeze(0)
-    local_scores = torch.einsum("bshd,btd->bsht", query, local_kv) * scale
+    local_scores = torch.einsum("bshd,btd->bsht", query.float(), local_kv.float()) * scale
     local_scores = torch.where(local_valid.unsqueeze(2), local_scores, masked_logit)
-    compressed_scores = torch.einsum("bshd,bskd->bshk", query, compressed_kv) * scale
+    compressed_scores = torch.einsum("bshd,bskd->bshk", query.float(), compressed_kv.float()) * scale
     compressed_scores = torch.where(compressed_valid.unsqueeze(2), compressed_scores, masked_logit)
-    sink_scores = sinks.view(1, 1, -1, 1).expand(query.shape[0], query.shape[1], -1, -1)
+    sink_scores = sinks.float().view(1, 1, -1, 1).expand(query.shape[0], query.shape[1], -1, -1)
     scores = torch.cat((local_scores, sink_scores, compressed_scores), dim=-1)
     values = torch.cat(
         (
-            local_kv.unsqueeze(1).expand(-1, query.shape[1], -1, -1),
+            local_kv.float().unsqueeze(1).expand(-1, query.shape[1], -1, -1),
             torch.zeros(query.shape[0], query.shape[1], 1, local_kv.shape[-1]),
-            compressed_kv,
+            compressed_kv.float(),
         ),
         dim=2,
     )
-    expected = torch.einsum("bsht,bstd->bshd", torch.softmax(scores, dim=-1), values)
+    probabilities = torch.softmax(scores.float(), dim=-1).to(dtype)
+    expected = torch.einsum("bsht,bstd->bshd", probabilities.float(), values.float()).to(dtype)
+
+    assert output.dtype == dtype
 
     torch.testing.assert_close(output, expected)
 
@@ -1193,7 +1197,8 @@ def test_deepseek_v4_hca_prefill_preserves_rank_four_compressed_cache():
     assert torch.isfinite(output.logits).all()
 
 
-def test_deepseek_v4_hca_prefill_matches_token_decode_with_compressed_attention():
+@pytest.mark.parametrize("compressed_block_size", [2, 1024])
+def test_deepseek_v4_hca_prefill_matches_token_decode_with_compressed_attention(compressed_block_size):
     config = _tiny_deepseek_v4_config()
     config.num_hidden_layers = 1
     config.layer_types = ["heavily_compressed_attention"]
@@ -1204,7 +1209,7 @@ def test_deepseek_v4_hca_prefill_matches_token_decode_with_compressed_attention(
     prefill_config = deepcopy(config)
     prefill_config.qeff_hca_prefill_only = True
     prefill_config.qeff_hca_prefill_q_block_size = 4
-    prefill_config.qeff_hca_prefill_comp_kv_block_size = 2
+    prefill_config.qeff_hca_prefill_comp_kv_block_size = compressed_block_size
     prefill_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(prefill_config).eval()).model.eval()
     prefill_model.load_state_dict(decode_model.state_dict())
 
