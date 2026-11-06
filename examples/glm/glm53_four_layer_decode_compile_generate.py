@@ -477,6 +477,7 @@ def run_decode_opstats(
     *,
     artifact_dir: Path,
     batch_size: int,
+    input_ids: torch.Tensor,
     vocab_size: int,
     num_iters: int,
     profile_start_iter: int,
@@ -508,8 +509,11 @@ def run_decode_opstats(
     input_shape = get_shape("input_ids", (batch_size, 1))
     position_shape = get_shape("position_ids", (batch_size, 1))
     output_shape = get_shape("logits", (batch_size, 1, vocab_size))
+    input_ids_array = input_ids[:, -input_shape[1] :].detach().cpu().numpy().astype(get_dtype("input_ids"), copy=False)
+    if input_ids_array.shape != input_shape:
+        raise ValueError(f"Opstats input_ids shape {input_ids_array.shape} does not match ONNX shape {input_shape}.")
     inputs = {
-        "input_ids": np.zeros(input_shape, dtype=get_dtype("input_ids")),
+        "input_ids": input_ids_array,
         "position_ids": np.zeros(position_shape, dtype=get_dtype("position_ids")),
     }
     outputs = {"logits": np.zeros(output_shape, dtype=get_dtype("logits"))}
@@ -844,6 +848,7 @@ def main() -> None:
             Path(onnx_path),
             artifact_dir=Path(args.qeff_home),
             batch_size=args.batch_size,
+            input_ids=input_ids,
             vocab_size=int(config.vocab_size),
             num_iters=args.opstats_num_iters,
             profile_start_iter=args.opstats_profile_start_iter,
