@@ -1600,3 +1600,74 @@ class TestLlama4TextAccuracy:
         from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
         assert GptOssForCausalLM in KVCacheTransform._module_mapping
+
+
+# ---------------------------------------------------------------------------
+# Tests: Qwen4-Exp RMSNorm custom-op mapping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.transforms
+@pytest.mark.accuracy
+class TestQwen4ExpRMSNormAccuracy:
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_custom_rmsnorm_transform_preserves_outputs(self, dtype):
+        from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextRMSNorm, Qwen4ExpTextRMSNormGated
+
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
+            QEffQwen4ExpTextRMSNorm,
+            QEffQwen4ExpTextRMSNormGated,
+        )
+
+        torch.manual_seed(0)
+        model = (
+            torch.nn.ModuleDict(
+                {
+                    "plain": Qwen4ExpTextRMSNorm(128),
+                    "grouped": Qwen4ExpTextRMSNorm(128, group_size=16),
+                    "gated": Qwen4ExpTextRMSNormGated(128, activation="tanh"),
+                }
+            )
+            .to(dtype)
+            .eval()
+        )
+        with torch.no_grad():
+            model["plain"].weight.normal_(mean=0.0, std=0.2)
+            model["grouped"].weight.normal_(mean=0.0, std=0.2)
+            model["gated"].weight.normal_(mean=1.0, std=0.2)
+
+        hidden_states = torch.randn(2, 5, 128, dtype=dtype)
+        gate = torch.randn_like(hidden_states)
+
+        custom_op_modules = (
+            torch.nn.ModuleDict(
+                {
+                    "plain": QEffQwen4ExpTextRMSNorm(128),
+                    "grouped": QEffQwen4ExpTextRMSNorm(128, group_size=16),
+                    "gated": QEffQwen4ExpTextRMSNormGated(128, activation="tanh"),
+                }
+            )
+            .to(dtype)
+            .eval()
+        )
+        for name, module in custom_op_modules.items():
+            module.load_state_dict(model[name].state_dict())
+
+        def assert_matches_upstream(candidate):
+            with torch.no_grad():
+                for name, original in model.items():
+                    expected = original(hidden_states, gate) if name == "gated" else original(hidden_states)
+                    actual = candidate[name](hidden_states, gate) if name == "gated" else candidate[name](hidden_states)
+                    torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.01)
+
+        # First check the custom-op-backed modules directly against Transformers.
+        assert_matches_upstream(custom_op_modules)
+
+        transformed, applied = CustomOpsTransform.apply(model)
+        assert applied
+        assert isinstance(transformed["plain"], QEffQwen4ExpTextRMSNorm)
+        assert isinstance(transformed["grouped"], QEffQwen4ExpTextRMSNorm)
+        assert isinstance(transformed["gated"], QEffQwen4ExpTextRMSNormGated)
+
+        # Then check that the registered PyTorch transform produces the same outputs.
+        assert_matches_upstream(transformed)

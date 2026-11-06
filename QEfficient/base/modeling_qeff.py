@@ -28,6 +28,7 @@ from QEfficient.base.onnx_transforms import (
     FP16ClipTransform,
     LocalizeFunctionReduceSumAxesTransform,
     OnnxTransformPipeline,
+    ReductionCastCleanupTransform,
     RenameFunctionOutputsTransform,
     SplitTensorsTransform,
 )
@@ -684,6 +685,8 @@ class QEFFBaseModel(ABC):
                 _restore_retained_state_output_names(model, output_names)
 
             transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]
+            if ReductionCastCleanupTransform.__name__ not in transform_names:
+                transform_names.append(ReductionCastCleanupTransform.__name__)
             model.metadata_props.append(
                 onnx.StringStringEntryProto(key="qeff_transforms", value=",".join(transform_names))
             )

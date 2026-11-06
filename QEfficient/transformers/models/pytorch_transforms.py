@@ -250,6 +250,8 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextGatedDeltaNet,
     Qwen4ExpTextModel,
     Qwen4ExpTextPLELayer,
+    Qwen4ExpTextRMSNorm,
+    Qwen4ExpTextRMSNormGated,
     Qwen4ExpTextSparseMoeBlock,
 )
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
@@ -609,6 +611,8 @@ from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
     QEffQwen4ExpTextGatedDeltaNet,
     QEffQwen4ExpTextModel,
     QEffQwen4ExpTextPLELayer,
+    QEffQwen4ExpTextRMSNorm,
+    QEffQwen4ExpTextRMSNormGated,
     QEffQwen4ExpTextSparseMoeBlock,
 )
 from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import (
@@ -737,6 +741,8 @@ class CustomOpsTransform(ModuleMappingTransform):
         Qwen3_5MoeRMSNorm: GemmaCustomRMSNormAIC,
         Qwen3_5RMSNormGated: QEffQwen3_5GatedDeltaNetCustomRMSNormAIC,
         Qwen3_5MoeRMSNormGated: QEffQwen3_5MoeGatedDeltaNetCustomRMSNormAIC,
+        Qwen4ExpTextRMSNorm: QEffQwen4ExpTextRMSNorm,
+        Qwen4ExpTextRMSNormGated: QEffQwen4ExpTextRMSNormGated,
     }
 
 

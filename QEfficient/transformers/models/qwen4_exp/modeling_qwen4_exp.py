@@ -11,6 +11,7 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
+from transformers.activations import ACT2FN
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpForCausalLM,
@@ -30,6 +31,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
 
 from QEfficient.customop import ctx_gather_rows, ctx_paged_scatter
 from QEfficient.customop.rms_norm import CustomRMSNormFunc
+from QEfficient.customop.utils import select_interface
 from QEfficient.transformers.cache_utils import QEffQwen4ExpDynamicCache
 from QEfficient.transformers.moe import (
     MoEFlavour,
@@ -141,31 +143,25 @@ def _build_qwen4_exp_pooled_mrope_cache(cos_cached, sin_cached, config, rotary_w
 
 class QEffQwen4ExpTextRMSNormGated(Qwen4ExpTextRMSNormGated):
     def forward(self, hidden_states, gate):
-        if hidden_states.dtype == torch.bfloat16:
-            variance = hidden_states.pow(2).mean(-1, keepdim=True)
-            epsilon = torch.tensor(self.variance_epsilon, dtype=variance.dtype)
-            normed = hidden_states * torch.rsqrt(variance + epsilon)
-            normed = self.weight * normed
-            return normed * F.silu(gate)
-        normed = CustomRMSNormFunc.apply(hidden_states, self.weight, self.variance_epsilon)
-        return normed * F.silu(gate)
+        rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
+        normed = rms_interface(hidden_states, self.weight, self.variance_epsilon)
+        return (normed * ACT2FN[self.activation](gate.to(torch.float32))).to(normed.dtype)
 
 
 class QEffQwen4ExpTextRMSNorm(Qwen4ExpTextRMSNorm):
-    """Keep Qwen4 RMSNorm calculations in BF16 for AI200 export."""
+    """Implement Qwen4 RMSNorm through the compiler-recognized custom op."""
 
     def forward(self, x):
-        if x.dtype != torch.bfloat16:
-            return super().forward(x)
         if self.group_size is not None:
             x = x.reshape(*x.shape[:-1], -1, self.group_size)
-        variance = x.pow(2).mean(-1, keepdim=True)
-        epsilon = torch.tensor(self.eps, dtype=variance.dtype)
-        output = x * torch.rsqrt(variance + epsilon)
+            weight = (self.weight + 1.0).reshape(-1, self.group_size)
+        else:
+            weight = self.weight + 1.0
+        rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
+        output = rms_interface(x, weight, self.eps)
         if self.group_size is not None:
             output = output.flatten(-2)
-        one = torch.tensor(1.0, dtype=self.weight.dtype)
-        return output * (one + self.weight)
+        return output
 
 
 class QEffQwen4ExpTextTopKRouter(Qwen4ExpTextTopKRouter):
@@ -1273,8 +1269,7 @@ class QEffQwen4ExpDecodeExportMixin:
     ):
         del kv_cache_shape, retain_full_kv
         config, dtype = self.config, self.lm_head.weight.dtype
-        decode_bf16 = dtype == torch.bfloat16 and seq_len == 1
-        recurrent_state_dtype = dtype if decode_bf16 else torch.float32
+        recurrent_state_dtype = dtype
         batch_axis = "full_batch_size" if continuous_batching else "batch_size"
         specs = {"past_key_values": [], "input_names": [], "output_names": [], "dynamic_axes": {}}
         for index in range(config.num_hidden_layers):

@@ -72,6 +72,143 @@ class BaseOnnxTransform:
         raise NotImplementedError("Use subclasses for ONNX transform")
 
 
+class ReductionCastCleanupTransform(BaseOnnxTransform):
+    """Remove BF16→FP32→BF16 casts immediately surrounding a standard reduction."""
+
+    _REDUCTION_OPS = frozenset({"ReduceSum", "ReduceMean"})
+
+    @classmethod
+    def apply(cls, model: ModelProto) -> bool:
+        changed = cls._apply_to_graph(model.graph)
+        for function in model.functions:
+            if function.domain == "com.qti.aisw.onnx" and function.name == "CustomRMSNorm":
+                # Preserve the compiler-recognized RMSNorm function body.
+                continue
+            changed |= cls._apply_to_function(function)
+        return changed
+
+    @classmethod
+    def _apply_to_graph(cls, graph: onnx.GraphProto) -> bool:
+        changed = False
+        for node in graph.node:
+            for attribute in node.attribute:
+                if attribute.type == onnx.AttributeProto.GRAPH:
+                    changed |= cls._apply_to_graph(attribute.g)
+                elif attribute.type == onnx.AttributeProto.GRAPHS:
+                    for subgraph in attribute.graphs:
+                        changed |= cls._apply_to_graph(subgraph)
+        changed |= cls._apply_to_container(graph)
+        return changed
+
+    @classmethod
+    def _apply_to_function(cls, function: onnx.FunctionProto) -> bool:
+        changed = False
+        for node in function.node:
+            for attribute in node.attribute:
+                if attribute.type == onnx.AttributeProto.GRAPH:
+                    changed |= cls._apply_to_graph(attribute.g)
+                elif attribute.type == onnx.AttributeProto.GRAPHS:
+                    for subgraph in attribute.graphs:
+                        changed |= cls._apply_to_graph(subgraph)
+        changed |= cls._apply_to_container(function)
+        return changed
+
+    @classmethod
+    def _apply_to_container(cls, container: onnx.GraphProto | onnx.FunctionProto) -> bool:
+        nodes = list(container.node)
+        producers = {output: index for index, node in enumerate(nodes) for output in node.output if output}
+        consumers: dict[str, list[int]] = {}
+        for index, node in enumerate(nodes):
+            for input_name in node.input:
+                if input_name:
+                    consumers.setdefault(input_name, []).append(index)
+
+        value_dtypes: dict[str, int] = {}
+        for field in ("input", "output", "value_info"):
+            for value in getattr(container, field, ()):
+                if not hasattr(value, "name") or not value.HasField("type"):
+                    continue
+                if value.type.HasField("tensor_type"):
+                    value_dtypes[value.name] = value.type.tensor_type.elem_type
+        initializers = {tensor.name: tensor for tensor in getattr(container, "initializer", ())}
+        value_dtypes.update({name: tensor.data_type for name, tensor in initializers.items()})
+        output_names = cls._container_names(container, "output")
+
+        removed_indices = set()
+        invalidated_value_names = set()
+        changed = False
+
+        for post_cast_idx, post_cast in enumerate(nodes):
+            if post_cast_idx in removed_indices or not cls._is_cast_to(post_cast, TensorProto.BFLOAT16):
+                continue
+            if len(post_cast.input) != 1 or len(post_cast.output) != 1:
+                continue
+            reduction_idx = producers.get(post_cast.input[0])
+            if reduction_idx is None or reduction_idx in removed_indices:
+                continue
+            reduction = nodes[reduction_idx]
+            if reduction.domain or reduction.op_type not in cls._REDUCTION_OPS:
+                continue
+            if len(reduction.input) < 1 or len(reduction.output) != 1:
+                continue
+            if consumers.get(reduction.output[0]) != [post_cast_idx] or reduction.output[0] in output_names:
+                continue
+
+            input_producer_idx = producers.get(reduction.input[0])
+            if input_producer_idx is None or input_producer_idx in removed_indices:
+                continue
+            input_cast = nodes[input_producer_idx]
+            if (
+                not cls._is_cast_to(input_cast, TensorProto.FLOAT)
+                or len(input_cast.input) != 1
+                or len(input_cast.output) != 1
+            ):
+                continue
+            if consumers.get(input_cast.output[0]) != [reduction_idx]:
+                continue
+            source_dtype = value_dtypes.get(input_cast.input[0])
+            if source_dtype not in (None, TensorProto.BFLOAT16):
+                continue
+
+            old_reduction_output = reduction.output[0]
+            reduction.input[0] = input_cast.input[0]
+            reduction.output[0] = post_cast.output[0]
+            removed_indices.update((input_producer_idx, post_cast_idx))
+            invalidated_value_names.add(input_cast.output[0])
+            invalidated_value_names.add(old_reduction_output)
+            changed = True
+
+        if changed:
+            retained_nodes = []
+            for index, node in enumerate(nodes):
+                if index not in removed_indices:
+                    copied_node = onnx.NodeProto()
+                    copied_node.CopyFrom(node)
+                    retained_nodes.append(copied_node)
+            container.ClearField("node")
+            container.node.extend(retained_nodes)
+            if hasattr(container, "value_info"):
+                retained_value_info = []
+                for value in container.value_info:
+                    if value.name not in invalidated_value_names:
+                        copied_value = onnx.ValueInfoProto()
+                        copied_value.CopyFrom(value)
+                        retained_value_info.append(copied_value)
+                container.ClearField("value_info")
+                container.value_info.extend(retained_value_info)
+        return changed
+
+    @staticmethod
+    def _container_names(container, field: str) -> set[str]:
+        return {value.name if hasattr(value, "name") else value for value in getattr(container, field, ())}
+
+    @staticmethod
+    def _is_cast_to(node: onnx.NodeProto, target_dtype: int) -> bool:
+        if node.domain or node.op_type != "Cast":
+            return False
+        return any(attribute.name == "to" and attribute.i == target_dtype for attribute in node.attribute)
+
+
 class FP16ClipTransform(BaseOnnxTransform):
     """Clip FP32 tensors to FP16 range to avoid overflow during conversion."""
 
@@ -858,8 +995,11 @@ class OnnxTransformPipeline(BaseOnnxTransform):
         size_threshold: int = SIZE_THRESHOLD_DEFAULT,
         **kwargs,
     ) -> Tuple[ModelProto, bool]:
+        reduction_casts_applied = ReductionCastCleanupTransform.apply(model)
         if not self.transforms:
-            return model, False
+            if reduction_casts_applied:
+                logger.info("Transform '%s' applied=True", ReductionCastCleanupTransform.__name__)
+            return model, reduction_casts_applied
 
         # Same logic as before, but replace `transforms` with `self.transforms`
         mapping: Dict[str, Tuple[TensorProto, str]] = {}
@@ -933,4 +1073,4 @@ class OnnxTransformPipeline(BaseOnnxTransform):
         for t, done in applied.items():
             logger.info(f"Transform '{t.__name__}' applied={done}")
 
-        return model, any(applied.values())
+        return model, reduction_casts_applied or any(applied.values())
