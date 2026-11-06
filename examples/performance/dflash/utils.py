@@ -163,7 +163,7 @@ class HostSelector:
         unary = np.take_along_axis(logits, candidates, axis=-1)
         for batch_idx, anchor in enumerate(np.asarray(anchor_ids).reshape(-1)):
             predecessor = int(anchor)
-            for position in range(1, logits.shape[1]):
+            for position in range(logits.shape[1]):
                 query = self.predecessor[predecessor] * projected[batch_idx, position]
                 scores = unary[batch_idx, position] + self.successor[candidates[batch_idx, position]] @ query
                 predecessor = int(candidates[batch_idx, position, int(scores.argmax())])
@@ -974,15 +974,6 @@ def reformat_jsonl_by_category(questions: list) -> list:
     return questions
 
 
-# DFlash-2 compile helpers. Keep the example front end responsible only for CLI
-# parsing/session execution, matching the compile helpers above for DFlash-1.
-def _dflash2_value(config, name: str, default=None):
-    dflash_config = getattr(config, "dflash_config", None) or {}
-    if isinstance(dflash_config, dict) and name in dflash_config:
-        return dflash_config[name]
-    return getattr(config, name, default)
-
-
 def inspect_dflash2_draft(
     draft_model: str,
     hf_token: str | None = None,
@@ -1002,11 +993,11 @@ def inspect_dflash2_draft(
         raise RuntimeError(f"{draft_model!r} is not a DFlash-2 draft checkpoint: architectures={architectures}")
 
     hidden_size = int(config.hidden_size)
-    kernel_size = int(_dflash2_value(config, "conv_kernel_size"))
-    group_size = int(_dflash2_value(config, "conv_group_size"))
-    block_size = int(_dflash2_value(config, "block_size", 16))
-    selector_rank = int(_dflash2_value(config, "selector_rank"))
-    selector_top_k = int(_dflash2_value(config, "selector_top_k"))
+    kernel_size = int(_dflash2_config_value(config, "conv_kernel_size"))
+    group_size = int(_dflash2_config_value(config, "conv_group_size"))
+    block_size = int(_dflash2_config_value(config, "block_size", 16))
+    selector_rank = int(_dflash2_config_value(config, "selector_rank"))
+    selector_top_k = int(_dflash2_config_value(config, "selector_top_k"))
     if hidden_size % group_size:
         raise RuntimeError(f"hidden_size={hidden_size} is not divisible by conv_group_size={group_size}")
     groups = hidden_size // group_size

@@ -558,7 +558,10 @@ def test_dflash_queued_prefix_counts_seed_and_preserves_verification_features(ac
 
 
 def test_dflash2_host_selector_rescores_top_k_chain():
+    import torch
+
     from examples.performance.dflash.utils import HostSelector
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import CandidateSelector
 
     predecessor = np.zeros((VOCAB_SIZE, 2), dtype=np.float32)
     successor = np.zeros_like(predecessor)
@@ -575,8 +578,25 @@ def test_dflash2_host_selector_rescores_top_k_chain():
     }
 
     selected = selector(outputs, np.array([0], dtype=np.int64))
+    reference = CandidateSelector(
+        SimpleNamespace(
+            hidden_size=2,
+            vocab_size=VOCAB_SIZE,
+            dflash_config={"selector_rank": 2, "selector_top_k": 2},
+        )
+    )
+    with torch.no_grad():
+        reference.predecessor_codebook.weight.copy_(torch.from_numpy(predecessor))
+        reference.successor_codebook.weight.copy_(torch.from_numpy(successor))
+        reference.hidden_projection.weight.copy_(torch.eye(2))
+    expected, _ = reference.select(
+        torch.ones((1, BLOCK_SIZE, 2)),
+        torch.from_numpy(logits),
+        torch.tensor([0]),
+    )
 
-    assert selected.tolist() == [[1, 2, 2, 2]]
+    np.testing.assert_array_equal(selected, expected.numpy())
+    assert selected.tolist() == [[2, 2, 2, 2]]
     with pytest.raises(ValueError, match="selector_hidden rank"):
         selector(
             {
