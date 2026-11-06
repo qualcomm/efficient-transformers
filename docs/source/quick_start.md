@@ -29,9 +29,12 @@ QEfficient writes structured JSON logs to `~/.cache/qefficient_logs` by default.
 ```bash
 export QEFF_LOG_PATH=/tmp/qefficient-logs
 export QEFF_LOG_LEVEL=INFO
+# Optional: log structured logs and timing summaries to console.
+export QEFF_LOG_TO_CONSOLE=1
 ```
 
 `QEFF_LOG_PATH` may name a directory or a `.log` file. Process IDs are added to the resulting filename so parallel workers do not share a log.
+By default, logs are written only to the QEfficient log file. Set `QEFF_LOG_TO_CONSOLE=1` to also print structured logs and final timing summaries to the console.
 
 ---
 

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import reprlib
+import sys
 import threading
 import warnings
 from contextlib import contextmanager
@@ -22,7 +23,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from QEfficient.utils.logging_timing import RunState, build_timing_table
+from QEfficient.utils.logging_timing import RunState, build_timing_table, record_timing_milestone
 
 # Import centralized config
 
@@ -33,16 +34,22 @@ class LoggerConfig:
 
     log_path_env: str = "QEFF_LOG_PATH"
     log_level_env: str = "QEFF_LOG_LEVEL"
+    log_to_console_env: str = "QEFF_LOG_TO_CONSOLE"
     default_log_dir: str = os.path.expanduser("~/.cache/qefficient_logs")
     default_level: str = "INFO"
     max_bytes: int = 5 * 1024 * 1024
     backup_count: int = 10
     milestone_load_start: str = "load_start"
     milestone_load_complete: str = "load_complete"
+    milestone_export_start: str = "export_start"
     milestone_export_complete: str = "export_complete"
     milestone_export_skipped: str = "export_skipped"
+    milestone_compile_start: str = "compile_start"
     milestone_compile_complete: str = "compile_complete"
     milestone_compile_skipped: str = "compile_skipped"
+    milestone_mdp_generation_start: str = "mdp_generation_start"
+    milestone_mdp_generation_complete: str = "mdp_generation_complete"
+    milestone_generation_start: str = "generation_start"
     milestone_generation_complete: str = "generation_complete"
 
 
@@ -71,6 +78,26 @@ class JSONNamespaceFormatter(logging.Formatter):
             if value is not None:
                 log_record[field] = value
         return json.dumps(log_record, default=str)
+
+
+class DynamicStderrHandler(logging.StreamHandler):
+    """Stream handler that writes to the current stderr."""
+
+    def __init__(self):
+        super().__init__(stream=None)
+
+    def emit(self, record):
+        self.stream = sys.stderr
+        super().emit(record)
+
+    def flush(self):
+        self.stream = sys.stderr
+        super().flush()
+
+
+def _is_env_enabled(name: str) -> bool:
+    """Return true for common environment-variable opt-in values."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class QEFFLoggerAdapter(logging.LoggerAdapter):
@@ -164,7 +191,15 @@ def _serialize_argument(value: Any, name: Optional[str] = None, *, _depth: int =
 
 
 def log_api_arguments(api: str, namespace: str, arguments: Dict[str, Any]) -> None:
-    """Write one structured API-argument record."""
+    """Write the API's start milestone and one structured argument record."""
+    start_milestones = {
+        "export": (QEFFLogger.MILESTONE_EXPORT_START, "ONNX export started."),
+        "compile": (QEFFLogger.MILESTONE_COMPILE_START, "Compilation started."),
+        "generate": (QEFFLogger.MILESTONE_GENERATION_START, "Generation started."),
+    }
+    if start_event := start_milestones.get(api):
+        milestone, message = start_event
+        QEFFLogger.log_event("milestone", namespace, message, api=api, milestone=milestone)
     QEFFLogger.log_event(
         "api_call",
         namespace,
@@ -175,7 +210,7 @@ def log_api_arguments(api: str, namespace: str, arguments: Dict[str, Any]) -> No
 
 
 def log_generate_call(func):
-    """Log generate arguments and a plain completion message."""
+    """Log generation start, arguments, and completion."""
     signature = inspect.signature(func)
     receiver_name = next(iter(signature.parameters), None)
 
@@ -281,13 +316,19 @@ def log_from_pretrained_call(func):
         model_name = arguments.get("pretrained_model_name_or_path", "unknown")
         if QEFFLogger.is_api_logging_suppressed():
             return func(cls, *args, **kwargs)
-        QEFFLogger.start_run(str(model_name))
+        started_run = False
+        if not QEFFLogger.has_active_run():
+            QEFFLogger.start_run(str(model_name))
+            started_run = True
+        if not started_run:
+            return func(cls, *args, **kwargs)
         log_api_arguments("from_pretrained", cls.__name__, arguments)
         try:
             result = func(cls, *args, **kwargs)
         except Exception as exc:
             QEFFLogger.log_api_failure("from_pretrained", cls.__name__, exc)
-            QEFFLogger.finish_run()
+            if started_run:
+                QEFFLogger.finish_run()
             raise
         else:
             QEFFLogger.log_event(
@@ -310,6 +351,7 @@ class QEFFLogger:
     Project-wide behavior:
       - A single log level is enforced using env `QEFF_LOG_LEVEL` (default = INFO).
       - Log path resolved with priority: explicit arg > env `QEFF_LOG_PATH` > default dir + timestamp.
+      - Console logging is enabled only when `QEFF_LOG_TO_CONSOLE` is truthy.
     """
 
     _instance: Optional[logging.Logger] = None
@@ -327,10 +369,15 @@ class QEFFLogger:
 
     MILESTONE_LOAD_START = LoggerConfig.milestone_load_start
     MILESTONE_LOAD_COMPLETE = LoggerConfig.milestone_load_complete
+    MILESTONE_EXPORT_START = LoggerConfig.milestone_export_start
     MILESTONE_EXPORT_COMPLETE = LoggerConfig.milestone_export_complete
     MILESTONE_EXPORT_SKIPPED = LoggerConfig.milestone_export_skipped
+    MILESTONE_COMPILE_START = LoggerConfig.milestone_compile_start
     MILESTONE_COMPILE_COMPLETE = LoggerConfig.milestone_compile_complete
     MILESTONE_COMPILE_SKIPPED = LoggerConfig.milestone_compile_skipped
+    MILESTONE_MDP_GENERATION_START = LoggerConfig.milestone_mdp_generation_start
+    MILESTONE_MDP_GENERATION_COMPLETE = LoggerConfig.milestone_mdp_generation_complete
+    MILESTONE_GENERATION_START = LoggerConfig.milestone_generation_start
     MILESTONE_GENERATION_COMPLETE = LoggerConfig.milestone_generation_complete
 
     def __init__(self, loglevel: Optional[str] = None, log_path: Optional[str] = None):
@@ -415,20 +462,6 @@ class QEFFLogger:
             handler.close()
             logger.removeHandler(handler)
 
-        try:
-            if self.log_path is None:
-                raise OSError("log path resolution failed")
-            handler: logging.Handler = RotatingFileHandler(
-                self.log_path,
-                maxBytes=LoggerConfig.max_bytes,
-                backupCount=LoggerConfig.backup_count,
-                delay=True,
-            )
-        except Exception as exc:
-            QEFFLogger._logfile = None
-            self._warn_file_logging_fallback(exc)
-            handler = logging.StreamHandler()
-
         class RunContextFilter(logging.Filter):
             def filter(self, record):
                 state = QEFFLogger._get_run_state()
@@ -437,9 +470,30 @@ class QEFFLogger:
                     record.model = state.model
                 return True
 
-        handler.addFilter(RunContextFilter())
-        handler.setFormatter(JSONNamespaceFormatter())
-        logger.addHandler(handler)
+        formatter = JSONNamespaceFormatter()
+        run_context_filter = RunContextFilter()
+
+        def add_handler(handler: logging.Handler) -> None:
+            handler.addFilter(run_context_filter)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
+        try:
+            if self.log_path is None:
+                raise OSError("log path resolution failed")
+            file_handler: logging.Handler = RotatingFileHandler(
+                self.log_path,
+                maxBytes=LoggerConfig.max_bytes,
+                backupCount=LoggerConfig.backup_count,
+                delay=True,
+            )
+            add_handler(file_handler)
+        except Exception as exc:
+            QEFFLogger._logfile = None
+            self._warn_file_logging_fallback(exc)
+
+        if QEFFLogger._logfile is None or _is_env_enabled(LoggerConfig.log_to_console_env):
+            add_handler(DynamicStderrHandler())
 
         return logger
 
@@ -460,7 +514,11 @@ class QEFFLogger:
         """Write one structured event record."""
         with cls._run_lock:
             if cls._is_api_logging_suppressed() and event in {"api_call", "milestone", "api_failure"}:
-                return
+                if event != "milestone" or fields.get("milestone") not in (
+                    cls.MILESTONE_MDP_GENERATION_START,
+                    cls.MILESTONE_MDP_GENERATION_COMPLETE,
+                ):
+                    return
             if cls._instance is None:
                 cls.get_logger(namespace)
             state = cls._get_run_state()
@@ -468,14 +526,11 @@ class QEFFLogger:
                 now = datetime.now().timestamp()
                 milestone = fields.get("milestone")
                 if event == "milestone" and milestone:
-                    if milestone == cls.MILESTONE_LOAD_START:
-                        state.milestones.setdefault(milestone, now)
-                    else:
-                        state.milestones[milestone] = now
-                if event == "api_call" and fields.get("api") == "generate":
-                    state.milestones.setdefault("generate_start", now)
-                if event == "api_failure" and fields.get("api") == "compile":
-                    state.milestones["compile_failed"] = now
+                    record_timing_milestone(state, milestone, now)
+                if event == "api_failure":
+                    failed_stage = {"export": "export_failed", "compile": "compile_failed"}.get(fields.get("api"))
+                    if failed_stage:
+                        record_timing_milestone(state, failed_stage, now)
             extra = {"namespace": namespace, "event": event, **fields}
             logging.LoggerAdapter(cls._instance, extra).info(message, stacklevel=2)
 
@@ -631,16 +686,23 @@ class QEFFLogger:
                 {
                     "load_start": cls.MILESTONE_LOAD_START,
                     "load_complete": cls.MILESTONE_LOAD_COMPLETE,
+                    "export_start": cls.MILESTONE_EXPORT_START,
                     "export_complete": cls.MILESTONE_EXPORT_COMPLETE,
                     "export_skipped": cls.MILESTONE_EXPORT_SKIPPED,
+                    "compile_start": cls.MILESTONE_COMPILE_START,
                     "compile_complete": cls.MILESTONE_COMPILE_COMPLETE,
                     "compile_skipped": cls.MILESTONE_COMPILE_SKIPPED,
+                    "mdp_generation_start": cls.MILESTONE_MDP_GENERATION_START,
+                    "mdp_generation_complete": cls.MILESTONE_MDP_GENERATION_COMPLETE,
+                    "generation_start": cls.MILESTONE_GENERATION_START,
                     "generation_complete": cls.MILESTONE_GENERATION_COMPLETE,
                 },
             )
 
     @classmethod
-    def _append_final_table(cls, state: RunState, table: Optional[str] = None) -> bool:
+    def _append_final_table(
+        cls, state: RunState, table: Optional[str] = None, *, print_to_console: bool = True
+    ) -> bool:
         """Append one human-readable timing summary to the active log file."""
         with cls._run_lock:
             if state.table_written or cls._instance is None:
@@ -656,6 +718,8 @@ class QEFFLogger:
                 handle.write(f"\n===== QEfficient Timing Summary: {state.model} =====\n")
                 handle.write(table)
                 handle.write("\n\n")
+            if print_to_console and _is_env_enabled(LoggerConfig.log_to_console_env):
+                print(f"\n===== QEfficient Timing Summary: {state.model} =====\n{table}\n", file=sys.stderr, flush=True)
             state.table_written = True
             return True
 
@@ -695,7 +759,7 @@ class QEFFLogger:
         state = cls._get_run_state()
         if state is not None:
             try:
-                cls._append_final_table(state, table)
+                cls._append_final_table(state, table, print_to_console=False)
             except Exception:
                 logging.getLogger(__name__).debug("Unable to write QEfficient timing summary", exc_info=True)
         print("\n" + table)
