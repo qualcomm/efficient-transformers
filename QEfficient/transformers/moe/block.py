@@ -64,6 +64,8 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     weights_transformed: bool = False
     # Optional token tiling for routed FFN execution. Disabled by default.
     ffn_token_block_size: Optional[int] = None
+    # Optional decode-BMM weight tiling. Disabled by default.
+    ffn_num_weight_blocks: int | None = None
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -111,10 +113,12 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
         mode: str = "default",
         token_block_size: Optional[int] = None,
         weight_block_size: Optional[int] = None,
+        num_weight_blocks: int | None = None,
     ) -> None:
-        """Configure optional token tiling for routed expert execution."""
+        """Configure optional token and decode-BMM weight tiling."""
         del weight_block_size
         self.ffn_token_block_size = token_block_size if mode in {"token", "token_weight"} else None
+        self.ffn_num_weight_blocks = num_weight_blocks
 
     def get_supported_moe_flavours(self) -> Tuple[MoEFlavour, ...]:
         if not hasattr(self, "supported_moe_flavours"):
@@ -163,8 +167,18 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
                 raise ValueError("decode_bmm flavour requires route() to return (topk_indices, topk_weights)")
             topk_indices, topk_weights = topk
             if quantized_experts:
+                if getattr(self, "ffn_num_weight_blocks", None):
+                    raise ValueError("decode_bmm weight blocking is not supported for quantized experts")
                 return moe_quantized_decode_bmm(x, topk_indices, topk_weights, quantized_weights, self.act_fn)
-            return moe_decode_bmm(x, topk_indices, topk_weights, weights, profile, top_k=topk_indices.shape[1])
+            return moe_decode_bmm(
+                x,
+                topk_indices,
+                topk_weights,
+                weights,
+                profile,
+                top_k=topk_indices.shape[1],
+                num_weight_blocks=getattr(self, "ffn_num_weight_blocks", None) or 1,
+            )
 
         dense, _ = resolve_routing(routing, num_experts)
         if flavour is MoEFlavour.EXPERT_PARALLEL:

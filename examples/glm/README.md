@@ -41,6 +41,44 @@ python examples/glm/glm53_four_layer_decode_compile_generate.py \
 Remove `--export-only` to compile. By default the script then generates tokens and compares them with a CPU Hugging
 Face decode; use `--skip-generate` to stop after compilation.
 
+## Decode-BMM token and weight blocking
+
+Use `--num-weight-blocks` together with token FFN blocking to split each selected expert's gate/up weights and down
+weights into separate blocks. This mode selects `decode_bmm` for MoE. For a four-layer export-only smoke run:
+
+```bash
+export HF_HUB_CACHE=/home/huggingface_hub
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export QEFF_HOME=/home/ochougul/efficient-transformers/artifacts/glm53_weight_blocked_decode
+export QEFF_WF_HOME="$QEFF_HOME/weight_free_checkpoints"
+
+python examples/glm/glm53_four_layer_decode_compile_generate.py \
+  --weight-free --export-only \
+  --attention-preset dsa_cp1 \
+  --ffn-blocking-mode token --ffn-token-block-size 1 \
+  --num-weight-blocks 4 \
+  --prompt-len 4 --generation-len 1 \
+  --qeff-home "$QEFF_HOME"
+```
+
+Remove `--export-only` to compile and run decode generation. `--num-weight-blocks` requires both token blocking options;
+the model transform warns and ignores weight blocking if it is configured without token blocking.
+For a four-layer QAIC compile with profiling and per-op summaries/traces, replace `--export-only` with:
+
+```bash
+python examples/glm/glm53_four_layer_decode_compile_generate.py \
+  --weight-free --skip-generate --opstats \
+  --attention-preset dsa_cp1 \
+  --ffn-blocking-mode token --ffn-token-block-size 1 \
+  --num-weight-blocks 4 \
+  --opstats-device-list 0 \
+  --prompt-len 4 --generation-len 1 \
+  --qeff-home "$QEFF_HOME"
+```
+
+The default profiling run uses three iterations and captures one sample. Set `--opstats-device-list` to select a QAIC
+device explicitly. The summaries and traces are written under `$QEFF_HOME/opstats/`.
+
 ## Attention presets
 
 The selected preset is copied into `qaic_config` before `QEFFAutoModelForCausalLM.transform()` is called. The

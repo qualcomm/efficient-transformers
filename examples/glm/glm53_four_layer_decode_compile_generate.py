@@ -193,6 +193,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--skip-generate", action="store_true")
+    parser.add_argument("--opstats", action="store_true", help="Compile with profiling and capture QAIC opstats.")
+    parser.add_argument("--opstats-num-iters", type=int, default=3)
+    parser.add_argument("--opstats-profile-start-iter", type=int, default=1)
+    parser.add_argument("--opstats-num-samples", type=int, default=1)
+    parser.add_argument("--opstats-device-list", default=None)
     parser.add_argument(
         "--dtype",
         choices=("float32", "float16", "bfloat16"),
@@ -215,6 +220,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Token tile size for token FFN blocking.",
+    )
+    parser.add_argument(
+        "--num-weight-blocks",
+        type=int,
+        default=None,
+        help="Split each routed expert's gate/up and down weights into this many decode-BMM blocks.",
     )
     parser.add_argument("--attention-preset", choices=sorted(ATTENTION_PRESETS), default="dsa_cp1")
     parser.add_argument(
@@ -263,13 +274,20 @@ def resolve_runtime_dimensions(args: argparse.Namespace) -> tuple[int, int, int,
     return batch_size, ctx_len, num_devices, generation_len
 
 
-def build_decode_qaic_config(attention_preset: str, attention_qaic_json: str | None = None) -> dict[str, Any]:
-    """Build decode QAIC config with expert parallel enabled unless explicitly overridden."""
+def build_decode_qaic_config(
+    attention_preset: str,
+    attention_qaic_json: str | None = None,
+    num_weight_blocks: int | None = None,
+) -> dict[str, Any]:
+    """Build decode QAIC config, optionally selecting weight-blocked decode BMM."""
     qaic_config = copy.deepcopy(ATTENTION_PRESETS[attention_preset])
     # Leave the chunk size unset so the library's standard EP packing default applies.
     qaic_config["moe_config"] = {"flavour": "expert_parallel"}
     if attention_qaic_json:
         qaic_config.update(json.loads(attention_qaic_json))
+    if num_weight_blocks is not None:
+        qaic_config.setdefault("moe_config", {})["flavour"] = "decode_bmm"
+        qaic_config["moe_config"]["num_weight_blocks"] = num_weight_blocks
     return qaic_config
 
 
@@ -413,6 +431,7 @@ def compile_weight_free_decode_only(
     user_tiled: bool,
     use_onnx_subfunctions: bool = False,
     mdp_num_partitions: int = 1,
+    enable_opstats: bool = False,
 ):
     """Compile the validated single-token GLM weight-free specialization."""
     custom_io = {}
@@ -442,7 +461,118 @@ def compile_weight_free_decode_only(
     }
     if mdp_num_partitions > 1:
         compile_kwargs["mdp_num_partitions"] = mdp_num_partitions
+    if enable_opstats:
+        compile_kwargs.update(
+            stats_level=70,
+            ddr_stats=True,
+            aic_pmu_recipe="KernelUtil",
+            aic_perf_metrics=True,
+        )
     return qeff_model._compile(**compile_kwargs)
+
+
+def run_decode_opstats(
+    qpc_path: Path,
+    onnx_path: Path,
+    *,
+    artifact_dir: Path,
+    batch_size: int,
+    vocab_size: int,
+    num_iters: int,
+    profile_start_iter: int,
+    num_samples: int,
+    device_list: str | None = None,
+) -> Path:
+    """Run QAIC profiling on the decode QPC and generate per-op summaries and traces."""
+    import onnx
+
+    model = onnx.load(onnx_path, load_external_data=False)
+
+    def get_value_info(name: str):
+        values = [*model.graph.input, *model.graph.output, *model.graph.value_info]
+        return next(value for value in values if value.name == name)
+
+    def get_dtype(name: str) -> np.dtype:
+        value_info = get_value_info(name)
+        elem_type = value_info.type.tensor_type.elem_type
+        if elem_type == onnx.TensorProto.BFLOAT16:
+            import ml_dtypes
+
+            return np.dtype(ml_dtypes.bfloat16)
+        return np.dtype(onnx.helper.tensor_dtype_to_np_dtype(elem_type))
+
+    def get_shape(name: str, fallback: tuple[int, ...]) -> tuple[int, ...]:
+        dimensions = get_value_info(name).type.tensor_type.shape.dim
+        return tuple(dimension.dim_value or fallback[index] for index, dimension in enumerate(dimensions))
+
+    input_shape = get_shape("input_ids", (batch_size, 1))
+    position_shape = get_shape("position_ids", (batch_size, 1))
+    output_shape = get_shape("logits", (batch_size, 1, vocab_size))
+    inputs = {
+        "input_ids": np.zeros(input_shape, dtype=get_dtype("input_ids")),
+        "position_ids": np.zeros(position_shape, dtype=get_dtype("position_ids")),
+    }
+    outputs = {"logits": np.zeros(output_shape, dtype=get_dtype("logits"))}
+
+    io_dir = artifact_dir / "opstats_io"
+    data_dir = io_dir / "data"
+    stats_dir = artifact_dir / "raw_device_stats"
+    opstats_dir = artifact_dir / "opstats"
+    for directory in (data_dir, stats_dir, opstats_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    io_files = []
+    for direction, tensors in (("in", inputs), ("out", outputs)):
+        for name, array in tensors.items():
+            raw_path = data_dir / f"{name}.raw"
+            array.tofile(raw_path)
+            io_files.append(
+                {
+                    "path": f"data/{name}.raw",
+                    "io-direction": direction,
+                    "elem-size": array.itemsize,
+                    "map-to": name,
+                    "dims": list(array.shape),
+                }
+            )
+    io_json_path = io_dir / "aic_batch_io.json"
+    io_json_path.write_text(json.dumps({"IO-files": [io_files]}, indent=2), encoding="utf-8")
+
+    runner_cmd = [
+        "/opt/qti-aic/exec/qaic-runner",
+        "-t",
+        str(qpc_path),
+        "-n",
+        str(num_iters),
+        "--aic-profiling-type",
+        "raw_device_stats",
+        "--aic-profiling-start-iter",
+        str(profile_start_iter),
+        "--aic-profiling-num-samples",
+        str(num_samples),
+        "--aic-profiling-out-dir",
+        str(stats_dir),
+        "--aic-batch-json-input",
+        str(io_json_path),
+    ]
+    if device_list is not None:
+        runner_cmd.extend(["-D", device_list])
+    subprocess.run(runner_cmd, check=True)
+    subprocess.run(
+        [
+            "/opt/qti-aic/exec/qaic-opstats",
+            "--qpc",
+            str(qpc_path / "programqpc.bin"),
+            "--input-dir",
+            str(stats_dir),
+            "--output-dir",
+            str(opstats_dir),
+            "--summary",
+            "--trace",
+        ],
+        check=True,
+    )
+    return opstats_dir
 
 
 def compare_tokens(hf_tokens: torch.Tensor, qeff_tokens: np.ndarray, prompt_len: int) -> dict[str, Any]:
@@ -515,15 +645,31 @@ def main() -> None:
         return
     if args.export_only and not args.weight_free:
         raise ValueError("--export-only is supported only with --weight-free.")
+    if args.opstats and not args.weight_free:
+        raise ValueError("--opstats currently requires --weight-free.")
+    if args.opstats_num_iters < 1 or args.opstats_profile_start_iter < 0 or args.opstats_num_samples < 1:
+        raise ValueError("Opstats iteration and sample counts must be positive; profile start may be zero.")
+    if args.opstats_profile_start_iter + args.opstats_num_samples > args.opstats_num_iters:
+        raise ValueError("--opstats-profile-start-iter plus --opstats-num-samples must not exceed --opstats-num-iters.")
     args.batch_size, args.ctx_len, args.num_devices, generation_len = resolve_runtime_dimensions(args)
-    qaic_config = build_decode_qaic_config(args.attention_preset, args.attention_qaic_json)
+    qaic_config = build_decode_qaic_config(
+        args.attention_preset,
+        args.attention_qaic_json,
+        num_weight_blocks=args.num_weight_blocks,
+    )
     if args.ffn_token_block_size is not None and args.ffn_token_block_size < 1:
         raise ValueError("--ffn-token-block-size must be a positive integer.")
+    if args.num_weight_blocks is not None:
+        if args.num_weight_blocks < 1:
+            raise ValueError("--num-weight-blocks must be a positive integer.")
+        if args.ffn_blocking_mode != "token" or args.ffn_token_block_size is None:
+            raise ValueError("--num-weight-blocks requires --ffn-blocking-mode token and --ffn-token-block-size.")
     qaic_config["ffn_blocking_mode"] = args.ffn_blocking_mode
     qaic_config["ffn_token_block_size"] = args.ffn_token_block_size
     os.environ.setdefault("HF_HUB_CACHE", args.hf_cache)
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
     os.environ.setdefault("QEFF_HOME", args.qeff_home)
+    os.environ.setdefault("QEFF_WF_HOME", str(Path(args.qeff_home) / "weight_free_checkpoints"))
 
     from QEfficient import QEFFAutoModelForCausalLM
 
@@ -536,9 +682,7 @@ def main() -> None:
     full_num_layers = int(config.num_hidden_layers)
     if args.full_model and args.num_layers is not None:
         raise ValueError("Use either --full-model or --num-layers, not both.")
-    args.num_layers = full_num_layers if args.full_model else (
-        args.num_layers if args.num_layers is not None else 4
-    )
+    args.num_layers = full_num_layers if args.full_model else (args.num_layers if args.num_layers is not None else 4)
     if args.num_layers < 1 or args.num_layers > full_num_layers:
         raise ValueError(
             f"--num-layers must be between 1 and the model's full layer count ({full_num_layers}), "
@@ -676,6 +820,7 @@ def main() -> None:
             args.user_tiled,
             args.use_onnx_subfunctions,
             args.mdp_num_partitions,
+            args.opstats,
         )
     else:
         qpc_path = qeff_model.compile(
@@ -692,6 +837,20 @@ def main() -> None:
         json.dumps({"event": "compile_done", "qpc_path": str(qpc_path), "onnx_path": str(qeff_model.onnx_path)}),
         flush=True,
     )
+
+    if args.opstats:
+        opstats_dir = run_decode_opstats(
+            Path(qpc_path),
+            Path(onnx_path),
+            artifact_dir=Path(args.qeff_home),
+            batch_size=args.batch_size,
+            vocab_size=int(config.vocab_size),
+            num_iters=args.opstats_num_iters,
+            profile_start_iter=args.opstats_profile_start_iter,
+            num_samples=args.opstats_num_samples,
+            device_list=args.opstats_device_list,
+        )
+        print(json.dumps({"event": "opstats_done", "opstats_dir": str(opstats_dir)}), flush=True)
 
     if args.skip_generate:
         print(json.dumps({"event": "skip_generate"}), flush=True)

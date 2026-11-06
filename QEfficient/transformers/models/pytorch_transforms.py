@@ -1714,6 +1714,30 @@ class OptimizedMoEExportConfigTransform(PytorchTransform):
                 requested_flavour=requested_flavour,
             )
             module._moe_flavour = flavour
+            num_weight_blocks = getattr(module, "ffn_num_weight_blocks", None)
+            if num_weight_blocks is not None:
+                if flavour is not MoEFlavour.DECODE_BMM:
+                    logger.warning(
+                        "qaic_config['moe_config']['num_weight_blocks'] is only supported for "
+                        "moe flavour 'decode_bmm'; the provided value will be ignored."
+                    )
+                    module.ffn_num_weight_blocks = None
+                elif getattr(module, "_qeff_quantized_experts", False):
+                    logger.warning(
+                        "qaic_config['moe_config']['num_weight_blocks'] is not supported for quantized experts; "
+                        "the provided value will be ignored."
+                    )
+                    module.ffn_num_weight_blocks = None
+                else:
+                    profile = module.moe_profile
+                    if callable(profile):
+                        profile = profile()
+                    if profile.expert_mlp_gate_up is None or profile.expert_mlp_down is None:
+                        logger.warning(
+                            f"{type(module).__name__} does not provide split gate/up and down operations; "
+                            "qaic_config['moe_config']['num_weight_blocks'] will be ignored."
+                        )
+                        module.ffn_num_weight_blocks = None
             if flavour is MoEFlavour.EXPERT_PARALLEL:
                 uses_expert_parallel = True
                 num_experts = _get_moe_num_experts(module)
@@ -1758,6 +1782,16 @@ class OptimizedMoEExportConfigTransform(PytorchTransform):
                 "qaic_config['moe_config']['cores_per_expert'] and "
                 "qaic_config['moe_config']['tree_reduce'] are only used for moe flavour 'expert_parallel'."
             )
+
+        if hash_params is not None:
+            hash_params.pop("moe_decode_num_weight_blocks", None)
+            weight_block_counts = {
+                module.ffn_num_weight_blocks
+                for module in _iter_optimized_moe_modules(model)
+                if getattr(module, "ffn_num_weight_blocks", None) is not None
+            }
+            if len(weight_block_counts) == 1:
+                hash_params["moe_decode_num_weight_blocks"] = weight_block_counts.pop()
 
         if transformed and hash_params is not None:
             hash_params["moe_prefill_flavour"] = (flavour or MoEFlavour.DECODE_BMM).value
@@ -1841,6 +1875,8 @@ class FFNBlockingTransform(PytorchTransform):
         config = qaic_config or {}
         mode = config.get("ffn_blocking_mode", "default")
         token_block_size = config.get("ffn_token_block_size")
+        moe_config = config.get("moe_config", {}) or {}
+        num_weight_blocks = moe_config.get("num_weight_blocks")
         if mode not in cls._VALID_MODES:
             raise ValueError(
                 f"qaic_config['ffn_blocking_mode'] must be one of {sorted(cls._VALID_MODES)}, got {mode!r}."
@@ -1849,11 +1885,23 @@ class FFNBlockingTransform(PytorchTransform):
             not isinstance(token_block_size, int) or isinstance(token_block_size, bool) or token_block_size < 1
         ):
             raise ValueError("qaic_config['ffn_token_block_size'] must be a positive integer when provided.")
+        if num_weight_blocks is not None and (
+            not isinstance(num_weight_blocks, int) or isinstance(num_weight_blocks, bool) or num_weight_blocks < 1
+        ):
+            raise ValueError("qaic_config['moe_config']['num_weight_blocks'] must be a positive integer when provided.")
+
+        if num_weight_blocks is not None and (mode != "token" or token_block_size is None):
+            logger.warning(
+                "qaic_config['moe_config']['num_weight_blocks'] requires "
+                "qaic_config['ffn_blocking_mode']='token' and a positive "
+                "qaic_config['ffn_token_block_size']; weight blocking will be ignored."
+            )
+            num_weight_blocks = None
 
         transformed = False
         for module in model.modules():
             if isinstance(module, QEffMoEBlockMixin):
-                module.configure_ffn_blocking(mode, token_block_size)
+                module.configure_ffn_blocking(mode, token_block_size, num_weight_blocks=num_weight_blocks)
                 transformed = True
         return model, transformed
 

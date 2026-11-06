@@ -281,19 +281,47 @@ def moe_decode_bmm(
     profile: MoEProfile,
     *,
     top_k: int,
+    num_weight_blocks: int = 1,
 ) -> torch.Tensor:
     """Decode flavour: gather selected expert weights by index and batch-matmul."""
     T, H = x.shape
     idx = topk_indices.reshape(-1)
-    gate_proj = weights.gate[idx]
-    up_proj = weights.up[idx]
-    down_proj = weights.down[idx]
-    b_g = weights.gate_bias[idx] if weights.gate_bias is not None else None
-    b_u = weights.up_bias[idx] if weights.up_bias is not None else None
-    b_d = weights.down_bias[idx] if weights.down_bias is not None else None
-
     expert_in = x.unsqueeze(1).expand(-1, top_k, -1).contiguous().view(-1, 1, H)
-    down = profile.expert_mlp(expert_in, gate_proj, up_proj, down_proj, b_g, b_u, b_d)
+    if num_weight_blocks > 1:
+        if profile.expert_mlp_gate_up is None or profile.expert_mlp_down is None:
+            raise ValueError("decode_bmm weight blocking requires a profile with split gate/up and down operations")
+
+        block_bounds = [i * idx.shape[0] // num_weight_blocks for i in range(num_weight_blocks + 1)]
+        gate_up_outputs = []
+        for block_index in range(num_weight_blocks):
+            start, end = block_bounds[block_index], block_bounds[block_index + 1]
+            block_idx = idx[start:end]
+            b_g = weights.gate_bias[block_idx] if weights.gate_bias is not None else None
+            b_u = weights.up_bias[block_idx] if weights.up_bias is not None else None
+            gate_up_outputs.append(
+                profile.expert_mlp_gate_up(
+                    expert_in[start:end], weights.gate[block_idx], weights.up[block_idx], b_g, b_u
+                )
+            )
+        intermediate = torch.cat(gate_up_outputs, dim=0)
+        del gate_up_outputs
+
+        down_outputs = []
+        for block_index in range(num_weight_blocks):
+            start, end = block_bounds[block_index], block_bounds[block_index + 1]
+            block_idx = idx[start:end]
+            b_d = weights.down_bias[block_idx] if weights.down_bias is not None else None
+            down_outputs.append(profile.expert_mlp_down(intermediate[start:end], weights.down[block_idx], b_d))
+        down = torch.cat(down_outputs, dim=0)
+        del down_outputs
+    else:
+        gate_proj = weights.gate[idx]
+        up_proj = weights.up[idx]
+        down_proj = weights.down[idx]
+        b_g = weights.gate_bias[idx] if weights.gate_bias is not None else None
+        b_u = weights.up_bias[idx] if weights.up_bias is not None else None
+        b_d = weights.down_bias[idx] if weights.down_bias is not None else None
+        down = profile.expert_mlp(expert_in, gate_proj, up_proj, down_proj, b_g, b_u, b_d)
     experts_out = down.view(T, top_k, H)
     experts_out = experts_out * topk_weights.unsqueeze(-1)
     return experts_out.sum(dim=1)

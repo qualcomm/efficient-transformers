@@ -182,9 +182,7 @@ class TestWeightFreeCheckpointTransforms:
         assert not GlmMoeDsaReducedCheckpointTransform.is_applicable(
             weight_map, model_config=config_without_source_metadata
         )
-        assert GlmMoeDsaReducedCheckpointTransform.is_applicable(
-            weight_map, model_config=config_with_source_metadata
-        )
+        assert GlmMoeDsaReducedCheckpointTransform.is_applicable(weight_map, model_config=config_with_source_metadata)
 
     def test_weight_free_compile_default_is_only_glm_multitoken_prefill(self, monkeypatch):
         from QEfficient.transformers.models.modeling_auto import (
@@ -196,13 +194,9 @@ class TestWeightFreeCheckpointTransforms:
         monkeypatch.delenv("QEFF_ALLOW_WEIGHT_FREE_PREFILL_COMPILE", raising=False)
 
         assert _allow_weight_free_prefill_compile_by_default(glm_config, prefill_only=True, prefill_seq_len=128)
-        assert not _allow_weight_free_prefill_compile_by_default(
-            glm_config, prefill_only=False, prefill_seq_len=128
-        )
+        assert not _allow_weight_free_prefill_compile_by_default(glm_config, prefill_only=False, prefill_seq_len=128)
         assert not _allow_weight_free_prefill_compile_by_default(glm_config, prefill_only=True, prefill_seq_len=1)
-        assert not _allow_weight_free_prefill_compile_by_default(
-            other_config, prefill_only=True, prefill_seq_len=128
-        )
+        assert not _allow_weight_free_prefill_compile_by_default(other_config, prefill_only=True, prefill_seq_len=128)
 
     def test_prepares_reduced_glm_moe_dsa_fp8_checkpoint(self, tmp_path):
         src = tmp_path / "src"
@@ -494,6 +488,13 @@ class TestWeightFreeCheckpointTransforms:
 
         assert config["moe_config"] == {"flavour": "tensor_parallel"}
 
+    def test_glm_decode_weight_blocking_selects_decode_bmm(self):
+        from examples.glm.glm53_four_layer_decode_compile_generate import build_decode_qaic_config
+
+        config = build_decode_qaic_config("dsa_cp1", num_weight_blocks=4)
+
+        assert config["moe_config"] == {"flavour": "decode_bmm", "num_weight_blocks": 4}
+
     def test_glm_generation_perf_metrics_are_json_safe(self):
         from examples.glm.glm53_four_layer_decode_compile_generate import serialize_qeff_perf_metrics
 
@@ -536,6 +537,7 @@ class TestWeightFreeCheckpointTransforms:
             cache_io_dtype="mxint8",
             user_tiled=False,
             use_onnx_subfunctions=True,
+            enable_opstats=True,
         )
 
         compile_kwargs = qeff_model._compile.call_args.kwargs
@@ -554,6 +556,10 @@ class TestWeightFreeCheckpointTransforms:
         assert compile_kwargs["mxint8_kv_cache"] is True
         assert compile_kwargs["allow_mxint8_mdp_io"] is True
         assert compile_kwargs["use_onnx_subfunctions"] is True
+        assert compile_kwargs["stats_level"] == 70
+        assert compile_kwargs["ddr_stats"] is True
+        assert compile_kwargs["aic_pmu_recipe"] == "KernelUtil"
+        assert compile_kwargs["aic_perf_metrics"] is True
         assert "mdp_num_partitions" not in compile_kwargs
 
         compile_weight_free_decode_only(
@@ -654,9 +660,10 @@ class TestWeightFreeCheckpointTransforms:
 
         manifest = json.loads((out / CHECKPOINT_PREPARED_MANIFEST).read_text())
         assert not stale_marker.exists()
-        assert manifest["transform_context"]["checkpoint_transform_context"]["moe_weight_layout"][
-            "num_pipeline_stages"
-        ] == 4
+        assert (
+            manifest["transform_context"]["checkpoint_transform_context"]["moe_weight_layout"]["num_pipeline_stages"]
+            == 4
+        )
 
     def test_checkpoint_pipeline_rebuilds_incomplete_prepared_dir(self, tmp_path):
         src = tmp_path / "src"

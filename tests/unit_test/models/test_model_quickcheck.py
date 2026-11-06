@@ -2476,10 +2476,12 @@ def _tiny_glm_moe_dsa_config():
     )
 
 
-def _tiny_glm_moe_dsa_qeff_model(hf_model):
+def _tiny_glm_moe_dsa_qeff_model(hf_model, qaic_config=None):
     from QEfficient.transformers.models.pytorch_transforms import (
         CustomOpsTransform,
+        FFNBlockingTransform,
         KVCacheTransform,
+        OptimizedMoEExportConfigTransform,
         OptimizedMoEMapperTransform,
         OptimizedMoEWeightsTransform,
     )
@@ -2488,7 +2490,55 @@ def _tiny_glm_moe_dsa_qeff_model(hf_model):
     transforms = (CustomOpsTransform, KVCacheTransform, OptimizedMoEMapperTransform, OptimizedMoEWeightsTransform)
     for transform in transforms:
         qeff_model, _ = transform.apply(qeff_model)
+    FFNBlockingTransform.apply(qeff_model, qaic_config=qaic_config)
+    if qaic_config is not None:
+        OptimizedMoEExportConfigTransform.apply(qeff_model, qaic_config=qaic_config)
     return qeff_model
+
+
+def test_glm_moe_dsa_decode_bmm_weight_blocking_module_parity():
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+
+    from QEfficient.transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import QEffGlmMoeDsaMoE
+
+    torch.manual_seed(1)
+    hf_model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config()).eval()
+    qeff_model = _tiny_glm_moe_dsa_qeff_model(
+        hf_model,
+        qaic_config={
+            "ffn_blocking_mode": "token",
+            "ffn_token_block_size": 2,
+            "moe_config": {"num_weight_blocks": 2},
+        },
+    )
+    hf_moe = hf_model.model.layers[3].mlp
+    qeff_moe = next(module for module in qeff_model.modules() if isinstance(module, QEffGlmMoeDsaMoE))
+    hidden_states = torch.randn(1, 4, _tiny_glm_moe_dsa_config().hidden_size)
+
+    with torch.no_grad():
+        expected = hf_moe(hidden_states)
+        actual = qeff_moe(hidden_states)
+
+    if isinstance(expected, tuple):
+        expected = expected[0]
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    assert qeff_moe.ffn_num_weight_blocks == 2
+
+
+def test_glm_moe_dsa_decode_bmm_weight_blocking_requires_token_blocking(monkeypatch):
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+
+    from QEfficient.transformers.models import pytorch_transforms
+    from QEfficient.transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import QEffGlmMoeDsaMoE
+
+    hf_model = GlmMoeDsaForCausalLM(_tiny_glm_moe_dsa_config()).eval()
+    warnings = []
+    monkeypatch.setattr(pytorch_transforms.logger, "warning", warnings.append)
+    qeff_model = _tiny_glm_moe_dsa_qeff_model(hf_model, qaic_config={"moe_config": {"num_weight_blocks": 2}})
+    qeff_moe = next(module for module in qeff_model.modules() if isinstance(module, QEffGlmMoeDsaMoE))
+
+    assert qeff_moe.ffn_num_weight_blocks is None
+    assert any("requires qaic_config['ffn_blocking_mode']='token'" in warning for warning in warnings)
 
 
 def test_glm_moe_dsa_four_layer_decode_parity_and_shared_indexer_cache():
@@ -2497,7 +2547,14 @@ def test_glm_moe_dsa_four_layer_decode_parity_and_shared_indexer_cache():
     config = _tiny_glm_moe_dsa_config()
     torch.manual_seed(0)
     hf_model = GlmMoeDsaForCausalLM(config).eval()
-    qeff_model = _tiny_glm_moe_dsa_qeff_model(hf_model)
+    qeff_model = _tiny_glm_moe_dsa_qeff_model(
+        hf_model,
+        qaic_config={
+            "ffn_blocking_mode": "token",
+            "ffn_token_block_size": 1,
+            "moe_config": {"num_weight_blocks": 2},
+        },
+    )
     input_ids = torch.tensor([[1, 5, 7, 9]], dtype=torch.long)
     position_ids = torch.arange(input_ids.shape[1], dtype=torch.long).unsqueeze(0)
     attention_mask = torch.ones_like(input_ids, dtype=torch.bool)

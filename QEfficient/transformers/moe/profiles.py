@@ -32,6 +32,10 @@ class MoEProfile:
     # "post": weight the expert output after the MLP (default for all current models).
     # "pre": input is pre-scaled by the routing weight and routing is a boolean mask (llama4).
     scale_mode: str = "post"
+    # Optional split operations used by decode BMM weight blocking. Arbitrary
+    # expert MLP profiles cannot be decomposed unless both are provided.
+    expert_mlp_gate_up: Callable | None = None
+    expert_mlp_down: Callable | None = None
 
 
 def silu_glu_mlp(
@@ -49,6 +53,37 @@ def silu_glu_mlp(
     gate = x @ W_g
     up = x @ W_u
     return (up * act_fn(gate)) @ W_d
+
+
+def silu_glu_gate_up(
+    x: torch.Tensor,
+    W_g: torch.Tensor,
+    W_u: torch.Tensor,
+    b_g: torch.Tensor | None = None,
+    b_u: torch.Tensor | None = None,
+    *,
+    act_fn: Callable = F.silu,
+) -> torch.Tensor:
+    """Compute the intermediate activation for a gated GLU expert."""
+    gate = x @ W_g
+    up = x @ W_u
+    if b_g is not None:
+        gate = gate + b_g.unsqueeze(-2)
+    if b_u is not None:
+        up = up + b_u.unsqueeze(-2)
+    return up * act_fn(gate)
+
+
+def silu_glu_down(
+    intermediate: torch.Tensor,
+    W_d: torch.Tensor,
+    b_d: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Apply the down projection to a gated GLU activation."""
+    down = intermediate @ W_d
+    if b_d is not None:
+        down = down + b_d.unsqueeze(-2)
+    return down
 
 
 def gptoss_clamped_glu_mlp(
