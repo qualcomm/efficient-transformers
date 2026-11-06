@@ -453,6 +453,10 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
             "dynamo": all_args.get("dynamo", False),
         }
     )
+    if all_args.get("dynamo", False):
+        # Node names are compiler/MDP-facing artifacts. Bump this when their
+        # post-export normalization changes so generic-name exports are not reused.
+        copy_of_hash_params["dynamo_node_name_version"] = 1
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):

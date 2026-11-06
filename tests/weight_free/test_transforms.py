@@ -476,6 +476,7 @@ class TestWeightFreeCheckpointTransforms:
             num_devices=32,
             generation_len=7,
             prompt_len=4,
+            mdp_num_partitions=1,
         )
         assert resolve_runtime_dimensions(args) == (32, 8192, 32, 7)
 
@@ -553,6 +554,21 @@ class TestWeightFreeCheckpointTransforms:
         assert compile_kwargs["mxint8_kv_cache"] is True
         assert compile_kwargs["allow_mxint8_mdp_io"] is True
         assert compile_kwargs["use_onnx_subfunctions"] is True
+        assert "mdp_num_partitions" not in compile_kwargs
+
+        compile_weight_free_decode_only(
+            qeff_model,
+            tmp_path / "model.onnx",
+            tmp_path / "compile",
+            ctx_len=4096,
+            batch_size=16,
+            num_devices=16,
+            num_cores=16,
+            cache_io_dtype="mxint8",
+            user_tiled=False,
+            mdp_num_partitions=2,
+        )
+        assert qeff_model._compile.call_args.kwargs["mdp_num_partitions"] == 2
 
     def test_checkpoint_pipeline_rebuilds_when_source_changes(self, tmp_path):
         src = tmp_path / "src"

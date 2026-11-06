@@ -226,6 +226,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-json", default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-devices", type=int, default=None)
+    parser.add_argument(
+        "--mdp-num-partitions",
+        type=int,
+        default=1,
+        help="Pipeline-parallel MDP partitions. Values above one generate a layer-aware MDP configuration.",
+    )
     args = parser.parse_args()
     args.torch_dtype = {
         "float32": torch.float32,
@@ -251,6 +257,9 @@ def resolve_runtime_dimensions(args: argparse.Namespace) -> tuple[int, int, int,
             raise ValueError(f"{name} must be positive, got {value}.")
     if args.prompt_len + generation_len > ctx_len:
         raise ValueError("prompt_len + generation_len must not exceed ctx_len.")
+    mdp_num_partitions = getattr(args, "mdp_num_partitions", 1)
+    if mdp_num_partitions <= 0 or num_devices % mdp_num_partitions:
+        raise ValueError("--num-devices must be divisible by a positive --mdp-num-partitions value.")
     return batch_size, ctx_len, num_devices, generation_len
 
 
@@ -403,6 +412,7 @@ def compile_weight_free_decode_only(
     cache_io_dtype: str,
     user_tiled: bool,
     use_onnx_subfunctions: bool = False,
+    mdp_num_partitions: int = 1,
 ):
     """Compile the validated single-token GLM weight-free specialization."""
     custom_io = {}
@@ -415,21 +425,24 @@ def compile_weight_free_decode_only(
         custom_io[cache_name] = cache_io_dtype
         custom_io[f"{cache_name}_RetainedState"] = cache_io_dtype
 
-    return qeff_model._compile(
-        onnx_path=str(onnx_path),
-        compile_dir=str(compile_dir),
-        specializations=[{"_graph_name": "Decode", "batch_size": batch_size, "seq_len": 1, "ctx_len": ctx_len}],
-        custom_io=custom_io,
-        prefill_only=False,
-        retained_state=True,
-        convert_to_fp16=True,
-        mdp_ts_num_devices=num_devices,
-        aic_num_cores=num_cores,
-        mxint8_kv_cache=cache_io_dtype == "mxint8",
-        allow_mxint8_mdp_io=cache_io_dtype == "mxint8",
-        user_tiled=user_tiled,
-        use_onnx_subfunctions=use_onnx_subfunctions,
-    )
+    compile_kwargs = {
+        "onnx_path": str(onnx_path),
+        "compile_dir": str(compile_dir),
+        "specializations": [{"_graph_name": "Decode", "batch_size": batch_size, "seq_len": 1, "ctx_len": ctx_len}],
+        "custom_io": custom_io,
+        "prefill_only": False,
+        "retained_state": True,
+        "convert_to_fp16": True,
+        "mdp_ts_num_devices": num_devices,
+        "aic_num_cores": num_cores,
+        "mxint8_kv_cache": cache_io_dtype == "mxint8",
+        "allow_mxint8_mdp_io": cache_io_dtype == "mxint8",
+        "user_tiled": user_tiled,
+        "use_onnx_subfunctions": use_onnx_subfunctions,
+    }
+    if mdp_num_partitions > 1:
+        compile_kwargs["mdp_num_partitions"] = mdp_num_partitions
+    return qeff_model._compile(**compile_kwargs)
 
 
 def compare_tokens(hf_tokens: torch.Tensor, qeff_tokens: np.ndarray, prompt_len: int) -> dict[str, Any]:
@@ -562,6 +575,7 @@ def main() -> None:
                 "ctx_len": args.ctx_len,
                 "generation_len": generation_len,
                 "cache_io_dtype": args.cache_io_dtype,
+                "mdp_num_partitions": args.mdp_num_partitions,
                 "qeff_home": os.environ["QEFF_HOME"],
                 "attention_preset": args.attention_preset,
                 "qaic_config": qaic_config,
@@ -661,6 +675,7 @@ def main() -> None:
             args.cache_io_dtype,
             args.user_tiled,
             args.use_onnx_subfunctions,
+            args.mdp_num_partitions,
         )
     else:
         qpc_path = qeff_model.compile(

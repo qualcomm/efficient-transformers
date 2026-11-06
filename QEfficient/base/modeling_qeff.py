@@ -24,6 +24,7 @@ from QEfficient.base.checkpoint_transforms import BaseCheckpointTransform
 from QEfficient.base.onnx_transforms import (
     BaseOnnxTransform,
     CustomOpTransform,
+    DynamoSemanticNodeNameTransform,
     FP16ClipTransform,
     LocalizeFunctionReduceSumAxesTransform,
     OnnxTransformPipeline,
@@ -634,12 +635,20 @@ class QEFFBaseModel(ABC):
             onnx_transforms = OnnxTransformPipeline(transforms=active_transforms)
             model, transformed = onnx_transforms.apply(model, **transform_kwargs)
 
+            # Dynamo preserves module paths as node metadata but uses generic
+            # names. Compiler traces and MDP generation consume node names, so
+            # expose the metadata after all graph rewrites have completed.
+            if dynamo:
+                transformed |= DynamoSemanticNodeNameTransform.apply(model)
+
             # Keep this strictly layerwise-scoped so regular non-layerwise export
             # remains backward compatible.
             if QEFFBaseModel._layerwise_active:
                 _restore_retained_state_output_names(model, output_names)
 
             transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]
+            if dynamo:
+                transform_names.append(DynamoSemanticNodeNameTransform.__name__)
             model.metadata_props.append(
                 onnx.StringStringEntryProto(key="qeff_transforms", value=",".join(transform_names))
             )
@@ -1272,6 +1281,7 @@ class QEFFBaseModel(ABC):
             mdp_config_dir = (
                 Path(mdp_compiler_dump_path).parent if mdp_strategy is MdpStrategy.INTERSECTION else compile_dir
             )
+            mdp_config_dir.mkdir(parents=True, exist_ok=True)
             mdp_ts_json_path, mdp_ts_json = generate_disagg_mdp_config(
                 onnx_path=onnx_path,
                 compile_dir=mdp_config_dir,

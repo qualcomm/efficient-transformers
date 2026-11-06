@@ -18,8 +18,6 @@ from QEfficient.utils import create_json
 
 logger = logging.getLogger(__name__)
 
-_MAX_INLINABLE_NODES = 100
-
 
 class MdpStrategy(str, Enum):
     """MDP partition-config generation strategy for disaggregated prefill.
@@ -146,21 +144,14 @@ def _layer_partition_bounds(num_layers: int, num_partitions: int) -> List[int]:
     return bounds
 
 
-def _get_inlined_node_map(model) -> tuple:
-    """Classify ONNX local functions and build inlined sub-node names.
+def _get_compiler_expanded_functions(model) -> Tuple[Dict[str, Any], Set[str]]:
+    """Return local functions which the compiler expands and known custom ops.
 
-    The compiler inlines a local function body into the parent graph during
-    ONNX import if it has fewer than _MAX_INLINABLE_NODES nodes AND is not a
-    known custom op (ONNXModelLoaderSubFuns.cpp).  Inlined call-sites do not
-    appear in the compiler IR; their sub-nodes are named
-    ``<call_site>/<func_node>``.  Known custom ops (registered via
-    DEFINEKNOWNCUSTOMOP) keep their call-site name in the IR and must be
-    included in nodeList as-is.
-
-    Returns:
-        inlined_node_map:  call-site name -> list of inlined sub-node names.
-        non_inlined_funcs: function names NOT inlined (custom ops or
-            >= _MAX_INLINABLE_NODES nodes).
+    QAIC expands ONNX local functions into the caller regardless of function
+    body size.  Expanded body nodes are named ``<call-site>/<function-node>``;
+    function-node names exported by Dynamo begin with ``/``, which produces
+    the compiler-visible ``<call-site>//<function-name>/<body-node>`` form.
+    Registered custom operations remain call sites and retain their own names.
     """
     # Op types registered via DEFINEKNOWNCUSTOMOP in ONNXModelLoaderCustomOp.cpp.
     _KNOWN_CUSTOM_OPS = frozenset(
@@ -173,24 +164,52 @@ def _get_inlined_node_map(model) -> tuple:
     local_functions = {f.name: f for f in model.functions}
     logger.info(f"Found {len(local_functions)} local function types: {set(local_functions.keys())}")
 
-    inlined_funcs: Set[str] = set()
-    non_inlined_funcs: Set[str] = set()
+    expanded_functions = set(local_functions) - _KNOWN_CUSTOM_OPS
     for func_name, func in local_functions.items():
-        if func_name in _KNOWN_CUSTOM_OPS or len(func.node) >= _MAX_INLINABLE_NODES:
-            non_inlined_funcs.add(func_name)
-            logger.info(f"  {func_name}: not inlined")
+        expansion = "expanded" if func_name in expanded_functions else "custom call-site"
+        logger.info(f"  {func_name}: {len(func.node)} nodes, {expansion}")
+
+    return local_functions, expanded_functions
+
+
+def _get_expanded_function_node_names(
+    function: Any,
+    call_site_name: str,
+    local_functions: Dict[str, Any],
+    expanded_functions: Set[str],
+    expansion_stack: Tuple[str, ...] = (),
+) -> List[str]:
+    """Return compiler-visible names for a local function invocation.
+
+    Local functions can invoke other local functions.  The compiler recursively
+    expands those calls, so append each body-node name to its caller path and
+    recurse until reaching an ordinary operator or a known custom operation.
+    ONNX local-function recursion is invalid; detect it here to avoid emitting
+    an incomplete or non-terminating MDP list for malformed models.
+    """
+    node_names: List[str] = []
+    for node in function.node:
+        if not node.name:
+            continue
+
+        compiler_name = f"{call_site_name}/{node.name}"
+        if node.op_type in expanded_functions:
+            if node.op_type in expansion_stack:
+                cycle = " -> ".join((*expansion_stack, node.op_type))
+                raise ValueError(f"Recursive ONNX local function expansion is unsupported: {cycle}")
+            node_names.extend(
+                _get_expanded_function_node_names(
+                    local_functions[node.op_type],
+                    compiler_name,
+                    local_functions,
+                    expanded_functions,
+                    (*expansion_stack, node.op_type),
+                )
+            )
         else:
-            inlined_funcs.add(func_name)
-            logger.info(f"  {func_name}: {len(func.node)} nodes, will inline")
+            node_names.append(compiler_name)
 
-    inlined_node_map: Dict[str, List[str]] = {}
-    for node in model.graph.node:
-        if node.op_type in inlined_funcs:
-            func = local_functions[node.op_type]
-            inlined_node_map[node.name] = [f"{node.name}/{fn.name}" for fn in func.node if fn.name]
-
-    logger.info(f"Inlined sub-nodes mapped for {len(inlined_node_map)} call-sites")
-    return inlined_node_map, non_inlined_funcs
+    return node_names
 
 
 def generate_mdp_partition_config(num_devices: int, num_cores: int) -> Dict[str, Any]:
@@ -235,9 +254,9 @@ def generate_disagg_mdp_partition_config(
     spreads to middle stages first, then to the first stage).  Non-layer nodes
     (embeddings, lm_head) follow the nearest layer in topological order.  nodeList
     is a superset of the compiler dump; the compiler silently ignores names it has
-    optimised away.  Inlined local function call-sites are excluded; their
-    ``/nNN`` sub-nodes are assigned in topological position.  Known custom ops
-    (e.g. CustomRMSNorm) are included by call-site name.
+    optimised away.  Compiler-expanded local function call-sites are replaced by
+    their recursively expanded body-node names in topological position. Known
+    custom ops (e.g. CustomRMSNorm) are included by call-site name.
 
     For PP+TS: ``num_devices // num_partitions`` devices per partition.
 
@@ -296,12 +315,10 @@ def generate_disagg_mdp_partition_config(
     folded_nodes = _get_compiler_folded_nodes(model.graph)
     logger.info(f"Found {len(folded_nodes)} compiler-folded nodes (excluded from nodeList)")
 
-    _, non_inlined_functions = _get_inlined_node_map(model)
-    inlined_functions = {f.name for f in model.functions} - non_inlined_functions
-    local_functions = {f.name: f for f in model.functions}
+    local_functions, expanded_functions = _get_compiler_expanded_functions(model)
 
-    # Single pass: assign main-graph nodes by layer index.  Inlined call-sites
-    # are expanded in topological position so nodeList order matches the ONNX
+    # Single pass: assign main-graph nodes by layer index. Local functions are
+    # expanded in topological position so nodeList order matches the ONNX
     # topsort — required by the compiler's SplitPlanMerge.
     partitions: List[List[str]] = [[] for _ in range(num_partitions)]
     current_layer_partition = 0
@@ -321,11 +338,18 @@ def generate_disagg_mdp_partition_config(
         else:
             partition_idx = 0 if not seen_first_layer else current_layer_partition
 
-        if node.op_type in inlined_functions:
-            # Expand the call-site inline: emit sub-nodes at this topological position.
-            func = local_functions[node.op_type]
-            sub_nodes = [f"{node.name}/{fn.name}" for fn in func.node if fn.name]
-            partitions[partition_idx].extend(sub_nodes)
+        if node.op_type in expanded_functions:
+            # Expand local functions at their topological call site. QAIC recursively
+            # expands nested local functions and names their body nodes from this path.
+            partitions[partition_idx].extend(
+                _get_expanded_function_node_names(
+                    local_functions[node.op_type],
+                    node.name,
+                    local_functions,
+                    expanded_functions,
+                    (node.op_type,),
+                )
+            )
         else:
             partitions[partition_idx].append(node.name)
 

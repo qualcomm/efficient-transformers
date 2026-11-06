@@ -10,12 +10,86 @@ import onnx
 import pytest
 
 from QEfficient.base.onnx_transforms import (
+    DynamoSemanticNodeNameTransform,
     FP16ClipTransform,
     LocalizeFunctionReduceSumAxesTransform,
     OnnxTransformPipeline,
     RenameWsubNodesTransform,
     SplitTensorsTransform,
 )
+
+
+def _add_name_scopes(node, scopes):
+    metadata = node.metadata_props.add()
+    metadata.key = "pkg.torch.onnx.name_scopes"
+    metadata.value = repr(scopes)
+
+
+def test_dynamo_semantic_node_name_transform_uses_module_metadata():
+    graph_node = onnx.helper.make_node("MatMul", ["x", "weight"], ["y"], name="node_linear")
+    _add_name_scopes(
+        graph_node,
+        ["", "model", "model.layers.12", "model.layers.12.self_attn.q_proj", "linear"],
+    )
+    function_node = onnx.helper.make_node("MatMul", ["hidden", "weight"], ["output"], name="node_linear")
+    _add_name_scopes(
+        function_node,
+        ["", "model", "model.layers.12", "model.layers.12.self_attn.q_proj", "linear"],
+    )
+    function = onnx.helper.make_function(
+        "test",
+        "DecoderLayer",
+        ["hidden", "weight"],
+        ["output"],
+        [function_node],
+        [onnx.helper.make_opsetid("", 17)],
+    )
+    graph = onnx.helper.make_graph(
+        [graph_node],
+        "test",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, 4])],
+        [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1, 4])],
+        initializer=[onnx.helper.make_tensor("weight", onnx.TensorProto.FLOAT, [4, 4], [1.0] * 16)],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[onnx.helper.make_opsetid("", 17), onnx.helper.make_opsetid("test", 1)],
+    )
+
+    assert DynamoSemanticNodeNameTransform.apply(model)
+    assert model.graph.node[0].name == "/model/layers.12/self_attn/q_proj/linear__node_linear"
+    assert model.functions[0].node[0].name == "/DecoderLayer/self_attn/q_proj/linear__node_linear"
+    assert list(model.graph.node[0].input) == ["x", "weight"]
+    assert list(model.graph.node[0].output) == ["y"]
+    assert not DynamoSemanticNodeNameTransform.apply(model)
+
+
+def test_dynamo_semantic_node_name_transform_names_local_function_calls():
+    call_node = onnx.helper.make_node("DecoderLayer", ["x"], ["y"], domain="test", name="node_invoke_subgraph")
+    _add_name_scopes(call_node, ["", "model", "model.layers.12", "invoke_subgraph"])
+    function = onnx.helper.make_function(
+        "test",
+        "DecoderLayer",
+        ["x"],
+        ["y"],
+        [onnx.helper.make_node("Identity", ["x"], ["y"], name="node_identity")],
+        [onnx.helper.make_opsetid("", 17)],
+    )
+    graph = onnx.helper.make_graph(
+        [call_node],
+        "test",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])],
+        [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1])],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[onnx.helper.make_opsetid("", 17), onnx.helper.make_opsetid("test", 1)],
+    )
+
+    assert DynamoSemanticNodeNameTransform.apply(model)
+    assert model.graph.node[0].name == "/model/layers.12/DecoderLayer__node_invoke_subgraph"
 
 
 def test_fp16clip_transform():

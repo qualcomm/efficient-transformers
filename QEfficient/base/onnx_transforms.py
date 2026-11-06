@@ -5,6 +5,7 @@
 #
 # ----------------------------------------------------------------------------
 
+import ast
 import logging
 import os
 import re
@@ -67,6 +68,188 @@ class BaseOnnxTransform:
     @classmethod
     def apply(cls, model: ModelProto, **kwargs) -> bool:
         raise NotImplementedError("Use subclasses for ONNX transform")
+
+
+class DynamoSemanticNodeNameTransform(BaseOnnxTransform):
+    """Promote Dynamo module-scope metadata into stable ONNX node names.
+
+    Dynamo preserves PyTorch module paths in ``pkg.torch.onnx.name_scopes`` but
+    emits generic ``node_<operator>`` names. Compiler traces and MDP files use
+    the ONNX node-name field, so make that field descriptive without changing
+    tensors, operators, functions, or metadata.
+    """
+
+    _NAME_SCOPES_KEY = "pkg.torch.onnx.name_scopes"
+    _CAPTURED_ARG_PREFIX = re.compile(r"^L\[['\"](?:args|kwargs)['\"]\](?:\[\d+\])?\.")
+    _SAFE_NAME_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
+
+    @classmethod
+    def apply(cls, model: ModelProto, **kwargs) -> bool:
+        """Rename nodes in the main graph and every local ONNX function body."""
+        local_function_names = {function.name for function in model.functions}
+        changed = cls._rename_node_scope(model.graph.node, local_function_names=local_function_names)
+        for function in model.functions:
+            changed |= cls._rename_node_scope(
+                function.node,
+                function_name=function.name,
+                local_function_names=local_function_names,
+            )
+        return changed
+
+    @classmethod
+    def _rename_node_scope(
+        cls,
+        nodes,
+        function_name: Optional[str] = None,
+        local_function_names: Optional[set[str]] = None,
+    ) -> bool:
+        """Rename one lexical ONNX node scope while preserving unique names.
+
+        A leading slash marks names already normalized by this transform, making
+        repeated application a no-op while still visiting nested graph bodies.
+        """
+        changed = False
+        used_names = {node.name for node in nodes if node.name}
+
+        for node in nodes:
+            original_name = node.name
+            if original_name.startswith("/"):
+                changed |= cls._rename_nested_graphs(node, function_name, local_function_names)
+                continue
+
+            scope_path = cls._scope_path(node, function_name, local_function_names or set())
+            if scope_path:
+                original_component = cls._sanitize_component(original_name or f"node_{node.op_type}")
+                base_name = f"/{scope_path}__{original_component}"
+                node.name = cls._unique_name(base_name, used_names)
+                changed |= node.name != original_name
+
+            changed |= cls._rename_nested_graphs(node, function_name, local_function_names)
+
+        return changed
+
+    @classmethod
+    def _rename_nested_graphs(
+        cls,
+        node,
+        function_name: Optional[str],
+        local_function_names: Optional[set[str]],
+    ) -> bool:
+        """Apply the same naming rules to graph attributes of control-flow nodes."""
+        changed = False
+        for attribute in node.attribute:
+            if attribute.HasField("g"):
+                changed |= cls._rename_node_scope(
+                    attribute.g.node,
+                    function_name=function_name,
+                    local_function_names=local_function_names,
+                )
+            for graph in attribute.graphs:
+                changed |= cls._rename_node_scope(
+                    graph.node,
+                    function_name=function_name,
+                    local_function_names=local_function_names,
+                )
+        return changed
+
+    @classmethod
+    def _scope_path(cls, node, function_name: Optional[str], local_function_names: set[str]) -> Optional[str]:
+        """Build a semantic path from Dynamo metadata for one ONNX node.
+
+        A local-function call uses its function type instead of Dynamo's generic
+        ``invoke_subgraph`` leaf. Function bodies drop a concrete ``layers.N``
+        or ``h.N`` segment because the same body can serve multiple callsites.
+        """
+        scopes = cls._name_scopes(node)
+        if not scopes:
+            return None
+
+        leaf = cls._sanitize_component(scopes[-1])
+        if leaf.startswith("invoke_subgraph") and node.op_type in local_function_names:
+            leaf = cls._sanitize_component(node.op_type)
+        module_scope = next(
+            (cls._normalize_scope(scope) for scope in reversed(scopes[:-1]) if cls._normalize_scope(scope)),
+            "",
+        )
+        if not module_scope and not leaf:
+            return None
+
+        parts = [cls._sanitize_component(function_name)] if function_name else []
+        if function_name:
+            module_scope = cls._drop_layer_index(module_scope)
+        if module_scope:
+            parts.extend(cls._module_scope_components(module_scope))
+        if leaf:
+            parts.append(leaf)
+        return "/".join(part for part in parts if part)
+
+    @classmethod
+    def _name_scopes(cls, node) -> List[str]:
+        """Return valid Dynamo ``name_scopes`` metadata values for ``node``."""
+        raw_scopes = next((prop.value for prop in node.metadata_props if prop.key == cls._NAME_SCOPES_KEY), None)
+        if not raw_scopes:
+            return []
+        try:
+            scopes = ast.literal_eval(raw_scopes)
+        except (SyntaxError, ValueError):
+            return []
+        if not isinstance(scopes, (list, tuple)):
+            return []
+        return [scope for scope in scopes if isinstance(scope, str) and scope]
+
+    @classmethod
+    def _normalize_scope(cls, scope: str) -> str:
+        """Remove Dynamo capture syntax and ignore synthetic operator-only scopes."""
+        scope = cls._CAPTURED_ARG_PREFIX.sub("", scope.strip())
+        if not scope or scope.startswith("_empty_nn_module_stack") or scope.startswith("aten."):
+            return ""
+        return scope
+
+    @classmethod
+    def _module_scope_components(cls, scope: str) -> List[str]:
+        """Split module scope into compiler-readable path components.
+
+        ``layers.N`` and GPT-style ``h.N`` stay intact so layer-aware MDP code
+        can identify transformer blocks from one path component.
+        """
+        components = [cls._sanitize_component(component) for component in scope.split(".")]
+        normalized = []
+        index = 0
+        while index < len(components):
+            component = components[index]
+            if component in {"layers", "h"} and index + 1 < len(components) and components[index + 1].isdigit():
+                normalized.append(f"{component}.{components[index + 1]}")
+                index += 2
+            else:
+                if component:
+                    normalized.append(component)
+                index += 1
+        return normalized
+
+    @classmethod
+    def _drop_layer_index(cls, scope: str) -> str:
+        """Remove a concrete layer number from a shared ONNX function-body scope."""
+        components = scope.split(".")
+        for index, component in enumerate(components[:-1]):
+            if component in {"layers", "h"} and components[index + 1].isdigit():
+                return ".".join(components[index + 2 :])
+        return scope
+
+    @classmethod
+    def _sanitize_component(cls, value: str) -> str:
+        """Convert one metadata component into a compiler-safe node-name component."""
+        return cls._SAFE_NAME_COMPONENT.sub("_", value).strip("_")
+
+    @staticmethod
+    def _unique_name(base_name: str, used_names: set[str]) -> str:
+        """Return a deterministic unique node name in the current ONNX lexical scope."""
+        candidate = base_name
+        suffix = 1
+        while candidate in used_names:
+            candidate = f"{base_name}_{suffix}"
+            suffix += 1
+        used_names.add(candidate)
+        return candidate
 
 
 class FP16ClipTransform(BaseOnnxTransform):

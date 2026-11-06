@@ -24,7 +24,7 @@ from onnx import TensorProto, helper
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
 from QEfficient.base.modeling_qeff import generate_mdp_compiler_dump
-from QEfficient.compile.mdp_generator import _layer_partition_bounds
+from QEfficient.compile.mdp_generator import _layer_partition_bounds, generate_disagg_mdp_partition_config
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
 VOCAB_SIZE = 500
@@ -443,6 +443,50 @@ def _build_synthetic_gpt2_onnx(num_layers: int, out_path: Path) -> None:
     onnx.save(onnx_model, str(out_path))
 
 
+def _build_synthetic_local_function_onnx(out_path: Path) -> None:
+    """Write a two-layer graph with nested ONNX local functions.
+
+    Dynamo exports local-function body names with a leading slash.  QAIC expands
+    those local functions recursively and uses ``<call-site>//<function>/...``
+    names in the MDP compiler dump.  This fixture exercises that exact naming
+    rule without requiring a model export or QAIC hardware.
+    """
+    nested_function = helper.make_function(
+        "local",
+        "NestedFn",
+        ["X"],
+        ["Y"],
+        [helper.make_node("Identity", ["X"], ["Y"], name="n0")],
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    layer_function = helper.make_function(
+        "local",
+        "LayerFn",
+        ["X"],
+        ["Y"],
+        [
+            helper.make_node("Identity", ["X"], ["linear"], name="/LayerFn/linear"),
+            helper.make_node("NestedFn", ["linear"], ["Y"], domain="local", name="/LayerFn/nested"),
+        ],
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("local", 1)],
+    )
+    graph = helper.make_graph(
+        [
+            helper.make_node("LayerFn", ["input"], ["layer0"], domain="local", name="layer_0/call"),
+            helper.make_node("LayerFn", ["layer0"], ["output"], domain="local", name="layer_1/call"),
+        ],
+        "synthetic_local_function_graph",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])],
+    )
+    onnx_model = helper.make_model(
+        graph,
+        functions=[nested_function, layer_function],
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("local", 1)],
+    )
+    onnx.save(onnx_model, str(out_path))
+
+
 def _fake_subprocess_run(command: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
     """Monkeypatch for subprocess.run: create compile artifacts requested by the command."""
     binary_dir: Optional[Path] = None
@@ -548,6 +592,32 @@ class TestMdpLayerPartitionBounds:
 
 @pytest.mark.cpu_only
 @pytest.mark.mdp
+class TestMdpLocalFunctionExpansion:
+    """Validate MDP names for compiler-expanded ONNX local functions."""
+
+    def test_nested_local_function_nodes_use_compiler_paths(self, tmp_path: Path):
+        onnx_path = tmp_path / "local_functions.onnx"
+        _build_synthetic_local_function_onnx(onnx_path)
+
+        mdp = generate_disagg_mdp_partition_config(
+            onnx_path=str(onnx_path),
+            num_devices=2,
+            num_partitions=2,
+            num_layers=2,
+        )
+
+        assert mdp["partitions"][0]["nodeList"] == [
+            "layer_0/call//LayerFn/linear",
+            "layer_0/call//LayerFn/nested/n0",
+        ]
+        assert mdp["partitions"][1]["nodeList"] == [
+            "layer_1/call//LayerFn/linear",
+            "layer_1/call//LayerFn/nested/n0",
+        ]
+
+
+@pytest.mark.cpu_only
+@pytest.mark.mdp
 class TestMdpCompileIntegration:
     """CPU-only compile integration tests for the ONNX MDP strategy.
 
@@ -561,7 +631,6 @@ class TestMdpCompileIntegration:
         onnx_path = tmp_path / "model.onnx"
         _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path)
         compile_dir = tmp_path / "compile_out"
-        compile_dir.mkdir(parents=True, exist_ok=True)
         return tmp_path, onnx_path, compile_dir
 
     def _run_mdp_compile(
