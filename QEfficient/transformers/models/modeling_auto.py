@@ -1278,6 +1278,7 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
             offload_pt_weights=offload_pt_weights,
             use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
             dynamo=dynamo,
+            **({"optimize": kwargs["optimize"]} if "optimize" in kwargs else {}),
         )
 
     def compile(
@@ -1506,6 +1507,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 qaic_config=qaic_config,
                 prefill_seq_len=prefill_seq_len,
                 onnx_transform_kwargs=onnx_transform_kwargs,
+                **({"optimize": kwargs["optimize"]} if "optimize" in kwargs else {}),
             )
         else:
             dynamo = kwargs.get("dynamo", False) or self._weight_free
@@ -1518,6 +1520,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
                 dynamo=dynamo,
                 onnx_transform_kwargs=onnx_transform_kwargs,
+                **({"optimize": kwargs["optimize"]} if "optimize" in kwargs else {}),
             )
 
     def compile(
@@ -1878,6 +1881,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 offload_pt_weights=False,
                 use_onnx_subfunctions=use_onnx_subfunctions,
                 dynamo=dynamo,
+                **({"optimize": kwargs["optimize"]} if "optimize" in kwargs else {}),
             )
 
         # TODO: remove the current pt weight offload capability once CustomLoader is in place
@@ -1904,6 +1908,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
                 dynamo=dynamo,
+                **({"optimize": kwargs["optimize"]} if "optimize" in kwargs else {}),
             )
         return self.onnx_path
 
@@ -2154,6 +2159,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         """
         if artifacts:
             compiler_options["artifacts"] = True
+        onnx_optimize = compiler_options.pop("onnx_optimize", False)
         if skip_lang and skip_vision:
             raise ValueError("Expected at least one of 'skip_lang' or 'skip_vision' to be False")
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
@@ -2195,6 +2201,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                     enable_chunking=enable_chunking,
                     qaic_config=qaic_config,
                     kv_cache_prefix=kv_cache_prefix,
+                    onnx_optimize=onnx_optimize,
                     **compiler_options,
                 )
                 self.vision_model.onnx_path = vision_wrapper.vision_model.onnx_path
@@ -2228,6 +2235,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 qaic_config=qaic_config,
                 layerwise_window_size=layerwise_window_size,
                 kv_cache_prefix=kv_cache_prefix,
+                onnx_optimize=onnx_optimize,
                 **compiler_options,
             )
 
@@ -2342,6 +2350,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                     _layerwise_cache_probe=layerwise_cache_probe,
                     kv_cache_prefix=kv_cache_prefix,
                     offload_pt_weights=offload_pt_weights,
+                    optimize=onnx_optimize,
                 )
             if log_times:
                 print(f"[timing] export (ONNX):       {time.perf_counter() - _t0_export:.2f}s")
@@ -4622,6 +4631,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 prefill_seq_len=prefill_seq_len,
                 kv_cache_prefix=kv_cache_prefix,
                 _layerwise_cache_probe=kwargs.get("_layerwise_cache_probe", False),
+                **({"optimize": kwargs["optimize"]} if "optimize" in kwargs else {}),
             )
         else:
             return self._export(
@@ -4632,6 +4642,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
                 dynamo=dynamo,
                 offload_pt_weights=kwargs.get("offload_pt_weights", True),
+                **({"optimize": kwargs["optimize"]} if "optimize" in kwargs else {}),
             )
 
     def build_prefill_specialization(

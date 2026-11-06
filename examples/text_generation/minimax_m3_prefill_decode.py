@@ -105,6 +105,10 @@ def main():
         description="Export and compile separate MiniMax-M3 prefill and decode QPCs for disaggregated serving."
     )
     parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument(
+        "--onnx-optimize", action="store_true",
+        help="Enable optimization in the PyTorch ONNX exporter.",
+    )
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--generation-len", type=int, default=32)
     parser.add_argument("--num-devices", type=int, default=16)
@@ -322,6 +326,7 @@ def main():
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
+        onnx_optimize=args.onnx_optimize,
         skip_vision=True,
         offload_pt_weights=False,
         node_precision_info=True,

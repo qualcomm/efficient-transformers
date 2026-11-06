@@ -46,6 +46,10 @@ def main():
     parser = argparse.ArgumentParser(description="MiniMax-M3 text-only decode (PL=1) with DP and GP enabled.")
     parser.add_argument("--model-id", default=MODEL_ID)
     parser.add_argument(
+        "--onnx-optimize", action="store_true",
+        help="Enable optimization in the PyTorch ONNX exporter.",
+    )
+    parser.add_argument(
         "--dtype",
         choices=("float16", "bfloat16", "float32"),
         default="float16",
@@ -224,6 +228,7 @@ def main():
         mxfp6_matmul=args.mxfp6_matmul,
         mxint8_kv_cache=args.mxint8_kv_cache,
         use_onnx_subfunctions=True,
+        onnx_optimize=args.onnx_optimize,
         dynamo=True,
         skip_vision=True,
         node_precision_info=args.node_precision_info,

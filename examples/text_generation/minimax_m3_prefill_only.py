@@ -123,6 +123,10 @@ def main():
     )
     parser.add_argument("--model-id", default=MODEL_ID)
     parser.add_argument(
+        "--onnx-optimize", action="store_true",
+        help="Enable optimization in the PyTorch ONNX exporter.",
+    )
+    parser.add_argument(
         "--dtype",
         choices=("float16", "bfloat16", "float32"),
         default="float16",
@@ -385,6 +389,7 @@ def main():
         mxfp6_matmul=True,
         mxint8_kv_cache=args.mxint8_kv_cache,
         use_onnx_subfunctions=args.use_onnx_subfunctions,
+        onnx_optimize=args.onnx_optimize,
         skip_vision=True,
         offload_pt_weights=False,
         node_precision_info=True,

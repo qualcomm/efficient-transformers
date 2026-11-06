@@ -56,6 +56,10 @@ def expand_batch(inputs, batch_size: int):
 def main() -> None:
     parser = argparse.ArgumentParser(description="MiniMax-M3 paged MSA decode with DP/CP.")
     parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument(
+        "--onnx-optimize", action="store_true",
+        help="Enable optimization in the PyTorch ONNX exporter.",
+    )
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument("--page-block-size", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -173,6 +177,7 @@ def main() -> None:
         skip_vision=True,
         node_precision_info=True,
         use_onnx_subfunctions=True,
+        onnx_optimize=args.onnx_optimize,
         mxint8_kv_cache=True,
         qaic_config=qaic_config,
     )

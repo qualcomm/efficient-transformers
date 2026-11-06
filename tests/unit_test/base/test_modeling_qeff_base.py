@@ -76,6 +76,31 @@ def make_tiny_llama():
 
 
 @pytest.mark.cpu_only
+@pytest.mark.parametrize("onnx_optimize", [False, True])
+def test_get_onnx_path_routes_onnx_optimize(monkeypatch, onnx_optimize):
+    model, _ = make_tiny_gpt2()
+    qeff_model = QEFFAutoModelForCausalLM(model)
+    captured_export_kwargs = {}
+    captured_transform_kwargs = {}
+
+    def capture_export(**kwargs):
+        captured_export_kwargs.update(kwargs)
+
+    def capture_transform(**kwargs):
+        captured_transform_kwargs.update(kwargs)
+
+    monkeypatch.setattr(qeff_model, "export", capture_export)
+    monkeypatch.setattr(qeff_model, "transform", capture_transform)
+    qeff_model.get_onnx_path(
+        specializations=[{"batch_size": 1, "seq_len": SEQ_LEN, "ctx_len": CTX_LEN}],
+        onnx_optimize=onnx_optimize,
+    )
+
+    assert "onnx_optimize" not in captured_transform_kwargs
+    assert captured_export_kwargs["optimize"] is onnx_optimize
+
+
+@pytest.mark.cpu_only
 class TestQEFFBaseModelProperties:
     """Test QEFFBaseModel properties and class methods."""
 

@@ -28,6 +28,7 @@ def _run_pytorch_parity_test(
     expert_parallel_chunk_size: int = 256,
     cores_per_expert: int = 2,
     tree_reduce: bool = True,
+    onnx_optimize: bool = False,
 ) -> None:
     """Compare HF PyTorch vs AIC on the last decode token of the prompt (prefill_seq_len=1)."""
     # Load real model architecture with 4 layers for a fast test (random weights).
@@ -63,6 +64,7 @@ def _run_pytorch_parity_test(
         num_cores=num_cores,
         num_devices=num_devices,
         use_onnx_subfunctions=False,
+        onnx_optimize=onnx_optimize,
         skip_vision=True,
         node_precision_info=True,
         offload_pt_weights=False,
@@ -89,6 +91,10 @@ def _run_pytorch_parity_test(
 def main():
     parser = argparse.ArgumentParser(description="MiniMax-M3 text-only decode (PL=1).")
     parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument(
+        "--onnx-optimize", action="store_true",
+        help="Enable optimization in the PyTorch ONNX exporter.",
+    )
     parser.add_argument("--ctx-len", type=int, default=1024)
     parser.add_argument("--num-devices", type=int, default=16)
     parser.add_argument("--num-cores", type=int, default=16)
@@ -134,6 +140,7 @@ def main():
                 expert_parallel_chunk_size=args.expert_parallel_chunk_size,
                 cores_per_expert=args.cores_per_expert,
                 tree_reduce=args.tree_reduce,
+                onnx_optimize=args.onnx_optimize,
             )
         return
 
@@ -157,6 +164,7 @@ def main():
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         use_onnx_subfunctions=True,
+        onnx_optimize=args.onnx_optimize,
         skip_vision=True,
         node_precision_info=True,
         offload_pt_weights=False,

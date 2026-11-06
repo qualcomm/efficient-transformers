@@ -761,6 +761,7 @@ class QEFFBaseModel(ABC):
         use_onnx_subfunctions: Optional[bool] = False,
         dynamo: Optional[bool] = False,
         retain_full_kv: Optional[bool] = False,
+        onnx_optimize: bool = False,
         qaic_config: Optional[dict] = None,
         kv_cache_prefix: Optional[str] = None,
         **compiler_options,
@@ -771,6 +772,7 @@ class QEFFBaseModel(ABC):
             "dynamo": dynamo,
             "retain_full_kv": retain_full_kv,
         }
+        kwargs["optimize"] = onnx_optimize
         layerwise_cache_probe = compiler_options.pop("_layerwise_cache_probe", False)
         if layerwise_cache_probe:
             kwargs["_layerwise_cache_probe"] = True
@@ -1167,6 +1169,7 @@ class QEFFBaseModel(ABC):
         qaic_config: Optional[dict] = None,
         specialization_module_name: Optional[str] = None,
         kv_cache_prefix: Optional[str] = None,
+        onnx_optimize: bool = False,
         artifacts: bool = False,
         **compiler_options,
     ) -> str:
@@ -1237,6 +1240,7 @@ class QEFFBaseModel(ABC):
                     mdp_num_partitions=mdp_num_partitions,
                     qaic_config=qaic_config,
                     _layerwise_cache_probe=layerwise_cache_probe,
+                    onnx_optimize=onnx_optimize,
                     kv_cache_prefix=kv_cache_prefix,
                     **compiler_options,
                 )

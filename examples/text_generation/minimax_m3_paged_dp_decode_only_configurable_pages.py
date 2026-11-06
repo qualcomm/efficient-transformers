@@ -163,6 +163,10 @@ def main() -> None:
         description="MiniMax-M3 paged decode with independently configurable cache page sizes and counts."
     )
     parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument(
+        "--onnx-optimize", action="store_true",
+        help="Enable optimization in the PyTorch ONNX exporter.",
+    )
     parser.add_argument("--ctx-len", type=int, default=4096)
     parser.add_argument(
         "--page-block-size",
@@ -450,6 +454,7 @@ def main() -> None:
         skip_vision=True,
         node_precision_info=True,
         use_onnx_subfunctions=True,
+        onnx_optimize=args.onnx_optimize,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,
         retain_full_kv=True,
