@@ -372,7 +372,7 @@ def generic_blocked_attention_interface(
     mla_kwargs: dict[str, Any] | None = None,
     is_mla: bool = False,
     prefill_only: bool = False,
-    skip_kv: Optional[bool] = None,
+    skip_kv: bool = None,
     **kwargs,
 ):
     blocking_mode = BlockingMode.resolve(blocking_config.mode)
