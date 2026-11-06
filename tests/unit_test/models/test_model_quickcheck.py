@@ -57,8 +57,8 @@ from transformers.cache_utils import DynamicCache
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4ForCausalLM,
-    DeepseekV4RotaryEmbedding,
     DeepseekV4RMSNorm,
+    DeepseekV4RotaryEmbedding,
     DeepseekV4UnweightedRMSNorm,
 )
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
@@ -83,8 +83,8 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Attention,
     QEffDeepseekV4Cache,
     QEffDeepseekV4ForCausalLM,
-    QEffDeepseekV4RotaryEmbedding,
     QEffDeepseekV4RMSNorm,
+    QEffDeepseekV4RotaryEmbedding,
     QEffDeepseekV4UnweightedRMSNorm,
 )
 from QEfficient.transformers.models.modeling_auto import (
@@ -704,7 +704,7 @@ def test_deepseek_v4_swa_full_context_prefill_matches_decode():
     input_ids = torch.randint(0, config.vocab_size, (1, 9))
     decode_cache = decode_model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=32)
     prefill_cache = prefill_model.get_dummy_pkv_cache(prefill_config, batch_size=1, ctx_len=32)
-    assert decode_cache[0][0].shape == (1, 1, 32, config.head_dim)
+    assert decode_cache[0][0].shape == (1, 1, config.sliding_window, config.head_dim)
     assert prefill_cache[0][0].shape == (1, 1, 32, config.head_dim)
 
     with torch.no_grad():
@@ -725,7 +725,12 @@ def test_deepseek_v4_swa_full_context_prefill_matches_decode():
         )
 
     torch.testing.assert_close(prefill_output.logits, decode_output.logits, atol=2e-4, rtol=2e-4)
-    torch.testing.assert_close(prefill_output.past_key_values[0][0], decode_cache[0][0])
+    expected_ring_cache = torch.zeros_like(decode_cache[0][0])
+    for position in range(input_ids.shape[1]):
+        expected_ring_cache[:, :, position % config.sliding_window] = prefill_output.past_key_values[0][0][
+            :, :, position
+        ]
+    torch.testing.assert_close(expected_ring_cache, decode_cache[0][0])
     specializations = prefill_model.get_specializations(batch_size=1, prefill_seq_len=9, ctx_len=32)
     assert [specialization["ctx_len"] for specialization in specializations] == [32, 32]
 
@@ -854,6 +859,28 @@ def test_deepseek_v4_swa_prefill_keeps_sliding_cache_context_axis_static(monkeyp
     )
 
 
+def test_deepseek_v4_decode_uses_fixed_sliding_cache_axis(monkeypatch):
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["sliding_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.sliding_window = 4
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    captured = {}
+
+    def fake_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["example_inputs"] = example_inputs
+        captured["dynamic_axes"] = dynamic_axes
+        return "unused.onnx"
+
+    monkeypatch.setattr(qeff_model, "_export", fake_export)
+    qeff_model.export(export_batch_size=2, cache_ctx_len=32, dynamo=True)
+
+    cache = captured["example_inputs"]["past_key_values"][0][0]
+    assert cache.shape == (1, 2, config.sliding_window, config.head_dim)
+    assert captured["dynamic_axes"]["past_sliding_window_kv.0"] == {1: "batch_size"}
+
+
 def test_deepseek_v4_compressed_cache_dynamic_shape_uses_compressed_capacity():
     from QEfficient.utils.export_utils import convert_dynamic_axes_to_dynamic_shapes
 
@@ -973,14 +1000,14 @@ def test_deepseek_v4_prefill_subfunction_outputs_match_decode_cache_names(tmp_pa
 
     assert prefill_outputs == decode_outputs
 
-    for onnx_path in (decode_onnx_path, prefill_onnx_path):
+    for onnx_path, expected_ctx_len in ((decode_onnx_path, config.sliding_window), (prefill_onnx_path, 32)):
         graph = onnx.load(onnx_path, load_external_data=False).graph
         cache_input = next(value for value in graph.input if value.name == "past_sliding_window_kv.0")
         retained_output = next(
             value for value in graph.output if value.name == "past_sliding_window_kv.0_RetainedState"
         )
-        assert cache_input.type.tensor_type.shape.dim[2].dim_param == "ctx_len"
-        assert retained_output.type.tensor_type.shape.dim[2].dim_param == "ctx_len"
+        assert cache_input.type.tensor_type.shape.dim[2].dim_value == expected_ctx_len
+        assert retained_output.type.tensor_type.shape.dim[2].dim_value == expected_ctx_len
         compressed_input = next(value for value in graph.input if value.name == "past_actual_compressed_kv.3")
         compressed_output = next(
             value for value in graph.output if value.name == "past_actual_compressed_kv.3_RetainedState"

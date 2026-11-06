@@ -106,12 +106,27 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
         cumulative_length: int = 0,
     ) -> None:
         self._folded_row_cache = bool(getattr(config, "qeff_sliding_folded_row_cache", True))
-        logical_cache_len = sliding_window_kv.shape[2]
+        logical_cache_len = int(
+            getattr(
+                config,
+                "qeff_sliding_cache_ctx_len",
+                getattr(config, "max_position_embeddings", sliding_window_kv.shape[2]),
+            )
+        )
+        if logical_cache_len <= 0:
+            logical_cache_len = sliding_window_kv.shape[2]
         self.sliding_window = (
             config.sliding_window if _is_export_capture() else min(config.sliding_window, logical_cache_len)
         )
         expected = (
-            (1, sliding_window_kv.shape[1], logical_cache_len, config.head_dim)
+            (
+                1,
+                sliding_window_kv.shape[1],
+                logical_cache_len
+                if bool(getattr(config, "qeff_swa_prefill_only", False))
+                else min(config.sliding_window, logical_cache_len),
+                config.head_dim,
+            )
             if self._folded_row_cache
             else (
                 sliding_window_kv.shape[0],
@@ -192,6 +207,8 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
                 raise ValueError("position_ids exceed the allocated QEff sliding cache capacity.")
         invalid_index = torch.iinfo(torch.int32).max
         scatter_positions = position_ids.to(torch.int32)
+        if self._folded_row_cache:
+            scatter_positions = torch.remainder(scatter_positions, self.sliding_window)
         scatter_positions = torch.where(scatter_positions < 0, invalid_index, scatter_positions)
         if self._folded_row_cache:
             self.sliding_window_kv = ctx_scatter_folded_rows(
@@ -203,15 +220,20 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
             self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
-        context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
-        gather_limit = position_ids.max(dim=1, keepdim=True).values.to(torch.int32).unsqueeze(1)
-        valid = valid & (context_indices <= gather_limit)
-        safe_context_indices = torch.where(valid, context_indices, torch.full_like(context_indices, invalid_index))
         if self._folded_row_cache:
-            gathered = ctx_gather_folded_rows(self.sliding_window_kv, safe_context_indices.squeeze(1))
+            context_indices, valid = _folded_sliding_window_context_indices(position_ids, self.sliding_window)
+            safe_context_indices = torch.where(
+                valid,
+                context_indices,
+                torch.full_like(context_indices, invalid_index),
+            )
+            gathered = ctx_gather_folded_rows(self.sliding_window_kv, safe_context_indices)
             gathered = gathered.squeeze(0).unsqueeze(1)
-            valid = valid.squeeze(1).unsqueeze(1)
+            valid = valid.unsqueeze(1)
         else:
+            context_indices, valid = _sliding_window_context_indices(position_ids, self.sliding_window, self.device)
+            gather_limit = position_ids.max(dim=1, keepdim=True).values.to(torch.int32).unsqueeze(1)
+            valid = valid & (context_indices <= gather_limit)
             context_indices = context_indices.expand(-1, self.sliding_window_kv.shape[1], -1)
             valid = valid.expand(-1, self.sliding_window_kv.shape[1], -1)
             safe_context_indices = torch.where(valid, context_indices, torch.full_like(context_indices, invalid_index))
@@ -1364,9 +1386,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 prior_score = torch.full_like(prior_score, float("-inf"))
             pooled_kv = torch.cat((prior_kv, kv_state[:, ratio:, head_dim:]), dim=1)
             pooled_score = torch.cat((prior_score, score_state[:, ratio:, head_dim:]), dim=1)
-            compressed = (pooled_kv * pooled_score.float().softmax(dim=1).to(pooled_kv.dtype)).sum(
-                dim=1, keepdim=True
-            )
+            compressed = (pooled_kv * pooled_score.float().softmax(dim=1).to(pooled_kv.dtype)).sum(dim=1, keepdim=True)
             compressed = norm(compressed.to(hidden_states.dtype))
             block_start = (pos0 // ratio) * ratio
             compressed_positions = torch.full(
@@ -1403,9 +1423,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 pooled_kv[:, 0, :ratio] = kv_state[:, :ratio, :head_dim]
                 pooled_score[:, 0, :ratio] = score_state[:, :ratio, :head_dim]
             compressed = norm(
-                (pooled_kv * pooled_score.float().softmax(dim=2).to(pooled_kv.dtype))
-                .sum(dim=2)
-                .to(hidden_states.dtype)
+                (pooled_kv * pooled_score.float().softmax(dim=2).to(pooled_kv.dtype)).sum(dim=2).to(hidden_states.dtype)
             )
             block_starts = pos0 + lead + torch.arange(full_blocks, device=hidden_states.device) * ratio
             compressed_positions = block_starts.view(1, -1).expand(batch_size, -1)
@@ -2669,10 +2687,15 @@ class QEffDeepseekV4Cache(Cache):
         layers = []
         for layer_type in config.layer_types:
             if layer_type == "sliding_attention":
+                cache_len = (
+                    ctx_len
+                    if bool(getattr(config, "qeff_swa_prefill_only", False))
+                    else min(config.sliding_window, ctx_len)
+                )
                 sliding = torch.zeros(
                     1,
                     batch_size,
-                    ctx_len,
+                    cache_len,
                     config.head_dim,
                     **common,
                 )
@@ -3314,9 +3337,7 @@ class QEffDeepseekV4Model(DeepseekV4Model):
         retained_states = list(cache.to_legacy_cache()) if prefill_cache else None
         for layer_idx, layer in enumerate(self.layers):
             layer_position_embeddings = (
-                position_embeddings
-                if prefill_cache
-                else position_embeddings[layer.self_attn.rope_layer_type]
+                position_embeddings if prefill_cache else position_embeddings[layer.self_attn.rope_layer_type]
             )
             layer_output = layer(
                 hidden_states,
