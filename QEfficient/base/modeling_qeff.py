@@ -32,6 +32,7 @@ from QEfficient.base.onnx_transforms import (
     SplitTensorsTransform,
 )
 from QEfficient.base.pytorch_transforms import PytorchTransform
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.blocking.blocking_configurator import (
     build_gated_delta_config_for_transform,
     build_transformer_blocking_config_for_transform,
@@ -1386,6 +1387,7 @@ class QEFFBaseModel(ABC):
             self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=AttentionBlockingConfig())
             self.hash_params.pop("blocking_kwargs", None)
         if qaic_config is not None:
             self.hash_params["qaic_config"] = qaic_config
@@ -1651,8 +1653,9 @@ class QEFFBaseModel(ABC):
 
         compile_dir = qpc_path.with_name(qpc_path.name + "-" + compile_hash)
         qpc_path = compile_dir / "qpc"
+        programqpc_path = qpc_path / "programqpc.bin"
         if not artifacts:
-            if (qpc_path / "programqpc.bin").is_file():
+            if programqpc_path.is_file() and programqpc_path.stat().st_size > 0:
                 self.qpc_path = qpc_path
                 self.compile_artifacts_path = compile_dir
 
@@ -1786,6 +1789,9 @@ class QEFFBaseModel(ABC):
                     ]
                 )
             )
+        if not programqpc_path.is_file() or programqpc_path.stat().st_size == 0:
+            raise RuntimeError(f"QAIC compiler returned success without producing a non-empty QPC: {programqpc_path}")
+
         # Dump JSON file with hashed parameters
         hashed_compile_params_path = compile_dir / "hashed_compile_params.json"
         create_json(hashed_compile_params_path, compile_hash_params)

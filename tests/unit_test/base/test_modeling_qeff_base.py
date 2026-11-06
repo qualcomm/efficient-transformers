@@ -636,6 +636,41 @@ class TestMdpCompileIntegration:
         compile_dir.mkdir(parents=True, exist_ok=True)
         return tmp_path, onnx_path, compile_dir
 
+    def test_compile_rejects_empty_programqpc(self, compile_workspace):
+        _, onnx_path, compile_dir = compile_workspace
+        model_hf, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model_hf)
+
+        def _write_empty_qpc(command, **kwargs):
+            binary_dir = next(
+                Path(argument.split("=", 1)[1]) for argument in command if argument.startswith("-aic-binary-dir=")
+            )
+            binary_dir.mkdir(parents=True, exist_ok=True)
+            (binary_dir / "programqpc.bin").touch()
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=b"", stderr=b"")
+
+        with (
+            patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_write_empty_qpc),
+            pytest.raises(RuntimeError, match="non-empty QPC"),
+        ):
+            qeff._compile(onnx_path=str(onnx_path), compile_dir=str(compile_dir))
+
+    def test_compile_rebuilds_empty_cached_programqpc(self, compile_workspace):
+        _, onnx_path, compile_dir = compile_workspace
+        model_hf, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model_hf)
+        compile_kwargs = {"onnx_path": str(onnx_path), "compile_dir": str(compile_dir)}
+
+        with patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_fake_subprocess_run):
+            qeff._compile(**compile_kwargs)
+        (qeff.qpc_path / "programqpc.bin").write_bytes(b"")
+
+        with patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_fake_subprocess_run) as compile_mock:
+            qeff._compile(**compile_kwargs)
+
+        assert compile_mock.call_count == 1
+        assert (qeff.qpc_path / "programqpc.bin").stat().st_size > 0
+
     def _run_mdp_compile(
         self,
         compile_workspace,

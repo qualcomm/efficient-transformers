@@ -618,6 +618,8 @@ class QEffDynamicLayer(CacheLayerMixin):
                 self.keys = ctx_scatter(self.keys, position_ids, key_states)
                 self.values = ctx_scatter(self.values, position_ids, value_states)
 
+        return self.keys, self.values
+
     def write_only_batch(self, key_states, value_states, cache_kwargs):
         """
         Write through the batch-folded scatter while retaining the standard
