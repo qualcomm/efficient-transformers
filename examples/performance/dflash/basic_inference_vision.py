@@ -11,6 +11,12 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, THIS_DIR)
 
 import requests
 from PIL import Image
@@ -19,16 +25,20 @@ from rich.markup import escape
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 from utils import (
     MODEL_MAP,
+    compile_dspark_qpcs,
     compile_gemma_vlm_dlm_qpc,
     compile_gemma_vlm_qpcs,
     compile_qwen3vl_vlm_dlm_qpc,
     compile_qwen3vl_vlm_qpcs,
+    dspark_smoke_test,
     get_dflash_block_size,
     get_dlm_target_seq_len,
     get_spd_prompt_chunk_size,
     load_spd_session,
     load_spd_sessions,
+    report_metrics,
     resolve_model_name,
+    run_dspark_device_inference,
     validate_dlm_target_seq_len,
     validate_spd_decode_specialization,
 )
@@ -44,10 +54,6 @@ from QEfficient.generation.dflash_generation import (
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, THIS_DIR)
 
 console = Console()
 IMAGE_PROMPT = "Can you Describe this image in detail?"
@@ -60,6 +66,21 @@ def parse_device_list(value):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--technique", choices=["dflash", "dspark"], default="dflash")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run the offline tiny DSpark parity check.",
+    )
+    parser.add_argument("--manifest", type=Path, help="Reuse a DSpark compilation manifest.")
+    parser.add_argument("--metrics-output", type=Path, help="Write DSpark metrics as JSON.")
+    parser.add_argument(
+        "--dspark-output-dir",
+        type=Path,
+        help="DSpark compilation and manifest directory.",
+    )
+    parser.add_argument("--draft-prefill-target-seq-len", type=int, default=None)
+    parser.add_argument("--image-path", type=Path, help="Local image for DSpark vision inference.")
     parser.add_argument(
         "--model_name",
         default="gemma-4-31B-it",
@@ -79,7 +100,12 @@ def parse_args():
         default=None,
         help="Enable thinking when supported; default: model chat-template setting.",
     )
-    thinking.add_argument("--disable-thinking", "--disable_thinking", dest="enable_thinking", action="store_false")
+    thinking.add_argument(
+        "--disable-thinking",
+        "--disable_thinking",
+        dest="enable_thinking",
+        action="store_false",
+    )
     parser.add_argument("--tlm_qpc", default=None)
     parser.add_argument("--vision_qpc", default=None)
     parser.add_argument("--dlm_qpc", default=None)
@@ -163,7 +189,11 @@ def _run_gemma(
         user_prompt = args.image_prompt or IMAGE_PROMPT
         image = Image.open(requests.get(image_url, stream=True, timeout=60).raw).convert("RGB")
         input_ids, mm_token_type_ids, processor_inputs = build_inputs_gemma4(
-            processor, tokenizer, user_prompt, image=image, enable_thinking=args.enable_thinking
+            processor,
+            tokenizer,
+            user_prompt,
+            image=image,
+            enable_thinking=args.enable_thinking,
         )
         logger.info(f"Image: {image_url}")
         vision_devices = args.vision_devices if args.vision_devices is not None else args.tlm_devices
@@ -269,8 +299,52 @@ def _run_qwen3_vl(
     return metrics, {"vision_encode_time_s": metrics.vision_prefill_time if args.image else None}
 
 
+def _run_dspark(args):
+    if args.smoke_test:
+        report_metrics(
+            dspark_smoke_test(vision=args.image, generation_len=args.generation_len),
+            args.metrics_output,
+        )
+        return
+    target_model, draft_model = MODEL_MAP[args.model_name]
+    if not args.model_name.endswith("-DSpark"):
+        raise ValueError("Select a *-DSpark model_name when --technique dspark is used.")
+    if args.image and args.image_path is None:
+        raise ValueError("DSpark vision inference requires --image-path.")
+    if args.image and not target_model.startswith("Qwen/Qwen3.8"):
+        raise NotImplementedError("The DSpark vision runner currently supports the Qwen3.8 multimodal target.")
+    output_root = os.environ.get("QEFF_HOME", "dspark-artifacts")
+    output_dir = args.dspark_output_dir or Path(output_root) / "dflash-dspark" / args.model_name
+    if args.manifest is None:
+        args.manifest = compile_dspark_qpcs(
+            target_model,
+            draft_model,
+            output_dir=output_dir,
+            prefill_seq_len=args.prefill_seq_len,
+            ctx_len=args.ctx_len,
+            target_cores=args.tlm_cores,
+            draft_cores=args.dlm_cores,
+            target_devices=args.tlm_devices,
+            draft_devices=args.dlm_devices,
+            draft_prefill_target_seq_len=args.draft_prefill_target_seq_len,
+            vision=args.image,
+            height=args.height or 448,
+            width=args.width or 448,
+            hf_token=args.hf_token,
+        )
+    args.target_devices = args.tlm_devices
+    args.draft_devices = args.dlm_devices
+    args.prompt = args.image_prompt or args.prompt or IMAGE_PROMPT
+    args.image = args.image_path
+    metrics = run_dspark_device_inference(args, vision=args.image is not None)
+    report_metrics(metrics, args.metrics_output)
+
+
 def main():
     args = parse_args()
+    if args.technique == "dspark":
+        _run_dspark(args)
+        return
     batch_size = _resolve_batch_size(args.batch_size)
     if not args.image and not args.prompt:
         raise ValueError("Provide --prompt for text mode, or --image for image mode.")
@@ -311,7 +385,13 @@ def main():
             "hf_token": args.hf_token,
         }
         if is_qwen3vl:
-            compile_kwargs.update({"height": args.height, "width": args.width, "disagg_tlm": args.disagg_tlm})
+            compile_kwargs.update(
+                {
+                    "height": args.height,
+                    "width": args.width,
+                    "disagg_tlm": args.disagg_tlm,
+                }
+            )
         tlm_qpc, vision_qpc = compile_vlm(tlm_repo, dlm_repo, **compile_kwargs)
         if args.disagg_tlm:
             args.tlm_prefill_qpc, tlm_qpc = tlm_qpc["prefill"], tlm_qpc["decode"]

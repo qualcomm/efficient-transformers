@@ -8,20 +8,37 @@
 import argparse
 import json
 import os
+import time
+from copy import deepcopy
+from pathlib import Path
 
+import numpy as np
 import torch
 from datasets import Features, Sequence, Value, load_dataset
 from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 from torch import nn
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    Qwen3_5Config,
+    Qwen3_5ForCausalLM,
+    Qwen3_5ForConditionalGeneration,
+    Qwen3Config,
+)
+from transformers.models.qwen3_5.configuration_qwen3_5 import (
+    Qwen3_5TextConfig,
+    Qwen3_5VisionConfig,
+)
 
-from QEfficient import QEFFAutoModelForImageTextToText
+from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import (
     QAICInferenceSession,
     is_retained_state_name,
 )
 from QEfficient.generation.dflash_generation import get_qwen35_target_seq_len
+from QEfficient.transformers.models.dspark_draft import QEffDSparkForCausalLM
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
@@ -39,11 +56,22 @@ MODEL_MAP = {
     "Qwen3.6-27B": ("Qwen/Qwen3.6-27B", "z-lab/Qwen3.6-27B-DFlash"),
     "Qwen3.6-35B-A3B": ("Qwen/Qwen3.6-35B-A3B", "z-lab/Qwen3.6-35B-A3B-DFlash"),
     "Qwen3-8B": ("Qwen/Qwen3-8B", "z-lab/Qwen3-8B-DFlash-b16"),
-    "Llama-3.1-8B-Instruct": ("meta-llama/Llama-3.1-8B-Instruct", "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat"),
+    "Llama-3.1-8B-Instruct": (
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat",
+    ),
     "Qwen3-VL-32B-Instruct": (
         "Qwen/Qwen3-VL-32B-Instruct",
         "path_qwen3_vl_model",
     ),
+    "Qwen3-4B-DSpark": ("Qwen/Qwen3-4B", "deepseek-ai/dspark_qwen3_4b_block7"),
+    "Qwen3-8B-DSpark": ("Qwen/Qwen3-8B", "deepseek-ai/dspark_qwen3_8b_block7"),
+    "Qwen3-14B-DSpark": ("Qwen/Qwen3-14B", "deepseek-ai/dspark_qwen3_14b_block7"),
+    "Gemma4-12B-DSpark": (
+        "google/gemma-4-12B-it",
+        "deepseek-ai/dspark_gemma4_12b_block7",
+    ),
+    "Qwen3.8-27B-DSpark": ("Qwen/Qwen3.8-27B", "RadixArk/Qwen3.8-27B-DSpark"),
 }
 
 
@@ -224,7 +252,10 @@ def _compile_tlm_phases(model, compile_kwargs, disagg_tlm):
     qpcs = {}
     for phase, spec in zip(("prefill", "decode"), specializations):
         qpc = model.compile(
-            **compile_kwargs, specializations=[spec], split_retained_state_io=True, offload_pt_weights=False
+            **compile_kwargs,
+            specializations=[spec],
+            split_retained_state_io=True,
+            offload_pt_weights=False,
         )
         qpcs[phase] = dict(qpc) if isinstance(qpc, dict) else str(qpc)
     return qpcs
@@ -268,7 +299,10 @@ def compile_tlm_qpc(
                     "sliding_window": config.sliding_window,
                     "num_logits_to_keep": num_logits,
                 }
-                for length, num_logits in ((prefill_seq_len, 1), (block_size, block_size))
+                for length, num_logits in (
+                    (prefill_seq_len, 1),
+                    (block_size, block_size),
+                )
             ],
         }
     tlm_qeff = QEFFAutoModelForCausalLM.from_pretrained(
@@ -546,7 +580,9 @@ def _get_text_inner(base_model: AutoModelForCausalLM) -> nn.Module:
     return inner
 
 
-def extract_lm_head(model: AutoModelForCausalLM) -> tuple[torch.Tensor, torch.Tensor | None]:
+def extract_lm_head(
+    model: AutoModelForCausalLM,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Return (lm_head_weight, lm_head_bias) as fp32. Falls back to the module when the
     state_dict has no ``lm_head.weight`` (tied embeddings deduplicate it)."""
     sd = model.state_dict()
@@ -807,7 +843,14 @@ def load_and_process_dataset(data_name: str):
 
     elif data_name == "livecodebench":
         base = "https://huggingface.co/datasets/livecodebench/code_generation_lite/resolve/main/"
-        allowed_files = ["test.jsonl", "test2.jsonl", "test3.jsonl", "test4.jsonl", "test5.jsonl", "test6.jsonl"]
+        allowed_files = [
+            "test.jsonl",
+            "test2.jsonl",
+            "test3.jsonl",
+            "test4.jsonl",
+            "test5.jsonl",
+            "test6.jsonl",
+        ]
         urls = [base + fn for fn in allowed_files]
         dataset = load_dataset("json", data_files={"test": urls})["test"]
 
@@ -829,7 +872,9 @@ def load_and_process_dataset(data_name: str):
 
         target_features = Features({"turns": Sequence(Value("large_string"))})
         dataset = dataset.map(
-            lambda x: {"turns": [format_lcb(x)]}, remove_columns=dataset.column_names, features=target_features
+            lambda x: {"turns": [format_lcb(x)]},
+            remove_columns=dataset.column_names,
+            features=target_features,
         )
 
     return dataset
@@ -873,3 +918,965 @@ def reformat_jsonl_by_category(questions: list) -> list:
         category = q.get("category", "")
         q["turns"][0] = format_prompt(q["turns"][0], category)
     return questions
+
+
+def compile_dspark_qpcs(
+    target_model,
+    draft_model,
+    *,
+    output_dir,
+    prefill_seq_len,
+    ctx_len,
+    target_cores,
+    draft_cores,
+    target_devices,
+    draft_devices,
+    draft_prefill_target_seq_len=None,
+    vision=False,
+    height=448,
+    width=448,
+    hf_token=None,
+):
+    require_model_cache()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("QEFF_HOME", str(output_dir / "qeff"))
+    draft_config = AutoConfig.from_pretrained(draft_model, token=hf_token)
+    target_config = AutoConfig.from_pretrained(target_model, token=hf_token)
+    target_text_config = getattr(target_config, "text_config", target_config)
+    if draft_config.hidden_size != target_text_config.hidden_size:
+        raise ValueError("Target and DSpark draft hidden dimensions differ.")
+    target_layer_ids = [layer_id + 1 for layer_id in draft_config.target_layer_ids]
+    block_size = int(draft_config.block_size)
+    verify_width = block_size + 1
+    if verify_width & (verify_width - 1):
+        raise ValueError("DSpark requires block_size + 1 to be a power of two.")
+    if prefill_seq_len < 2 * verify_width or prefill_seq_len % verify_width:
+        raise ValueError("prefill_seq_len must be a multiple of block_size + 1 and at least twice that width.")
+
+    target_qaic_config = {
+        "dspark_tlm": True,
+        "dspark_dlm_repo": draft_model,
+        "target_layer_ids": target_layer_ids,
+        "dspark_block_size": block_size,
+    }
+    target_model_type = target_config.model_type
+    target_compile_kwargs = {
+        "prefill_seq_len": prefill_seq_len,
+        "ctx_len": ctx_len,
+        "num_cores": target_cores,
+        "num_devices": len(target_devices),
+        "mxfp6_matmul": True,
+        "mxint8_kv_cache": True,
+        "mos": 1,
+        "dflash_block_size": verify_width,
+    }
+    if target_model_type == "qwen3":
+        target = QEFFAutoModelForCausalLM.from_pretrained(
+            target_model,
+            config=target_config,
+            torch_dtype=torch.float16,
+            token=hf_token,
+            qaic_config=target_qaic_config,
+        )
+        lang_qpc_path = str(target.compile(**target_compile_kwargs))
+        vision_qpc_path = None
+    else:
+        target = QEFFAutoModelForImageTextToText.from_pretrained(
+            target_model,
+            config=target_config,
+            torch_dtype=torch.float16,
+            token=hf_token,
+            kv_offload=True,
+            qaic_config=target_qaic_config,
+        )
+        target_paths = target.compile(
+            skip_vision=not vision,
+            height=height,
+            width=width,
+            split_model_io=True,
+            use_onnx_subfunctions="gemma4" in target_model_type,
+            **target_compile_kwargs,
+        )
+        lang_qpc_path = str(target_paths.get("lang_qpc_path") or target_paths["lang_prefill_qpc_path"])
+        vision_qpc_path = str(target_paths["vision_qpc_path"]) if vision else None
+
+    draft_target_seq_len = draft_prefill_target_seq_len or prefill_seq_len
+    draft_target_seq_lens = sorted({verify_width, draft_target_seq_len})
+    draft = QEFFAutoModelForCausalLM.from_pretrained(
+        draft_model,
+        config=draft_config,
+        torch_dtype=torch.float16,
+        token=hf_token,
+        qaic_config={
+            "dspark_dlm": True,
+            "dspark_tlm_repo": target_model,
+            "dflash_target_seq_len": verify_width,
+            "dspark_return_token_ids": True,
+        },
+    )
+    draft_qpc_path = str(
+        draft.compile(
+            prefill_seq_len=block_size,
+            ctx_len=ctx_len,
+            num_cores=draft_cores,
+            num_devices=len(draft_devices),
+            mxfp6_matmul=True,
+            mxint8_kv_cache=True,
+            mos=1,
+            prefill_only=True,
+            dflash_block_size=block_size,
+            specializations=[
+                {
+                    "batch_size": 1,
+                    "seq_len": block_size,
+                    "ctx_len": ctx_len,
+                    "target_seq_len": target_seq_len,
+                }
+                for target_seq_len in draft_target_seq_lens
+            ],
+        )
+    )
+    manifest = {
+        "target_model": target_model,
+        "draft_model": draft_model,
+        "block_size": block_size,
+        "mask_token_id": int(draft_config.mask_token_id),
+        "prefill_seq_len": prefill_seq_len,
+        "ctx_len": ctx_len,
+        "lang_qpc_path": lang_qpc_path,
+        "vision_qpc_path": vision_qpc_path,
+        "draft_qpc_path": draft_qpc_path,
+        "target_devices": target_devices,
+        "draft_devices": draft_devices,
+    }
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest_path
+
+
+DEFAULT_DRAFT = "RadixArk/Qwen3.8-27B-DSpark"
+DEFAULT_TARGET = "Qwen/Qwen3.8-27B"
+
+
+def require_model_cache():
+    if not os.environ.get("HF_HUB_CACHE"):
+        raise ValueError("Set HF_HUB_CACHE to your model cache before loading checkpoints; --smoke-test is offline.")
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
+
+def load_tokenizer(model_id):
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.vocab_size > 1:
+        return tokenizer
+    model_path = Path(model_id)
+    if not model_path.is_dir():
+        repo_cache = Path(os.environ["HF_HUB_CACHE"]) / f"models--{model_id.replace('/', '--')}"
+        ref_path = repo_cache / "refs" / "main"
+        revision = (
+            ref_path.read_text().strip() if ref_path.exists() else next((repo_cache / "snapshots").iterdir()).name
+        )
+        model_path = repo_cache / "snapshots" / revision
+        if not (model_path / "tokenizer.json").exists():
+            model_path = next(
+                path for path in (repo_cache / "snapshots").iterdir() if (path / "tokenizer.json").exists()
+            )
+    tokenizer_config = json.loads((model_path / "tokenizer_config.json").read_text())
+    return PreTrainedTokenizerFast(
+        tokenizer_file=str(model_path / "tokenizer.json"),
+        bos_token=tokenizer_config.get("bos_token"),
+        eos_token=tokenizer_config.get("eos_token"),
+        pad_token=tokenizer_config.get("pad_token"),
+        additional_special_tokens=tokenizer_config.get("additional_special_tokens"),
+        chat_template=tokenizer_config.get("chat_template"),
+        model_max_length=tokenizer_config.get("model_max_length", 262144),
+    )
+
+
+def format_chat_text(tokenizer, prompt):
+    messages = [{"role": "user", "content": prompt}]
+    if tokenizer.chat_template:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
+    return f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+
+def parse_devices(value):
+    devices = [int(device.strip()) for device in value.split(",")]
+    if not devices or any(device < 0 for device in devices):
+        raise argparse.ArgumentTypeError("Device IDs must be nonnegative integers.")
+    return devices
+
+
+def inference_parser(vision=False):
+    parser = argparse.ArgumentParser(description="DSpark greedy speculation with hybrid-state verification/replay.")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Check a random tiny model on CPU, without downloads.",
+    )
+    parser.add_argument("--manifest", type=Path, help="Compilation manifest produced by compile.py.")
+    parser.add_argument("--metrics-output", type=Path, help="Save the reported metrics as a JSON file.")
+    parser.add_argument("--prompt", default="Explain why speculative decoding preserves greedy output.")
+    parser.add_argument("--generation-len", type=int, default=64)
+    parser.add_argument("--target-devices", type=parse_devices, default=[0])
+    parser.add_argument("--draft-devices", type=parse_devices, default=[0])
+    if vision:
+        parser.add_argument(
+            "--image",
+            type=Path,
+            help="Local image; required unless --smoke-test is used.",
+        )
+        parser.add_argument("--vision-devices", type=parse_devices, default=[0])
+    return parser
+
+
+def report_metrics(metrics, output_path=None):
+    serialized = json.dumps(metrics, indent=2)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(serialized + "\n")
+    print(serialized)
+
+
+def make_hybrid_cache(model, config, ctx_len):
+    cache = []
+    for layer_index, layer_type in enumerate(config.layer_types):
+        if layer_type == "full_attention":
+            shape = (1, config.num_key_value_heads, ctx_len, config.head_dim)
+            cache.append((torch.zeros(shape), torch.zeros(shape)))
+        else:
+            layer = model.layers[layer_index].linear_attn
+            conv_shape = (
+                1,
+                layer.num_k_heads,
+                layer.conv_dim // layer.num_k_heads,
+                layer.conv_kernel_size,
+            )
+            recurrent_shape = (1, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
+            cache.append((torch.zeros(conv_shape), torch.zeros(recurrent_shape)))
+    return tuple(cache)
+
+
+class TorchTarget:
+    def __init__(self, wrapper, ctx_len, vision_embeds=None):
+        self.wrapper = wrapper
+        self.vision_embeds = vision_embeds
+        self.image_index = torch.zeros((1, 1), dtype=torch.long)
+        if vision_embeds is None:
+            self.model = wrapper.model
+            inner = self.model.model
+            config = self.model.config
+        else:
+            self.model = wrapper.lang_model.model
+            inner = wrapper.model.model.language_model
+            config = wrapper.model.config.text_config
+        self.cache = make_hybrid_cache(inner, config, ctx_len)
+        self.fused_replay = config.model_type == "qwen3_5_text"
+
+    @torch.no_grad()
+    def __call__(self, input_ids, position_ids, commit, num_logits):
+        if self.vision_embeds is None:
+            position_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
+        inputs = {
+            "input_ids": torch.from_numpy(input_ids),
+            "position_ids": torch.from_numpy(position_ids),
+            "past_key_values": self.cache,
+            "cache_commit": torch.tensor([int(commit)]),
+            "num_logits_to_keep": torch.zeros((num_logits, 1), dtype=torch.long),
+        }
+        if self.vision_embeds is not None:
+            inputs.update(vision_embeds=self.vision_embeds, image_idx=self.image_index)
+            predictions, _, image_index, features, cache = self.model(**inputs)
+            if commit:
+                self.image_index = image_index
+        else:
+            outputs = self.model(**inputs)
+            predictions, features, cache = (
+                outputs.logits,
+                outputs.hidden_states,
+                outputs.past_key_values,
+            )
+        self.cache = cache
+        if predictions.ndim == 3:
+            predictions = predictions.argmax(dim=-1)
+        return predictions.numpy().copy(), features.numpy().copy()
+
+
+class TorchDraft:
+    def __init__(self, model, ctx_len):
+        self.model = model
+        config = model.config
+        self.target_seq_len = model.model.block_size + 1
+        self.target_seq_lens = [self.target_seq_len]
+        shape = (1, config.num_key_value_heads, ctx_len, config.head_dim)
+        self.cache = tuple((torch.zeros(shape), torch.zeros(shape)) for _ in range(config.num_hidden_layers))
+
+    @torch.no_grad()
+    def __call__(self, input_ids, features, feature_positions, noise_positions, seed):
+        outputs = self.model(
+            input_ids=torch.from_numpy(input_ids),
+            target_hidden=torch.from_numpy(features),
+            position_ids_target=torch.from_numpy(feature_positions),
+            position_ids=torch.from_numpy(noise_positions),
+            prev_token_ids=torch.tensor([[seed]]),
+            past_key_values=self.cache,
+            use_cache=True,
+        )
+        self.cache = outputs.past_key_values
+        predictions = outputs.logits
+        if predictions.ndim == 3:
+            predictions = predictions.argmax(dim=-1)
+        return predictions.numpy().copy()
+
+
+class DeviceTarget:
+    def __init__(self, session, vision_embeds):
+        self.session = session
+        self.vision_embeds = vision_embeds
+        self.image_index = np.zeros((1, 1), dtype=np.int64)
+        required = {"num_logits_to_keep", "position_ids", "input_ids"}
+        if not required.issubset(session.input_names) or "hidden_states" not in session.output_names:
+            raise ValueError("The target QPC lacks the DSpark verification contract; recompile it.")
+        self.fused_replay = "cache_commit" in session.input_names
+        position_binding = session.bindings[session.binding_index_map["position_ids"]]
+        self.position_rank = len(position_binding.dims)
+        retained = [name for name in session.input_names + session.output_names if is_cache_name(name)]
+        if "vision_embeds_RetainedState" in session.input_names + session.output_names:
+            retained.append("vision_embeds_RetainedState")
+        session.skip_buffers(retained)
+
+    def decode_positions(self, start, width, rope_delta=0):
+        flat = np.arange(start, start + width, dtype=np.int64)[None, :]
+        if self.position_rank == 2:
+            return flat
+        return np.concatenate((flat[None], np.repeat((flat + rope_delta)[None], 3, axis=0)), axis=0)
+
+    def __call__(self, input_ids, position_ids, commit, num_logits):
+        inputs = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "num_logits_to_keep": np.zeros((num_logits, 1), dtype=np.int64),
+        }
+        if self.fused_replay:
+            inputs["cache_commit"] = np.array([int(commit)], dtype=np.int64)
+        if "image_idx" in self.session.input_names:
+            inputs["image_idx"] = self.image_index
+        if self.vision_embeds is not None:
+            inputs["vision_embeds"] = self.vision_embeds
+        set_dynamic_output_buffers(self.session, inputs)
+        outputs = run_session(self.session, inputs)
+        if self.vision_embeds is not None:
+            self.session.skip_buffers(["vision_embeds"])
+            self.vision_embeds = None
+        if commit and "image_idx_output" in outputs:
+            self.image_index = outputs["image_idx_output"].copy()
+        predictions = outputs["logits"]
+        if predictions.ndim == 3:
+            predictions = predictions.argmax(axis=-1)
+        return predictions.copy(), outputs["hidden_states"].copy()
+
+
+class DeviceDraft:
+    def __init__(self, session):
+        self.session = session
+        if "prev_token_ids" not in session.input_names:
+            raise ValueError("The draft QPC lacks DSpark's Markov seed input; recompile it.")
+        if "draft_tokens" in session.output_names:
+            self.output_name = "draft_tokens"
+        elif "logits" in session.output_names:
+            self.output_name = "logits"
+        else:
+            raise ValueError("The draft QPC lacks DSpark token or logits output; recompile it.")
+        target_binding_index = session.binding_index_map["target_hidden"]
+        target_shapes = [shape[target_binding_index][1] for shape in session.allowed_shapes]
+        target_shape = target_shapes[0] if target_shapes else session.bindings[target_binding_index].dims
+        self.target_seq_lens = sorted({int(shape[1]) for shape in target_shapes}) or [int(target_shape[1])]
+        self.target_seq_len = self.target_seq_lens[0]
+        session.skip_buffers([name for name in session.input_names + session.output_names if is_cache_name(name)])
+
+    def __call__(self, input_ids, features, feature_positions, noise_positions, seed):
+        outputs = run_session(
+            self.session,
+            {
+                "input_ids": input_ids,
+                "target_hidden": features,
+                "position_ids_target": feature_positions,
+                "position_ids": noise_positions,
+                "prev_token_ids": np.array([[seed]], dtype=np.int64),
+            },
+        )
+        predictions = outputs[self.output_name]
+        if predictions.ndim == 3:
+            predictions = predictions.argmax(axis=-1)
+        return predictions.copy()
+
+
+def is_cache_name(name):
+    return name.startswith(("past_key.", "past_value.", "conv_state.", "recurrent_state."))
+
+
+def run_session(session, inputs):
+    converted = {}
+    for name, value in inputs.items():
+        if name in session.input_names:
+            binding = session.bindings[session.binding_index_map[name]]
+            dtype = session.aic_to_np_dtype_mapping[binding.type]
+            converted[name] = np.ascontiguousarray(value, dtype=dtype)
+    return session.run(converted)
+
+
+def set_dynamic_output_buffers(session, inputs):
+    if not session.allowed_shapes:
+        return
+    matching_shapes = []
+    for allowed_shape in session.allowed_shapes:
+        if all(
+            tuple(allowed_shape[session.binding_index_map[name]][1]) == np.asarray(value).shape
+            for name, value in inputs.items()
+            if name in session.binding_index_map
+        ):
+            matching_shapes.append(allowed_shape)
+    if len(matching_shapes) != 1:
+        raise ValueError(f"Expected one QAIC specialization for input shapes, found {len(matching_shapes)}.")
+    shape_key = tuple(
+        sorted(
+            (name, tuple(np.asarray(value).shape))
+            for name, value in inputs.items()
+            if name in session.binding_index_map
+        )
+    )
+    if getattr(session, "_dspark_output_shape_key", None) == shape_key:
+        return
+    output_buffer_cache = getattr(session, "_dspark_output_buffer_cache", {})
+    output_buffers = output_buffer_cache.get(shape_key)
+    if output_buffers is not None:
+        session.set_buffers(output_buffers)
+        session._dspark_output_shape_key = shape_key
+        return
+    output_buffers = {}
+    for output_name in session.output_names:
+        basename = output_name.rsplit("/", 1)[-1]
+        if basename.endswith("RetainedState"):
+            continue
+        binding_index = session.binding_index_map[output_name]
+        binding = session.bindings[binding_index]
+        output_shape = matching_shapes[0][binding_index][1]
+        output_dtype = session.aic_to_np_dtype_mapping[binding.type]
+        output_buffers[output_name] = np.empty(output_shape, dtype=output_dtype)
+    output_buffer_cache[shape_key] = output_buffers
+    session._dspark_output_buffer_cache = output_buffer_cache
+    session._dspark_output_shape_key = shape_key
+    session.set_buffers(output_buffers)
+
+
+def prepare_vision_embeds(session, vision_embeds):
+    binding_index = session.binding_index_map.get("vision_embeds")
+    if binding_index is None:
+        if vision_embeds is not None:
+            raise ValueError("The target QPC has no vision_embeds input; recompile it with --vision.")
+        return None
+    shapes = [shape[binding_index][1] for shape in session.allowed_shapes]
+    vision_shape = tuple(shapes[0] if shapes else session.bindings[binding_index].dims)
+    padded_vision = np.zeros(vision_shape, dtype=np.float32)
+    if vision_embeds is not None:
+        if vision_embeds.shape[1] > vision_shape[1]:
+            raise ValueError("Image token count exceeds the compiled vision size; recompile for this resolution.")
+        padded_vision[:, : vision_embeds.shape[1]] = vision_embeds
+    return padded_vision
+
+
+def decode_positions(start, width, rope_delta=0):
+    flat = np.arange(start, start + width, dtype=np.int64)[None, :]
+    return np.concatenate((flat[None], np.repeat((flat + rope_delta)[None], 3, axis=0)), axis=0)
+
+
+def run_dspark(
+    target,
+    draft,
+    input_ids,
+    position_ids,
+    *,
+    block_size,
+    mask_token_id,
+    prefill_seq_len,
+    ctx_len,
+    generation_len,
+    rope_delta=0,
+    eos_token_ids=(),
+):
+    verify_width = block_size + 1
+    if verify_width & (verify_width - 1) or prefill_seq_len < 2 * verify_width or prefill_seq_len % verify_width:
+        raise ValueError(
+            "Verification width must be a power of two; prefill width must be a multiple at least twice as large."
+        )
+    prompt_len = input_ids.shape[1]
+    if input_ids.shape[0] != 1 or prompt_len < 1 or generation_len < 1:
+        raise ValueError("DSpark requires a nonempty single prompt and positive generation length.")
+    if prompt_len + generation_len + verify_width > ctx_len:
+        raise ValueError("ctx_len must reserve the prompt, requested output, and a complete verification block.")
+    start_time = time.perf_counter()
+    prompt_features = []
+    for offset in range(0, prompt_len, prefill_seq_len):
+        count = min(prefill_seq_len, prompt_len - offset)
+        tokens = np.zeros((1, prefill_seq_len), dtype=np.int64)
+        positions = np.full((*position_ids.shape[:-1], prefill_seq_len), -1, dtype=np.int64)
+        tokens[:, :count] = input_ids[:, offset : offset + count]
+        positions[..., :count] = position_ids[..., offset : offset + count]
+        predictions, features = target(tokens, positions, True, 1)
+        prompt_features.append(features[:, :count].copy())
+    seed = int(predictions[0, -1])
+    features = np.concatenate(prompt_features, axis=1)
+    feature_start = 0
+    committed_len = prompt_len
+    generated = []
+    accepted_lengths = []
+    matched_lengths = []
+    target_calls = len(prompt_features)
+    draft_calls = 0
+    draft_seconds = 0.0
+    verify_seconds = 0.0
+    fused_replay = getattr(target, "fused_replay", True)
+    replay_tokens = np.zeros((1, verify_width), dtype=np.int64)
+    replay_positions = np.full((*position_ids.shape[:-1], verify_width), -1, dtype=np.int64)
+    fallback_target_seq_len = getattr(draft, "target_seq_len", block_size)
+    draft_target_seq_lens = sorted(set(getattr(draft, "target_seq_lens", [fallback_target_seq_len])))
+    if not draft_target_seq_lens or draft_target_seq_lens[0] < 1:
+        raise ValueError("Draft target feature widths must be positive.")
+    prefill_time = time.perf_counter() - start_time
+    while len(generated) < generation_len:
+        noise = np.full((1, block_size), mask_token_id, dtype=np.int64)
+        noise[:, 0] = seed
+        noise_positions = np.arange(committed_len, committed_len + block_size, dtype=np.int64)[None, :]
+        draft_target_seq_len = next(
+            (width for width in draft_target_seq_lens if width >= features.shape[1]),
+            draft_target_seq_lens[-1],
+        )
+        for offset in range(0, features.shape[1], draft_target_seq_len):
+            count = min(draft_target_seq_len, features.shape[1] - offset)
+            update = np.zeros((1, draft_target_seq_len, features.shape[-1]), dtype=features.dtype)
+            update[:, :count] = features[:, offset : offset + count]
+            update_positions = np.full((1, draft_target_seq_len), -1, dtype=np.int64)
+            update_positions[:, :count] = np.arange(feature_start + offset, feature_start + offset + count)
+            call_start = time.perf_counter()
+            proposals = draft(noise, update, update_positions, noise_positions, seed)
+            draft_seconds += time.perf_counter() - call_start
+            draft_calls += 1
+        candidates = np.concatenate((np.array([[seed]], dtype=np.int64), proposals), axis=1)
+        positions = (
+            target.decode_positions(committed_len, verify_width, rope_delta)
+            if hasattr(target, "decode_positions")
+            else decode_positions(committed_len, verify_width, rope_delta)
+        )
+        call_start = time.perf_counter()
+        target_tokens = np.concatenate((replay_tokens, candidates), axis=1) if fused_replay else candidates
+        target_positions = np.concatenate((replay_positions, positions), axis=-1) if fused_replay else positions
+        predictions, verified_features = target(target_tokens, target_positions, False, verify_width)
+        verify_seconds += time.perf_counter() - call_start
+        target_calls += 1
+        matches = proposals[0] == predictions[0, :block_size]
+        mismatches = np.flatnonzero(~matches)
+        accepted = int(mismatches[0]) if mismatches.size else block_size
+        count = min(accepted + 1, generation_len - len(generated))
+        emitted = candidates[0, :count].tolist()
+        eos_offsets = [index for index, token in enumerate(emitted) if token in eos_token_ids]
+        if eos_offsets:
+            count = eos_offsets[0] + 1
+            emitted = emitted[:count]
+        current_features = verified_features[:, -verify_width:] if fused_replay else verified_features
+        features = current_features[:, :count].copy()
+        next_seed = int(predictions[0, accepted])
+        if fused_replay:
+            replay_tokens = candidates.copy()
+            replay_positions = positions.copy()
+            replay_positions[..., count:] = -1
+        generated.extend(emitted)
+        accepted_lengths.append(count - 1)
+        matched_lengths.append(accepted)
+        feature_start = committed_len
+        committed_len += count
+        seed = next_seed
+        if eos_offsets:
+            break
+    elapsed = time.perf_counter() - start_time
+    rounds = len(accepted_lengths)
+    target_seconds = verify_seconds
+    target_round_rate = rounds / max(target_seconds, 1e-9)
+    decode_speed = len(generated) / max(elapsed - prefill_time, 1e-9)
+    return {
+        "token_ids": generated,
+        "prefill_seconds": prefill_time,
+        "elapsed_seconds": elapsed,
+        "decode_tokens_per_second": decode_speed,
+        "spd_tokens_per_second": decode_speed,
+        "acceptance_rate": sum(accepted_lengths) / rounds,
+        "draft_acceptance_fraction": sum(matched_lengths) / (block_size * rounds),
+        "accepted_draft_tokens": accepted_lengths,
+        "matched_draft_tokens": matched_lengths,
+        "generated_tokens": len(generated),
+        "speculation_rounds": rounds,
+        "tlm_decode_seconds": target_seconds,
+        "tlm_verify_seconds": verify_seconds,
+        "tlm_replay_seconds": 0.0,
+        "dlm_decode_seconds": draft_seconds,
+        "tlm_tokens_per_second": target_round_rate,
+        "tlm_rounds_per_second": target_round_rate,
+        "tlm_verify_calls_per_second": rounds / max(verify_seconds, 1e-9),
+        "tlm_fused_calls_per_second": rounds / max(verify_seconds, 1e-9),
+        "tlm_replay_calls_per_second": 0.0,
+        "tlm_verified_positions_per_second": verify_width * rounds / max(verify_seconds, 1e-9),
+        "dlm_tokens_per_second": (block_size * rounds) / max(draft_seconds, 1e-9),
+        "target_calls": target_calls,
+        "draft_calls": draft_calls,
+    }
+
+
+def make_dspark_smoke_models(vision=False):
+    torch.manual_seed(42)
+    text_config = Qwen3_5TextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=128,
+        layer_types=["full_attention", "linear_attention"],
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 1.0,
+            "mrope_section": [2, 1, 1],
+        },
+        dtype="float32",
+    )
+    qaic_config = {
+        "dspark_tlm": True,
+        "target_layer_ids": [1, 2],
+        "dspark_block_size": 3,
+    }
+    if vision:
+        vision_config = Qwen3_5VisionConfig(
+            depth=1,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=2,
+            patch_size=4,
+            temporal_patch_size=1,
+            spatial_merge_size=1,
+            out_hidden_size=16,
+            num_position_embeddings=64,
+            dtype="float32",
+        )
+        config = Qwen3_5Config(
+            text_config=text_config,
+            vision_config=vision_config,
+            image_token_id=3,
+            video_token_id=4,
+            vision_start_token_id=5,
+            vision_end_token_id=6,
+        )
+        hf_model = Qwen3_5ForConditionalGeneration(config).eval()
+        reference = deepcopy(hf_model)
+        target = QEFFAutoModelForImageTextToText(hf_model, kv_offload=True, qaic_config=qaic_config)
+        embeddings = hf_model.model.get_input_embeddings()
+    else:
+        hf_model = Qwen3_5ForCausalLM(text_config).eval()
+        reference = deepcopy(hf_model)
+        target = QEFFAutoModelForCausalLM(hf_model, qaic_config=qaic_config)
+        embeddings = hf_model.model.embed_tokens
+    draft_config = Qwen3Config(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=128,
+        block_size=3,
+        target_layer_ids=[0, 1],
+        target_hidden_size=16,
+        mask_token_id=63,
+        markov_rank=8,
+        markov_head_type="vanilla",
+        projector_type="dspark",
+        dtype="float32",
+    )
+    draft = QEffDSparkForCausalLM(draft_config, embed_tokens=embeddings, lm_head=hf_model.lm_head).eval()
+    return (
+        target,
+        QEFFAutoModelForCausalLM(
+            draft,
+            qaic_config={
+                "dspark_dlm": True,
+                "dflash_target_seq_len": draft_config.block_size + 1,
+                "dspark_return_token_ids": True,
+            },
+        ),
+        reference,
+    )
+
+
+@torch.no_grad()
+def dspark_smoke_test(vision=False, generation_len=12, draft_target_seq_lens=None):
+    target, draft, reference = make_dspark_smoke_models(vision)
+    prompt = torch.tensor([[8, 9, 10, 11, 12, 13, 14, 15, 16]])
+    vision_embeds = None
+    if vision:
+        pixels = torch.randn(4, 48)
+        grid = torch.zeros((1, 1, 2, 2), dtype=torch.long)
+        vision_embeds = target.vision_model.model(pixels, grid)
+        expected = reference.model.visual(pixels, grid_thw=torch.tensor([[1, 2, 2]]))
+        expected = expected[0] if isinstance(expected, tuple) else expected.pooler_output
+        torch.testing.assert_close(
+            vision_embeds.reshape(-1, 16),
+            expected.reshape(-1, 16),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        prompt[:, 1:5] = 3
+    torch_draft = TorchDraft(draft.model, 128)
+    if draft_target_seq_lens is not None:
+        torch_draft.target_seq_lens = sorted(set(draft_target_seq_lens))
+        torch_draft.target_seq_len = torch_draft.target_seq_lens[0]
+    metrics = run_dspark(
+        TorchTarget(target, 128, vision_embeds),
+        torch_draft,
+        prompt.numpy(),
+        decode_positions(0, prompt.shape[1]),
+        block_size=3,
+        mask_token_id=63,
+        prefill_seq_len=8,
+        ctx_len=128,
+        generation_len=generation_len,
+    )
+    reference_ids = prompt.clone()
+    expected_tokens = []
+    for _ in range(generation_len):
+        if vision:
+            embeds = reference.model.get_input_embeddings()(reference_ids)
+            embeds[:, 1:5] = vision_embeds
+            outputs = reference.model.language_model(inputs_embeds=embeds, use_cache=False)
+            logits = reference.lm_head(outputs.last_hidden_state)
+        else:
+            logits = reference(input_ids=reference_ids, use_cache=False).logits
+        next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+        expected_tokens.append(int(next_token))
+        reference_ids = torch.cat((reference_ids, next_token), dim=1)
+    if metrics["token_ids"] != expected_tokens:
+        raise AssertionError(f"DSpark differs from HF greedy decoding: {metrics['token_ids']} != {expected_tokens}")
+    metrics.update(mode="tiny_cpu_vision" if vision else "tiny_cpu_text", hf_greedy_parity=True)
+    return metrics
+
+
+HUMANEVAL_PROMPT = "Write a solution to the following problem and make sure that it passes the tests:\n{prompt}"
+
+
+def aggregate_dspark_metrics(rows, block_size):
+    rounds = sum(row["speculation_rounds"] for row in rows)
+    generated = sum(row["generated_tokens"] for row in rows)
+    accepted = sum(sum(row["accepted_draft_tokens"]) for row in rows)
+    matched = sum(sum(row["matched_draft_tokens"]) for row in rows)
+    target_seconds = sum(row["tlm_decode_seconds"] for row in rows)
+    verify_seconds = sum(row["tlm_verify_seconds"] for row in rows)
+    draft_seconds = sum(row["dlm_decode_seconds"] for row in rows)
+    decode_seconds = sum(row["elapsed_seconds"] - row["prefill_seconds"] for row in rows)
+    return {
+        "dataset": "humaneval",
+        "samples": len(rows),
+        "generated_tokens": generated,
+        "speculation_rounds": rounds,
+        "acceptance_length": generated / rounds,
+        "acceptance_rate": accepted / rounds,
+        "draft_acceptance_fraction": matched / (block_size * rounds),
+        "tlm_tokens_per_second": rounds / target_seconds,
+        "tlm_rounds_per_second": rounds / target_seconds,
+        "tlm_verify_calls_per_second": rounds / verify_seconds,
+        "tlm_verified_positions_per_second": (block_size + 1) * rounds / verify_seconds,
+        "dlm_tokens_per_second": block_size * rounds / draft_seconds,
+        "spd_tokens_per_second": generated / decode_seconds,
+        "decode_seconds": decode_seconds,
+    }
+
+
+def run_dspark_humaneval(
+    manifest_path,
+    output_dir,
+    *,
+    target_devices,
+    draft_devices,
+    max_new_tokens=2048,
+    limit=164,
+    dataset_file=None,
+):
+    require_model_cache()
+    manifest = json.loads(Path(manifest_path).read_text())
+    if dataset_file is None:
+        dataset = load_dataset("openai/openai_humaneval", split="test")
+        prompts = [HUMANEVAL_PROMPT.format(prompt=record["prompt"]) for record in dataset]
+    else:
+        records = [json.loads(line) for line in Path(dataset_file).read_text().splitlines() if line.strip()]
+        prompts = [record["turns"][0] for record in records]
+    prompts = prompts[:limit]
+    if len(prompts) != limit:
+        raise ValueError(f"Requested {limit} HumanEval prompts, found {len(prompts)}.")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows_path = output_dir / "samples.jsonl"
+    completed = {}
+    if rows_path.exists():
+        completed = {row["sample_index"]: row for row in map(json.loads, rows_path.read_text().splitlines())}
+
+    tokenizer = load_tokenizer(manifest["target_model"])
+    config = AutoConfig.from_pretrained(manifest["target_model"])
+    text_config = getattr(config, "text_config", config)
+    eos_ids = text_config.eos_token_id or tokenizer.eos_token_id
+    eos_ids = [eos_ids] if isinstance(eos_ids, int) else (eos_ids or [])
+    target_session = QAICInferenceSession(manifest["lang_qpc_path"], target_devices)
+    draft_session = QAICInferenceSession(manifest["draft_qpc_path"], draft_devices)
+    target = DeviceTarget(target_session, None)
+    draft = DeviceDraft(draft_session)
+    started = time.perf_counter()
+    try:
+        for sample_index, prompt in enumerate(prompts):
+            if sample_index in completed:
+                continue
+            chat_text = format_chat_text(tokenizer, prompt)
+            input_ids = tokenizer(chat_text, return_tensors="np")["input_ids"]
+            if input_ids.shape[1] + max_new_tokens + manifest["block_size"] + 1 > manifest["ctx_len"]:
+                raise ValueError(f"HumanEval sample {sample_index} exceeds the compiled context length.")
+            metrics = run_dspark(
+                target,
+                draft,
+                input_ids,
+                target.decode_positions(0, input_ids.shape[1]),
+                block_size=manifest["block_size"],
+                mask_token_id=manifest["mask_token_id"],
+                prefill_seq_len=manifest["prefill_seq_len"],
+                ctx_len=manifest["ctx_len"],
+                generation_len=max_new_tokens,
+                eos_token_ids=eos_ids,
+            )
+            metrics.update(
+                sample_index=sample_index,
+                prompt_tokens=int(input_ids.shape[1]),
+                acceptance_length=metrics["generated_tokens"] / metrics["speculation_rounds"],
+            )
+            with rows_path.open("a") as output:
+                output.write(json.dumps(metrics) + "\n")
+            completed[sample_index] = metrics
+            print(
+                f"[{sample_index + 1}/{len(prompts)}] "
+                f"acceptance_length={metrics['acceptance_length']:.4f} "
+                f"TLM={metrics['tlm_rounds_per_second']:.4f} "
+                f"DLM={metrics['dlm_tokens_per_second']:.4f} "
+                f"SPD={metrics['spd_tokens_per_second']:.4f}",
+                flush=True,
+            )
+    finally:
+        draft_session.deactivate()
+        target_session.deactivate()
+
+    rows = [completed[index] for index in range(len(prompts))]
+    summary = aggregate_dspark_metrics(rows, manifest["block_size"])
+    summary.update(max_new_tokens=max_new_tokens, wall_time_seconds=time.perf_counter() - started)
+    summary_path = output_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary, indent=2))
+    return summary
+
+
+def run_dspark_device_inference(args, vision=False):
+    from transformers import AutoConfig, AutoProcessor
+
+    from QEfficient.generation.cloud_infer import QAICInferenceSession
+
+    require_model_cache()
+    if args.manifest is None:
+        raise ValueError("--manifest is required for QAIC inference.")
+    manifest = json.loads(args.manifest.read_text())
+    if not manifest.get("lang_qpc_path") or not manifest.get("draft_qpc_path"):
+        raise ValueError("The manifest has no compiled target/draft QPCs; rerun compile.py without --export-only.")
+    tokenizer = load_tokenizer(manifest["target_model"])
+    config = AutoConfig.from_pretrained(manifest["target_model"])
+    vision_embeds = None
+    rope_delta = 0
+    if vision:
+        from PIL import Image
+
+        if args.image is None or not manifest.get("vision_qpc_path"):
+            raise ValueError("Vision inference requires --image and a manifest compiled with --vision.")
+        processor = AutoProcessor.from_pretrained(manifest["target_model"])
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": str(args.image)},
+                    {"type": "text", "text": args.prompt},
+                ],
+            }
+        ]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        with Image.open(args.image) as image:
+            inputs = processor(text=[text], images=[image.convert("RGB")], return_tensors="pt")
+        if inputs["image_grid_thw"].shape[0] != 1:
+            raise ValueError("Only one image per request is currently supported.")
+        with torch.device("meta"):
+            rope_model = Qwen3_5ForConditionalGeneration(config)
+        rotary, deltas = rope_model.model.get_rope_index(
+            inputs["input_ids"],
+            inputs["mm_token_type_ids"],
+            inputs["image_grid_thw"],
+            attention_mask=inputs["attention_mask"],
+        )
+        input_ids = inputs["input_ids"].numpy()
+        position_ids = np.concatenate((np.arange(input_ids.shape[1])[None, None, :], rotary.numpy()), axis=0)
+        rope_delta = int(deltas.reshape(-1)[0])
+        vision_session = QAICInferenceSession(manifest["vision_qpc_path"], args.vision_devices)
+        grid_time, grid_height, grid_width = inputs["image_grid_thw"][0].tolist()
+        grid = np.zeros((1, grid_time, grid_height, grid_width), dtype=np.int64)
+        vision_embeds = run_session(
+            vision_session,
+            {"pixel_values": inputs["pixel_values"].numpy(), "image_grid_thw": grid},
+        )["vision_embeds"].copy()
+        vision_session.deactivate()
+    else:
+        text = format_chat_text(tokenizer, args.prompt)
+        input_ids = tokenizer(text, return_tensors="np")["input_ids"]
+        position_ids = (
+            decode_positions(0, input_ids.shape[1])
+            if getattr(config, "model_type", "") == "qwen3_5"
+            else np.arange(input_ids.shape[1], dtype=np.int64)[None, :]
+        )
+    target_session = QAICInferenceSession(manifest["lang_qpc_path"], args.target_devices)
+    draft_session = QAICInferenceSession(manifest["draft_qpc_path"], args.draft_devices)
+    padded_vision = prepare_vision_embeds(target_session, vision_embeds)
+    text_config = getattr(config, "text_config", config)
+    eos_ids = text_config.eos_token_id or tokenizer.eos_token_id
+    eos_ids = [eos_ids] if isinstance(eos_ids, int) else (eos_ids or [])
+    metrics = run_dspark(
+        DeviceTarget(target_session, padded_vision),
+        DeviceDraft(draft_session),
+        input_ids,
+        position_ids,
+        block_size=manifest["block_size"],
+        mask_token_id=manifest["mask_token_id"],
+        prefill_seq_len=manifest["prefill_seq_len"],
+        ctx_len=manifest["ctx_len"],
+        generation_len=args.generation_len,
+        rope_delta=rope_delta,
+        eos_token_ids=eos_ids,
+    )
+    metrics["text"] = tokenizer.decode(metrics["token_ids"], skip_special_tokens=True)
+    metrics["mode"] = "qaic_vision" if vision else "qaic_text"
+    return metrics

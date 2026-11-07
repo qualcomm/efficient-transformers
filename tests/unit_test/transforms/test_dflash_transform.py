@@ -835,3 +835,163 @@ class TestComputeDFlashTargetHiddenStates:
         expected = hidden_norm(fc(torch.cat(target_hidden_list, dim=-1)))
         assert result.shape == (2, 5, hidden)
         assert torch.equal(result, expected)
+
+
+@pytest.mark.transforms
+def test_dspark_tlm_transform_loads_projector_and_norm_on_target(monkeypatch):
+    from QEfficient.customop import CustomRMSNormAIC
+    from QEfficient.transformers.models.dspark_draft import DSparkTLMTransform
+    from QEfficient.utils.constants import _DFLASH_TARGET_ABSMAX
+
+    target = make_tiny_qwen3_5_vlm()
+    hidden_size = target.config.text_config.hidden_size
+    feature_size = 2 * hidden_size
+    fc_weight = torch.arange(hidden_size * feature_size, dtype=torch.float32).reshape(hidden_size, feature_size)
+    norm_weight = torch.linspace(0.5, 1.5, hidden_size)
+
+    def load_projector_weights(repo, names):
+        assert repo == "local-dspark-checkpoint"
+        assert names == {"fc.weight", "hidden_norm.weight"}
+        return {"fc.weight": fc_weight, "hidden_norm.weight": norm_weight}
+
+    monkeypatch.setattr(
+        "QEfficient.transformers.models.dspark_draft.modeling_dspark_draft.load_checkpoint_weights",
+        load_projector_weights,
+    )
+    transformed, applied = DSparkTLMTransform.apply(
+        target,
+        {
+            "dspark_tlm": True,
+            "dspark_dlm_repo": "local-dspark-checkpoint",
+            "target_layer_ids": [1, 3],
+            "dspark_block_size": 3,
+        },
+    )
+
+    target_model = transformed.model.language_model
+    bound = (feature_size**0.5) * fc_weight.norm(dim=1).max().item()
+    expected_fc_weight = fc_weight / max(bound / _DFLASH_TARGET_ABSMAX, 1.0)
+    assert applied
+    assert isinstance(target_model.fc, nn.Linear)
+    assert isinstance(target_model.hidden_norm, CustomRMSNormAIC)
+    torch.testing.assert_close(target_model.fc.weight, expected_fc_weight)
+    torch.testing.assert_close(target_model.hidden_norm.weight, norm_weight)
+    assert target_model.target_layer_ids == [1, 3]
+    assert target_model.dflash_chunk_size == 4
+
+
+@pytest.mark.transforms
+def test_dspark_fused_smoke_projects_target_features_and_uses_one_target_call_per_round():
+    from examples.performance.dflash.utils import dspark_smoke_test, make_dspark_smoke_models
+    from QEfficient.customop import CustomRMSNormAIC
+
+    target, draft, _ = make_dspark_smoke_models()
+    target_model = target.model.model
+
+    assert isinstance(target_model.fc, nn.Linear)
+    assert isinstance(target_model.hidden_norm, CustomRMSNormAIC)
+    assert target_model.fc.in_features == 32
+    assert target_model.fc.out_features == 16
+    assert draft.model.model.target_feature_size == 16
+    assert not hasattr(draft.model.model, "fc")
+    assert not hasattr(draft.model.model, "hidden_norm")
+    assert target_model.dflash_chunk_size == 4
+    assert draft.dspark_dlm
+
+    metrics = dspark_smoke_test(generation_len=4)
+
+    assert metrics["hf_greedy_parity"]
+    assert metrics["tlm_replay_calls_per_second"] == 0.0
+    assert metrics["target_calls"] == 2 + metrics["speculation_rounds"]
+    first_round_calls = (9 + draft.model.model.block_size) // (draft.model.model.block_size + 1)
+    assert metrics["draft_calls"] == first_round_calls + metrics["speculation_rounds"] - 1
+
+
+@pytest.mark.transforms
+def test_dspark_wide_prompt_specialization_preserves_greedy_output_and_reduces_calls():
+    from examples.performance.dflash.utils import dspark_smoke_test
+
+    metrics = dspark_smoke_test(generation_len=4, draft_target_seq_lens=[4, 16])
+
+    assert metrics["hf_greedy_parity"]
+    assert metrics["draft_calls"] == metrics["speculation_rounds"]
+
+
+@pytest.mark.transforms
+def test_dspark_token_output_matches_markov_logits_argmax():
+    from examples.performance.dflash.utils import make_dspark_smoke_models
+
+    _, draft, _ = make_dspark_smoke_models()
+    model = draft.model
+    config = model.config
+    cache_shape = (1, config.num_key_value_heads, 16, config.head_dim)
+
+    def make_cache():
+        return tuple((torch.zeros(cache_shape), torch.zeros(cache_shape)) for _ in range(config.num_hidden_layers))
+
+    inputs = {
+        "input_ids": torch.tensor([[8, 63, 63]]),
+        "target_hidden": torch.randn(1, 4, config.hidden_size),
+        "position_ids_target": torch.tensor([[0, 1, 2, 3]]),
+        "position_ids": torch.tensor([[4, 5, 6]]),
+        "prev_token_ids": torch.tensor([[7]]),
+        "use_cache": True,
+    }
+    model.return_token_ids = False
+    expected = model(**inputs, past_key_values=make_cache()).logits.argmax(dim=-1)
+    model.return_token_ids = True
+    actual = model(**inputs, past_key_values=make_cache()).logits
+
+    assert actual.dtype == torch.int64
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.transforms
+def test_dspark_gemma4_draft_forward_uses_checkpoint_attention_layout():
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+
+    from QEfficient.transformers.models.dspark_draft import DSparkGemmaDraftModel, QEffDSparkForCausalLM
+
+    config = Gemma4TextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=256,
+        layer_types=["full_attention"],
+        max_position_embeddings=128,
+        dtype="float32",
+    )
+    dspark_values = {
+        "global_head_dim": 512,
+        "num_global_key_value_heads": 1,
+        "attention_k_eq_v": True,
+        "enable_moe_block": False,
+        "hidden_size_per_layer_input": 0,
+        "block_size": 3,
+        "target_layer_ids": [0],
+        "mask_token_id": 63,
+        "num_anchors": 4,
+        "markov_rank": 8,
+        "markov_head_type": "vanilla",
+        "enable_confidence_head": True,
+        "confidence_head_with_markov": True,
+        "final_logit_softcapping": 30.0,
+    }
+    for name, value in dspark_values.items():
+        setattr(config, name, value)
+
+    model = QEffDSparkForCausalLM(config, draft_model=DSparkGemmaDraftModel(config)).eval()
+    outputs = model(
+        input_ids=torch.tensor([[7, 63, 63]]),
+        target_hidden=torch.randn(1, 4, config.hidden_size),
+        position_ids_target=torch.tensor([[0, 1, 2, 3]]),
+        position_ids=torch.tensor([[4, 5, 6]]),
+        prev_token_ids=torch.tensor([[7]]),
+        use_cache=False,
+    )
+
+    assert outputs.logits.shape == (1, config.block_size, config.vocab_size)
+    assert outputs.logits.dtype == torch.float32

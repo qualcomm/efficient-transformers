@@ -34,6 +34,12 @@ Examples:
 import argparse
 import os
 import sys
+from pathlib import Path
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, THIS_DIR)
 
 from rich.console import Console
 from rich.markup import escape
@@ -41,14 +47,19 @@ from transformers import AutoConfig, AutoTokenizer
 from utils import (
     MODEL_MAP,
     compile_dlm_qpc,
+    compile_dspark_qpcs,
     compile_tlm_qpc,
+    dspark_smoke_test,
     format_prompt,
     get_dflash_block_size,
     get_dlm_target_seq_len,
     get_spd_prompt_chunk_size,
     load_spd_session,
     load_spd_sessions,
+    report_metrics,
     resolve_model_name,
+    run_dspark_device_inference,
+    run_dspark_humaneval,
     validate_dlm_target_seq_len,
     validate_spd_decode_specialization,
 )
@@ -57,10 +68,6 @@ from QEfficient.generation.dflash_generation import run_spd_inference_single
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, THIS_DIR)
 
 console = Console()
 
@@ -71,6 +78,25 @@ def parse_device_list(s):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--technique", choices=["dflash", "dspark"], default="dflash")
+    p.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run the offline tiny DSpark parity check.",
+    )
+    p.add_argument("--manifest", type=Path, help="Reuse a DSpark compilation manifest.")
+    p.add_argument("--metrics-output", type=Path, help="Write DSpark metrics as JSON.")
+    p.add_argument(
+        "--dspark-output-dir",
+        type=Path,
+        help="DSpark compilation and manifest directory.",
+    )
+    p.add_argument("--draft-prefill-target-seq-len", type=int, default=None)
+    p.add_argument("--dataset", choices=["single", "humaneval"], default="single")
+    p.add_argument("--dataset-file", type=Path)
+    p.add_argument("--benchmark-output-dir", type=Path)
+    p.add_argument("--limit", type=int, default=164)
+    p.add_argument("--max-new-tokens", type=int, default=2048)
     p.add_argument(
         "--model_name",
         required=True,
@@ -79,7 +105,7 @@ def parse_args():
         "the full HF repo path (e.g. 'Qwen/Qwen3-4B'). "
         f"Supported: {', '.join(MODEL_MAP.keys())}",
     )
-    p.add_argument("--prompt", required=True, help="Input prompt text.")
+    p.add_argument("--prompt", help="Input prompt text.")
     p.add_argument(
         "--category",
         default="",
@@ -99,7 +125,12 @@ def parse_args():
         default=None,
         help="Enable thinking when supported; default: model chat-template setting.",
     )
-    thinking.add_argument("--disable-thinking", "--disable_thinking", dest="enable_thinking", action="store_false")
+    thinking.add_argument(
+        "--disable-thinking",
+        "--disable_thinking",
+        dest="enable_thinking",
+        action="store_false",
+    )
     p.add_argument(
         "--tlm_hf_path",
         default=None,
@@ -169,9 +200,59 @@ def _resolve_batch_size(batch_size):
     return batch_size
 
 
+def _run_dspark(args):
+    if args.smoke_test:
+        report_metrics(dspark_smoke_test(generation_len=args.generation_len), args.metrics_output)
+        return
+    target_model, draft_model = MODEL_MAP[args.model_name]
+    if not args.model_name.endswith("-DSpark"):
+        raise ValueError("Select a *-DSpark model_name when --technique dspark is used.")
+    output_dir = (
+        args.dspark_output_dir
+        or Path(os.environ.get("QEFF_HOME", "dspark-artifacts")) / "dflash-dspark" / args.model_name
+    )
+    if args.manifest is None:
+        args.manifest = compile_dspark_qpcs(
+            target_model,
+            draft_model,
+            output_dir=output_dir,
+            prefill_seq_len=args.prefill_seq_len,
+            ctx_len=args.ctx_len,
+            target_cores=args.tlm_cores,
+            draft_cores=args.dlm_cores,
+            target_devices=args.tlm_devices,
+            draft_devices=args.dlm_devices,
+            draft_prefill_target_seq_len=args.draft_prefill_target_seq_len,
+            hf_token=args.hf_token,
+        )
+    args.target_devices = args.tlm_devices
+    args.draft_devices = args.dlm_devices
+    if args.dataset == "humaneval":
+        benchmark_dir = args.benchmark_output_dir or output_dir / "humaneval"
+        run_dspark_humaneval(
+            args.manifest,
+            benchmark_dir,
+            target_devices=args.target_devices,
+            draft_devices=args.draft_devices,
+            max_new_tokens=args.max_new_tokens,
+            limit=args.limit,
+            dataset_file=args.dataset_file,
+        )
+        return
+    if not args.prompt:
+        raise ValueError("--prompt is required for single-prompt inference.")
+    metrics = run_dspark_device_inference(args)
+    report_metrics(metrics, args.metrics_output)
+
+
 def main():
     args = parse_args()
+    if args.technique == "dspark":
+        _run_dspark(args)
+        return
     batch_size = _resolve_batch_size(args.batch_size)
+    if not args.prompt:
+        raise ValueError("--prompt is required for DFlash inference.")
 
     tlm_repo_default, dlm_repo = MODEL_MAP[args.model_name]
     tlm_repo = args.tlm_hf_path or tlm_repo_default

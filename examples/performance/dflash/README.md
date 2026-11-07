@@ -273,3 +273,7 @@ Edit `MODEL_MAP` in `utils.py`:
 ```
 
 Both entry points reuse the same map automatically.
+
+## DSpark
+
+DSpark uses the same text and vision entry points with `--technique dspark`. See [`dflash-dspark/README.md`](dflash-dspark/README.md) for supported checkpoints, compilation, inference, and benchmark results.
