@@ -15,6 +15,7 @@ to real QPCs, and drives them through the SPD decode loop.
 import os
 import runpy
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -40,6 +41,62 @@ CTX_LEN = 32
 PAD_TOKEN_ID = 0
 EOS_TOKEN_ID = 1
 MASK_TOKEN_ID = 2
+
+
+@pytest.mark.parametrize("lang_only", [True, False])
+def test_dflash2_target_helper_preserves_vision_paths(monkeypatch, lang_only):
+    from examples.performance.dflash import utils
+
+    compile_calls = []
+    paths = {"vision_qpc_path": Path("vision.qpc"), "lang_qpc_path": Path("lang.qpc")}
+    text_model = SimpleNamespace(
+        target_layer_ids=[0, 1], config=SimpleNamespace(hidden_size=4), fc=SimpleNamespace(in_features=8)
+    )
+
+    def compile_target(**kwargs):
+        compile_calls.append(kwargs)
+        return paths
+
+    model = SimpleNamespace(dflash_tlm=True, model=SimpleNamespace(language_model=text_model), compile=compile_target)
+    monkeypatch.setattr(utils, "read_dflash2_compile_meta", lambda *args: {"block_size": 8})
+    monkeypatch.setattr(utils, "validate_dflash2_tlm_pair", lambda *args: SimpleNamespace())
+    monkeypatch.setattr(utils.QEFFAutoModelForImageTextToText, "from_pretrained", lambda *args, **kwargs: model)
+    result = utils.compile_dflash2_tlm_qpc(
+        "target",
+        "draft",
+        target_auto_class="image_text_to_text",
+        prefill_seq_len=128,
+        ctx_len=4096,
+        num_devices=4,
+        num_cores=8,
+        vision_num_devices=4,
+        vision_num_cores=4,
+        lang_only=lang_only,
+    )
+    assert result == ("lang.qpc" if lang_only else {name: str(path) for name, path in paths.items()})
+    assert compile_calls[0]["num_devices"] == 4
+    assert compile_calls[0]["num_cores"] == 8
+    assert compile_calls[0]["vision_num_devices"] == 4
+    assert compile_calls[0]["vision_num_cores"] == 4
+    assert compile_calls[0].get("skip_vision", False) is lang_only
+
+
+@pytest.mark.parametrize("target_auto_class,kv_offload", [("causal_lm", True), ("image_text_to_text", False)])
+def test_dflash2_target_helper_rejects_non_split_vision_resources(target_auto_class, kv_offload):
+    from examples.performance.dflash import utils
+
+    with pytest.raises(ValueError, match="Independent vision resources"):
+        utils.compile_dflash2_tlm_qpc(
+            "target",
+            "draft",
+            target_auto_class=target_auto_class,
+            kv_offload=kv_offload,
+            prefill_seq_len=128,
+            ctx_len=4096,
+            num_devices=4,
+            num_cores=8,
+            vision_num_cores=4,
+        )
 
 
 @pytest.mark.parametrize("config", [{}, {"dflash_config": {}}], ids=["missing-block-size", "empty-dflash-config"])
@@ -343,6 +400,7 @@ class _FakeTokenizer:
 class _FakeTLMSession:
     def __init__(self):
         self.run_count = 0
+        self.input_names = []
 
     def set_buffers(self, _buffers):
         pass
@@ -368,6 +426,28 @@ class _FakeDLMSession:
         token_ids = np.array([5, 6, 7, 8])
         logits[0, np.arange(BLOCK_SIZE), token_ids] = 1
         return {"logits": logits}
+
+
+class _FakeCommitTLMSession(_FakeTLMSession):
+    def __init__(self, position_dims=2):
+        super().__init__()
+        self.input_names = ["input_ids", "num_logits_to_keep", "position_ids", "cache_commit"]
+        self.binding_index_map = {"input_ids": 0, "num_logits_to_keep": 1, "position_ids": 2}
+        position_shape = (1, 2 * BLOCK_SIZE) if position_dims == 2 else (position_dims, 1, 2 * BLOCK_SIZE)
+        self.allowed_shapes = [[(None, (1, 2 * BLOCK_SIZE)), (None, (BLOCK_SIZE, 1)), (None, position_shape)]]
+        self.bindings = [SimpleNamespace(dims=shape) for _, shape in self.allowed_shapes[0]]
+        self.cache_commits = []
+        self.position_history = []
+        self.input_history = []
+
+    def run(self, inputs):
+        self.cache_commits.append(int(inputs["cache_commit"][0]))
+        self.position_history.append(inputs["position_ids"].copy())
+        self.input_history.append(inputs["input_ids"].copy())
+        outputs = super().run(inputs)
+        if inputs["cache_commit"].item() == 0:
+            outputs["logits"][:, 1] = 10
+        return outputs
 
 
 class _FakeGemmaTLMSession:
@@ -477,6 +557,56 @@ def test_dflash_queued_prefix_counts_seed_and_preserves_verification_features(ac
     assert metrics.tlm_decode_time > 0
 
 
+def test_dflash2_host_selector_rescores_top_k_chain():
+    import torch
+
+    from examples.performance.dflash.utils import HostSelector
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import CandidateSelector
+
+    predecessor = np.zeros((VOCAB_SIZE, 2), dtype=np.float32)
+    successor = np.zeros_like(predecessor)
+    predecessor[[0, 2], 0] = 1.0
+    successor[2, 0] = 2.0
+    selector = HostSelector(predecessor, successor, top_k=2)
+
+    logits = np.zeros((1, BLOCK_SIZE, VOCAB_SIZE), dtype=np.float32)
+    logits[:, :, 1] = 5.0
+    logits[:, :, 2] = 4.5
+    outputs = {
+        "logits": logits,
+        "selector_hidden": np.ones((1, BLOCK_SIZE, 2), dtype=np.float32),
+    }
+
+    selected = selector(outputs, np.array([0], dtype=np.int64))
+    reference = CandidateSelector(
+        SimpleNamespace(
+            hidden_size=2,
+            vocab_size=VOCAB_SIZE,
+            dflash_config={"selector_rank": 2, "selector_top_k": 2},
+        )
+    )
+    with torch.no_grad():
+        reference.predecessor_codebook.weight.copy_(torch.from_numpy(predecessor))
+        reference.successor_codebook.weight.copy_(torch.from_numpy(successor))
+        reference.hidden_projection.weight.copy_(torch.eye(2))
+    expected, _ = reference.select(
+        torch.ones((1, BLOCK_SIZE, 2)),
+        torch.from_numpy(logits),
+        torch.tensor([0]),
+    )
+
+    np.testing.assert_array_equal(selected, expected.numpy())
+    assert selected.tolist() == [[2, 2, 2, 2]]
+    with pytest.raises(ValueError, match="selector_hidden rank"):
+        selector(
+            {
+                "logits": logits,
+                "selector_hidden": np.ones((1, BLOCK_SIZE, 3), dtype=np.float32),
+            },
+            np.array([0], dtype=np.int64),
+        )
+
+
 def test_dflash_generation_len_caps_partial_block():
     metrics = run_spd_inference_single(
         prompt_text="hi",
@@ -498,6 +628,178 @@ def test_dflash_generation_len_caps_partial_block():
     assert metrics.total_generated_tokens == 1
     assert metrics.total_accepted_tokens == 1
     assert metrics.num_total_iters == 1
+
+
+@pytest.mark.parametrize("position_dims", [2, 4])
+@pytest.mark.parametrize("dynamic_shapes", [False, True])
+def test_dflash2_text_path_uses_selector_and_qwen35_queued_prefix(position_dims, dynamic_shapes):
+    tlm_session = _FakeCommitTLMSession(position_dims)
+    if not dynamic_shapes:
+        tlm_session.allowed_shapes = []
+    selector_calls = []
+
+    def selector(outputs, anchor_ids):
+        selector_calls.append((sorted(outputs), anchor_ids.copy()))
+        return outputs["logits"].argmax(axis=-1)
+
+    run_spd_inference_single(
+        prompt_text="hi",
+        tokenizer=_FakeTokenizer(),
+        dlm_session=_FakeDLMSession(),
+        tlm_session=tlm_session,
+        mask_token_id=MASK_TOKEN_ID,
+        vocab_size=VOCAB_SIZE,
+        prompt_chunk_size=PROMPT_CHUNK_SIZE,
+        ctx_len=CTX_LEN,
+        block_size=BLOCK_SIZE,
+        max_iterations=2,
+        hidden_size=HIDDEN_SIZE,
+        generation_len=16,
+        draft_selector=selector,
+    )
+
+    assert len(selector_calls) >= 2
+    assert tlm_session.cache_commits == [1, 0, 0]
+    assert all(ids.shape == (1, 2 * BLOCK_SIZE) for ids in tlm_session.input_history[1:])
+    assert all(positions.shape == tuple(tlm_session.bindings[2].dims) for positions in tlm_session.position_history)
+    assert np.all(tlm_session.position_history[1][..., :BLOCK_SIZE] == -1)
+    assert np.all(tlm_session.position_history[2][..., 2:BLOCK_SIZE] == -1)
+    assert np.all(tlm_session.position_history[2][..., :2] >= 0)
+    assert np.all(tlm_session.position_history[2][..., BLOCK_SIZE:] >= 0)
+
+
+@pytest.mark.parametrize("ctx_len", [32, 48])
+def test_hybrid_verification_reserves_a_full_block(ctx_len):
+    class BoundedTarget(_FakeCommitTLMSession):
+        def run(self, inputs):
+            if inputs["cache_commit"].item() == 0:
+                assert inputs["position_ids"].max() < ctx_len
+            outputs = super().run(inputs)
+            if inputs["cache_commit"].item() == 0:
+                outputs["logits"].fill(10)
+            else:
+                outputs["logits"] = np.full((1, inputs["input_ids"].shape[1]), 5, dtype=np.int32)
+            return outputs
+
+    target = BoundedTarget()
+    metrics = run_spd_inference_single(
+        prompt_text="x" * (ctx_len - 2 * BLOCK_SIZE),
+        tokenizer=_FakeTokenizer(),
+        dlm_session=_FakeDLMSession(),
+        tlm_session=target,
+        mask_token_id=MASK_TOKEN_ID,
+        vocab_size=VOCAB_SIZE,
+        prompt_chunk_size=PROMPT_CHUNK_SIZE,
+        ctx_len=ctx_len,
+        block_size=BLOCK_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        generation_len=2 * BLOCK_SIZE,
+        max_iterations=20,
+    )
+
+    assert 0 < metrics.total_generated_tokens <= BLOCK_SIZE
+    assert target.cache_commits.count(0) > 1
+
+
+@pytest.mark.parametrize("target_model_type", ["qwen3", "qwen3_5", "qwen3_5_moe"])
+def test_dflash_report_distinguishes_wall_and_model_call_speed(capsys, monkeypatch, target_model_type):
+    from examples.performance.dflash import utils
+
+    monkeypatch.setitem(sys.modules, "utils", utils)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    namespace = runpy.run_path(os.path.join(os.path.dirname(utils.__file__), "basic_inference_vision.py"))
+
+    metrics = SpecDecodingMetrics(block_size=BLOCK_SIZE)
+    metrics.total_generated_tokens = 10
+    metrics.num_total_iters = 2
+    metrics.tlm_decode_time = 1.0
+    metrics.dlm_decode_time = 1.0
+    metrics.decode_wall_time = 4.0
+    namespace["_print_results"](
+        SimpleNamespace(decode=lambda *args, **kwargs: ""), metrics, {"vision_encode_time_s": None}, target_model_type
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert next(line for line in lines if "SPD Wall Speed" in line).endswith("2.5")
+    assert next(line for line in lines if "SPD Model-call Speed" in line).endswith("5.0")
+    assert not any("SPD Decode Speed" in line for line in lines)
+    expected_label = "TLM Rounds" if target_model_type in {"qwen3_5", "qwen3_5_moe"} else "TLM Throughput"
+    assert any(expected_label in line for line in lines)
+
+
+@pytest.mark.parametrize("thinking_flag", [None, "--enable-thinking", "--disable-thinking"])
+def test_dflash2_vision_cli_forwards_thinking_override(monkeypatch, thinking_flag):
+    from examples.performance.dflash import utils
+
+    chat_kwargs = []
+
+    class Tokenizer(_FakeTokenizer):
+        def apply_chat_template(self, messages, **kwargs):
+            assert messages == [{"role": "user", "content": "hi"}]
+            chat_kwargs.append(kwargs)
+            return "hi"
+
+    tokenizer = Tokenizer()
+    meta = SimpleNamespace(
+        block_size=BLOCK_SIZE,
+        vocab_size=VOCAB_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        mask_token_id=MASK_TOKEN_ID,
+        selector_top_k=1,
+        selector_rank=3,
+    )
+    monkeypatch.setitem(sys.modules, "utils", utils)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    monkeypatch.setattr(utils, "read_dflash2_meta", lambda *args: meta)
+    monkeypatch.setattr(utils, "load_spd_sessions", lambda *args: (_FakeDLMSession(), _FakeCommitTLMSession(4)))
+    namespace = runpy.run_path(os.path.join(os.path.dirname(utils.__file__), "basic_inference_vision.py"))
+    monkeypatch.setattr(namespace["AutoTokenizer"], "from_pretrained", lambda *args, **kwargs: tokenizer)
+    arguments = [
+        "basic_inference_vision.py",
+        "--dflash-method",
+        "dflash-2",
+        "--tlm_qpc",
+        "target",
+        "--dlm_qpc",
+        "draft",
+        "--prompt",
+        "hi",
+        "--ctx_len",
+        str(CTX_LEN),
+        "--iteration",
+        "1",
+        "--generation_len",
+        "2",
+    ]
+    if thinking_flag is not None:
+        arguments.append(thinking_flag)
+    monkeypatch.setattr(sys, "argv", arguments)
+    args = namespace["parse_args"]()
+    namespace["_run_dflash2"](args, "target", "draft", SimpleNamespace(model_type="qwen3_5"), 1)
+
+    expected = {"tokenize": False, "add_generation_prompt": True}
+    if thinking_flag is not None:
+        expected["enable_thinking"] = thinking_flag == "--enable-thinking"
+    assert chat_kwargs == [expected]
+
+
+def test_dflash2_text_path_rejects_old_qwen35_verification_qpc():
+    tlm_session = _FakeCommitTLMSession()
+    tlm_session.allowed_shapes[0][0] = (None, (1, BLOCK_SIZE))
+
+    with pytest.raises(ValueError, match="concatenated verification specialization"):
+        run_spd_inference_single(
+            prompt_text="hi",
+            tokenizer=_FakeTokenizer(),
+            dlm_session=_FakeDLMSession(),
+            tlm_session=tlm_session,
+            mask_token_id=MASK_TOKEN_ID,
+            vocab_size=VOCAB_SIZE,
+            prompt_chunk_size=PROMPT_CHUNK_SIZE,
+            ctx_len=CTX_LEN,
+            block_size=BLOCK_SIZE,
+            hidden_size=HIDDEN_SIZE,
+        )
 
 
 def test_dflash_rejects_padded_prompt_longer_than_context():

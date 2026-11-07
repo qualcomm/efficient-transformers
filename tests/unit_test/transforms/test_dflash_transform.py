@@ -20,12 +20,14 @@ Verifies that:
      wiring produces the expected hidden_states shape end to end.
   6. compute_dflash_target_hidden_states itself matches a manual reference computation.
 
-All tests run on CPU only, using tiny in-memory models -- no checkpoints, no Hugging Face Hub access.
+All tests run on CPU only, using tiny in-memory models and synthetic local safetensors checkpoints --
+no downloaded checkpoints or Hugging Face Hub access.
 """
 
 import copy
 import io
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -97,6 +99,69 @@ def make_tiny_qwen3_5_vlm(moe=False):
 
 
 @pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("with_image", [False, True])
+@pytest.mark.parametrize("padding", [0, 2])
+def test_qwen3_5_rope_helper_matches_hf_and_qeff(moe, with_image, padding):
+    from types import SimpleNamespace
+
+    from QEfficient.generation import dflash_generation
+    from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import (
+        QEffQwen3_5ForConditionalGeneration,
+        QEffQwen3_5Model,
+    )
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        QEffQwen3_5MoeForConditionalGeneration,
+        QEffQwen3_5MoeModel,
+    )
+
+    with torch.device("meta"):
+        hf_model = make_tiny_qwen3_5_vlm(moe=moe)
+    qeff_model_cls = QEffQwen3_5MoeModel if moe else QEffQwen3_5Model
+    qeff_generation_cls = QEffQwen3_5MoeForConditionalGeneration if moe else QEffQwen3_5ForConditionalGeneration
+    assert qeff_model_cls.get_rope_index is type(hf_model.model).get_rope_index
+    assert qeff_model_cls.get_vision_position_ids is type(hf_model.model).get_vision_position_ids
+
+    tokens = [10, 5, 3, 3, 3, 3, 6, 11, 12] if with_image else [10, 11, 12, 13]
+    input_ids = torch.tensor([tokens + [0] * padding], dtype=torch.int64)
+    attention_mask = torch.tensor([[1] * len(tokens) + [0] * padding], dtype=torch.int64)
+    mm_token_type_ids = (input_ids == hf_model.config.image_token_id).to(torch.int64)
+    image_grid_thw = torch.tensor([[1, 4, 4]]) if with_image else None
+    expected_mrope, expected_deltas = hf_model.model.get_rope_index(
+        input_ids,
+        mm_token_type_ids,
+        image_grid_thw=image_grid_thw,
+        attention_mask=attention_mask,
+    )
+
+    positions, deltas = dflash_generation.compute_position_ids_qwen3_vl(
+        input_ids, attention_mask, image_grid_thw, hf_model.config
+    )
+    torch.testing.assert_close(positions[1:], expected_mrope)
+    torch.testing.assert_close(deltas, expected_deltas)
+    prepared = qeff_generation_cls.prepare_inputs_for_generation(
+        SimpleNamespace(model=hf_model.model),
+        inputs={
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "mm_token_type_ids": mm_token_type_ids,
+            "image_grid_thw": image_grid_thw,
+        },
+        prefill_seq_len=input_ids.shape[1],
+    )
+    torch.testing.assert_close(positions, prepared["position_ids"])
+
+    hf_model.model.rope_deltas = expected_deltas
+    native_decode = hf_model._prepare_position_ids_for_generation(
+        torch.zeros((1, 4), dtype=torch.int64),
+        {"past_key_values": SimpleNamespace(get_seq_length=lambda: len(tokens))},
+    )
+    flat_positions = np.arange(len(tokens), len(tokens) + 4).reshape(1, -1)
+    decode_positions = dflash_generation.build_decode_position_ids_qwen3_vl(flat_positions, int(deltas[0, 0]))
+    np.testing.assert_array_equal(decode_positions[0], flat_positions)
+    np.testing.assert_array_equal(decode_positions[1:], native_decode[:, :, -4:].expand(3, -1, -1).numpy())
+
+
+@pytest.mark.parametrize("moe", [False, True])
 @pytest.mark.parametrize("seq_len,num_logits", [(32, 16), (128, 1)])
 def test_qwen3_5_dflash_vllm_returns_vocabulary_logits(moe, seq_len, num_logits):
     from QEfficient import QEFFAutoModelForImageTextToText
@@ -119,6 +184,7 @@ def test_qwen3_5_dflash_vllm_returns_vocabulary_logits(moe, seq_len, num_logits)
             enable_chunking=True,
         )
     wrapper = qeff.lang_model.model
+    assert wrapper.qaic_config is qaic_config
     inputs = qeff.model.get_dummy_inputs(kv_offload=True, batch_size=1)["lang"]
     inputs["input_ids"] = torch.randint(10, VOCAB_SIZE, (1, seq_len))
     inputs["input_ids"][:, :2] = hf_model.config.image_token_id
@@ -582,6 +648,699 @@ def test_dflash_transforms_run_before_spd_and_sampler(monkeypatch, qaic_config, 
     QEFFAutoModelForCausalLM(make_tiny_qwen3(), qaic_config=qaic_config)
 
     assert applied == expected_order
+
+
+def test_dflash2_dlm_dispatch_accepts_subclasses(monkeypatch):
+    from transformers import Qwen3Config
+
+    from QEfficient import QEFFAutoModelForCausalLM
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+    from QEfficient.transformers.models.pytorch_transforms import (
+        DFlash2DLMTransform,
+        DFlashDLMTransform,
+        DFlashTransform,
+        SamplerTransform,
+        SpDTransform,
+    )
+
+    class WrappedDFlash2ForCausalLM(DFlash2ForCausalLM):
+        pass
+
+    config = Qwen3Config(
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        hidden_size=32,
+        intermediate_size=64,
+        vocab_size=64,
+        max_position_embeddings=32,
+        head_dim=16,
+        layer_types=["sliding_attention"],
+        sliding_window=16,
+        dflash_config={
+            "block_size": 4,
+            "conv_group_size": 16,
+            "conv_kernel_size": 2,
+            "mask_token_id": 63,
+            "selector_rank": 8,
+            "selector_top_k": 1,
+        },
+    )
+    model = WrappedDFlash2ForCausalLM(config).eval()
+    applied = []
+    dflash2_apply = DFlash2DLMTransform.apply
+
+    def record_dflash2(cls, transformed_model, qaic_config=None, **kwargs):
+        applied.append(type(transformed_model))
+        return dflash2_apply(transformed_model, qaic_config, **kwargs)
+
+    def reject_legacy(*args, **kwargs):
+        raise AssertionError("A DFlash-2 subclass must not use the DFlash-1 transform path")
+
+    def passthrough(cls, transformed_model, qaic_config=None, **kwargs):
+        return transformed_model, False
+
+    monkeypatch.setattr(DFlash2DLMTransform, "apply", classmethod(record_dflash2))
+    monkeypatch.setattr(DFlashTransform, "apply", classmethod(reject_legacy))
+    monkeypatch.setattr(DFlashDLMTransform, "apply", classmethod(reject_legacy))
+    monkeypatch.setattr(SpDTransform, "apply", classmethod(passthrough))
+    monkeypatch.setattr(SamplerTransform, "apply", classmethod(passthrough))
+
+    wrapped = QEFFAutoModelForCausalLM(model, qaic_config={"dflash_dlm": True})
+
+    assert wrapped.model is model
+    assert applied == [WrappedDFlash2ForCausalLM]
+
+
+def test_dflash2_target_transform_sets_shared_dflash_chunk_metadata():
+    from QEfficient.transformers.models.pytorch_transforms import DFlash2TLMTransform
+
+    model = make_tiny_qwen3()
+    transformed, applied = DFlash2TLMTransform.apply(
+        model,
+        {"target_layer_ids": [1], "dflash_block_size": 8},
+    )
+
+    assert applied is True
+    assert transformed.model.target_layer_ids == [1]
+    assert transformed.model.dflash_chunk_size == 8
+
+
+def _dflash_export_hash(wrapper):
+    from QEfficient.utils.export_utils import _generate_export_hash
+
+    wrapper.transform(ctx_len=CTX_LEN, seq_len=4, qaic_config=None)
+    assert "qaic_config" not in wrapper.hash_params
+    return _generate_export_hash(wrapper, ({}, ["logits"], {}), {}, type(wrapper)._export)[0]
+
+
+def test_dflash2_dlm_hash_covers_effective_transform_options(tmp_path):
+    from safetensors.torch import save_file
+    from transformers import Qwen3Config
+
+    from QEfficient import QEFFAutoModelForCausalLM
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+    config = Qwen3Config(
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        hidden_size=32,
+        intermediate_size=64,
+        vocab_size=64,
+        max_position_embeddings=32,
+        head_dim=16,
+        layer_types=["sliding_attention", "full_attention"],
+        sliding_window=16,
+        dflash_config={
+            "block_size": 4,
+            "conv_group_size": 16,
+            "conv_kernel_size": 2,
+            "mask_token_id": 63,
+            "selector_rank": 8,
+            "selector_top_k": 4,
+        },
+    )
+
+    def wrap(**options):
+        torch.manual_seed(23)
+        model = DFlash2ForCausalLM(copy.deepcopy(config)).eval()
+        return QEFFAutoModelForCausalLM(model, qaic_config={"dflash_dlm": True, **options})
+
+    default = wrap()
+    explicit_default = wrap(dflash_residual_scale="4", dflash_emit_selector_hidden=False)
+    unscaled = wrap(dflash_residual_scale=1)
+    host_selector = wrap(dflash_emit_selector_hidden=True)
+    assert _dflash_export_hash(default) == _dflash_export_hash(explicit_default)
+    assert len({_dflash_export_hash(wrapper) for wrapper in (default, unscaled, host_selector)}) == 3
+    assert default.hash_params["dflash_architecture"] == "dflash2"
+    assert default.hash_params["dflash_residual_scale"] == default.model.model.residual_scale == 4.0
+    assert default.hash_params["dflash_emit_selector_hidden"] is default.model.emit_selector_hidden is False
+    assert host_selector.hash_params["dflash_emit_selector_hidden"] is host_selector.model.emit_selector_hidden is True
+    assert default.model.model.layers[1].input_layernorm.variance_epsilon != (
+        unscaled.model.model.layers[1].input_layernorm.variance_epsilon
+    )
+
+    source_hashes = []
+    for source_name, value in (("target_a", 1.0), ("target_b", 2.0)):
+        source = tmp_path / source_name
+        source.mkdir()
+        save_file({"model.embed_tokens.weight": torch.full((64, 32), value)}, source / "model.safetensors")
+        wrapper = wrap(dflash_tlm_repo=str(source))
+        assert wrapper.hash_params["dflash_tlm_repo"] == str(source)
+        torch.testing.assert_close(wrapper.model.model.embed_tokens.weight, torch.full((64, 32), value))
+        source_hashes.append(_dflash_export_hash(wrapper))
+    assert source_hashes[0] != source_hashes[1]
+
+    greedy_config = copy.deepcopy(config)
+    greedy_config.dflash_config["selector_top_k"] = 1
+    greedy = QEFFAutoModelForCausalLM(
+        DFlash2ForCausalLM(greedy_config).eval(),
+        qaic_config={"dflash_dlm": True, "dflash_emit_selector_hidden": True},
+    )
+    assert greedy.hash_params["dflash_emit_selector_hidden"] is greedy.model.emit_selector_hidden is False
+
+
+@pytest.mark.parametrize("target_kind", ["text", "qwen3_5", "qwen3_5_moe"])
+def test_dflash2_tlm_hash_covers_checkpoint_and_projection_options(tmp_path, target_kind):
+    from safetensors.torch import save_file
+    from transformers import Qwen3Config
+
+    from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+    from QEfficient.utils.constants import _DFLASH_TARGET_ABSMAX
+
+    def make_model():
+        torch.manual_seed(23)
+        return make_tiny_qwen3() if target_kind == "text" else make_tiny_qwen3_5_vlm(target_kind == "qwen3_5_moe")
+
+    model = make_model()
+    hidden_size = getattr(model.config, "text_config", model.config).hidden_size
+    sources = []
+    for source_name, value in (("draft_a", 100.0), ("draft_b", 200.0)):
+        source = tmp_path / source_name
+        source.mkdir()
+        Qwen3Config(hidden_size=hidden_size, dflash_config={"target_layer_ids": [0], "block_size": 8}).save_pretrained(
+            source
+        )
+        save_file(
+            {"fc.weight": torch.eye(hidden_size) * value, "hidden_norm.weight": torch.ones(hidden_size)},
+            source / "model.safetensors",
+        )
+        sources.append(str(source))
+
+    def wrap(checkpoint=sources[0], **options):
+        model = make_model()
+        qaic_config = {"dflash2_checkpoint": checkpoint, **options}
+        if target_kind == "text":
+            return QEFFAutoModelForCausalLM(model, qaic_config=qaic_config)
+        return QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config=qaic_config).lang_model
+
+    default = wrap()
+    explicit_default = wrap(dflash_target_absmax=str(_DFLASH_TARGET_ABSMAX))
+    smaller_bound = wrap(dflash_target_absmax=_DFLASH_TARGET_ABSMAX / 2)
+    other_checkpoint = wrap(checkpoint=sources[1])
+    zero_centered = wrap(dflash_hidden_norm="ZERO_CENTERED")
+    assert _dflash_export_hash(default) == _dflash_export_hash(explicit_default)
+    assert (
+        len({_dflash_export_hash(wrapper) for wrapper in (default, smaller_bound, other_checkpoint, zero_centered)})
+        == 4
+    )
+    assert default.hash_params["dflash2_checkpoint"] == sources[0]
+    assert default.hash_params["dflash_target_absmax"] == _DFLASH_TARGET_ABSMAX
+    assert zero_centered.hash_params["dflash_hidden_norm"] == "zero_centered"
+    text_model = default.model.model
+    bounded_text_model = smaller_bound.model.model
+    if target_kind != "text":
+        text_model = text_model.model.language_model
+        bounded_text_model = bounded_text_model.model.language_model
+    torch.testing.assert_close(bounded_text_model.fc.weight * 2, text_model.fc.weight)
+
+
+@pytest.mark.parametrize("target_kind", ["text", "qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize("override_layers", [False, True])
+def test_dflash2_target_wrappers_resolve_checkpoint_metadata(tmp_path, target_kind, override_layers):
+    from safetensors.torch import save_file
+    from transformers import Qwen3Config
+
+    from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+
+    torch.manual_seed(23)
+    model = make_tiny_qwen3() if target_kind == "text" else make_tiny_qwen3_5_vlm(target_kind == "qwen3_5_moe")
+    hidden_size = getattr(model.config, "text_config", model.config).hidden_size
+    config = Qwen3Config(hidden_size=hidden_size, dflash_config={"target_layer_ids": [0], "block_size": 8})
+    config.save_pretrained(tmp_path)
+    weights = {"fc.weight": torch.eye(hidden_size), "hidden_norm.weight": torch.ones(hidden_size)}
+    save_file(weights, tmp_path / "model.safetensors")
+    qaic_config = {"dflash2_checkpoint": str(tmp_path), "dflash2_target_layer_offset": 1}
+    if override_layers:
+        qaic_config["target_layer_ids"] = [1]
+
+    if target_kind == "text":
+        qeff = QEFFAutoModelForCausalLM(model, qaic_config=qaic_config)
+        text_model = qeff.model.model
+        hash_params = qeff.hash_params
+    else:
+        qeff = QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config=qaic_config)
+        text_model = qeff.model.model.language_model
+        hash_params = qeff.lang_model.hash_params
+
+    assert qeff.dflash_tlm
+    assert qaic_config["target_layer_ids"] == [1]
+    assert qaic_config["dflash_block_size"] == 8
+    assert text_model.target_layer_ids == [1]
+    assert text_model.dflash_chunk_size == 8
+    assert hash_params["target_layer_ids"] == (1,)
+    if target_kind != "text":
+        assert hash_params["dflash_chunk_size"] == 8
+    torch.testing.assert_close(text_model.fc.weight, weights["fc.weight"])
+    torch.testing.assert_close(text_model.hidden_norm.weight, weights["hidden_norm.weight"])
+
+
+def test_dflash2_state_dict_remap_and_export_submodule():
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import (
+        DFlash2DecoderLayer,
+        DFlash2ForCausalLM,
+        remap_dflash2_state_dict,
+    )
+
+    remapped = remap_dflash2_state_dict(
+        {
+            "layers.0.input_layernorm.weight": torch.ones(4),
+            "candidate_selector.predecessor_codebook": torch.ones(8, 2),
+            "fc.weight": torch.ones(4, 4),
+        }
+    )
+
+    assert "model.layers.0.input_layernorm.weight" in remapped
+    assert "model.candidate_selector.predecessor_codebook.weight" in remapped
+    assert "fc.weight" not in remapped
+    assert DFlash2ForCausalLM.__new__(DFlash2ForCausalLM).get_submodules_for_export() == {DFlash2DecoderLayer}
+
+
+def test_dflash2_dlm_transform_scales_fp16_residual_stream():
+    from transformers import Qwen3Config
+
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+    from QEfficient.transformers.models.pytorch_transforms import DFlash2DLMTransform
+
+    torch.manual_seed(23)
+    config = Qwen3Config(
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=128,
+        vocab_size=VOCAB_SIZE,
+        max_position_embeddings=CTX_LEN,
+        head_dim=32,
+        layer_types=["sliding_attention", "sliding_attention"],
+        dflash_config={
+            "block_size": 4,
+            "conv_group_size": 16,
+            "conv_kernel_size": 2,
+            "mask_token_id": VOCAB_SIZE - 1,
+            "selector_rank": 8,
+            "selector_top_k": 1,
+        },
+    )
+    model = DFlash2ForCausalLM(config).eval()
+    for layer in model.model.layers:
+        for conv in (layer.attention_conv, layer.mlp_conv):
+            nn.init.normal_(conv.base_kernel, std=config.initializer_range)
+    inputs = {
+        "input_ids": torch.randint(0, VOCAB_SIZE, (1, 4)),
+        "target_hidden": torch.randn(1, 4, HIDDEN_SIZE),
+        "position_ids_target": torch.arange(4).unsqueeze(0),
+        "position_ids": torch.arange(4, 8).unsqueeze(0),
+        "attention_mask": torch.zeros(1, 8),
+        "use_cache": True,
+    }
+    with torch.no_grad():
+        reference = model(past_key_values=_make_legacy_past_key_values(config, 1, 8), **inputs)
+    assert torch.isfinite(reference.logits).all()
+    epsilon = model.model.norm.variance_epsilon
+    finish_weights = [
+        layer.attention_conv.kernel_projection.weight[layer.attention_conv.kernel_size * layer.attention_conv.groups :]
+        .detach()
+        .clone()
+        for layer in model.model.layers
+    ]
+
+    transformed, applied = DFlash2DLMTransform.apply(
+        model,
+        {"dflash_dlm": True, "dflash_residual_scale": 4.0},
+    )
+
+    assert applied is True
+    assert transformed.model.residual_scale == 4.0
+    assert transformed.model.layers[0].scale_input_residual is True
+    assert transformed.model.layers[1].scale_input_residual is False
+    assert transformed.model.layers[0].input_layernorm.variance_epsilon == epsilon
+    assert transformed.model.layers[0].post_attention_layernorm.variance_epsilon == epsilon / 16
+    assert transformed.model.layers[1].input_layernorm.variance_epsilon == epsilon / 16
+    assert transformed.model.norm.variance_epsilon == epsilon / 16
+    for layer, original_finish_weight in zip(transformed.model.layers, finish_weights):
+        finish_offset = layer.attention_conv.kernel_size * layer.attention_conv.groups
+        assert torch.equal(
+            layer.attention_conv.kernel_projection.weight[finish_offset:],
+            original_finish_weight / 4,
+        )
+
+    with torch.no_grad():
+        actual = transformed(past_key_values=_make_legacy_past_key_values(config, 1, 8), **inputs)
+    assert actual.logits.shape == (1, 4, VOCAB_SIZE)
+    assert torch.isfinite(actual.logits).all()
+    torch.testing.assert_close(actual.logits, reference.logits, rtol=3e-5, atol=3e-5)
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_dflash2_legacy_export_preserves_dynamic_sliding_window(causal):
+    onnxruntime = pytest.importorskip("onnxruntime")
+
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import _create_mask
+
+    class MaskExport(nn.Module):
+        def forward(self, positions, cache):
+            return _create_mask(positions, cache.shape[2], causal=causal, sliding_window=2048)
+
+    model = MaskExport().eval()
+    buffer = io.BytesIO()
+    torch.onnx.export(
+        model,
+        (torch.arange(8, 16).reshape(1, 8), torch.zeros(1, 1, 16, 1)),
+        buffer,
+        input_names=["positions", "cache"],
+        output_names=["mask"],
+        dynamic_axes={
+            "positions": {1: "seq_len"},
+            "cache": {2: "ctx_len"},
+            "mask": {2: "seq_len", 3: "ctx_len"},
+        },
+        opset_version=17,
+        dynamo=False,
+    )
+    positions = torch.arange(2050, 2058).reshape(1, 8)
+    cache = torch.zeros(1, 1, 4096, 1)
+    expected = model(positions, cache).numpy()
+    assert expected[0, 0, 0, 0]
+    session_options = onnxruntime.SessionOptions()
+    session_options.intra_op_num_threads = 1
+    session = onnxruntime.InferenceSession(
+        buffer.getvalue(), sess_options=session_options, providers=["CPUExecutionProvider"]
+    )
+    actual = session.run(None, {"positions": positions.numpy(), "cache": cache.numpy()})[0]
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("comp_ctx_len", [12, 16])
+def test_dflash2_attention_gathers_comp_ctx_lengths(comp_ctx_len):
+    from transformers import Qwen3Config
+
+    from QEfficient.transformers.cache_utils import QEffSlidingWindowCache
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2Attention, _create_mask
+
+    torch.manual_seed(23)
+    config = Qwen3Config(
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        hidden_size=32,
+        head_dim=16,
+        use_sliding_window=True,
+        sliding_window=32,
+        layer_types=["sliding_attention"],
+    )
+    attention = DFlash2Attention(config, layer_idx=0).eval()
+    cache = QEffSlidingWindowCache(config, batch_size=1, max_cache_len=32, sliding_window_len=32)
+    cache.key_cache.append(torch.zeros(1, 1, 32, 16))
+    cache.value_cache.append(torch.zeros(1, 1, 32, 16))
+    positions = torch.arange(8, 12).reshape(1, 4)
+    cosine = torch.ones(1, 8, 16)
+    with torch.no_grad():
+        output, weights = attention(
+            hidden_states=torch.randn(1, 4, 32),
+            target_hidden=torch.randn(1, 4, 32),
+            position_ids_target=torch.arange(4, 8).reshape(1, 4),
+            position_ids=positions,
+            attention_mask=_create_mask(positions, 32, causal=False, sliding_window=32),
+            past_key_value=cache,
+            comp_ctx_lengths=torch.zeros(comp_ctx_len, dtype=torch.int64),
+            position_embeddings=(cosine, torch.zeros_like(cosine)),
+        )
+    assert output.shape == (1, 4, config.hidden_size)
+    assert weights.shape == (1, config.num_attention_heads, 4, comp_ctx_len)
+    assert cache.key_cache[0].shape[2] == 32
+    assert cache.value_cache[0].shape[2] == 32
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.transforms
+class TestDFlash2CheckpointLoading:
+    @pytest.fixture(autouse=True)
+    def forbid_pickle_loading(self, monkeypatch):
+        def fail_pickle_load(*args, **kwargs):
+            pytest.fail("DFlash-2 checkpoints must not be loaded with pickle")
+
+        monkeypatch.setattr(torch, "load", fail_pickle_load)
+
+    @pytest.fixture
+    def tiny_dflash2_checkpoint(self, tmp_path):
+        from safetensors.torch import save_file
+        from transformers import Qwen3Config
+
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+        config = Qwen3Config(
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            hidden_size=32,
+            intermediate_size=64,
+            vocab_size=64,
+            head_dim=16,
+            max_position_embeddings=64,
+            sliding_window=32,
+            layer_types=["sliding_attention"],
+            architectures=["DFlash2DraftModel"],
+            dtype=torch.bfloat16,
+            dflash_config={
+                "block_size": 4,
+                "conv_group_size": 16,
+                "conv_kernel_size": 2,
+                "mask_token_id": 63,
+                "selector_rank": 4,
+                "selector_top_k": 1,
+            },
+        )
+        model = DFlash2ForCausalLM(config)
+        for layer in model.model.layers:
+            for conv in (layer.attention_conv, layer.mlp_conv):
+                nn.init.normal_(conv.base_kernel, std=config.initializer_range)
+        weights = {}
+        for key, tensor in model.state_dict().items():
+            if key in {"model.embed_tokens.weight", "lm_head.weight"}:
+                continue
+            key = key.removeprefix("model.")
+            if key in {
+                "candidate_selector.predecessor_codebook.weight",
+                "candidate_selector.successor_codebook.weight",
+            }:
+                key = key.removesuffix(".weight")
+            weights[key] = tensor.to(torch.bfloat16).contiguous()
+        checkpoint = tmp_path / "draft"
+        checkpoint.mkdir()
+        config.save_pretrained(checkpoint)
+        save_file(weights, checkpoint / "model.safetensors")
+        return checkpoint, config, weights
+
+    @pytest.mark.parametrize("loader_kind", ["native", "auto"])
+    @pytest.mark.parametrize("dtype,expected_dtype", [("float16", torch.float16), ("auto", torch.bfloat16)])
+    def test_loads_hf_string_dtype(self, tiny_dflash2_checkpoint, loader_kind, dtype, expected_dtype):
+        from QEfficient import QEFFAutoModelForCausalLM
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+        checkpoint, _, weights = tiny_dflash2_checkpoint
+        if loader_kind == "auto":
+            wrapper = QEFFAutoModelForCausalLM.from_pretrained(
+                checkpoint, dtype=dtype, qaic_config={"dflash_dlm": True, "dflash_residual_scale": 1.0}
+            )
+            model = wrapper.model
+        else:
+            model = DFlash2ForCausalLM.from_pretrained(checkpoint, dtype=dtype)
+
+        assert model.model.norm.weight.dtype == expected_dtype
+        assert model.config.dtype == expected_dtype
+        torch.testing.assert_close(model.model.norm.weight, weights["norm.weight"].to(expected_dtype))
+
+    def test_auto_dtype_falls_back_to_checkpoint(self, tiny_dflash2_checkpoint):
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+        checkpoint, config, weights = tiny_dflash2_checkpoint
+        config.dtype = None
+
+        model = DFlash2ForCausalLM.from_pretrained(checkpoint, config=config, torch_dtype="auto")
+
+        assert model.model.norm.weight.dtype == torch.bfloat16
+        assert model.config.dtype == torch.bfloat16
+        torch.testing.assert_close(model.model.norm.weight, weights["norm.weight"])
+
+    def test_auto_loader_uses_supplied_config(self, tiny_dflash2_checkpoint):
+        from QEfficient import QEFFAutoModelForCausalLM
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+        checkpoint, config, weights = tiny_dflash2_checkpoint
+        (checkpoint / "config.json").unlink()
+
+        wrapper = QEFFAutoModelForCausalLM.from_pretrained(
+            checkpoint,
+            config=config,
+            dtype=torch.float32,
+            qaic_config={"dflash_dlm": True, "dflash_residual_scale": 1.0},
+        )
+
+        assert isinstance(wrapper.model, DFlash2ForCausalLM)
+        assert wrapper.model.config is config
+        torch.testing.assert_close(
+            wrapper.model.model.layers[0].attention_conv.base_kernel,
+            weights["layers.0.attention_conv.base_kernel"].float(),
+        )
+
+    @pytest.mark.parametrize("architectures", [None, [], ["UnknownDraftModel"]])
+    def test_rejects_dflash2_config_without_supported_architecture(
+        self, tiny_dflash2_checkpoint, monkeypatch, architectures
+    ):
+        from unittest.mock import Mock
+
+        from QEfficient import QEFFAutoModelForCausalLM
+
+        checkpoint, config, _ = tiny_dflash2_checkpoint
+        config.architectures = architectures
+        fallback = Mock(side_effect=AssertionError("DFlash-2 must not fall back to the HF loader"))
+        monkeypatch.setattr(QEFFAutoModelForCausalLM._hf_auto_class, "from_pretrained", fallback)
+
+        with pytest.raises(ValueError, match="DFlash2DraftModel"):
+            QEFFAutoModelForCausalLM.from_pretrained(
+                checkpoint,
+                config=config,
+                qaic_config={"dflash_dlm": True, "dflash_residual_scale": 1.0},
+            )
+        fallback.assert_not_called()
+
+    def test_auto_loader_preserves_configuration_errors(self, monkeypatch):
+        from unittest.mock import Mock
+
+        from QEfficient import QEFFAutoModelForCausalLM
+
+        config_loader = Mock(side_effect=OSError("checkpoint configuration could not be read"))
+        fallback = Mock(side_effect=AssertionError("Configuration errors must not trigger an HF fallback"))
+        monkeypatch.setattr("transformers.AutoConfig.from_pretrained", config_loader)
+        monkeypatch.setattr(QEFFAutoModelForCausalLM._hf_auto_class, "from_pretrained", fallback)
+
+        with pytest.raises(OSError, match="checkpoint configuration could not be read"):
+            QEFFAutoModelForCausalLM.from_pretrained("test-org/unreadable-checkpoint", local_files_only=True)
+        fallback.assert_not_called()
+
+    @pytest.mark.parametrize("loader_kind", ["native", "auto"])
+    def test_loads_local_subfolder(self, tiny_dflash2_checkpoint, loader_kind):
+        from QEfficient import QEFFAutoModelForCausalLM
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+        checkpoint, _, weights = tiny_dflash2_checkpoint
+        kwargs = {"subfolder": checkpoint.name, "local_files_only": True, "dtype": torch.float32}
+        if loader_kind == "auto":
+            wrapper = QEFFAutoModelForCausalLM.from_pretrained(
+                checkpoint.parent,
+                qaic_config={"dflash_dlm": True, "dflash_residual_scale": 1.0},
+                **kwargs,
+            )
+            model = wrapper.model
+        else:
+            model = DFlash2ForCausalLM.from_pretrained(checkpoint.parent, **kwargs)
+
+        assert isinstance(model, DFlash2ForCausalLM)
+        torch.testing.assert_close(model.model.norm.weight, weights["norm.weight"].float())
+
+    @pytest.mark.parametrize("local_files_only,force_download", [(True, False), (False, True)])
+    def test_auto_loader_forwards_hub_options(
+        self, tiny_dflash2_checkpoint, monkeypatch, local_files_only, force_download
+    ):
+        from unittest.mock import Mock, call
+
+        from QEfficient import QEFFAutoModelForCausalLM
+
+        checkpoint, config, weights = tiny_dflash2_checkpoint
+        config_loader = Mock(return_value=config)
+        snapshot_download = Mock(return_value=str(checkpoint.parent))
+        monkeypatch.setattr("transformers.AutoConfig.from_pretrained", config_loader)
+        monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+        hub_kwargs = {
+            "cache_dir": str(checkpoint.parent / "cache"),
+            "revision": "test-revision",
+            "token": "test-token",
+            "subfolder": checkpoint.name,
+            "local_files_only": local_files_only,
+            "force_download": force_download,
+        }
+
+        wrapper = QEFFAutoModelForCausalLM.from_pretrained(
+            "test-org/dflash2-draft",
+            dtype="auto",
+            qaic_config={"dflash_dlm": True, "dflash_residual_scale": 1.0},
+            **hub_kwargs,
+        )
+
+        expected_config_call = call("test-org/dflash2-draft", trust_remote_code=False, **hub_kwargs)
+        assert config_loader.call_args_list == [expected_config_call, expected_config_call]
+        download_kwargs = {key: value for key, value in hub_kwargs.items() if key != "subfolder"}
+        snapshot_download.assert_called_once_with(
+            "test-org/dflash2-draft", allow_patterns=[f"{checkpoint.name}/*.safetensors"], **download_kwargs
+        )
+        torch.testing.assert_close(wrapper.model.model.norm.weight, weights["norm.weight"])
+
+    @pytest.mark.parametrize("shard_count", [1, 2])
+    def test_loads_safetensors_shards(self, tmp_path, shard_count):
+        from safetensors.torch import save_file
+
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import _read_checkpoint_tensors
+
+        expected = {}
+        for shard_index in range(shard_count):
+            tensors = {f"layers.{shard_index}.weight": torch.arange(6, dtype=torch.float32).reshape(2, 3)}
+            save_file(tensors, tmp_path / f"model-{shard_index}.safetensors")
+            expected.update(tensors)
+        (tmp_path / "pytorch_model.bin").write_bytes(b"not a safetensors checkpoint")
+
+        actual = _read_checkpoint_tensors(tmp_path)
+
+        assert actual.keys() == expected.keys()
+        for key, tensor in expected.items():
+            torch.testing.assert_close(actual[key], tensor)
+            assert actual[key].device.type == "cpu"
+
+    def test_downloads_only_safetensors(self, tmp_path, monkeypatch):
+        from unittest.mock import Mock
+
+        from safetensors.torch import save_file
+
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import _read_checkpoint_tensors
+
+        tensors = {"norm.weight": torch.ones(4)}
+        save_file(tensors, tmp_path / "model.safetensors")
+        snapshot_download = Mock(return_value=str(tmp_path))
+        monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+        hub_kwargs = {"revision": "test-revision", "cache_dir": str(tmp_path / "cache"), "token": "test-token"}
+
+        actual = _read_checkpoint_tensors("test-org/dflash2-draft", **hub_kwargs)
+
+        snapshot_download.assert_called_once_with(
+            "test-org/dflash2-draft", allow_patterns=["*.safetensors"], **hub_kwargs
+        )
+        torch.testing.assert_close(actual["norm.weight"], tensors["norm.weight"])
+
+    @pytest.mark.parametrize("checkpoint_format", ["missing", "bin", "empty_safetensors"])
+    def test_rejects_checkpoints_without_safetensors_weights(self, tmp_path, checkpoint_format):
+        from safetensors.torch import save_file
+
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import _read_checkpoint_tensors
+
+        if checkpoint_format == "bin":
+            (tmp_path / "pytorch_model.bin").write_bytes(b"not a safetensors checkpoint")
+        elif checkpoint_format == "empty_safetensors":
+            save_file({}, tmp_path / "model.safetensors")
+
+        with pytest.raises(FileNotFoundError, match="DFlash-2 requires safetensors checkpoints"):
+            _read_checkpoint_tensors(tmp_path)
+
+    def test_rejects_invalid_safetensors_without_pickle_fallback(self, tmp_path):
+        from safetensors import SafetensorError
+
+        from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import _read_checkpoint_tensors
+
+        (tmp_path / "model.safetensors").write_bytes(b"not a safetensors checkpoint")
+        (tmp_path / "pytorch_model.bin").write_bytes(b"not a safetensors checkpoint")
+
+        with pytest.raises(SafetensorError):
+            _read_checkpoint_tensors(tmp_path)
 
 
 # ---------------------------------------------------------------------------
