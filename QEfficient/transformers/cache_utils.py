@@ -1638,6 +1638,8 @@ class QEffSlidingWindowCache:
         is_sliding_layer = cache_kwargs.get("is_sliding")
         if is_sliding_layer is None and layer_types is not None and layer_idx < len(layer_types):
             is_sliding_layer = layer_types[layer_idx] == "sliding_attention"
+        if is_sliding_layer is None:
+            raise ValueError("QEffSlidingWindowCache.write_only requires is_sliding or config.layer_types")
         batch_index = cache_kwargs.get("batch_index")
 
         if is_sliding_layer:
