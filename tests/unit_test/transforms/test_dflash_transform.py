@@ -688,10 +688,11 @@ def test_dflash2_dlm_dispatch_accepts_subclasses(monkeypatch):
     )
     model = WrappedDFlash2ForCausalLM(config).eval()
     applied = []
+    dflash2_apply = DFlash2DLMTransform.apply
 
     def record_dflash2(cls, transformed_model, qaic_config=None, **kwargs):
         applied.append(type(transformed_model))
-        return transformed_model, True
+        return dflash2_apply(transformed_model, qaic_config, **kwargs)
 
     def reject_legacy(*args, **kwargs):
         raise AssertionError("A DFlash-2 subclass must not use the DFlash-1 transform path")
@@ -723,6 +724,136 @@ def test_dflash2_target_transform_sets_shared_dflash_chunk_metadata():
     assert applied is True
     assert transformed.model.target_layer_ids == [1]
     assert transformed.model.dflash_chunk_size == 8
+
+
+def _dflash_export_hash(wrapper):
+    from QEfficient.utils.export_utils import _generate_export_hash
+
+    wrapper.transform(ctx_len=CTX_LEN, seq_len=4, qaic_config=None)
+    assert "qaic_config" not in wrapper.hash_params
+    return _generate_export_hash(wrapper, ({}, ["logits"], {}), {}, type(wrapper)._export)[0]
+
+
+def test_dflash2_dlm_hash_covers_effective_transform_options(tmp_path):
+    from safetensors.torch import save_file
+    from transformers import Qwen3Config
+
+    from QEfficient import QEFFAutoModelForCausalLM
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+    config = Qwen3Config(
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        hidden_size=32,
+        intermediate_size=64,
+        vocab_size=64,
+        max_position_embeddings=32,
+        head_dim=16,
+        layer_types=["sliding_attention", "full_attention"],
+        sliding_window=16,
+        dflash_config={
+            "block_size": 4,
+            "conv_group_size": 16,
+            "conv_kernel_size": 2,
+            "mask_token_id": 63,
+            "selector_rank": 8,
+            "selector_top_k": 4,
+        },
+    )
+
+    def wrap(**options):
+        torch.manual_seed(23)
+        model = DFlash2ForCausalLM(copy.deepcopy(config)).eval()
+        return QEFFAutoModelForCausalLM(model, qaic_config={"dflash_dlm": True, **options})
+
+    default = wrap()
+    explicit_default = wrap(dflash_residual_scale="4", dflash_emit_selector_hidden=False)
+    unscaled = wrap(dflash_residual_scale=1)
+    host_selector = wrap(dflash_emit_selector_hidden=True)
+    assert _dflash_export_hash(default) == _dflash_export_hash(explicit_default)
+    assert len({_dflash_export_hash(wrapper) for wrapper in (default, unscaled, host_selector)}) == 3
+    assert default.hash_params["dflash_architecture"] == "dflash2"
+    assert default.hash_params["dflash_residual_scale"] == default.model.model.residual_scale == 4.0
+    assert default.hash_params["dflash_emit_selector_hidden"] is default.model.emit_selector_hidden is False
+    assert host_selector.hash_params["dflash_emit_selector_hidden"] is host_selector.model.emit_selector_hidden is True
+    assert default.model.model.layers[1].input_layernorm.variance_epsilon != (
+        unscaled.model.model.layers[1].input_layernorm.variance_epsilon
+    )
+
+    source_hashes = []
+    for source_name, value in (("target_a", 1.0), ("target_b", 2.0)):
+        source = tmp_path / source_name
+        source.mkdir()
+        save_file({"model.embed_tokens.weight": torch.full((64, 32), value)}, source / "model.safetensors")
+        wrapper = wrap(dflash_tlm_repo=str(source))
+        assert wrapper.hash_params["dflash_tlm_repo"] == str(source)
+        torch.testing.assert_close(wrapper.model.model.embed_tokens.weight, torch.full((64, 32), value))
+        source_hashes.append(_dflash_export_hash(wrapper))
+    assert source_hashes[0] != source_hashes[1]
+
+    greedy_config = copy.deepcopy(config)
+    greedy_config.dflash_config["selector_top_k"] = 1
+    greedy = QEFFAutoModelForCausalLM(
+        DFlash2ForCausalLM(greedy_config).eval(),
+        qaic_config={"dflash_dlm": True, "dflash_emit_selector_hidden": True},
+    )
+    assert greedy.hash_params["dflash_emit_selector_hidden"] is greedy.model.emit_selector_hidden is False
+
+
+@pytest.mark.parametrize("target_kind", ["text", "qwen3_5", "qwen3_5_moe"])
+def test_dflash2_tlm_hash_covers_checkpoint_and_projection_options(tmp_path, target_kind):
+    from safetensors.torch import save_file
+    from transformers import Qwen3Config
+
+    from QEfficient import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+    from QEfficient.utils.constants import _DFLASH_TARGET_ABSMAX
+
+    def make_model():
+        torch.manual_seed(23)
+        return make_tiny_qwen3() if target_kind == "text" else make_tiny_qwen3_5_vlm(target_kind == "qwen3_5_moe")
+
+    model = make_model()
+    hidden_size = getattr(model.config, "text_config", model.config).hidden_size
+    sources = []
+    for source_name, value in (("draft_a", 100.0), ("draft_b", 200.0)):
+        source = tmp_path / source_name
+        source.mkdir()
+        Qwen3Config(hidden_size=hidden_size, dflash_config={"target_layer_ids": [0], "block_size": 8}).save_pretrained(
+            source
+        )
+        save_file(
+            {"fc.weight": torch.eye(hidden_size) * value, "hidden_norm.weight": torch.ones(hidden_size)},
+            source / "model.safetensors",
+        )
+        sources.append(str(source))
+
+    def wrap(checkpoint=sources[0], **options):
+        model = make_model()
+        qaic_config = {"dflash2_checkpoint": checkpoint, **options}
+        if target_kind == "text":
+            return QEFFAutoModelForCausalLM(model, qaic_config=qaic_config)
+        return QEFFAutoModelForImageTextToText(model, kv_offload=True, qaic_config=qaic_config).lang_model
+
+    default = wrap()
+    explicit_default = wrap(dflash_target_absmax=str(_DFLASH_TARGET_ABSMAX))
+    smaller_bound = wrap(dflash_target_absmax=_DFLASH_TARGET_ABSMAX / 2)
+    other_checkpoint = wrap(checkpoint=sources[1])
+    zero_centered = wrap(dflash_hidden_norm="ZERO_CENTERED")
+    assert _dflash_export_hash(default) == _dflash_export_hash(explicit_default)
+    assert (
+        len({_dflash_export_hash(wrapper) for wrapper in (default, smaller_bound, other_checkpoint, zero_centered)})
+        == 4
+    )
+    assert default.hash_params["dflash2_checkpoint"] == sources[0]
+    assert default.hash_params["dflash_target_absmax"] == _DFLASH_TARGET_ABSMAX
+    assert zero_centered.hash_params["dflash_hidden_norm"] == "zero_centered"
+    text_model = default.model.model
+    bounded_text_model = smaller_bound.model.model
+    if target_kind != "text":
+        text_model = text_model.model.language_model
+        bounded_text_model = bounded_text_model.model.language_model
+    torch.testing.assert_close(bounded_text_model.fc.weight * 2, text_model.fc.weight)
 
 
 @pytest.mark.parametrize("target_kind", ["text", "qwen3_5", "qwen3_5_moe"])

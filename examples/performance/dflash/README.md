@@ -332,6 +332,16 @@ metadata without that marker is rejected with an actionable error rather than
 sent to the HF AutoModel loader. Configuration lookup errors are preserved; an
 explicit supported `config` can be supplied when loading a local checkpoint.
 
+DFlash-2 export cache keys include the draft architecture, applied residual scale,
+selector-hidden output mode, and shared vocabulary-weight source. Target export
+keys also include the projection checkpoint, target normalization bound, and hidden
+normalization mode. These keys persist when compile-time QAIC options are reset,
+so changing these settings selects a separate artifact instead of reusing a stale
+export. Existing DFlash-2 artifacts are regenerated once under the updated keys;
+explicit QPC paths still reuse the supplied artifacts. Checkpoint identities are
+paths or repository IDs, not weight-content digests: replacing weights at the same
+location requires a new checkpoint location or explicit artifact invalidation.
+
 The inference report distinguishes `SPD Wall Speed`, including host orchestration,
 from `SPD Model-call Speed`, based only on target and draft model-call time. These
 rates must not be treated as interchangeable when reporting benchmark results.

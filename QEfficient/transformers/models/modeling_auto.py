@@ -1643,6 +1643,13 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             qaic_config.setdefault("pretrained_model_name_or_path", kwargs.get("pretrained_model_name_or_path"))
             if qaic_config.get("dflash2_checkpoint"):
                 self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+                self.lang_model.hash_params["dflash2_checkpoint"] = str(qaic_config["dflash2_checkpoint"])
+                self.lang_model.hash_params["dflash_target_absmax"] = float(
+                    qaic_config.get("dflash_target_absmax", constants._DFLASH_TARGET_ABSMAX)
+                )
+                self.lang_model.hash_params["dflash_hidden_norm"] = str(
+                    qaic_config.get("dflash_hidden_norm", "standard")
+                ).lower()
             else:
                 self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
             self.lang_model.hash_params["dflash_dlm_repo"] = qaic_config.get("dflash_dlm_repo")
@@ -4057,6 +4064,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
             if isinstance(self.model, DFlash2ForCausalLM):
                 self.model, _ = DFlash2DLMTransform.apply(self.model, qaic_config)
+                self.hash_params["dflash_architecture"] = "dflash2"
+                self.hash_params["dflash_residual_scale"] = float(self.model.model.residual_scale)
+                self.hash_params["dflash_emit_selector_hidden"] = bool(self.model.emit_selector_hidden)
+                if qaic_config.get("dflash_tlm_repo"):
+                    self.hash_params["dflash_tlm_repo"] = str(qaic_config["dflash_tlm_repo"])
             else:
                 self.model, _ = DFlashTransform.apply(self.model, qaic_config)
                 self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
@@ -4067,10 +4079,15 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if self.dflash_tlm:
             if qaic_config.get("dflash2_checkpoint"):
                 self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+                self.hash_params["dflash2_checkpoint"] = str(qaic_config["dflash2_checkpoint"])
+                self.hash_params["dflash_target_absmax"] = float(
+                    qaic_config.get("dflash_target_absmax", constants._DFLASH_TARGET_ABSMAX)
+                )
+                self.hash_params["dflash_hidden_norm"] = str(qaic_config.get("dflash_hidden_norm", "standard")).lower()
             else:
                 self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
             self.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
-            if self.model.config.model_type == "gpt_oss":
+            if self.model.config.model_type == "gpt_oss" and not qaic_config.get("dflash2_checkpoint"):
                 self.hash_params["dflash_hidden_norm"] = "custom_rms_norm_v1"
 
         self.model, transformed = SpDTransform.apply(self.model, qaic_config=qaic_config, **kwargs)
