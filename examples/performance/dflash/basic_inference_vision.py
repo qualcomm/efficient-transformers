@@ -25,20 +25,17 @@ from rich.markup import escape
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 from utils import (
     MODEL_MAP,
-    compile_dspark_qpcs,
     compile_gemma_vlm_dlm_qpc,
     compile_gemma_vlm_qpcs,
     compile_qwen3vl_vlm_dlm_qpc,
     compile_qwen3vl_vlm_qpcs,
-    dspark_smoke_test,
     get_dflash_block_size,
     get_dlm_target_seq_len,
     get_spd_prompt_chunk_size,
     load_spd_session,
     load_spd_sessions,
-    report_metrics,
     resolve_model_name,
-    run_dspark_device_inference,
+    run_dspark_cli,
     validate_dlm_target_seq_len,
     validate_spd_decode_specialization,
 )
@@ -299,51 +296,10 @@ def _run_qwen3_vl(
     return metrics, {"vision_encode_time_s": metrics.vision_prefill_time if args.image else None}
 
 
-def _run_dspark(args):
-    if args.smoke_test:
-        report_metrics(
-            dspark_smoke_test(vision=args.image, generation_len=args.generation_len),
-            args.metrics_output,
-        )
-        return
-    target_model, draft_model = MODEL_MAP[args.model_name]
-    if not args.model_name.endswith("-DSpark"):
-        raise ValueError("Select a *-DSpark model_name when --technique dspark is used.")
-    if args.image and args.image_path is None:
-        raise ValueError("DSpark vision inference requires --image-path.")
-    if args.image and not target_model.startswith("Qwen/Qwen3.8"):
-        raise NotImplementedError("The DSpark vision runner currently supports the Qwen3.8 multimodal target.")
-    output_root = os.environ.get("QEFF_HOME", "dspark-artifacts")
-    output_dir = args.dspark_output_dir or Path(output_root) / "dflash-dspark" / args.model_name
-    if args.manifest is None:
-        args.manifest = compile_dspark_qpcs(
-            target_model,
-            draft_model,
-            output_dir=output_dir,
-            prefill_seq_len=args.prefill_seq_len,
-            ctx_len=args.ctx_len,
-            target_cores=args.tlm_cores,
-            draft_cores=args.dlm_cores,
-            target_devices=args.tlm_devices,
-            draft_devices=args.dlm_devices,
-            draft_prefill_target_seq_len=args.draft_prefill_target_seq_len,
-            vision=args.image,
-            height=args.height or 448,
-            width=args.width or 448,
-            hf_token=args.hf_token,
-        )
-    args.target_devices = args.tlm_devices
-    args.draft_devices = args.dlm_devices
-    args.prompt = args.image_prompt or args.prompt or IMAGE_PROMPT
-    args.image = args.image_path
-    metrics = run_dspark_device_inference(args, vision=args.image is not None)
-    report_metrics(metrics, args.metrics_output)
-
-
 def main():
     args = parse_args()
     if args.technique == "dspark":
-        _run_dspark(args)
+        run_dspark_cli(args, vision=args.image, default_prompt=IMAGE_PROMPT)
         return
     batch_size = _resolve_batch_size(args.batch_size)
     if not args.image and not args.prompt:

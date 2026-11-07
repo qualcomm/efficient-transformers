@@ -1880,3 +1880,65 @@ def run_dspark_device_inference(args, vision=False):
     metrics["text"] = tokenizer.decode(metrics["token_ids"], skip_special_tokens=True)
     metrics["mode"] = "qaic_vision" if vision else "qaic_text"
     return metrics
+
+
+def run_dspark_cli(args, *, vision=False, default_prompt=None):
+    if args.smoke_test:
+        report_metrics(
+            dspark_smoke_test(vision=vision, generation_len=args.generation_len),
+            args.metrics_output,
+        )
+        return
+
+    target_model, draft_model = MODEL_MAP[args.model_name]
+    if not args.model_name.endswith("-DSpark"):
+        raise ValueError("Select a *-DSpark model_name when --technique dspark is used.")
+    if vision:
+        if args.image_path is None:
+            raise ValueError("DSpark vision inference requires --image-path.")
+        if not target_model.startswith("Qwen/Qwen3.8"):
+            raise NotImplementedError("The DSpark vision runner currently supports the Qwen3.8 multimodal target.")
+
+    output_dir = (
+        args.dspark_output_dir
+        or Path(os.environ.get("QEFF_HOME", "dspark-artifacts")) / "dflash-dspark" / args.model_name
+    )
+    if args.manifest is None:
+        args.manifest = compile_dspark_qpcs(
+            target_model,
+            draft_model,
+            output_dir=output_dir,
+            prefill_seq_len=args.prefill_seq_len,
+            ctx_len=args.ctx_len,
+            target_cores=args.tlm_cores,
+            draft_cores=args.dlm_cores,
+            target_devices=args.tlm_devices,
+            draft_devices=args.dlm_devices,
+            draft_prefill_target_seq_len=args.draft_prefill_target_seq_len,
+            vision=vision,
+            height=getattr(args, "height", None) or 448,
+            width=getattr(args, "width", None) or 448,
+            hf_token=args.hf_token,
+        )
+
+    args.target_devices = args.tlm_devices
+    args.draft_devices = args.dlm_devices
+    if getattr(args, "dataset", "single") == "humaneval":
+        benchmark_dir = args.benchmark_output_dir or output_dir / "humaneval"
+        run_dspark_humaneval(
+            args.manifest,
+            benchmark_dir,
+            target_devices=args.target_devices,
+            draft_devices=args.draft_devices,
+            max_new_tokens=args.max_new_tokens,
+            limit=args.limit,
+            dataset_file=args.dataset_file,
+        )
+        return
+
+    if vision:
+        args.prompt = args.image_prompt or args.prompt or default_prompt
+        args.image = args.image_path
+    elif not args.prompt:
+        raise ValueError("--prompt is required for single-prompt inference.")
+    report_metrics(run_dspark_device_inference(args, vision=vision), args.metrics_output)
