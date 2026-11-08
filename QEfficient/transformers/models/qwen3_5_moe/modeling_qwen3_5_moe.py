@@ -622,6 +622,7 @@ class QEffQwen3_5MoeAttention(Qwen3_5MoeAttention):
         if past_key_values is not None and dflash_commit_final is not None:
             kv_layer = past_key_values.kv_layers[self.layer_idx]
             previous_keys, previous_values = kv_layer.keys, kv_layer.values
+            commit_keys, commit_values = key_states, value_states
             # Eager scatter mutates its input; verification needs a temporary cache.
             kv_layer.keys, kv_layer.values = previous_keys.clone(), previous_values.clone()
 
@@ -668,18 +669,27 @@ class QEffQwen3_5MoeAttention(Qwen3_5MoeAttention):
             )
 
         if past_key_values is not None and dflash_commit_final is not None:
-            # Prefill commits all valid positions; fused verification commits
-            # only the prior accepted prefix, never the current proposal suffix.
+            # Scatter only committed tokens into retained KV. Selecting across
+            # the full cache can requantize untouched MXINT8 request history.
             text_positions = position_ids[0]
-            commit_end = torch.where(
-                dflash_commit_final.bool(),
-                text_positions.amax(dim=-1),
-                text_positions[:, :-dflash_chunk_size].amax(dim=-1),
+            token_indices = torch.arange(text_positions.shape[1], device=position_ids.device)
+            commit_positions = torch.where(
+                dflash_commit_final.bool() | (token_indices < text_positions.shape[1] - dflash_chunk_size),
+                text_positions,
+                -1,
             )
-            cache_positions = torch.arange(previous_keys.shape[2], device=position_ids.device)
-            commit_mask = (cache_positions[None, :] <= commit_end[:, None])[:, None, :, None]
-            kv_layer.keys = torch.where(commit_mask, kv_layer.keys, previous_keys)
-            kv_layer.values = torch.where(commit_mask, kv_layer.values, previous_values)
+            kv_layer.keys, kv_layer.values = previous_keys.clone(), previous_values.clone()
+            past_key_values.update(
+                commit_keys,
+                commit_values,
+                self.layer_idx,
+                {
+                    "batch_index": batch_index
+                    if batch_index is not None
+                    else torch.arange(previous_keys.shape[0], device=position_ids.device).reshape(-1, 1),
+                    "position_ids": commit_positions,
+                },
+            )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = attn_output * torch.sigmoid(gate)
@@ -1138,6 +1148,11 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 recurrent_state = recurrent_state * recurrent_keep
 
             if dflash_commit_final is not None:
+                # Leave retained rows untouched when verification has no prefix to commit.
+                commit_rows = (position_ids[0] >= 0).any(dim=1, keepdim=True)
+                commit_rows = commit_rows & (
+                    dflash_commit_final.bool() | (position_ids[0, :, :-dflash_chunk_size] >= 0).any(dim=1, keepdim=True)
+                )
                 # Replay padding must not become history for the verification half.
                 prefix_qkv, prefix_conv_state = qeff_torch_causal_conv1d_update(
                     mixed_qkv[:, :, :-dflash_chunk_size],
@@ -1185,6 +1200,8 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_position_ids = torch.arange(
                     conv_state_all_flat.shape[1], dtype=torch.int64, device=conv_state_all_flat.device
                 )[None, :]
+                if dflash_commit_final is not None:
+                    conv_position_ids = torch.where(commit_rows, conv_position_ids, torch.iinfo(torch.int32).max)
                 scattered_conv = ctx_scatter_cb_3d(
                     conv_state_all_flat, conv_batch_index, conv_position_ids, new_conv_state_flat
                 )
@@ -1292,6 +1309,10 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 recurrent_position_ids = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, :].expand(recurrent_batch_index.shape[0], -1)
+                if dflash_commit_final is not None:
+                    recurrent_position_ids = torch.where(
+                        commit_rows, recurrent_position_ids, torch.iinfo(torch.int32).max
+                    )
                 updated_recurrent_state = ctx_scatter_cb(
                     recurrent_state_all,
                     recurrent_batch_index,
@@ -1539,8 +1560,8 @@ class QEffQwen3_5MoeTextModel(Qwen3_5MoeTextModel):
                     "Qwen3.5-MoE DFlash requires cache_commit: 1 commits all valid positions; "
                     "0 commits only the accepted-prefix half of the concatenated decode input."
                 )
-            if batch_index is not None or batch_fold:
-                raise ValueError("Qwen3.5-MoE DFlash currently supports non-continuous batch size 1 only.")
+            if batch_fold:
+                raise ValueError("Qwen3.5-MoE DFlash does not support batch-folded attention.")
             if past_key_values is None or any(
                 past_key_values.conv_states[i] is None or past_key_values.recurrent_states[i] is None
                 for i, kind in enumerate(self.config.layer_types)
@@ -1565,16 +1586,6 @@ class QEffQwen3_5MoeTextModel(Qwen3_5MoeTextModel):
                 )
         position_ids = _expand_mrope_position_ids(position_ids, cache_position, inputs_embeds.shape[0])
         text_position_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
-        if target_layer_ids:
-            # Reset the saved state too: verification must not restore an old request.
-            reset = (text_position_ids[:, :1] == 0).reshape(-1, 1, 1, 1)
-            for i, kind in enumerate(self.config.layer_types):
-                if kind == "linear_attention":
-                    conv = past_key_values.conv_states[i]
-                    recurrent = past_key_values.recurrent_states[i]
-                    conv_reset = reset if conv.ndim == 4 else reset.squeeze(-1)
-                    past_key_values.conv_states[i] = torch.where(conv_reset, torch.zeros_like(conv), conv)
-                    past_key_values.recurrent_states[i] = torch.where(reset, torch.zeros_like(recurrent), recurrent)
         rotary_position_ids = (
             position_ids[1:] if position_ids.ndim == 3 and position_ids.shape[0] == 4 else position_ids
         )
@@ -2543,10 +2554,11 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
                 }
             )
 
-        def _build_lang_spec(seq_len_val, comp_ctx_len=None):
+        def _build_lang_spec(seq_len_val, comp_ctx_len=None, is_decode=False):
+            is_decode = is_decode and bool(getattr(language_model, "target_layer_ids", None))
             spec = {
                 "batch_size": full_batch_size
-                if (continuous_batching and seq_len_val == 1)
+                if (continuous_batching and (seq_len_val == 1 or is_decode))
                 else (1 if continuous_batching else batch_size),
                 "seq_len": seq_len_val,
                 "ctx_len": ctx_len,
@@ -2560,7 +2572,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
                 spec["full_batch_size"] = kv_cache_batch_size
             else:
                 spec["batch_size"] = kv_cache_batch_size
-            if full_batch_size and seq_len_val != 1:
+            if full_batch_size and seq_len_val != 1 and not is_decode:
                 spec["full_batch_exec_size"] = full_batch_size
             return spec
 
@@ -2575,13 +2587,13 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
                     prefill_spec["num_logits_to_keep"] = 1
                 lang.append(prefill_spec)
             for comp_ctx in comp_ctx_lengths_decode or []:
-                decode_spec = _build_lang_spec(decode_seq_len, comp_ctx_len=comp_ctx)
+                decode_spec = _build_lang_spec(decode_seq_len, comp_ctx_len=comp_ctx, is_decode=True)
                 if getattr(language_model, "target_layer_ids", None):
                     decode_spec["num_logits_to_keep"] = chunk_size
                 lang.append(decode_spec)
         else:
             prefill_spec = _build_lang_spec(prefill_seq_len)
-            decode_spec = _build_lang_spec(decode_seq_len)
+            decode_spec = _build_lang_spec(decode_seq_len, is_decode=True)
             if getattr(language_model, "target_layer_ids", None):
                 prefill_spec["num_logits_to_keep"] = 1
                 decode_spec["num_logits_to_keep"] = chunk_size
@@ -2660,8 +2672,8 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
         dummy_seq_len = int(kwargs.get("prefill_seq_len", 32))
         is_dflash = bool(getattr(self.model.language_model, "target_layer_ids", None))
         if is_dflash:
-            if not kv_offload or continuous_batching:
-                raise ValueError("Qwen3.5-MoE DFlash requires kv_offload=True and continuous_batching=False.")
+            if not kv_offload:
+                raise ValueError("Qwen3.5-MoE DFlash requires kv_offload=True.")
             if dummy_seq_len < 2:
                 raise ValueError("Qwen3.5-MoE DFlash requires prefill_seq_len >= 2 for the exported gated-delta graph.")
             # A small dummy still exports the scripted loop's dynamic trip count.
