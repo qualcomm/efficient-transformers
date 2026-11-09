@@ -22,6 +22,10 @@ import torch
 from qwen_vl_utils import process_vision_info
 
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.generation.dflash_tlm_handoff import DFlashTlmHandoff
+from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import (
+    QEffQwen3_5ForConditionalGeneration,
+)
 from QEfficient.transformers.models.qwen3_vl.modeling_qwen3_vl import (
     QEffQwen3VLForConditionalGeneration,
 )
@@ -50,6 +54,7 @@ class SpecDecodingMetrics:
         self.total_prefill_time = 0.0
         self.tlm_decode_time = 0.0
         self.dlm_decode_time = 0.0
+        self.decode_wall_time = 0.0
         self.total_accepted_tokens = 0
         self.total_rejected_tokens = 0
         self.total_generated_tokens = 0
@@ -100,6 +105,12 @@ def _prepare_text_inputs(tokenizer, prompt_text: str, prompt_chunk_size: int) ->
     return inputs["input_ids"], position_ids
 
 
+def _dflash_logit_selection_inputs(tlm_session, num_logits: int) -> dict[str, np.ndarray]:
+    if "num_logits_to_keep" not in getattr(tlm_session, "input_names", ()):
+        return {}
+    return {"num_logits_to_keep": np.zeros((num_logits, 1), dtype=np.int64)}
+
+
 def _run_spd_core(
     *,
     input_ids: np.ndarray,
@@ -119,6 +130,7 @@ def _run_spd_core(
     generated_ids: np.ndarray,
     metrics: SpecDecodingMetrics,
     prefill_start_time: float | None = None,
+    queue_accepted_prefix: Callable[[np.ndarray, np.ndarray, int], None] | None = None,
 ) -> SpecDecodingMetrics:
     """Run model-independent DFlash prefill, verification, and cache advancement.
 
@@ -144,15 +156,22 @@ def _run_spd_core(
     prefill_start = time.time() if prefill_start_time is None else prefill_start_time
     num_chunks = padded_len // prompt_chunk_size
 
+    target_seq_len = block_size
+    if "target_hidden" in getattr(dlm_session, "binding_index_map", {}):
+        target_index = dlm_session.binding_index_map["target_hidden"]
+        target_seq_len = int(dlm_session.bindings[target_index].dims[1])
+    if target_seq_len < block_size or target_seq_len % block_size or prompt_chunk_size % target_seq_len:
+        raise ValueError("DLM target length must be a multiple of block_size and divide the TLM prefill length.")
+
     def run_dlm_prefill_block(hidden_states, position_ids, sub_start, sub_len):
-        target_hidden = np.zeros((batch_size, block_size, hidden_size), dtype=np.float32)
-        position_ids_target = np.full((batch_size, block_size), -1, dtype=position_ids.dtype)
+        target_hidden = np.zeros((batch_size, target_seq_len, hidden_size), dtype=np.float32)
+        position_ids_target = np.full((batch_size, target_seq_len), -1, dtype=position_ids.dtype)
         target_hidden[:, :sub_len, :] = hidden_states[:, sub_start : sub_start + sub_len, :]
         position_ids_target[:, :sub_len] = position_ids[:, sub_start : sub_start + sub_len]
         dlm_inputs.update(
             {
                 "input_ids": np.full((batch_size, block_size), mask_token_id, dtype=np.int64),
-                "position_ids": position_ids_target + block_size,
+                "position_ids": position_ids_target.max(axis=1, keepdims=True) + 1 + np.arange(block_size),
                 "position_ids_target": position_ids_target,
                 "target_hidden": target_hidden,
             }
@@ -166,21 +185,22 @@ def _run_spd_core(
         flat_pos_chunk = flat_position_ids[:, chunk_start:chunk_end]
 
         if chunk_index < num_chunks - 1:
-            for sub_start in range(0, prompt_chunk_size, block_size):
-                sub_len = min(block_size, prompt_chunk_size - sub_start)
+            for sub_start in range(0, prompt_chunk_size, target_seq_len):
+                sub_len = min(target_seq_len, prompt_chunk_size - sub_start)
                 run_dlm_prefill_block(target_hidden, flat_pos_chunk, sub_start, sub_len)
             continue
 
         last_prefill_pos_in_chunk = int(flat_pos_chunk.argmax())
-        new_tlm_token = tlm_logits[:, last_prefill_pos_in_chunk]
-        last_sub_start = (last_prefill_pos_in_chunk // block_size) * block_size
+        logit_index = 0 if tlm_logits.shape[1] == 1 else last_prefill_pos_in_chunk
+        new_tlm_token = tlm_logits[:, logit_index]
+        last_sub_start = (last_prefill_pos_in_chunk // target_seq_len) * target_seq_len
 
-        for sub_start in range(0, last_sub_start, block_size):
-            run_dlm_prefill_block(target_hidden, flat_pos_chunk, sub_start, block_size)
+        for sub_start in range(0, last_sub_start, target_seq_len):
+            run_dlm_prefill_block(target_hidden, flat_pos_chunk, sub_start, target_seq_len)
 
-        sub_len = min(block_size, prompt_chunk_size - last_sub_start)
-        final_hidden = np.zeros((batch_size, block_size, hidden_size), dtype=np.float32)
-        final_position_ids = np.full((batch_size, block_size), -1, dtype=flat_pos_chunk.dtype)
+        sub_len = min(target_seq_len, prompt_chunk_size - last_sub_start)
+        final_hidden = np.zeros((batch_size, target_seq_len, hidden_size), dtype=np.float32)
+        final_position_ids = np.full((batch_size, target_seq_len), -1, dtype=flat_pos_chunk.dtype)
         final_hidden[:, :sub_len, :] = target_hidden[:, last_sub_start : last_sub_start + sub_len, :]
         final_position_ids[:, :sub_len] = flat_pos_chunk[:, last_sub_start : last_sub_start + sub_len]
 
@@ -204,6 +224,7 @@ def _run_spd_core(
     gen_idx = 0
     iteration_count = 0
     continue_generation = True
+    decode_wall_start = time.perf_counter()
 
     while gen_idx < generation_limit and iteration_count < max_iterations and continue_generation:
         iteration_count += 1
@@ -249,6 +270,10 @@ def _run_spd_core(
         if any(tok_id in eos_token_ids for tok_id in this_iter_gen_ids):
             continue_generation = False
 
+        if queue_accepted_prefix is not None:
+            # Queue the accepted prefix; the next verification call commits it.
+            queue_accepted_prefix(dlm_candidates, dlm_inputs["position_ids"], accepted_length + 1)
+
         if not continue_generation or gen_idx >= generation_limit:
             break
 
@@ -261,12 +286,20 @@ def _run_spd_core(
         dlm_inputs["position_ids"] = np.arange(spd_counter_idx + 1, spd_counter_idx + block_size + 1).reshape(1, -1)
         input_ids_block[:, 0] = new_tlm_token
         dlm_inputs["input_ids"] = input_ids_block
+        if target_seq_len != block_size:
+            padded_positions = np.full((batch_size, target_seq_len), -1, dtype=np.int64)
+            padded_positions[:, :block_size] = dlm_inputs["position_ids_target"]
+            dlm_inputs["position_ids_target"] = padded_positions
+            padded_hidden = np.zeros((batch_size, target_seq_len, hidden_size), dtype=np.float32)
+            padded_hidden[:, :block_size] = target_hidden
+            target_hidden = padded_hidden
         dlm_inputs["target_hidden"] = target_hidden
         dlm_outputs = dlm_session.run(dlm_inputs)
         metrics.dlm_decode_time += time.time() - dlm_decode_start
         dlm_candidates = dlm_outputs["logits"].argmax(axis=-1)
 
     metrics.num_total_iters = iteration_count
+    metrics.decode_wall_time += time.perf_counter() - decode_wall_start
     return metrics
 
 
@@ -287,21 +320,35 @@ def run_spd_inference_single(
     hidden_size: int = 4096,
     generation_len: int = 256,
     batch_size: int = 1,
+    tlm_prefill_session: QAICInferenceSession | None = None,
 ) -> SpecDecodingMetrics:
     input_ids, position_ids = _prepare_text_inputs(tokenizer, prompt_text, prompt_chunk_size)
     generated_ids = _initialize_generated_ids(batch_size, ctx_len, input_ids.shape[1], tokenizer.pad_token_id)
     metrics = SpecDecodingMetrics(block_size=block_size)
 
-    tlm_session.set_buffers({"logits": np.zeros((batch_size, prompt_chunk_size), dtype=np.int32)})
-    tlm_session.set_buffers({"hidden_states": np.zeros((batch_size, prompt_chunk_size, hidden_size), dtype=np.float32)})
+    prefill_session = tlm_prefill_session or tlm_session
+    handoff = DFlashTlmHandoff(prefill_session, tlm_session) if tlm_prefill_session is not None else None
+    prefill_selection = _dflash_logit_selection_inputs(prefill_session, 1)
+    decode_selection = _dflash_logit_selection_inputs(tlm_session, block_size)
+    prefill_logits = 1 if prefill_selection or tlm_prefill_session is not None else prompt_chunk_size
+    prefill_session.set_buffers({"logits": np.zeros((batch_size, prefill_logits), dtype=np.int32)})
+    prefill_session.set_buffers(
+        {"hidden_states": np.zeros((batch_size, prompt_chunk_size, hidden_size), dtype=np.float32)}
+    )
 
     def tlm_prefill(chunk_start, chunk_end):
-        outputs = tlm_session.run(
+        last_chunk = chunk_end == input_ids.shape[1]
+        outputs = prefill_session.run(
             {
                 "input_ids": input_ids[:, chunk_start:chunk_end],
                 "position_ids": position_ids[:, chunk_start:chunk_end],
+                **prefill_selection,
+                **(handoff.outputs if handoff is not None and last_chunk else {}),
             }
         )
+        if handoff is not None and last_chunk:
+            handoff.capture(outputs)
+            prefill_session.skip_buffers(handoff.outputs)
         return outputs["logits"], outputs["hidden_states"]
 
     def prepare_decode():
@@ -309,7 +356,18 @@ def run_spd_inference_single(
         tlm_session.set_buffers({"hidden_states": np.zeros((batch_size, block_size, hidden_size), dtype=np.float32)})
 
     def tlm_decode(draft_ids, decode_position_ids):
-        outputs = tlm_session.run({"input_ids": draft_ids, "position_ids": decode_position_ids})
+        nonlocal handoff
+        outputs = tlm_session.run(
+            {
+                "input_ids": draft_ids,
+                "position_ids": decode_position_ids,
+                **decode_selection,
+                **(handoff.inputs if handoff is not None else {}),
+            }
+        )
+        if handoff is not None:
+            tlm_session.skip_buffers(handoff.inputs)
+            handoff = None
         return outputs["logits"], outputs["hidden_states"]
 
     eos_token_ids = {tokenizer.eos_token_id} if tokenizer.eos_token_id is not None else set()
@@ -375,6 +433,9 @@ def run_spd_inference_gemma4(
     generated_ids = _initialize_generated_ids(batch_size, ctx_len, padded_ids.shape[1], tokenizer.pad_token_id)
     metrics = SpecDecodingMetrics(block_size=block_size)
     tlm_hidden_name = "target_hidden_states" if "target_hidden_states" in tlm_session.output_names else "hidden_states"
+    prefill_selection = _dflash_logit_selection_inputs(tlm_session, 1)
+    decode_selection = _dflash_logit_selection_inputs(tlm_session, block_size)
+    prefill_logits = 1 if prefill_selection else prompt_chunk_size
 
     tlm_inputs = set(tlm_session.input_names)
     tlm_needs_vision = "vision_embeds" in tlm_inputs
@@ -401,9 +462,9 @@ def run_spd_inference_gemma4(
 
     tlm_image_idx = np.array([[0]], dtype=np.int64)
 
-    def tlm_run(ids, model_position_ids, mm=None):
+    def tlm_run(ids, model_position_ids, selection, mm=None):
         nonlocal tlm_image_idx
-        feeds = {"input_ids": ids, "position_ids": model_position_ids}
+        feeds = {"input_ids": ids, "position_ids": model_position_ids, **selection}
         if tlm_needs_image_idx:
             feeds["image_idx"] = tlm_image_idx
         if tlm_needs_mm_ids:
@@ -422,9 +483,9 @@ def run_spd_inference_gemma4(
         return token_ids, outputs[tlm_hidden_name]
 
     if tlm_logits_is_full:
-        tlm_session.set_buffers({"logits": np.zeros((batch_size, prompt_chunk_size, vocab_size), dtype=np.float32)})
+        tlm_session.set_buffers({"logits": np.zeros((batch_size, prefill_logits, vocab_size), dtype=np.float32)})
     else:
-        tlm_session.set_buffers({"logits": np.zeros((batch_size, prompt_chunk_size), dtype=np.int32)})
+        tlm_session.set_buffers({"logits": np.zeros((batch_size, prefill_logits), dtype=np.int32)})
     tlm_session.set_buffers({tlm_hidden_name: np.zeros((batch_size, prompt_chunk_size, hidden_size), dtype=np.float32)})
 
     def tlm_prefill(chunk_start, chunk_end):
@@ -432,6 +493,7 @@ def run_spd_inference_gemma4(
         return tlm_run(
             padded_ids[:, chunk_start:chunk_end],
             position_ids[:, chunk_start:chunk_end],
+            prefill_selection,
             mm=mm_chunk,
         )
 
@@ -445,7 +507,7 @@ def run_spd_inference_gemma4(
             tlm_session.skip_buffers(["vision_embeds"])
 
     def tlm_decode(draft_ids, decode_position_ids):
-        return tlm_run(draft_ids, decode_position_ids)
+        return tlm_run(draft_ids, decode_position_ids, decode_selection)
 
     eos_token_ids = {tokenizer.eos_token_id} if tokenizer.eos_token_id is not None else set()
     return _run_spd_core(
@@ -468,7 +530,7 @@ def run_spd_inference_gemma4(
     )
 
 
-def build_inputs_gemma4(processor, tokenizer, user_prompt, image=None, system_prompt=None):
+def build_inputs_gemma4(processor, tokenizer, user_prompt, image=None, system_prompt=None, enable_thinking=None):
     """Build processor inputs for a gemma text or image+text prompt.
 
     Returns (input_ids [1, L] int64, mm_token_type_ids [1, L] int64 or None,
@@ -500,6 +562,7 @@ def build_inputs_gemma4(processor, tokenizer, user_prompt, image=None, system_pr
         tokenize=True,
         return_dict=True,
         return_tensors="pt",
+        **({} if enable_thinking is None else {"enable_thinking": enable_thinking}),
     )
     input_ids = inputs["input_ids"].detach().cpu().numpy()
     mm_ids = None
@@ -508,9 +571,11 @@ def build_inputs_gemma4(processor, tokenizer, user_prompt, image=None, system_pr
     return input_ids, mm_ids, inputs
 
 
-def build_input_ids_gemma4(processor, tokenizer, user_prompt, system_prompt=None):
+def build_input_ids_gemma4(processor, tokenizer, user_prompt, system_prompt=None, enable_thinking=None):
     """Back-compat shim: return only input_ids (text-only callers)."""
-    input_ids, _, _ = build_inputs_gemma4(processor, tokenizer, user_prompt, system_prompt=system_prompt)
+    input_ids, _, _ = build_inputs_gemma4(
+        processor, tokenizer, user_prompt, system_prompt=system_prompt, enable_thinking=enable_thinking
+    )
     return input_ids
 
 
@@ -560,11 +625,21 @@ def _get_rope_model_qwen3_vl(config):
     key = id(config)
     if key not in _rope_model_cache_qwen3_vl:
         with torch.device("meta"):
-            _rope_model_cache_qwen3_vl[key] = QEffQwen3VLForConditionalGeneration._from_config(config)
+            model_cls = (
+                QEffQwen3_5ForConditionalGeneration
+                if config.model_type == "qwen3_5"
+                else QEffQwen3VLForConditionalGeneration
+            )
+            if config.model_type == "qwen3_5_moe":
+                # Native HF construction initializes the MoE expert backend on meta.
+                from transformers import Qwen3_5MoeForConditionalGeneration
+
+                model_cls = Qwen3_5MoeForConditionalGeneration
+            _rope_model_cache_qwen3_vl[key] = model_cls._from_config(config)
     return _rope_model_cache_qwen3_vl[key]
 
 
-def compute_position_ids_qwen3_vl(input_ids, attention_mask, image_grid_thw, config):
+def compute_position_ids_qwen3_vl(input_ids, attention_mask, image_grid_thw, config, mm_token_type_ids=None):
     """Delegates to QEffQwen3VLForConditionalGeneration.prepare_inputs_for_generation
     for M-RoPE construction. With image_grid_thw=None (text-only) this reduces to a
     plain arange position broadcast to all 4 rows with rope_deltas=0.
@@ -572,6 +647,14 @@ def compute_position_ids_qwen3_vl(input_ids, attention_mask, image_grid_thw, con
     """
     rope_model = _get_rope_model_qwen3_vl(config)
     batch_size, seq_len = input_ids.shape
+    if config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+        if mm_token_type_ids is None:
+            mm_token_type_ids = (input_ids == config.image_token_id).to(torch.int64)
+        mrope, deltas = rope_model.model.get_rope_index(
+            input_ids, mm_token_type_ids, image_grid_thw=image_grid_thw, attention_mask=attention_mask
+        )
+        flat = torch.arange(seq_len).view(1, 1, -1).expand(1, batch_size, -1)
+        return torch.cat((flat, mrope), dim=0), deltas
     inputs = rope_model.prepare_inputs_for_generation(
         inputs={
             "input_ids": input_ids,
@@ -595,7 +678,7 @@ def build_decode_position_ids_qwen3_vl(flat_row: np.ndarray, rope_delta: int) ->
     return np.concatenate([flat_row[None], np.repeat(mrope_row[None], 3, axis=0)], axis=0)
 
 
-def build_inputs_qwen3_vl(processor, user_prompt, image=None):
+def build_inputs_qwen3_vl(processor, user_prompt, image=None, enable_thinking=None):
     """Build processor inputs for a qwen3-vl text or image+text prompt.
 
     Returns (processor_inputs dict). With image=None this is the text-only path (no
@@ -606,7 +689,12 @@ def build_inputs_qwen3_vl(processor, user_prompt, image=None):
         content.append({"type": "image", "image": image})
     content.append({"type": "text", "text": user_prompt})
     messages = [{"role": "user", "content": content}]
-    chat_text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    chat_text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        **({} if enable_thinking is None else {"enable_thinking": enable_thinking}),
+    )
     image_inputs, video_inputs = process_vision_info(messages) if image is not None else (None, None)
     proc_inputs = processor(
         text=[chat_text],
@@ -619,15 +707,31 @@ def build_inputs_qwen3_vl(processor, user_prompt, image=None):
     return proc_inputs
 
 
-def run_vision_encoder_qwen3_vl(vision_session, pixel_values, image_grid_thw):
-    """Run the qwen3-vl vision-encoder QPC to produce (vision_embeds, deepstack_features)."""
-    vision_outputs = vision_session.run(
-        {
-            "pixel_values": pixel_values.astype(np.float16),
-            "image_grid_thw": image_grid_thw,
-        }
+def get_qwen35_target_seq_len(tlm_session: QAICInferenceSession, block_size: int) -> int:
+    """Require concatenated verification independently of prompt prefill."""
+    index = tlm_session.binding_index_map["input_ids"]
+    selection_index = tlm_session.binding_index_map.get("num_logits_to_keep")
+    logits_index = tlm_session.binding_index_map.get("logits")
+    shapes = tlm_session.allowed_shapes or [[(None, binding.dims) for binding in tlm_session.bindings]]
+    # Single-specialization QPCs can fold away num_logits_to_keep.
+    lengths = {
+        shape[index][1][1]
+        for shape in shapes
+        if (selection_index is not None and shape[selection_index][1][0] == block_size)
+        or (
+            selection_index is None
+            and logits_index is not None
+            and len(shape[logits_index][1]) >= 2
+            and shape[logits_index][1][1] == block_size
+        )
+    }
+    if 2 * block_size in lengths:
+        return 2 * block_size
+    raise ValueError(
+        f"Qwen3.5 DFlash requires a {2 * block_size}-token concatenated "
+        f"verification specialization with num_logits_to_keep={block_size} (found {sorted(lengths)}). "
+        f"Older two-call QPCs are unsupported. Re-export and recompile the TLM with dflash_block_size={block_size}."
     )
-    return vision_outputs["vision_embeds"], vision_outputs["deepstack_features"]
 
 
 def run_spd_inference_qwen3_vl(
@@ -650,14 +754,30 @@ def run_spd_inference_qwen3_vl(
     compiled_height: int = 354,
     compiled_width: int = 536,
     batch_size: int = 1,
+    tlm_prefill_session: QAICInferenceSession | None = None,
+    enable_thinking: bool | None = None,
 ) -> SpecDecodingMetrics:
-    """Run Qwen3-VL DFlash inference for a text-only or single-image prompt."""
+    """Run Qwen3-VL, Qwen3.5 or Qwen3.5-MoE DFlash for a text or image prompt."""
+    is_qwen35 = tlm_config.model_type in {"qwen3_5", "qwen3_5_moe"}
+    if is_qwen35 and (batch_size != 1 or "cache_commit" not in tlm_session.input_names):
+        raise ValueError("Qwen3.5 DFlash requires batch size 1 and a TLM QPC with cache_commit input.")
+    target_seq_len = block_size
+    if is_qwen35:
+        if block_size < 2 or prompt_chunk_size < 2 * block_size or prompt_chunk_size % block_size:
+            raise ValueError(
+                "Qwen3.5 DFlash requires prefill length to be a multiple of block_size and >= 2 * block_size."
+            )
+        target_seq_len = get_qwen35_target_seq_len(tlm_session, block_size)
+    replay_ids = np.full((batch_size, block_size), tokenizer.pad_token_id, dtype=np.int64) if is_qwen35 else None
+    replay_positions = np.full((4, batch_size, block_size), -1, dtype=np.int64) if is_qwen35 else None
     metrics = SpecDecodingMetrics(block_size=block_size)
+    prefill_session = tlm_prefill_session or tlm_session
+    handoff = DFlashTlmHandoff(prefill_session, tlm_session) if tlm_prefill_session is not None else None
     image_processing_start = time.time()
 
     if image is not None:
         image = image.resize((compiled_width, compiled_height))
-    processor_inputs = build_inputs_qwen3_vl(processor, prompt_text, image=image)
+    processor_inputs = build_inputs_qwen3_vl(processor, prompt_text, image=image, enable_thinking=enable_thinking)
     input_ids_length = processor_inputs["input_ids"].shape[1]
     padded_len = -(input_ids_length // -prompt_chunk_size) * prompt_chunk_size
 
@@ -667,6 +787,7 @@ def run_spd_inference_qwen3_vl(
         processor_inputs["attention_mask"],
         image_grid_thw,
         tlm_config,
+        mm_token_type_ids=processor_inputs.get("mm_token_type_ids"),
     )
     position_ids = torch.nn.functional.pad(position_ids, (0, padded_len - input_ids_length), value=-1)
     input_ids = torch.nn.functional.pad(
@@ -678,63 +799,104 @@ def run_spd_inference_qwen3_vl(
     position_ids_np = position_ids.numpy()
     flat_position_ids = position_ids_np[0]
     rope_delta = int(rope_deltas.reshape(-1)[0])
-    generated_ids = _initialize_generated_ids(batch_size, ctx_len, padded_len, tokenizer.pad_token_id)
+    # Verification always consumes a complete block, including near the length limit.
+    generation_ctx_len = ctx_len - block_size if is_qwen35 else ctx_len
+    generated_ids = _initialize_generated_ids(batch_size, generation_ctx_len, padded_len, tokenizer.pad_token_id)
     metrics.image_processing_time = time.time() - image_processing_start
 
     prefill_start = time.time()
     vision_binding = tlm_session.bindings[tlm_session.binding_index_map["vision_embeds"]]
     vision_dtype = tlm_session.aic_to_np_dtype_mapping.get(vision_binding.type, np.dtype(np.float32))
-    deepstack_binding = tlm_session.bindings[tlm_session.binding_index_map["deepstack_features"]]
-    deepstack_dtype = tlm_session.aic_to_np_dtype_mapping.get(deepstack_binding.type, np.dtype(np.float32))
+    has_deepstack = "deepstack_features" in tlm_session.input_names
+    if has_deepstack:
+        deepstack_binding = tlm_session.bindings[tlm_session.binding_index_map["deepstack_features"]]
+        deepstack_dtype = tlm_session.aic_to_np_dtype_mapping.get(deepstack_binding.type, np.dtype(np.float32))
 
     if image is not None:
         if vision_session is None:
             raise ValueError("An image was given but no vision_session was provided.")
-        vision_embeds, deepstack_features = run_vision_encoder_qwen3_vl(
-            vision_session,
-            processor_inputs["pixel_values"].numpy(),
-            image_grid_thw.numpy(),
+        vision_results = vision_session.run(
+            {
+                "pixel_values": processor_inputs["pixel_values"].numpy().astype(np.float16),
+                "image_grid_thw": image_grid_thw.numpy(),
+            }
         )
+        vision_embeds = vision_results["vision_embeds"]
+        if has_deepstack:
+            deepstack_features = vision_results["deepstack_features"]
         metrics.vision_prefill_time = time.time() - prefill_start
     else:
         vision_embeds = np.zeros(tuple(int(dim) for dim in vision_binding.dims), dtype=vision_dtype)
-        deepstack_features = np.zeros(tuple(int(dim) for dim in deepstack_binding.dims), dtype=deepstack_dtype)
+        if has_deepstack:
+            deepstack_features = np.zeros(tuple(int(dim) for dim in deepstack_binding.dims), dtype=deepstack_dtype)
         metrics.vision_prefill_time = 0.0
 
     vision_outputs = {
         "vision_embeds": vision_embeds.astype(vision_dtype),
-        "deepstack_features": deepstack_features.astype(deepstack_dtype),
     }
-    tlm_session.set_buffers(vision_outputs)
+    if has_deepstack:
+        vision_outputs["deepstack_features"] = deepstack_features.astype(deepstack_dtype)
+    prefill_session.set_buffers(vision_outputs)
+    if handoff is not None:
+        tlm_session.set_buffers(vision_outputs)
     lang_extra = {"image_idx": np.array([[0]], dtype=np.int64)}
-    tlm_session.set_buffers({"logits": np.zeros((batch_size, prompt_chunk_size), dtype=np.int32)})
-    tlm_session.set_buffers({"hidden_states": np.zeros((batch_size, prompt_chunk_size, hidden_size), dtype=np.float32)})
+    if is_qwen35:
+        lang_extra["cache_commit"] = np.ones(1, dtype=np.int64)
+    prefill_selection = _dflash_logit_selection_inputs(prefill_session, 1)
+    decode_selection = _dflash_logit_selection_inputs(tlm_session, block_size)
+    prefill_logits = 1 if prefill_selection or tlm_prefill_session is not None else prompt_chunk_size
+    prefill_session.set_buffers({"logits": np.zeros((batch_size, prefill_logits), dtype=np.int32)})
+    prefill_session.set_buffers(
+        {"hidden_states": np.zeros((batch_size, prompt_chunk_size, hidden_size), dtype=np.float32)}
+    )
 
     def tlm_prefill(chunk_start, chunk_end):
-        outputs = tlm_session.run(
+        last_chunk = chunk_end == padded_len
+        outputs = prefill_session.run(
             {
                 "input_ids": input_ids_np[:, chunk_start:chunk_end],
                 "position_ids": position_ids_np[:, :, chunk_start:chunk_end],
+                **prefill_selection,
                 **lang_extra,
+                **(handoff.outputs if handoff is not None and last_chunk else {}),
             }
         )
+        if handoff is not None and last_chunk:
+            handoff.capture(outputs)
+            prefill_session.skip_buffers(handoff.outputs)
         lang_extra["image_idx"] = outputs["image_idx_output"]
         return outputs["logits"], outputs["hidden_states"]
 
     def prepare_decode():
         tlm_session.set_buffers({"logits": np.zeros((batch_size, block_size), dtype=np.int32)})
-        tlm_session.set_buffers({"hidden_states": np.zeros((batch_size, block_size, hidden_size), dtype=np.float32)})
-        tlm_session.skip_buffers(vision_outputs.keys())
+        tlm_session.set_buffers(
+            {"hidden_states": np.zeros((batch_size, target_seq_len, hidden_size), dtype=np.float32)}
+        )
+        if handoff is None:
+            tlm_session.skip_buffers(vision_outputs.keys())
+        if is_qwen35:
+            lang_extra["cache_commit"] = np.zeros(1, dtype=np.int64)
 
     def tlm_decode(draft_ids, decode_position_ids):
-        outputs = tlm_session.run(
-            {
-                "input_ids": draft_ids,
-                "position_ids": build_decode_position_ids_qwen3_vl(decode_position_ids, rope_delta),
-                **lang_extra,
-            }
-        )
-        return outputs["logits"], outputs["hidden_states"]
+        nonlocal handoff
+        positions = build_decode_position_ids_qwen3_vl(decode_position_ids, rope_delta)
+        if is_qwen35:
+            draft_ids = np.concatenate([replay_ids, draft_ids], axis=-1)
+            positions = np.concatenate([replay_positions, positions], axis=-1)
+        inputs = {"input_ids": draft_ids, "position_ids": positions, **decode_selection, **lang_extra}
+        if handoff is not None:
+            inputs.update(handoff.inputs)
+        outputs = tlm_session.run(inputs)
+        if handoff is not None:
+            tlm_session.skip_buffers(handoff.inputs)
+            tlm_session.skip_buffers(vision_outputs.keys())
+            handoff = None
+        return outputs["logits"][:, :block_size], outputs["hidden_states"][:, -block_size:]
+
+    def queue_accepted_prefix(draft_ids, decode_position_ids, count):
+        replay_ids[:] = draft_ids
+        replay_positions[:] = build_decode_position_ids_qwen3_vl(decode_position_ids, rope_delta)
+        replay_positions[:, :, count:] = -1
 
     eos_token_ids = {tokenizer.eos_token_id} if tokenizer.eos_token_id is not None else set()
     return _run_spd_core(
@@ -755,4 +917,5 @@ def run_spd_inference_qwen3_vl(
         generated_ids=generated_ids,
         metrics=metrics,
         prefill_start_time=prefill_start,
+        queue_accepted_prefix=queue_accepted_prefix if is_qwen35 else None,
     )

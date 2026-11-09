@@ -162,7 +162,7 @@ pipeline {
         )
         string(
             name: 'WEIGHT_FREE_QAIC_DEVICE_GROUPS',
-            defaultValue: '0,1,2,3;4,5,6,7;8,9,10,11;12,13,14,15',
+            defaultValue: '0,1,2,3;4,5,6,7;8,9,10,11',
             description: 'Exclusive four-device QAIC groups per weight-free worker, separated by semicolons'
         )
     }
@@ -173,7 +173,7 @@ pipeline {
         CI_IMPACT_MODE = 'full'
         CI_SELECTIVE_LAYER_FILTER = noopMarkerFilter()
         CI_QAIC_WORKERS = '3'
-        DISAGG_QAIC_WORKERS = '4'
+        DISAGG_QAIC_WORKERS = '3'
         MM_COMPILE_N = "${params.MM_COMPILE_WORKERS}"
         MM_EXEC_N = qaicDeviceGroupCount(params.MM_QAIC_DEVICE_GROUPS)
         WEIGHT_FREE_EXEC_N = qaicDeviceGroupCount(params.WEIGHT_FREE_QAIC_DEVICE_GROUPS)
@@ -391,11 +391,12 @@ pipeline {
         }
 
         stage('HL API Tests') {
+            when { expression { params.RUN_HL_APIS } }
             parallel {
                 stage('Export & Compile') {
                     steps {
                         script {
-                            runImpactStage('export_compile', true, params.TEST_PROFILE) {
+                            runImpactStage('export_compile', params.RUN_HL_APIS, params.TEST_PROFILE) {
                                 timeout(time: params.TEST_PROFILE == 'full_layers_model' ? 0 : 60, unit: params.TEST_PROFILE == 'full_layers_model' ? 'HOURS' : 'MINUTES') {
                                     sh '''
                                     sudo docker exec -e QEFF_MODEL_TIER=${MODEL_TIER} -e TMPDIR=/efficient-transformers/.ci-tmp/export_compile ${BUILD_TAG} bash -c "
@@ -418,7 +419,7 @@ pipeline {
                 stage('QAIC LLM') {
                     steps {
                         script {
-                            runImpactStage('qaic_llm', true, params.TEST_PROFILE) {
+                            runImpactStage('qaic_llm', params.RUN_HL_APIS, params.TEST_PROFILE) {
                                 timeout(time: params.TEST_PROFILE == 'full_layers_model' ? 0 : 240, unit: params.TEST_PROFILE == 'full_layers_model' ? 'HOURS' : 'MINUTES') {
                                     sh '''
                                     sudo docker exec -e QEFF_MODEL_TIER=${MODEL_TIER} -e TMPDIR=/efficient-transformers/.ci-tmp/qaic_llm ${BUILD_TAG} bash -c "
@@ -666,15 +667,67 @@ pipeline {
                     runImpactStage('weight_free_qaic', params.RUN_WEIGHT_FREE_QAIC, params.TEST_PROFILE) {
                         timeout(time: 360, unit: 'MINUTES') {
                             sh '''
-                            sudo docker exec -e QEFF_MODEL_TIER=${MODEL_TIER} -e TMPDIR=/efficient-transformers/.ci-tmp/weight_free_qaic -e QEFF_QAIC_DEVICE_GROUPS="${WEIGHT_FREE_QAIC_DEVICE_GROUPS}" -e QEFF_QAIC_DEVICES_PER_WORKER=4 ${BUILD_TAG} bash -c "
+                            sudo docker exec -e QEFF_MODEL_TIER="${MODEL_TIER}" -e TMPDIR=/efficient-transformers/.ci-tmp/weight_free_qaic -e QEFF_QAIC_DEVICE_GROUPS="${WEIGHT_FREE_QAIC_DEVICE_GROUPS}" -e QEFF_QAIC_DEVICES_PER_WORKER=4 -e WEIGHT_FREE_EXEC_N="${WEIGHT_FREE_EXEC_N}" -e IMPACT_TEST_FILTER="${IMPACT_TEST_FILTER}" -e CI_SELECTIVE_LAYER_FILTER="${CI_SELECTIVE_LAYER_FILTER}" -e CI_IMPACT_HEAD="${CI_IMPACT_HEAD}" ${BUILD_TAG} bash -c '
                             cd /efficient-transformers && . preflight_qeff/bin/activate && pip install -r examples/dynamo/causal_lm/requirements.txt &&
                             mkdir -p /efficient-transformers/weight_free_qaic && mkdir -p /efficient-transformers/Qeff_logs && export QEFF_LOG_PATH=/efficient-transformers/Qeff_logs &&
-                            export TOKENIZERS_PARALLELISM=false && export QEFF_ISOLATE_QAIC_WORKERS=1 && export QEFF_HOME=/efficient-transformers/weight_free_qaic &&
+                            export TOKENIZERS_PARALLELISM=false && export QEFF_ISOLATE_QAIC_WORKERS=1 && export QEFF_HOME=/efficient-transformers/weight_free_qaic && export QEFF_WF_HOME=/efficient-transformers/weight_free_qaic/weight_free_checkpoints &&
                             export HF_HUB_CACHE=/huggingface_hub && export HF_HUB_ENABLE_HF_TRANSFER=1 &&
-                            # Run the disaggregated subset in fresh workers after the main weight-free suite releases its QAIC contexts.
-                            python -m pytest tests/weight_free -m '(on_qaic) and (not disagg_dma) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --dist loadgroup -n ${WEIGHT_FREE_EXEC_N} -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_qaic.xml --durations=10 &&
-                            python -m pytest tests/weight_free/test_disaggregated.py -m '(on_qaic) and (disagg_dma) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --dist loadgroup -n ${WEIGHT_FREE_EXEC_N} -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_disagg_qaic.xml --durations=10 &&
-                            deactivate"
+                            VLM_EP_MODELS=(qwen3_vl_moe gemma4_moe) &&
+                            export QEFF_WF_EP_VLM_MODEL="${VLM_EP_MODELS[$((RANDOM % ${#VLM_EP_MODELS[@]}))]}" &&
+                            echo "Weight-free EP VLM selected: ${QEFF_WF_EP_VLM_MODEL}" &&
+                            python -m pytest tests/weight_free -m "(on_qaic) and (not disagg_dma) and (not weight_free_blocking) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n "$WEIGHT_FREE_EXEC_N" -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_qaic.xml --durations=10 &&
+                            # Run blocking parity configurations serially while retaining QAIC worker isolation.
+                            python -m pytest tests/weight_free/test_on_qaic_causallm.py -m "(on_qaic) and (weight_free_blocking) and (not disagg_dma) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n 1 -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_blocking_qaic.xml --durations=10 &&
+                            set -o pipefail &&
+                            for disagg_suite in parity blocking; do
+                              if [ "$disagg_suite" = blocking ]; then
+                                disagg_filter="weight_free_blocking"
+                                disagg_exec_n=1
+                              else
+                                disagg_filter="not weight_free_blocking"
+                                disagg_exec_n="$WEIGHT_FREE_EXEC_N"
+                              fi &&
+                              collection_status=0 &&
+                              python -m pytest tests/weight_free/test_disaggregated.py -m "(on_qaic) and (disagg_dma) and ($disagg_filter) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" -o addopts="" --collect-only -q -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --impact-head="$CI_IMPACT_HEAD" 2>&1 | tee "Qeff_logs/weight_free_disagg_${disagg_suite}_collection.log" || collection_status=$?
+                              if [ "$collection_status" -ne 0 ] && [ "$collection_status" -ne 5 ]; then
+                                exit "$collection_status"
+                              fi &&
+                              { grep "^tests/.*::" "Qeff_logs/weight_free_disagg_${disagg_suite}_collection.log" || true; } > ".ci-weight-free-disagg-${disagg_suite}-collected.txt" &&
+                              mapfile -t SELECTED_TESTS < ".ci-weight-free-disagg-${disagg_suite}-collected.txt" &&
+                              if [ "$disagg_suite" = blocking ] && [ "${#SELECTED_TESTS[@]}" -gt 0 ]; then
+                                # Sample once per run so fresh workers execute the same selected node IDs.
+                                REQUIRED_TESTS=() &&
+                                for test_id in "${SELECTED_TESTS[@]}"; do
+                                  case "$test_id" in
+                                    *"[gpt-oss-h]"|*"[gpt-oss-q]"|*"[gpt-oss-kv]"|*"[qwen3-moe-kv]") REQUIRED_TESTS+=("$test_id") ;;
+                                    *) echo "$test_id" ;;
+                                  esac
+                                done > .ci-weight-free-disagg-blocking-remaining.txt &&
+                                shuf -n 3 .ci-weight-free-disagg-blocking-remaining.txt > .ci-weight-free-disagg-blocking-sampled.txt &&
+                                mapfile -t SAMPLED_TESTS < .ci-weight-free-disagg-blocking-sampled.txt &&
+                                SELECTED_TESTS=("${REQUIRED_TESTS[@]}" "${SAMPLED_TESTS[@]}")
+                              fi &&
+                              if [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+                                echo "<?xml version=\"1.0\" encoding=\"utf-8\"?><testsuites></testsuites>" > "tests/tests_log_weight_free_disagg_${disagg_suite}_qaic.xml"
+                              else
+                                rm -f tests/tests_log_weight_free_disagg_${disagg_suite}_batch_*.xml &&
+                                batch=0 &&
+                                exit_status=0 &&
+                                # Keep one test per worker process so QAIC contexts are released between tests.
+                                for ((start=0; start<${#SELECTED_TESTS[@]}; start+=disagg_exec_n)); do
+                                  BATCH_TESTS=("${SELECTED_TESTS[@]:start:disagg_exec_n}") &&
+                                  batch_workers=${#BATCH_TESTS[@]} &&
+                                  echo "Running weight-free disaggregated $disagg_suite batch $batch with $batch_workers fresh workers" &&
+                                  python -m pytest "${BATCH_TESTS[@]}" --dist loadgroup -n "$batch_workers" --junitxml="tests/tests_log_weight_free_disagg_${disagg_suite}_batch_${batch}.xml" --durations=10 || exit_status=$? &&
+                                  if [ "$exit_status" -ne 0 ]; then break; fi &&
+                                  batch=$((batch + 1))
+                                done &&
+                                junitparser merge tests/tests_log_weight_free_disagg_${disagg_suite}_batch_*.xml "tests/tests_log_weight_free_disagg_${disagg_suite}_qaic.xml" &&
+                                if [ "$exit_status" -ne 0 ]; then exit "$exit_status"; fi
+                              fi || exit $?
+                            done &&
+                            deactivate
+                            '
                             '''
                         }
                     }

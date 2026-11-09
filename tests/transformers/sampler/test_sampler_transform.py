@@ -14,7 +14,7 @@ import torch
 from transformers import AutoConfig
 
 from QEfficient.generation.cloud_infer import QAICInferenceSession
-from QEfficient.utils.constants import Constants
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES, Constants
 from QEfficient.utils.test_utils import (
     load_qeff_model_with_sampler,
 )
@@ -88,7 +88,7 @@ def check_sampler_transform(
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_speculative_tokens=spec_length,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,
@@ -98,7 +98,7 @@ def check_sampler_transform(
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_speculative_tokens=spec_length,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,
@@ -108,7 +108,7 @@ def check_sampler_transform(
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_speculative_tokens=spec_length,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,

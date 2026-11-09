@@ -169,6 +169,22 @@ TORCH_TO_NUMPY_DTYPE_MAP = {
     torch.float32: np.float32,
 }
 
+_FP8_DEQUANT_TRANSFORMS = (
+    FP8DeQuantLinearToLinearTransform,
+    FP8BlockWiseDequantLinearToLinearTransform,
+    FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform,
+)
+
+
+def _configure_fp8_retention(wrapper, kwargs):
+    fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
+    wrapper._pytorch_transforms = list(wrapper._pytorch_transforms)
+    if fp8_retain_weights:
+        wrapper._pytorch_transforms = [
+            transform for transform in wrapper._pytorch_transforms if transform not in _FP8_DEQUANT_TRANSFORMS
+        ]
+    kwargs["fp8_retain_weights"] = fp8_retain_weights
+
 
 def _disable_unsupported_weight_free(kwargs: dict, qeff_auto_class_name: str) -> None:
     """Remove unsupported weight-free mode from non-CausalLM wrappers."""
@@ -965,7 +981,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
 
     _hf_auto_class = AutoModelForSequenceClassification
     _pytorch_transforms = [CustomOpsTransform, TextClassificationTransform]
-    _onnx_transforms = []
+    _onnx_transforms = [FP16ClipTransform]
 
     def __init__(self, model: nn.Module, **kwargs):
         """
@@ -1213,6 +1229,9 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
         AwqToMatmulNbitsTransform,
         GPTQToMatmulNbitsTransform,
         PackQuantizedInt4ToMatMulNBitsTransform,
+        FP8DeQuantLinearToLinearTransform,
+        FP8BlockWiseDequantLinearToLinearTransform,
+        FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform,
         CustomOpsTransform,
         KVCacheTransform,
         KVCacheExternalModuleMapperTransform,
@@ -1239,6 +1258,7 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
             Additional keyword arguments passed to the base class constructor.
         """
         _configure_proxy_for_model(self, kwargs.pop("enable_proxy", False))
+        _configure_fp8_retention(self, kwargs)
         super().__init__(model, **kwargs)
         self.model = model.get_qeff_vision_encoder()
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
@@ -1356,6 +1376,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         AwqToMatmulNbitsTransform,
         GPTQToMatmulNbitsTransform,
         PackQuantizedInt4ToMatMulNBitsTransform,
+        FP8DeQuantLinearToLinearTransform,
         FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform,
         FP8BlockWiseDequantLinearToLinearTransform,
         CustomOpsTransform,
@@ -1388,6 +1409,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
             Additional keyword arguments passed to the base class constructor.
         """
         _configure_proxy_for_model(self, kwargs.pop("enable_proxy", False))
+        _configure_fp8_retention(self, kwargs)
         super().__init__(model, **kwargs)
         self.model = model.get_qeff_language_decoder()
         self.qaic_config = qaic_config
@@ -1599,6 +1621,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         self.config = model.config
         self._pretrained_model_name_or_path = kwargs.get("pretrained_model_name_or_path", None)
         self._weight_free = kwargs.get("weight_free", False)
+        self._fp8_retain_weights = kwargs.get("fp8_retain_weights", False)
 
         self.vision_model = QEffVisionEncoderForTextImageToTextModel(model, **kwargs)
         self.lang_model = QEffCausalLMForTextImageToTextModel(model, qaic_config=qaic_config, **kwargs)
@@ -1615,8 +1638,19 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if self.dflash_tlm:
             qaic_config.setdefault("pretrained_model_name_or_path", kwargs.get("pretrained_model_name_or_path"))
             self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            self.lang_model.hash_params["dflash_dlm_repo"] = qaic_config.get("dflash_dlm_repo")
+            self.lang_model.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
 
         # ---Sampling---
+        if self.dflash_tlm and qaic_config.get("speculative_model_type") == "target":
+            self.lang_model.hash_params["dflash_output_logits"] = True
+        if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+            prefix = "qwen35_moe" if self.model.config.model_type == "qwen3_5_moe" else "qwen35"
+            self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_kv_commit_v2"
+            self.lang_model.hash_params["dflash_chunk_size"] = 16
+        if self.dflash_tlm and self.model.config.model_type == "gemma4":
+            self.lang_model.hash_params["dflash_cache_protocol"] = "gemma4_block_window_v1"
+
         # Note: SamplerTransform should be applied after all other transforms
         # are done. The role of the sampler is to just add nodes at the output of the
         # previous transform function.
@@ -1643,6 +1677,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             An instance initialized with the pretrained weights.
         """
         enable_proxy = kwargs.pop("enable_proxy", False)
+        fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
@@ -1665,6 +1700,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["fp8_retain_weights"] = fp8_retain_weights
 
         return cls(
             model,
@@ -1806,6 +1842,13 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         )
         dynamic_axes = self.model.get_onnx_dynamic_axes(**dynamic_axes_kwargs)
         output_names = self.model.get_output_names(kv_offload=True)
+        if self.dflash_tlm:
+            nlk = constants.ONNX_EXPORT_EXAMPLE_NLK
+            inputs["lang"]["num_logits_to_keep"] = torch.arange(nlk).view(nlk, 1)
+            dynamic_axes["lang"]["num_logits_to_keep"] = {0: "num_logits_to_keep"}
+            dynamic_axes["lang"]["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}
+            hidden_name = "target_hidden_states" if "target_hidden_states" in output_names["lang"] else "hidden_states"
+            dynamic_axes["lang"][hidden_name] = {0: "batch_size", 1: "seq_len"}
         # Prefix only the language-side KV-cache retained buffers (vision buffers are untouched).
         output_names = apply_kv_cache_prefix(output_names, validate_kv_cache_prefix(kv_cache_prefix))
         lang_qaic_config = getattr(self.lang_model, "qaic_config", None)
@@ -1887,6 +1930,18 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             **compiler_options,
         )
 
+        if (
+            self.dflash_tlm
+            and self.model.config.model_type == "gemma4"
+            and getattr(self.model.config.text_config, "enable_moe_block", False)
+        ):
+            # DFlash verifies a token block, not the single token optimized by decode BMM.
+            qaic_config = dict(qaic_config or getattr(self.lang_model.model, "qaic_config", None) or {})
+            qaic_config["moe_config"] = {
+                **(qaic_config.get("moe_config") or {}),
+                "flavour": MoEFlavour.EXPERT_PARALLEL.value,
+            }
+
         self.lang_model.transform(
             ctx_len=ctx_len,
             seq_len=seq_len,
@@ -1899,7 +1954,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
     def _layerwise_factory_kwargs(self):
         """Reproduce the from_pretrained kwargs needed to rebuild this wrapper per window."""
         # Mirror the dual-QPC from_pretrained surface; the layerwise driver passes
-        # config explicitly per call, so we only carry torch_dtype + attn here.
+        # config explicitly per call, so carry only the dtype, attention, and FP8 mode here.
         # low_cpu_mem_usage=True works with the shard-window patch to allocate
         # only the active window's weights instead of the full model.
         torch_dtype = getattr(self.config, "torch_dtype", None)
@@ -1908,6 +1963,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             "kv_offload": True,
             "torch_dtype": torch_dtype,
             "low_cpu_mem_usage": True,
+            "fp8_retain_weights": self._fp8_retain_weights,
         }
 
     def _build_layerwise_factory(self):
@@ -1936,6 +1992,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             "attn_implementation": "eager",
             "torch_dtype": torch_dtype,
             "low_cpu_mem_usage": True,
+            "fp8_retain_weights": self._fp8_retain_weights,
         }
         _resolve_torch_dtype(kwargs)
         self.config.torch_dtype = kwargs["torch_dtype"]
@@ -2118,6 +2175,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if skip_lang and skip_vision:
             raise ValueError("Expected at least one of 'skip_lang' or 'skip_vision' to be False")
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
+        if self.dflash_tlm and dflash_block_size is None and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+            dflash_block_size = getattr(self.model.model.language_model, "dflash_chunk_size", 16)
+        if self.dflash_tlm and not skip_lang and (type(dflash_block_size) is not int or dflash_block_size < 2):
+            raise ValueError("DFlash TLM requires an integer dflash_block_size >= 2.")
         _ignore_public_mdp_ts_num_devices(compiler_options)
         if qaic_config and qaic_config.get("gdn_full_state_update") is True:
             _get_gdn_full_state_update_kwargs(
@@ -2129,6 +2190,17 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 full_batch_size=full_batch_size,
                 kv_cache_batch_size=kv_cache_batch_size,
             )
+
+        if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+            language_model = self.lang_model.model.language_model
+            previous_chunk_size = getattr(language_model, "dflash_chunk_size", 16)
+            chunk_size = previous_chunk_size if dflash_block_size is None else dflash_block_size
+            if not isinstance(chunk_size, int) or chunk_size < 2 or chunk_size & (chunk_size - 1):
+                raise ValueError("Qwen3.5 DFlash requires a power-of-two dflash_block_size >= 2.")
+            if chunk_size != previous_chunk_size and self.lang_model.onnx_path is not None and lang_onnx_path is None:
+                raise ValueError("Changing dflash_block_size requires a fresh model instance to re-export the TLM.")
+            language_model.dflash_chunk_size = chunk_size
+            self.lang_model.hash_params["dflash_chunk_size"] = chunk_size
 
         if layerwise:
             if skip_lang and not skip_vision:
@@ -2243,6 +2315,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             prefill_seq_len=prefill_seq_len,
         )
 
+        if self.dflash_tlm:
+            compiler_options["dflash_block_size"] = dflash_block_size
         specializations, compiler_options = self.model.get_specializations(
             batch_size=batch_size,
             prefill_seq_len=prefill_seq_len,
@@ -2255,14 +2329,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             kv_cache_batch_size=kv_cache_batch_size,
             full_batch_size=full_batch_size,
             vision_batch_size=vision_batch_size,
+            enable_chunking=enable_chunking,
             **compiler_options,
         )
-
-        # DFlash TLM: override the lang decode spec's seq_len to dflash_block_size.
-        if getattr(self, "dflash_tlm", None) and dflash_block_size is not None:
-            for spec in specializations["lang"]:
-                if str(spec.get("seq_len")) == "1":
-                    spec["seq_len"] = dflash_block_size
 
         custom_io_vision = {}
         target_dtype = getattr(self.model.config, "torch_dtype", torch.float32)
@@ -2323,6 +2392,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         compiler_options.pop("kv_cache_batch_size", None)
         compiler_options.pop("full_batch_size", None)
         self.qpc_paths = {}
+        kw_spec = compiler_options.pop("specializations", None)
         if not skip_vision:
             compiler_options_vision = compiler_options.copy()
             compiler_options_vision["node_precision_info"] = False
@@ -2371,7 +2441,13 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             # but one CCL value is silently dropped.
             lang_specs = specializations["lang"]
             if prefill_only:
-                if self.comp_ctx_lengths_prefill is not None:
+                if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+                    # Prefill and block-sized verification share the chunk graph.
+                    specializations = []
+                    for spec in lang_specs:
+                        if spec not in specializations:
+                            specializations.append(spec)
+                elif self.comp_ctx_lengths_prefill is not None:
                     specializations = lang_specs[: len(self.comp_ctx_lengths_prefill)]
                 else:
                     specializations = lang_specs[:1]
@@ -2386,6 +2462,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 specializations = lang_specs
                 qpc_key = "lang_qpc_path"
 
+            if kw_spec:
+                specializations = kw_spec
             lang_qpc_path = self.lang_model._compile(
                 onnx_path=self.lang_model.onnx_path,
                 compile_dir=compile_dir,
@@ -2891,6 +2969,10 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
     _pytorch_transforms = [
         AwqToMatmulNbitsTransform,
         GPTQToMatmulNbitsTransform,
+        FP8DeQuantLinearToLinearTransform,
+        PackQuantizedInt4ToMatMulNBitsTransform,
+        FP8BlockWiseDequantLinearToLinearTransform,
+        FP8BlockWiseDequantQwen3VLMoeTextExpertsToQwen3VLMoeTextExpertsTransform,
         CustomOpsTransform,
         KVCacheTransform,
         KVCacheExternalModuleMapperTransform,
@@ -2931,6 +3013,7 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         if qaic_config is not None and qaic_config.pop("include_sampler", False):
             raise NotImplementedError("On-device sampling is not supported for single QPC multimodal models yet.")
 
+        _configure_fp8_retention(self, kwargs)
         super().__init__(model, **kwargs)
 
         self.model.qaic_config = qaic_config
@@ -3001,9 +3084,11 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         config._attn_implementation = "eager"
         config.vision_config.use_flash_attn = "false"
         _resolve_torch_dtype(kwargs)
+        fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, config, *args, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["fp8_retain_weights"] = fp8_retain_weights
 
         return cls(
             model,
@@ -3652,6 +3737,7 @@ class QEFFAutoModelForImageTextToText:
 
             **Note:** `attn_implementation` and `low_cpu_mem_usage` are automatically set to "eager" and False respectively to ensure compatibility.
             `continuous_batching` is not supported for image-text-to-text models.
+            Set `fp8_retain_weights=True` to preserve FP8 weights for Dynamo export; the default dequantizes them.
 
         Returns
         -------
@@ -3675,6 +3761,7 @@ class QEFFAutoModelForImageTextToText:
             validate_dynamo_export_requirements("weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
+        fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
 
         # TODO: add a check to see if kv_offload is allowed for given model by loading the config and checking architecture or type of config here.
         if continuous_batching and not kv_offload:
@@ -3710,6 +3797,7 @@ class QEFFAutoModelForImageTextToText:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["fp8_retain_weights"] = fp8_retain_weights
 
         instance = cls(
             model,
@@ -3760,6 +3848,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         AwqToMatmulNbitsTransform,
         GPTQToMatmulNbitsTransform,
         FP8DeQuantLinearToLinearTransform,
+        FP8BlockWiseDequantLinearToLinearTransform,
         PackQuantizedInt4ToMatMulNBitsTransform,
         Mxfp4GptOssExpertDequantizeTransform,
         CustomOpsTransform,
@@ -3871,6 +3960,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             logger.warning(
                 "Please use `from_pretrained` method to load quantized models, might give unexpected results"
             )
+        _configure_fp8_retention(self, kwargs)
         # Set use_cache=True to get KV values as output during ONNX export
         model.config.use_cache = True
 
@@ -3888,8 +3978,15 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if self.dflash_dlm:
             self.model, _ = DFlashTransform.apply(self.model, qaic_config)
             self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
+            self.hash_params["dflash_attention"] = "per_layer_window_v1"
+            if qaic_config.get("dflash_tlm_embedding_key"):
+                self.hash_params["dflash_tlm_embedding_key"] = qaic_config["dflash_tlm_embedding_key"]
+                self.hash_params["dflash_tlm_repo"] = qaic_config["dflash_tlm_repo"]
         if self.dflash_tlm:
             self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            self.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
+            if self.model.config.model_type == "gpt_oss":
+                self.hash_params["dflash_hidden_norm"] = "custom_rms_norm_v1"
 
         self.model, transformed = SpDTransform.apply(self.model, qaic_config=qaic_config, **kwargs)
         self.is_tlm = transformed
@@ -3982,6 +4079,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
             **Note:** `attn_implementation` and `low_cpu_mem_usage` are automatically
             set to "eager" and False respectively to ensure compatibility.
+            Set `fp8_retain_weights=True` to preserve FP8 weights for Dynamo export; the default dequantizes them.
 
         Returns
         -------
@@ -4019,6 +4117,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         )
 
         _resolve_torch_dtype(kwargs)
+        fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs)
         if layerwise:
@@ -4046,6 +4145,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         # This is support models that should be classified to in a different auto class but transformers load them via this class
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["fp8_retain_weights"] = fp8_retain_weights
         if model.__class__.__name__ in MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP:
             return MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP[model.__class__.__name__](
                 model,
@@ -4081,6 +4181,22 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         return self.model.config.__dict__
 
     def handle_gpt_oss_env_variable_legacy_burden(self, prefill_seq_len: int | None = None) -> int:
+        """Resolve export seq_len and populate hash_params from GPT-OSS blocking configuration.
+
+        GPT-OSS prefill blocking is controlled by two parameters:
+
+        * NUM_Q_BLOCKS  — number of query blocks in the blocked attention forward.
+          Can also be inferred from prefill_seq_len / GPT_OSS_PREFILL_Q_BLOCK_SIZE when
+          blocking_kwargs is not yet wired (legacy entry path).
+
+        * num_ffn_blocks — number of token-dimension blocks in the MoE expert loop.
+          Preferred path: set via ``qaic_config['moe_config']['num_ffn_blocks']``.
+          Deprecated fallback: ``NUM_FFN_BLOCKS`` environment variable (will be removed
+          in a future release).
+
+        The returned int is the minimum seq_len that satisfies both blocking divisibility
+        constraints, clamped up to ONNX_EXPORT_EXAMPLE_SEQ_LEN when necessary.
+        """
         num_q_blocks = (
             self.hash_params["blocking_kwargs"].num_q_blocks if self.hash_params.get("blocking_kwargs", None) else None
         )
@@ -4102,13 +4218,23 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         num_q_blocks = int(num_q_blocks)
 
-        num_ffn_blocks = os.environ.get("NUM_FFN_BLOCKS", None)
-        num_ffn_blocks = int(num_ffn_blocks) if num_ffn_blocks else num_ffn_blocks
+        # Preferred path: num_ffn_blocks written into hash_params by OptimizedMoEExportConfigTransform.
+        num_ffn_blocks = self.hash_params.get("num_ffn_blocks", None)
+        if num_ffn_blocks is None:
+            env_val = os.environ.get("NUM_FFN_BLOCKS", None)
+            if env_val is not None:
+                logger.warning(
+                    "NUM_FFN_BLOCKS environment variable is deprecated. "
+                    "Pass num_ffn_blocks via qaic_config['moe_config']['num_ffn_blocks'] instead."
+                )
+                num_ffn_blocks = int(env_val)
+        if num_ffn_blocks is not None:
+            num_ffn_blocks = int(num_ffn_blocks)
         min_seq_len = max(num_q_blocks, num_ffn_blocks) if num_ffn_blocks else num_q_blocks
         if (num_ffn_blocks and min_seq_len % num_ffn_blocks != 0) or min_seq_len % num_q_blocks != 0:
             raise ValueError(
-                f"Got NUM_FFN_BLOCKS={num_ffn_blocks} and NUM_Q_BLOCKS={num_q_blocks}, tried to set seq_len={min_seq_len} for export but,"
-                "seq_len is not divisible by either num_ffn_blocks or num_q_blocks, try chaning the values."
+                f"Got num_ffn_blocks={num_ffn_blocks} and NUM_Q_BLOCKS={num_q_blocks}, tried to set seq_len={min_seq_len} for export but,"
+                "seq_len is not divisible by either num_ffn_blocks or num_q_blocks, try changing the values."
             )
 
         self.hash_params["NUM_Q_BLOCKS"] = num_q_blocks
@@ -4325,6 +4451,27 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 if enable_chunking:
                     if self.model.config.model_type in {"qwen3_moe", "gpt_oss", "glm4_moe"}:
                         seq_len = max(prefill_seq_len or 0, constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
+                    if self.model.config.model_type == "gpt_oss":
+                        # Record NUM_FFN_BLOCKS in hash_params so the env-var fallback is hashed
+                        # even when enable_chunking=True (handle_gpt_oss_env_variable_legacy_burden
+                        # is unreachable in that branch and would otherwise leave the hash stale).
+                        if "NUM_FFN_BLOCKS" not in self.hash_params:
+                            # OptimizedMoEExportConfigTransform writes the lowercase key
+                            # "num_ffn_blocks"; check that before falling back to the env var
+                            # so the two paths use a consistent value.
+                            existing = self.hash_params.get("num_ffn_blocks")
+                            if existing is not None:
+                                self.hash_params["NUM_FFN_BLOCKS"] = existing
+                            else:
+                                env_val = os.environ.get("NUM_FFN_BLOCKS", None)
+                                if env_val is not None:
+                                    logger.warning(
+                                        "NUM_FFN_BLOCKS environment variable is deprecated. "
+                                        "Pass num_ffn_blocks via qaic_config['moe_config']['num_ffn_blocks'] instead."
+                                    )
+                                    self.hash_params["NUM_FFN_BLOCKS"] = int(env_val)
+                                else:
+                                    self.hash_params["NUM_FFN_BLOCKS"] = None
 
                 elif self.model.config.model_type == "gpt_oss":
                     seq_len = self.handle_gpt_oss_env_variable_legacy_burden(prefill_seq_len)
@@ -4369,15 +4516,20 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         }
 
         if getattr(self, "dflash_dlm", None):
-            example_inputs["target_hidden"] = torch.ones((bs, seq_len, self.hidden_size), dtype=torch.float)
+            target_seq_len = (qaic_config or {}).get("dflash_target_seq_len", seq_len)
+            if not isinstance(target_seq_len, int) or isinstance(target_seq_len, bool) or target_seq_len <= 0:
+                raise ValueError("dflash_target_seq_len must be a positive integer.")
+            target_axis = "target_seq_len" if "dflash_target_seq_len" in (qaic_config or {}) else "seq_len"
+            kv_cache_shape[2] = max(kv_cache_shape[2], target_seq_len + seq_len)
+            example_inputs["target_hidden"] = torch.ones((bs, target_seq_len, self.hidden_size), dtype=torch.float)
             example_inputs["position_ids"] = (
-                torch.arange(seq_len, 2 * seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1)
+                torch.arange(target_seq_len, target_seq_len + seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1)
             )
             example_inputs["position_ids_target"] = (
-                torch.arange(seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1)
+                torch.arange(target_seq_len, dtype=torch.int64).view(1, target_seq_len).repeat(bs, 1)
             )
-            dynamic_axes["target_hidden"] = {0: "batch_size", 1: "seq_len"}
-            dynamic_axes["position_ids_target"] = {0: "batch_size", 1: "seq_len"}
+            dynamic_axes["target_hidden"] = {0: "batch_size", 1: target_axis}
+            dynamic_axes["position_ids_target"] = {0: "batch_size", 1: target_axis}
 
         if self.ccl_enabled:
             example_inputs["comp_ctx_lengths"] = torch.randint(0, 127, (seq_len,), dtype=torch.int64)
@@ -4516,7 +4668,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             example_inputs["batch_index"] = torch.arange(bs).view(bs, 1)
             dynamic_axes["batch_index"] = {0: "batch_size"}
 
-        if self.is_tlm:
+        if self.is_tlm or self.dflash_tlm:
             nlk = constants.ONNX_EXPORT_EXAMPLE_NLK  # Number of Logits to Keep
             example_inputs["num_logits_to_keep"] = torch.arange(nlk).view(nlk, 1)
             dynamic_axes["num_logits_to_keep"] = {0: "num_logits_to_keep"}
@@ -4586,6 +4738,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         if getattr(self, "dflash_tlm", None):
             output_names.append("hidden_states")
+            dynamic_axes["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}
+            dynamic_axes["hidden_states"] = {0: "batch_size", 1: "seq_len"}
 
         if QEFFBaseModel._layerwise_active:
             return self._export_layerwise(
@@ -4676,7 +4830,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             }
         if comp_ctx_lengths is not None:
             spec["comp_ctx_lengths"] = comp_ctx_lengths
-        spec["num_logits_to_keep"] = 1 if self.is_tlm else None
+        spec["num_logits_to_keep"] = 1 if self.is_tlm or self.dflash_tlm else None
         if self.continuous_batching:
             spec["full_batch_size"] = kv_cache_batch_size
         else:
@@ -4736,7 +4890,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             of the prefill specialization (e.g., if prefill_seq_len is 1 and not continuous batching).
         """
         decode_seq_len = (num_speculative_tokens + 1) if self.is_tlm else 1
-        if decode_seq_len == prefill_seq_len and not self.continuous_batching:
+        if decode_seq_len == prefill_seq_len and not self.continuous_batching and not self.dflash_tlm:
             return None
         if hasattr(self.model, "get_specializations"):
             spec = self.model.get_specializations(
@@ -4757,6 +4911,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         if getattr(self, "dflash_tlm", None) or getattr(self, "dflash_dlm", None):
             spec["seq_len"] = dflash_block_size
+        if self.dflash_tlm:
+            if type(dflash_block_size) is not int or dflash_block_size < 2:
+                raise ValueError("DFlash TLM requires an integer dflash_block_size >= 2.")
+            spec["num_logits_to_keep"] = dflash_block_size
 
         if self.continuous_batching:
             spec["full_batch_size"] = kv_cache_batch_size
@@ -5112,6 +5270,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         if kw_spec := compiler_options.pop("specializations", None):
             specializations = kw_spec
+
+        if self.dflash_dlm and "dflash_target_seq_len" in (self.model.qaic_config or {}):
+            target_seq_len = self.model.qaic_config["dflash_target_seq_len"]
+            if not isinstance(target_seq_len, int) or isinstance(target_seq_len, bool) or target_seq_len <= 0:
+                raise ValueError("dflash_target_seq_len must be a positive integer.")
+            specializations = [dict(spec, target_seq_len=target_seq_len) for spec in specializations]
 
         target_dtype = getattr(self.model.config, "torch_dtype", torch.float32)
         kv_cache_dtype = "mxint8" if mxint8_kv_cache else CUSTOM_IO_DTYPE_MAP[target_dtype]
