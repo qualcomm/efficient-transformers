@@ -272,6 +272,9 @@ def _run_spd_core(
                 gen_idx += 1
                 metrics.generated_ids.append(int(dlm_token[0]))
                 metrics.generated_sources.append("dlm")
+                if int(dlm_token[0]) in eos_token_ids:
+                    continue_generation = False
+                    break
             else:
                 metrics.total_rejected_tokens += block_size - spec_idx - 1
                 rejected_flag = True
@@ -283,7 +286,7 @@ def _run_spd_core(
                 break
 
         metrics.acceptance_history.append(accepted_length)
-        if not rejected_flag and gen_idx < generation_limit:
+        if continue_generation and not rejected_flag and gen_idx < generation_limit:
             new_tlm_token = tlm_logits[:, block_size - 1]
             generated_ids[0, gen_idx] = new_tlm_token[0]
             gen_idx += 1
@@ -772,6 +775,24 @@ def build_inputs_qwen3_vl(processor, user_prompt, image=None, enable_thinking=No
     return proc_inputs
 
 
+def _prepare_qwen_vision_inputs(processor_inputs, vision_session):
+    inputs = {"pixel_values": processor_inputs["pixel_values"].numpy().astype(np.float16)}
+    grid = processor_inputs["image_grid_thw"].numpy()
+    if grid.ndim != 2 or grid.shape[1] != 3 or grid.shape[0] == 0 or np.any(grid <= 0):
+        raise ValueError("The image processor must provide positive (time, height, width) grid rows.")
+    if "image_grid_thw" not in vision_session.binding_index_map:
+        return inputs
+    binding = vision_session.bindings[vision_session.binding_index_map["image_grid_thw"]]
+    if len(binding.dims) == 4:
+        if not np.all(grid == grid[0]):
+            raise ValueError("The compiled vision encoder requires equal image grids within a batch.")
+        grid = np.zeros((grid.shape[0], *(int(size) for size in grid[0])), dtype=np.int64)
+    elif len(binding.dims) != 2:
+        raise ValueError("Unsupported compiled image_grid_thw rank.")
+    inputs["image_grid_thw"] = grid
+    return inputs
+
+
 def get_qwen35_target_seq_len(tlm_session: QAICInferenceSession, block_size: int) -> int:
     """Require concatenated verification independently of prompt prefill."""
     index = tlm_session.binding_index_map["input_ids"]
@@ -881,12 +902,7 @@ def run_spd_inference_qwen3_vl(
     if image is not None:
         if vision_session is None:
             raise ValueError("An image was given but no vision_session was provided.")
-        vision_results = vision_session.run(
-            {
-                "pixel_values": processor_inputs["pixel_values"].numpy().astype(np.float16),
-                "image_grid_thw": image_grid_thw.numpy(),
-            }
-        )
+        vision_results = vision_session.run(_prepare_qwen_vision_inputs(processor_inputs, vision_session))
         vision_embeds = vision_results["vision_embeds"]
         if has_deepstack:
             deepstack_features = vision_results["deepstack_features"]
