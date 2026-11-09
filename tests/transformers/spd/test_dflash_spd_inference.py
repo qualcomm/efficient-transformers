@@ -17,6 +17,7 @@ import runpy
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import numpy as np
 import pytest
@@ -41,6 +42,46 @@ CTX_LEN = 32
 PAD_TOKEN_ID = 0
 EOS_TOKEN_ID = 1
 MASK_TOKEN_ID = 2
+
+
+@pytest.mark.parametrize("compiled_rank", [None, 2, 4])
+def test_qwen_vision_inputs_match_compiled_grid_contract(compiled_rank):
+    import torch
+
+    from QEfficient.generation.dflash_generation import _prepare_qwen_vision_inputs
+
+    processor_inputs = {
+        "pixel_values": torch.ones((16, 1536), dtype=torch.float32),
+        "image_grid_thw": torch.tensor([[1, 4, 4]], dtype=torch.int64),
+    }
+    session = SimpleNamespace(
+        bindings=[SimpleNamespace(dims=(1, 3) if compiled_rank == 2 else (1, 1, 4, 4))],
+        binding_index_map={} if compiled_rank is None else {"image_grid_thw": 0},
+    )
+    result = _prepare_qwen_vision_inputs(processor_inputs, session)
+    assert result["pixel_values"].dtype == np.float16
+    assert result["pixel_values"].shape == (16, 1536)
+    if compiled_rank == 4:
+        assert result["image_grid_thw"].shape == (1, 1, 4, 4)
+        assert result["image_grid_thw"].dtype == np.int64
+    elif compiled_rank == 2:
+        np.testing.assert_array_equal(result["image_grid_thw"], [[1, 4, 4]])
+    else:
+        assert "image_grid_thw" not in result
+    np.testing.assert_array_equal(processor_inputs["image_grid_thw"].numpy(), [[1, 4, 4]])
+
+
+@pytest.mark.parametrize("grid", [[[0, 4, 4]], [[1, 4]], [[1, 4, 4], [1, 4, 6]]])
+def test_qwen_vision_inputs_reject_invalid_compiled_grid(grid):
+    import torch
+
+    from QEfficient.generation.dflash_generation import _prepare_qwen_vision_inputs
+
+    session = SimpleNamespace(bindings=[SimpleNamespace(dims=(1, 1, 4, 4))], binding_index_map={"image_grid_thw": 0})
+    with pytest.raises(ValueError, match="grid"):
+        _prepare_qwen_vision_inputs(
+            {"pixel_values": torch.zeros((16, 1536)), "image_grid_thw": torch.tensor(grid)}, session
+        )
 
 
 @pytest.mark.parametrize("lang_only", [True, False])
@@ -818,6 +859,229 @@ def test_dflash_rejects_padded_prompt_longer_than_context():
             hidden_size=HIDDEN_SIZE,
             generation_len=1,
         )
+
+
+class _EosScenario(NamedTuple):
+    """EOS handling in _run_spd_core: the drafts after the anchor, the target's verify tokens, and what is expected."""
+
+    drafts: list[int]
+    target: list[int]
+    generated: list[int]
+    sources: list[str]
+    accepted: list[int]
+    rejected: int
+    verifications: int
+    queued: list[int]
+
+
+EOS = EOS_TOKEN_ID
+EOS_SCENARIOS = {
+    "accepted-eos-first-draft": _EosScenario([EOS, 7, 8], [EOS, 7, 8, 9], [EOS], ["dlm"], [1], 0, 1, [2]),
+    "accepted-eos-middle-draft": _EosScenario([6, EOS, 8], [6, EOS, 8, 9], [6, EOS], ["dlm"] * 2, [2], 0, 1, [3]),
+    "accepted-eos-last-draft": _EosScenario([6, 7, EOS], [6, 7, EOS, 9], [6, 7, EOS], ["dlm"] * 3, [3], 0, 1, [4]),
+    "guard-correction-eos": _EosScenario([6, 7, 8], [6, EOS, 8, 9], [6, EOS], ["dlm", "tlm"], [1], 2, 1, [2]),
+    "guard-bonus-eos": _EosScenario([6, 7, 8], [6, 7, 8, EOS], [6, 7, 8, EOS], ["dlm"] * 3 + ["tlm"], [3], 0, 1, [4]),
+    "guard-no-eos": _EosScenario(
+        [6, 7, 8], [6, 7, 8, 9], [6, 7, 8, 9] * 2, (["dlm"] * 3 + ["tlm"]) * 2, [3, 3], 0, 2, [4, 4]
+    ),
+}
+
+
+def _one_hot_logits(token_ids):
+    logits = np.zeros((1, len(token_ids), VOCAB_SIZE), dtype=np.float32)
+    logits[0, np.arange(len(token_ids)), token_ids] = 1
+    return logits
+
+
+class _ScriptedDLMSession(_FakeDLMSession):
+    def __init__(self, drafts):
+        self.drafts = drafts
+
+    def run(self, _inputs):
+        return {"logits": _one_hot_logits([MASK_TOKEN_ID, *self.drafts])}
+
+
+class _ScriptedTLMSession(_FakeTLMSession):
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+
+    def run(self, inputs):
+        outputs = super().run(inputs)
+        if self.run_count > 1:
+            outputs["logits"] = np.array([self.target], dtype=np.int32)
+        return outputs
+
+
+class _ScriptedCommitTLMSession(_FakeCommitTLMSession):
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+
+    def run(self, inputs):
+        outputs = super().run(inputs)
+        if inputs["cache_commit"].item() == 0:
+            outputs["logits"] = np.array([self.target], dtype=np.int32)
+        return outputs
+
+
+class _ScriptedGemmaTLMSession(_FakeGemmaTLMSession):
+    def __init__(self, target):
+        super().__init__()
+        self.target, self.run_count = target, 0
+
+    def run(self, inputs):
+        self.run_count += 1
+        outputs = super().run(inputs)
+        if self.run_count > 1:
+            outputs["logits"] = _one_hot_logits(self.target)
+        return outputs
+
+
+def _record_queued_prefix(monkeypatch):
+    from QEfficient.generation import dflash_generation as generation
+
+    counts, run_core = [], generation._run_spd_core
+
+    def core(**kwargs):
+        queue = kwargs.pop("queue_accepted_prefix")
+
+        def record(draft_ids, decode_position_ids, count):
+            counts.append(count)
+            queue(draft_ids, decode_position_ids, count)
+
+        return run_core(queue_accepted_prefix=record if queue else None, **kwargs)
+
+    monkeypatch.setattr(generation, "_run_spd_core", core)
+    return counts
+
+
+_EOS_RUN = {
+    "mask_token_id": MASK_TOKEN_ID,
+    "vocab_size": VOCAB_SIZE,
+    "ctx_len": CTX_LEN,
+    "block_size": BLOCK_SIZE,
+    "max_iterations": 5,
+    "hidden_size": HIDDEN_SIZE,
+    "generation_len": 2 * BLOCK_SIZE,
+}
+
+
+def _run_single(monkeypatch, drafts, target):
+    tlm_session = _ScriptedTLMSession(target)
+    metrics = run_spd_inference_single(
+        prompt_text="hi",
+        tokenizer=_FakeTokenizer(),
+        dlm_session=_ScriptedDLMSession(drafts),
+        tlm_session=tlm_session,
+        prompt_chunk_size=PROMPT_CHUNK_SIZE,
+        **_EOS_RUN,
+    )
+    return metrics, tlm_session.run_count - 1, None
+
+
+def _run_single_hybrid(monkeypatch, drafts, target):
+    counts = _record_queued_prefix(monkeypatch)
+    tlm_session = _ScriptedCommitTLMSession(target)
+    metrics = run_spd_inference_single(
+        prompt_text="hi",
+        tokenizer=_FakeTokenizer(),
+        dlm_session=_ScriptedDLMSession(drafts),
+        tlm_session=tlm_session,
+        prompt_chunk_size=PROMPT_CHUNK_SIZE,
+        **_EOS_RUN,
+    )
+    return metrics, tlm_session.cache_commits.count(0), counts
+
+
+def _run_qwen3_5_vl(monkeypatch, drafts, target):
+    import torch
+
+    from QEfficient.generation import dflash_generation as generation
+
+    counts, cache_commits = _record_queued_prefix(monkeypatch), []
+
+    def run(feeds):
+        cache_commits.append(feeds["cache_commit"].item())
+        verify = cache_commits[-1] == 0
+        return {
+            "logits": np.array([target] if verify else [[5] * feeds["num_logits_to_keep"].shape[0]], np.int32),
+            "hidden_states": np.zeros((1, feeds["input_ids"].shape[1], HIDDEN_SIZE), dtype=np.float32),
+            "image_idx_output": np.zeros((1, 1), dtype=np.int64),
+        }
+
+    tlm_session = SimpleNamespace(
+        input_names=["cache_commit", "vision_embeds", "num_logits_to_keep"],
+        binding_index_map={"vision_embeds": 0, "input_ids": 1, "num_logits_to_keep": 2},
+        bindings=[SimpleNamespace(type=0, dims=(1, 1, HIDDEN_SIZE))],
+        allowed_shapes=[
+            [(0, [1, 1, HIDDEN_SIZE]), (8, [1, length]), (8, [keep, 1])]
+            for length, keep in [(PROMPT_CHUNK_SIZE, 1), (2 * BLOCK_SIZE, BLOCK_SIZE)]
+        ],
+        aic_to_np_dtype_mapping={0: np.dtype(np.float32)},
+        run=run,
+        set_buffers=lambda buffers: None,
+        skip_buffers=lambda names: None,
+    )
+    monkeypatch.setattr(
+        generation,
+        "build_inputs_qwen3_vl",
+        lambda *args, **kwargs: {"input_ids": torch.full((1, 5), 3), "attention_mask": torch.ones((1, 5))},
+    )
+    monkeypatch.setattr(
+        generation,
+        "compute_position_ids_qwen3_vl",
+        lambda *args, **kwargs: (torch.arange(5).view(1, 1, 5).repeat(4, 1, 1), torch.zeros((1, 1), dtype=torch.int64)),
+    )
+    metrics = generation.run_spd_inference_qwen3_vl(
+        prompt_text="hi",
+        tokenizer=_FakeTokenizer(),
+        processor=None,
+        tlm_config=SimpleNamespace(model_type="qwen3_5"),
+        dlm_session=_ScriptedDLMSession(drafts),
+        tlm_session=tlm_session,
+        prompt_chunk_size=PROMPT_CHUNK_SIZE,
+        **_EOS_RUN,
+    )
+    return metrics, cache_commits.count(0), counts
+
+
+def _run_gemma4(monkeypatch, drafts, target):
+    tlm_session = _ScriptedGemmaTLMSession(target)
+    metrics = run_spd_inference_gemma4(
+        prompt_text="ignored when input_ids are provided",
+        tokenizer=_FakeTokenizer(),
+        dlm_session=_ScriptedDLMSession(drafts),
+        tlm_session=tlm_session,
+        prompt_chunk_size=BLOCK_SIZE,
+        input_ids=np.array([[3, 4]], dtype=np.int64),
+        **_EOS_RUN,
+    )
+    return metrics, tlm_session.run_count - 1, None
+
+
+@pytest.mark.parametrize("scenario", list(EOS_SCENARIOS))
+@pytest.mark.parametrize(
+    "run_eos_scenario",
+    [_run_single, _run_single_hybrid, _run_qwen3_5_vl, _run_gemma4],
+    ids=["single", "single-qwen3_5-hybrid", "qwen3_vl-qwen3_5-queued-prefix", "gemma4"],
+)
+def test_dflash_stops_at_eos_inside_an_accepted_block(monkeypatch, run_eos_scenario, scenario):
+    """An accepted EOS draft ends generation: no later drafts, no bonus token, counters cover only emitted tokens.
+    The guard scenarios (EOS as correction or bonus token, no EOS) behave the same with and without the fix."""
+    case = EOS_SCENARIOS[scenario]
+
+    metrics, num_verifications, queued_counts = run_eos_scenario(monkeypatch, case.drafts, case.target)
+
+    assert metrics.generated_ids == case.generated
+    assert metrics.generated_sources == case.sources
+    assert metrics.total_generated_tokens == len(case.generated)
+    assert metrics.total_accepted_tokens == sum(case.accepted)
+    assert metrics.total_rejected_tokens == case.rejected
+    assert metrics.acceptance_history == case.accepted
+    assert metrics.num_total_iters == num_verifications == case.verifications
+    if queued_counts is not None:
+        assert queued_counts == case.queued
 
 
 def _make_tiny_qwen3_config():

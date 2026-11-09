@@ -98,7 +98,7 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 55
+EXPECTED_SCENARIO_COUNT = 56
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
         "retain_full_kv",
@@ -1088,6 +1088,17 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
         tiny_model_id=TINY_MIXTRAL,
         summary="full Mixtral export RAM spike requires memory measurement",
         skip_reason="full-model memory regression requires dedicated memory measurement job",
+    ),
+    RegressionScenario(
+        name="dflash-tokens-after-eos",
+        stage="inference",
+        source_model_card="Qwen/Qwen3-8B + z-lab/Qwen3-8B-DFlash-b16",
+        tiny_model_id=None,
+        summary="tokens after an EOS verified mid-block are emitted (4/20 prompts, 2 tokens each)",
+        skip_reason="requires QAIC DFlash TLM+DLM QPCs",
+        follow_up=(
+            "tests/transformers/spd/test_dflash_spd_inference.py::test_dflash_stops_at_eos_inside_an_accepted_block"
+        ),
     ),
 )
 
