@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QEfficient.diffusers.pipelines.flux.pipeline_flux &mdash; efficient-transformers main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/my_theme.css?v=f6ee2d30" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="../../../../../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="../../../../../_static/jquery.js?v=5d32c60e"></script>
+        <script src="../../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=d01aebe5"></script>
+        <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <script src="../../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../../../index.html" class="icon icon-home">
+            efficient-transformers
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Release Documents</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../../../release_docs.html">Efficient Transformer Library - 1.23.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../../../release_docs.html#efficient-transformer-library-1-22-0-release-notes">Efficient Transformer Library - 1.22.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../../../release_docs.html#efficient-transformer-library-1-21-6-release-notes">Efficient Transformer Library - 1.21.6 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../../../release_docs.html#efficient-transformer-library-1-21-0-release-notes">Efficient Transformer Library - 1.21.0 Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../../../release_docs.html#efficient-transformer-library-1-20-0-release-notes">Efficient Transformer Library - 1.20.0 Release Notes</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/introduction.html">Introduction Qualcomm <code class="docutils literal notranslate"><span class="pre">efficient-transformers</span></code> library</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/supported_features.html">Supported Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/validate.html">Validated Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/validate.html#note">Note</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/validate.html#models-coming-soon">Models Coming Soon</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Installation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/installation.html">Pre-requisites</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/installation.html#installation">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/installation.html#sanity-check">Sanity Check</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Inference on Cloud AI 100</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/quick_start.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/features_enablement.html">Fetaures Enablement Guide</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/qeff_autoclasses.html">QEfficient Auto Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/diffuser_classes.html">Diffuser Classes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/cli_api.html">CLI API Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">QAIC Finetune</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/finetune.html">Finetune Infra</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Blogs</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html">Train anywhere, Infer on Qualcomm Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#how-to-quadruple-llm-decoding-performance-with-speculative-decoding-spd-and-microscaling-mx-formats-on-qualcomm-cloud-ai-100">How to Quadruple LLM Decoding Performance with Speculative Decoding (SpD) and Microscaling (MX) Formats on Qualcomm® Cloud AI 100</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#power-efficient-acceleration-for-large-language-models-qualcomm-cloud-ai-sdk">Power-efficient acceleration for large language models – Qualcomm Cloud AI SDK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#qualcomm-cloud-ai-100-accelerates-large-language-model-inference-by-2x-using-microscaling-mx-formats">Qualcomm Cloud AI 100 Accelerates Large Language Model Inference by ~2x Using Microscaling (Mx) Formats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/blogs.html#qualcomm-cloud-ai-introduces-efficient-transformers-one-api-infinite-possibilities">Qualcomm Cloud AI Introduces Efficient Transformers: One API, Infinite Possibilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html">Qualcomm Cloud AI home</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#qualcomm-cloud-ai-sdk-download">Qualcomm Cloud AI SDK download</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#qualcomm-cloud-ai-api-reference">Qualcomm Cloud AI API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#user-guide">User Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../source/reference.html#ocp-microscaling-formats-mx-specification">OCP Microscaling Formats (MX) Specification</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../../index.html">efficient-transformers</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">QEfficient.diffusers.pipelines.flux.pipeline_flux</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for QEfficient.diffusers.pipelines.flux.pipeline_flux</h1><div class="highlight"><pre>
+<span></span><span class="c1"># -----------------------------------------------------------------------------</span>
+<span class="c1">#</span>
+<span class="c1"># Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.</span>
+<span class="c1"># SPDX-License-Identifier: BSD-3-Clause</span>
+<span class="c1">#</span>
+<span class="c1"># ----------------------------------------------------------------------------</span>
+
+<span class="c1"># TODO: Pipeline Architecture Improvements</span>
+<span class="c1"># 1. Introduce QEffDiffusionPipeline base class to provide unified export, compile,</span>
+<span class="c1">#    and inference APIs across all diffusion pipelines, promoting code reusability</span>
+<span class="c1">#    and consistent interface design.</span>
+<span class="c1"># 2. Implement persistent QPC session management strategy to retain/drop compiled model</span>
+<span class="c1">#    sessions in memory across all pipeline modules.</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Union</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers</span><span class="w"> </span><span class="kn">import</span> <span class="n">FluxPipeline</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion</span><span class="w"> </span><span class="kn">import</span> <span class="n">retrieve_timesteps</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">tqdm</span><span class="w"> </span><span class="kn">import</span> <span class="n">tqdm</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.first_block_cache.flux</span><span class="w"> </span><span class="kn">import</span> <span class="n">enable_flux_first_block_cache</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.pipelines.pipeline_module</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">QEffFluxTransformerModel</span><span class="p">,</span>
+    <span class="n">QEffTextEncoder</span><span class="p">,</span>
+    <span class="n">QEffVAE</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.diffusers.pipelines.pipeline_utils</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">ONNX_SUBFUNCTION_MODULE</span><span class="p">,</span>
+    <span class="n">ModulePerf</span><span class="p">,</span>
+    <span class="n">QEffPipelineOutput</span><span class="p">,</span>
+    <span class="n">calculate_compressed_latent_dimension</span><span class="p">,</span>
+    <span class="n">compile_modules_parallel</span><span class="p">,</span>
+    <span class="n">compile_modules_sequential</span><span class="p">,</span>
+    <span class="n">config_manager</span><span class="p">,</span>
+    <span class="n">set_execute_params</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.generation.cloud_infer</span><span class="w"> </span><span class="kn">import</span> <span class="n">QAICInferenceSession</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">QEfficient.utils.logging_utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">logger</span>
+
+
+<div class="viewcode-block" id="QEffFluxPipeline"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline">[docs]</a><span class="k">class</span><span class="w"> </span><span class="nc">QEffFluxPipeline</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    QEfficient-optimized Flux pipeline for high-performance text-to-image generation on Qualcomm AI hardware.</span>
+
+<span class="sd">    This pipeline provides an optimized implementation of the Flux diffusion model specifically designed</span>
+<span class="sd">    for deployment on Qualcomm AI Cloud (QAIC) devices. It wraps the original HuggingFace Flux model</span>
+<span class="sd">    components with QEfficient-optimized versions that can be exported to ONNX format and compiled</span>
+<span class="sd">    into Qualcomm Program Container (QPC) files for efficient inference.</span>
+
+<span class="sd">    The pipeline supports the complete Flux workflow including:</span>
+<span class="sd">    - Dual text encoding with CLIP and T5 encoders</span>
+<span class="sd">    - Transformer-based denoising with adaptive layer normalization</span>
+<span class="sd">    - VAE decoding for final image generation</span>
+<span class="sd">    - Performance monitoring and optimization</span>
+
+<span class="sd">    Attributes:</span>
+<span class="sd">        text_encoder (QEffTextEncoder): Optimized CLIP text encoder for pooled embeddings</span>
+<span class="sd">        text_encoder_2 (QEffTextEncoder): Optimized T5 text encoder for sequence embeddings</span>
+<span class="sd">        transformer (QEffFluxTransformerModel): Optimized Flux transformer for denoising</span>
+<span class="sd">        vae_decode (QEffVAE): Optimized VAE decoder for latent-to-image conversion</span>
+<span class="sd">        modules (Dict[str, Any]): Dictionary of all pipeline modules for batch operations</span>
+<span class="sd">        model (FluxPipeline): Original HuggingFace Flux model reference</span>
+<span class="sd">        tokenizer: CLIP tokenizer for text preprocessing</span>
+<span class="sd">        scheduler: Diffusion scheduler for timestep management</span>
+
+<span class="sd">    Example:</span>
+<span class="sd">        &gt;&gt;&gt; from QEfficient.diffusers.pipelines.flux import QEffFluxPipeline</span>
+<span class="sd">        &gt;&gt;&gt; pipeline = QEffFluxPipeline.from_pretrained(&quot;black-forest-labs/FLUX.1-schnell&quot;)</span>
+<span class="sd">        &gt;&gt;&gt; images = pipeline(</span>
+<span class="sd">        ...     prompt=&quot;A beautiful sunset over mountains&quot;,</span>
+<span class="sd">        ...     height=512,</span>
+<span class="sd">        ...     width=512,</span>
+<span class="sd">        ...     num_inference_steps=28</span>
+<span class="sd">        ... )</span>
+<span class="sd">        &gt;&gt;&gt; images.images[0].save(&quot;generated_image.png&quot;)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_hf_auto_class</span> <span class="o">=</span> <span class="n">FluxPipeline</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">model</span><span class="p">,</span>
+        <span class="n">enable_first_block_cache</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">first_block_cache_downsample_factor</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">4</span><span class="p">,</span>
+        <span class="o">*</span><span class="n">args</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initialize the QEfficient Flux pipeline.</span>
+
+<span class="sd">        This pipeline provides an optimized implementation of the Flux text-to-image model</span>
+<span class="sd">        for deployment on Qualcomm AI hardware. It wraps the original HuggingFace Flux model</span>
+<span class="sd">        components with QEfficient-optimized versions that can be exported to ONNX and compiled</span>
+<span class="sd">        for QAIC devices.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model: Pre-loaded FluxPipeline model</span>
+<span class="sd">            enable_first_block_cache (bool): Enable retained-state first-block-cache path.</span>
+<span class="sd">            first_block_cache_downsample_factor (int): Downsample factor for the first-block</span>
+<span class="sd">                residual cache key. Used only when first-block-cache is enabled.</span>
+<span class="sd">            **kwargs: Additional arguments including height and width</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="c1"># Wrap model components with QEfficient optimized versions</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">enable_first_block_cache</span> <span class="o">=</span> <span class="n">enable_first_block_cache</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">first_block_cache_downsample_factor</span> <span class="o">=</span> <span class="n">first_block_cache_downsample_factor</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span> <span class="o">=</span> <span class="n">QEffTextEncoder</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">text_encoder</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span> <span class="o">=</span> <span class="n">QEffTextEncoder</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span> <span class="o">=</span> <span class="n">QEffFluxTransformerModel</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">transformer</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">enable_first_block_cache</span><span class="p">:</span>
+            <span class="n">enable_flux_first_block_cache</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="p">,</span>
+                <span class="n">downsample_factor</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">first_block_cache_downsample_factor</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span> <span class="o">=</span> <span class="n">QEffVAE</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">vae</span><span class="p">,</span> <span class="s2">&quot;decoder&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Store all modules in a dictionary for easy iteration during export/compile</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">modules</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;text_encoder&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="p">,</span>
+            <span class="s2">&quot;text_encoder_2&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="p">,</span>
+            <span class="s2">&quot;transformer&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="p">,</span>
+            <span class="s2">&quot;vae_decoder&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="p">,</span>
+        <span class="p">}</span>
+
+        <span class="c1"># Copy tokenizers and scheduler from the original model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">tokenizer</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">tokenizer</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">tokenizer_2</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer_max_length</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">tokenizer_max_length</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">scheduler</span>
+
+        <span class="c1"># Override VAE forward method to use decode directly</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">forward</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">latent_sample</span><span class="p">,</span> <span class="n">return_dict</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span>
+            <span class="n">latent_sample</span><span class="p">,</span> <span class="n">return_dict</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Sync max position embeddings between text encoders</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_position_embeddings</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_position_embeddings</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="QEffFluxPipeline.from_pretrained"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.from_pretrained">[docs]</a>    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_pretrained</span><span class="p">(</span>
+        <span class="bp">cls</span><span class="p">,</span>
+        <span class="n">pretrained_model_name_or_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">]],</span>
+        <span class="n">enable_first_block_cache</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">first_block_cache_downsample_factor</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">4</span><span class="p">,</span>
+        <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Load a pretrained Flux model from HuggingFace Hub or local path and wrap it with QEfficient optimizations.</span>
+
+<span class="sd">        This class method provides a convenient way to instantiate a QEffFluxPipeline from a pretrained</span>
+<span class="sd">        Flux model. It automatically loads the base FluxPipeline model in float32 precision on CPU</span>
+<span class="sd">        and wraps all components with QEfficient-optimized versions for QAIC deployment.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            pretrained_model_name_or_path (str or os.PathLike): Either a HuggingFace model identifier</span>
+<span class="sd">                (e.g., &quot;black-forest-labs/FLUX.1-schnell&quot;) or a local path to a saved model directory.</span>
+<span class="sd">            enable_first_block_cache (bool, optional): Enables retained-state first-block-cache path.</span>
+<span class="sd">            first_block_cache_downsample_factor (int, optional): Downsample factor for the first-block</span>
+<span class="sd">                residual cache key when cache is enabled.</span>
+<span class="sd">            **kwargs: Additional keyword arguments passed to FluxPipeline.from_pretrained().</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            QEffFluxPipeline: A fully initialized pipeline instance with QEfficient-optimized components</span>
+<span class="sd">                ready for export, compilation, and inference on QAIC devices.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            ValueError: If the model path is invalid or model cannot be loaded</span>
+<span class="sd">            OSError: If there are issues accessing the model files</span>
+<span class="sd">            RuntimeError: If model initialization fails</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; # Load from HuggingFace Hub</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffFluxPipeline.from_pretrained(&quot;black-forest-labs/FLUX.1-schnell&quot;)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Load from local path</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffFluxPipeline.from_pretrained(&quot;/path/to/local/flux/model&quot;)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Load with custom cache directory</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffFluxPipeline.from_pretrained(</span>
+<span class="sd">            ...     &quot;black-forest-labs/FLUX.1-dev&quot;,</span>
+<span class="sd">            ...     cache_dir=&quot;/custom/cache/dir&quot;</span>
+<span class="sd">            ... )</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Load the base Flux model in float32 on CPU</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">_hf_auto_class</span><span class="o">.</span><span class="n">from_pretrained</span><span class="p">(</span>
+            <span class="n">pretrained_model_name_or_path</span><span class="p">,</span>
+            <span class="n">torch_dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+            <span class="n">device_map</span><span class="o">=</span><span class="s2">&quot;cpu&quot;</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+            <span class="n">enable_first_block_cache</span><span class="o">=</span><span class="n">enable_first_block_cache</span><span class="p">,</span>
+            <span class="n">first_block_cache_downsample_factor</span><span class="o">=</span><span class="n">first_block_cache_downsample_factor</span><span class="p">,</span>
+            <span class="n">pretrained_model_name_or_path</span><span class="o">=</span><span class="n">pretrained_model_name_or_path</span><span class="p">,</span>
+            <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffFluxPipeline.export"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.export">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">export_dir</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Export all pipeline modules to ONNX format for deployment preparation.</span>
+
+<span class="sd">        This method systematically exports each pipeline component (CLIP text encoder, T5 text encoder,</span>
+<span class="sd">        Flux transformer, and VAE decoder) to ONNX format. Each module is exported with its specific</span>
+<span class="sd">        configuration including dynamic axes, input/output specifications, and optimization settings.</span>
+
+<span class="sd">        The export process prepares the models for subsequent compilation to QPC format, enabling</span>
+<span class="sd">        efficient inference on QAIC hardware. ONNX subfunctions can be used for certain modules</span>
+<span class="sd">        to optimize memory usage and performance.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            export_dir (str, optional): Target directory for saving ONNX model files. If None,</span>
+<span class="sd">                uses the default export directory structure based on model name and configuration.</span>
+<span class="sd">                The directory will be created if it doesn&#39;t exist.</span>
+<span class="sd">            use_onnx_subfunctions (bool, default=False): Whether to enable ONNX subfunction</span>
+<span class="sd">                optimization for supported modules. This can optimize thegraph and</span>
+<span class="sd">                improve compilation efficiency for models like the transformer.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Absolute path to the export directory containing all ONNX model files.</span>
+<span class="sd">                Each module will have its own subdirectory with the exported ONNX file.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            RuntimeError: If ONNX export fails for any module</span>
+<span class="sd">            OSError: If there are issues creating the export directory or writing files</span>
+<span class="sd">            ValueError: If module configurations are invalid</span>
+
+<span class="sd">        Note:</span>
+<span class="sd">            - All models are exported in float32 precision for maximum compatibility</span>
+<span class="sd">            - Dynamic axes are configured to support variable batch sizes and sequence lengths</span>
+<span class="sd">            - The export process may take several minutes depending on model size</span>
+<span class="sd">            - Exported ONNX files can be large (several GB for complete pipeline)</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffFluxPipeline.from_pretrained(&quot;black-forest-labs/FLUX.1-schnell&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; export_path = pipeline.export(</span>
+<span class="sd">            ...     export_dir=&quot;/path/to/export&quot;,</span>
+<span class="sd">            ...     use_onnx_subfunctions=True</span>
+<span class="sd">            ... )</span>
+<span class="sd">            &gt;&gt;&gt; print(f&quot;Models exported to: {export_path}&quot;)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">for</span> <span class="n">module_name</span><span class="p">,</span> <span class="n">module_obj</span> <span class="ow">in</span> <span class="n">tqdm</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">items</span><span class="p">(),</span> <span class="n">desc</span><span class="o">=</span><span class="s2">&quot;Exporting modules&quot;</span><span class="p">,</span> <span class="n">unit</span><span class="o">=</span><span class="s2">&quot;module&quot;</span><span class="p">):</span>
+            <span class="c1"># Get ONNX export configuration for this module</span>
+            <span class="n">example_inputs</span><span class="p">,</span> <span class="n">dynamic_axes</span><span class="p">,</span> <span class="n">output_names</span> <span class="o">=</span> <span class="n">module_obj</span><span class="o">.</span><span class="n">get_onnx_params</span><span class="p">()</span>
+
+            <span class="n">export_params</span> <span class="o">=</span> <span class="p">{</span>
+                <span class="s2">&quot;inputs&quot;</span><span class="p">:</span> <span class="n">example_inputs</span><span class="p">,</span>
+                <span class="s2">&quot;output_names&quot;</span><span class="p">:</span> <span class="n">output_names</span><span class="p">,</span>
+                <span class="s2">&quot;dynamic_axes&quot;</span><span class="p">:</span> <span class="n">dynamic_axes</span><span class="p">,</span>
+                <span class="s2">&quot;export_dir&quot;</span><span class="p">:</span> <span class="n">export_dir</span><span class="p">,</span>
+            <span class="p">}</span>
+
+            <span class="k">if</span> <span class="n">use_onnx_subfunctions</span> <span class="ow">and</span> <span class="n">module_name</span> <span class="ow">in</span> <span class="n">ONNX_SUBFUNCTION_MODULE</span><span class="p">:</span>
+                <span class="n">export_params</span><span class="p">[</span><span class="s2">&quot;use_onnx_subfunctions&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">True</span>
+
+            <span class="k">if</span> <span class="n">module_obj</span><span class="o">.</span><span class="n">qpc_path</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">module_obj</span><span class="o">.</span><span class="n">export</span><span class="p">(</span><span class="o">**</span><span class="n">export_params</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffFluxPipeline.get_default_config_path"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.get_default_config_path">[docs]</a>    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_default_config_path</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Get the absolute path to the default Flux pipeline configuration file.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            str: Absolute path to the flux_config.json file containing default pipeline</span>
+<span class="sd">                configuration settings for compilation and device allocation.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)),</span> <span class="s2">&quot;configs/flux_config.json&quot;</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="QEffFluxPipeline.compile"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.compile">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">compile</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">compile_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">parallel</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">height</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+        <span class="n">width</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Compile ONNX models into optimized QPC format for deployment on Qualcomm AI hardware.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            compile_config (str, optional): Path to a JSON configuration file containing</span>
+<span class="sd">                compilation settings, device mappings, and optimization parameters. If None,</span>
+<span class="sd">                uses the default configuration from get_default_config_path().</span>
+<span class="sd">            parallel (bool, default=False): Compilation mode selection:</span>
+<span class="sd">                - True: Compile modules in parallel using ThreadPoolExecutor for faster processing</span>
+<span class="sd">                - False: Compile modules sequentially for lower resource usage</span>
+<span class="sd">            height (int, default=512): Target image height in pixels.</span>
+<span class="sd">            width (int, default=512): Target image width in pixels.</span>
+<span class="sd">            use_onnx_subfunctions (bool, default=False): Whether to export models with ONNX</span>
+<span class="sd">                subfunctions before compilation.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            RuntimeError: If compilation fails for any module or if QAIC compiler is not available</span>
+<span class="sd">            FileNotFoundError: If ONNX models haven&#39;t been exported or config file is missing</span>
+<span class="sd">            ValueError: If configuration parameters are invalid</span>
+<span class="sd">            OSError: If there are issues with file I/O during compilation</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffFluxPipeline.from_pretrained(&quot;black-forest-labs/FLUX.1-schnell&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; # Sequential compilation with default config</span>
+<span class="sd">            &gt;&gt;&gt; pipeline.compile(height=1024, width=1024)</span>
+<span class="sd">            &gt;&gt;&gt;</span>
+<span class="sd">            &gt;&gt;&gt; # Parallel compilation with custom config</span>
+<span class="sd">            &gt;&gt;&gt; pipeline.compile(</span>
+<span class="sd">            ...     compile_config=&quot;/path/to/custom_config.json&quot;,</span>
+<span class="sd">            ...     parallel=True,</span>
+<span class="sd">            ...     height=512,</span>
+<span class="sd">            ...     width=512</span>
+<span class="sd">            ... )</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># Load compilation configuration</span>
+        <span class="n">config_manager</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config_source</span><span class="o">=</span><span class="n">compile_config</span><span class="p">,</span> <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">)</span>
+
+        <span class="c1"># Set device IDs, qpc path if precompiled qpc exist</span>
+        <span class="n">set_execute_params</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+        <span class="c1"># Ensure all modules are exported to ONNX before compilation</span>
+        <span class="k">if</span> <span class="nb">any</span><span class="p">(</span>
+            <span class="n">path</span> <span class="ow">is</span> <span class="kc">None</span>
+            <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="p">[</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">onnx_path</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">onnx_path</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">onnx_path</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">onnx_path</span><span class="p">,</span>
+            <span class="p">]</span>
+        <span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">export</span><span class="p">(</span><span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">)</span>
+
+        <span class="c1"># Calculate compressed latent dimension using utility function</span>
+        <span class="n">cl</span><span class="p">,</span> <span class="n">latent_height</span><span class="p">,</span> <span class="n">latent_width</span> <span class="o">=</span> <span class="n">calculate_compressed_latent_dimension</span><span class="p">(</span>
+            <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae_scale_factor</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Prepare dynamic specialization updates based on image dimensions</span>
+        <span class="n">specialization_updates</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;transformer&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;cl&quot;</span><span class="p">:</span> <span class="n">cl</span><span class="p">},</span>
+            <span class="s2">&quot;vae_decoder&quot;</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">&quot;latent_height&quot;</span><span class="p">:</span> <span class="n">latent_height</span><span class="p">,</span>
+                <span class="s2">&quot;latent_width&quot;</span><span class="p">:</span> <span class="n">latent_width</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">}</span>
+
+        <span class="c1"># Use generic utility functions for compilation</span>
+        <span class="k">if</span> <span class="n">parallel</span><span class="p">:</span>
+            <span class="n">compile_modules_parallel</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">modules</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">custom_config</span><span class="p">,</span> <span class="n">specialization_updates</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">compile_modules_sequential</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">modules</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">custom_config</span><span class="p">,</span> <span class="n">specialization_updates</span><span class="p">)</span></div>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_get_t5_prompt_embeds</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">num_images_per_prompt</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">max_sequence_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+        <span class="n">device_ids</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Encode text prompts using the T5 text encoder for detailed semantic understanding.</span>
+
+<span class="sd">        T5 provides rich sequence embeddings that capture fine-grained text details,</span>
+<span class="sd">        complementing CLIP&#39;s global representation in Flux&#39;s dual encoder setup.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            prompt (str or List[str]): Input prompt(s) to encode</span>
+<span class="sd">            num_images_per_prompt (int): Number of images to generate per prompt</span>
+<span class="sd">            max_sequence_length (int): Maximum token sequence length (default: 512)</span>
+<span class="sd">            device_ids (List[int], optional): QAIC device IDs for inference</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            tuple: (prompt_embeds, inference_time)</span>
+<span class="sd">                - prompt_embeds (torch.Tensor): Encoded embeddings [batch*num_images, seq_len, 4096]</span>
+<span class="sd">                - inference_time (float): T5 encoder inference time in seconds</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">prompt</span> <span class="o">=</span> <span class="p">[</span><span class="n">prompt</span><span class="p">]</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="n">prompt</span>
+        <span class="n">batch_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span>
+
+        <span class="c1"># Tokenize prompts with padding and truncation</span>
+        <span class="n">text_inputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">tokenizer</span><span class="p">(</span>
+            <span class="n">prompt</span><span class="p">,</span>
+            <span class="n">padding</span><span class="o">=</span><span class="s2">&quot;max_length&quot;</span><span class="p">,</span>
+            <span class="n">max_length</span><span class="o">=</span><span class="n">max_sequence_length</span><span class="p">,</span>
+            <span class="n">truncation</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">return_length</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">return_overflowing_tokens</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">return_tensors</span><span class="o">=</span><span class="s2">&quot;pt&quot;</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="n">text_input_ids</span> <span class="o">=</span> <span class="n">text_inputs</span><span class="o">.</span><span class="n">input_ids</span>
+
+        <span class="c1"># Check for truncation and warn user</span>
+        <span class="n">untruncated_ids</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">tokenizer</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="n">padding</span><span class="o">=</span><span class="s2">&quot;longest&quot;</span><span class="p">,</span> <span class="n">return_tensors</span><span class="o">=</span><span class="s2">&quot;pt&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">input_ids</span>
+        <span class="k">if</span> <span class="n">untruncated_ids</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="n">text_input_ids</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">torch</span><span class="o">.</span><span class="n">equal</span><span class="p">(</span><span class="n">text_input_ids</span><span class="p">,</span> <span class="n">untruncated_ids</span><span class="p">):</span>
+            <span class="n">removed_text</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">batch_decode</span><span class="p">(</span>
+                <span class="n">untruncated_ids</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">model_max_length</span> <span class="o">-</span> <span class="mi">1</span> <span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+            <span class="p">)</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;The following part of your input was truncated because `max_sequence_length` is set to &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">model_max_length</span><span class="si">}</span><span class="s2"> tokens: </span><span class="si">{</span><span class="n">removed_text</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Initialize QAIC inference session if not already created</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span>
+                <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="o">=</span><span class="n">device_ids</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Allocate output buffers for QAIC inference</span>
+        <span class="n">text_encoder_2_output</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;last_hidden_state&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span> <span class="n">max_sequence_length</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">d_model</span>
+            <span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
+        <span class="p">}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="n">text_encoder_2_output</span><span class="p">)</span>
+
+        <span class="c1"># Prepare input for QAIC inference</span>
+        <span class="n">aic_text_input</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="n">text_input_ids</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)}</span>
+
+        <span class="c1"># Run T5 encoder inference and measure time</span>
+        <span class="n">start_t5_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">aic_text_input</span><span class="p">)[</span><span class="s2">&quot;last_hidden_state&quot;</span><span class="p">])</span>
+        <span class="n">end_t5_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">text_encoder_2_perf</span> <span class="o">=</span> <span class="n">end_t5_time</span> <span class="o">-</span> <span class="n">start_t5_time</span>
+
+        <span class="c1"># Duplicate embeddings for multiple images per prompt</span>
+        <span class="n">_</span><span class="p">,</span> <span class="n">seq_len</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">shape</span>
+        <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_images_per_prompt</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">batch_size</span> <span class="o">*</span> <span class="n">num_images_per_prompt</span><span class="p">,</span> <span class="n">seq_len</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">prompt_embeds</span><span class="p">,</span> <span class="n">text_encoder_2_perf</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_get_clip_prompt_embeds</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]],</span>
+        <span class="n">num_images_per_prompt</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">device_ids</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Encode text prompts using the CLIP text encoder for global semantic representation.</span>
+
+<span class="sd">        CLIP provides pooled embeddings that capture high-level semantic meaning,</span>
+<span class="sd">        working alongside T5&#39;s detailed sequence embeddings in Flux&#39;s dual encoder setup.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            prompt (str or List[str]): Input prompt(s) to encode</span>
+<span class="sd">            num_images_per_prompt (int): Number of images to generate per prompt</span>
+<span class="sd">            device_ids (List[int], optional): QAIC device IDs for inference</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            tuple: (pooled_prompt_embeds, inference_time)</span>
+<span class="sd">                - pooled_prompt_embeds (torch.Tensor): Pooled embeddings [batch*num_images, 768]</span>
+<span class="sd">                - inference_time (float): CLIP encoder inference time in seconds</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">prompt</span> <span class="o">=</span> <span class="p">[</span><span class="n">prompt</span><span class="p">]</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="n">prompt</span>
+        <span class="n">batch_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span>
+
+        <span class="c1"># Tokenize prompts</span>
+        <span class="n">text_inputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span><span class="p">(</span>
+            <span class="n">prompt</span><span class="p">,</span>
+            <span class="n">padding</span><span class="o">=</span><span class="s2">&quot;max_length&quot;</span><span class="p">,</span>
+            <span class="n">max_length</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">tokenizer_max_length</span><span class="p">,</span>
+            <span class="n">truncation</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">return_overflowing_tokens</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">return_length</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">return_tensors</span><span class="o">=</span><span class="s2">&quot;pt&quot;</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="n">text_input_ids</span> <span class="o">=</span> <span class="n">text_inputs</span><span class="o">.</span><span class="n">input_ids</span>
+
+        <span class="c1"># Check for truncation and warn user</span>
+        <span class="n">untruncated_ids</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="n">padding</span><span class="o">=</span><span class="s2">&quot;longest&quot;</span><span class="p">,</span> <span class="n">return_tensors</span><span class="o">=</span><span class="s2">&quot;pt&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">input_ids</span>
+        <span class="k">if</span> <span class="n">untruncated_ids</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="n">text_input_ids</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">torch</span><span class="o">.</span><span class="n">equal</span><span class="p">(</span><span class="n">text_input_ids</span><span class="p">,</span> <span class="n">untruncated_ids</span><span class="p">):</span>
+            <span class="n">removed_text</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">batch_decode</span><span class="p">(</span><span class="n">untruncated_ids</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer_max_length</span> <span class="o">-</span> <span class="mi">1</span> <span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;The following part of your input was truncated because CLIP can only handle sequences up to &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">tokenizer_max_length</span><span class="si">}</span><span class="s2"> tokens: </span><span class="si">{</span><span class="n">removed_text</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Initialize QAIC inference session if not already created</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="o">=</span><span class="n">device_ids</span><span class="p">)</span>
+
+        <span class="c1"># Allocate output buffers for QAIC inference</span>
+        <span class="n">text_encoder_output</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;last_hidden_state&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span>
+                <span class="n">batch_size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer_max_length</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">hidden_size</span>
+            <span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+            <span class="s2">&quot;pooler_output&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">hidden_size</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
+        <span class="p">}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="n">text_encoder_output</span><span class="p">)</span>
+
+        <span class="c1"># Prepare input for QAIC inference</span>
+        <span class="n">aic_text_input</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;input_ids&quot;</span><span class="p">:</span> <span class="n">text_input_ids</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int64</span><span class="p">)}</span>
+
+        <span class="c1"># Run CLIP encoder inference and measure time</span>
+        <span class="n">start_text_encoder_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">aic_embeddings</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">aic_text_input</span><span class="p">)</span>
+        <span class="n">end_text_encoder_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">text_encoder_perf</span> <span class="o">=</span> <span class="n">end_text_encoder_time</span> <span class="o">-</span> <span class="n">start_text_encoder_time</span>
+        <span class="c1"># Extract pooled output (used for conditioning in Flux)</span>
+        <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="n">aic_embeddings</span><span class="p">[</span><span class="s2">&quot;pooler_output&quot;</span><span class="p">])</span>
+
+        <span class="c1"># Duplicate embeddings for multiple images per prompt</span>
+        <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_images_per_prompt</span><span class="p">)</span>
+        <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">batch_size</span> <span class="o">*</span> <span class="n">num_images_per_prompt</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">prompt_embeds</span><span class="p">,</span> <span class="n">text_encoder_perf</span>
+
+<div class="viewcode-block" id="QEffFluxPipeline.encode_prompt"><a class="viewcode-back" href="../../../../../source/diffuser_classes.html#QEfficient.diffusers.pipelines.flux.pipeline_flux.QEffFluxPipeline.encode_prompt">[docs]</a>    <span class="k">def</span><span class="w"> </span><span class="nf">encode_prompt</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]],</span>
+        <span class="n">prompt_2</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">num_images_per_prompt</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">pooled_prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">max_sequence_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Encode text prompts using Flux&#39;s dual text encoder architecture.</span>
+
+<span class="sd">        Flux employs both CLIP and T5 encoders for comprehensive text understanding:</span>
+<span class="sd">        - CLIP provides pooled embeddings for global semantic conditioning</span>
+<span class="sd">        - T5 provides detailed sequence embeddings for fine-grained text control</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            prompt (str or List[str]): Primary prompt(s) for both encoders</span>
+<span class="sd">            prompt_2 (str or List[str], optional): Secondary prompt(s) for T5. If None, uses primary prompt</span>
+<span class="sd">            num_images_per_prompt (int): Number of images to generate per prompt</span>
+<span class="sd">            prompt_embeds (torch.FloatTensor, optional): Pre-computed T5 embeddings</span>
+<span class="sd">            pooled_prompt_embeds (torch.FloatTensor, optional): Pre-computed CLIP pooled embeddings</span>
+<span class="sd">            max_sequence_length (int): Maximum sequence length for T5 tokenization</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            tuple: (prompt_embeds, pooled_prompt_embeds, text_ids, encoder_perf_times)</span>
+<span class="sd">                - prompt_embeds (torch.Tensor): T5 sequence embeddings [batch*num_images, seq_len, 4096]</span>
+<span class="sd">                - pooled_prompt_embeds (torch.Tensor): CLIP pooled embeddings [batch*num_images, 768]</span>
+<span class="sd">                - text_ids (torch.Tensor): Position IDs for text tokens [seq_len, 3]</span>
+<span class="sd">                - encoder_perf_times (List[float]): Performance times [CLIP_time, T5_time]</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">prompt</span> <span class="o">=</span> <span class="p">[</span><span class="n">prompt</span><span class="p">]</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="n">prompt</span>
+        <span class="n">text_encoder_perf</span> <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="n">text_encoder_2_perf</span> <span class="o">=</span> <span class="mf">0.0</span>
+
+        <span class="k">if</span> <span class="n">prompt_embeds</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="c1"># Use primary prompt for both encoders if secondary not provided</span>
+            <span class="n">prompt_2</span> <span class="o">=</span> <span class="n">prompt_2</span> <span class="ow">or</span> <span class="n">prompt</span>
+            <span class="n">prompt_2</span> <span class="o">=</span> <span class="p">[</span><span class="n">prompt_2</span><span class="p">]</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt_2</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="n">prompt_2</span>
+
+            <span class="c1"># Encode with CLIP (returns pooled embeddings)</span>
+            <span class="n">pooled_prompt_embeds</span><span class="p">,</span> <span class="n">text_encoder_perf</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_clip_prompt_embeds</span><span class="p">(</span>
+                <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+                <span class="n">device_ids</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">device_ids</span><span class="p">,</span>
+                <span class="n">num_images_per_prompt</span><span class="o">=</span><span class="n">num_images_per_prompt</span><span class="p">,</span>
+            <span class="p">)</span>
+
+            <span class="c1"># Encode with T5 (returns sequence embeddings)</span>
+            <span class="n">prompt_embeds</span><span class="p">,</span> <span class="n">text_encoder_2_perf</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_t5_prompt_embeds</span><span class="p">(</span>
+                <span class="n">prompt</span><span class="o">=</span><span class="n">prompt_2</span><span class="p">,</span>
+                <span class="n">num_images_per_prompt</span><span class="o">=</span><span class="n">num_images_per_prompt</span><span class="p">,</span>
+                <span class="n">max_sequence_length</span><span class="o">=</span><span class="n">max_sequence_length</span><span class="p">,</span>
+                <span class="n">device_ids</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">device_ids</span><span class="p">,</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Create text position IDs (required by Flux transformer)</span>
+        <span class="n">text_ids</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">prompt_embeds</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="mi">3</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">prompt_embeds</span><span class="p">,</span> <span class="n">pooled_prompt_embeds</span><span class="p">,</span> <span class="n">text_ids</span><span class="p">,</span> <span class="p">[</span><span class="n">text_encoder_perf</span><span class="p">,</span> <span class="n">text_encoder_2_perf</span><span class="p">]</span></div>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">height</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+        <span class="n">width</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+        <span class="n">prompt</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">prompt_2</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">negative_prompt</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">negative_prompt_2</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">true_cfg_scale</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span>
+        <span class="n">num_inference_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">28</span><span class="p">,</span>
+        <span class="n">timesteps</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">guidance_scale</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">3.5</span><span class="p">,</span>
+        <span class="n">num_images_per_prompt</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">generator</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Generator</span><span class="p">,</span> <span class="n">List</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Generator</span><span class="p">]]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">latents</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">pooled_prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">negative_prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">negative_pooled_prompt_embeds</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">output_type</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;pil&quot;</span><span class="p">,</span>
+        <span class="n">callback_on_step_end</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Callable</span><span class="p">[[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="n">Dict</span><span class="p">],</span> <span class="kc">None</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">callback_on_step_end_tensor_inputs</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;latents&quot;</span><span class="p">],</span>
+        <span class="n">max_sequence_length</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">512</span><span class="p">,</span>
+        <span class="n">custom_config_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">parallel_compile</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">use_onnx_subfunctions</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+        <span class="n">cache_threshold</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Generate images from text prompts using the QEfficient-optimized Flux pipeline on QAIC hardware.</span>
+
+<span class="sd">        This is the main entry point for text-to-image generation. It orchestrates the complete Flux</span>
+<span class="sd">        diffusion pipeline optimized for Qualcomm AI Cloud devices.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            height (int, optional): Target image height in pixels. Must be divisible by 8. Default: 512.</span>
+<span class="sd">            width (int, optional): Target image width in pixels. Must be divisible by 8. Default: 512.</span>
+<span class="sd">            prompt (str or List[str]): Primary text prompt(s) describing the desired image(s).</span>
+<span class="sd">                Required unless `prompt_embeds` is provided.</span>
+<span class="sd">            prompt_2 (str or List[str], optional): Secondary prompt for T5 encoder. If None, uses `prompt`.</span>
+<span class="sd">            negative_prompt (str or List[str], optional): Negative prompt(s) describing what to avoid.</span>
+<span class="sd">                Only used when `true_cfg_scale &gt; 1.0`.</span>
+<span class="sd">            negative_prompt_2 (str or List[str], optional): Secondary negative prompt for T5. If None, uses `negative_prompt`.</span>
+<span class="sd">            true_cfg_scale (float, optional): True classifier-free guidance scale. Values &gt; 1.0 enable</span>
+<span class="sd">                negative prompting. Default: 1.0 (disabled).</span>
+<span class="sd">            num_inference_steps (int, optional): Number of denoising steps. Default: 28.</span>
+<span class="sd">            timesteps (List[int], optional): Custom timestep schedule. If provided, overrides `num_inference_steps`.</span>
+<span class="sd">            guidance_scale (float, optional): Guidance scale for classifier-free guidance. Default: 3.5.</span>
+<span class="sd">            num_images_per_prompt (int, optional): Number of images to generate per prompt. Default: 1.</span>
+<span class="sd">            generator (torch.Generator or List[torch.Generator], optional): Random generator for reproducibility.</span>
+<span class="sd">            latents (torch.FloatTensor, optional): Pre-generated latent tensors. If None, random latents are generated.</span>
+<span class="sd">            prompt_embeds (torch.FloatTensor, optional): Pre-computed T5 text embeddings. Shape: [batch, seq_len, 4096].</span>
+<span class="sd">            pooled_prompt_embeds (torch.FloatTensor, optional): Pre-computed CLIP pooled embeddings. Shape: [batch, 768].</span>
+<span class="sd">            negative_prompt_embeds (torch.FloatTensor, optional): Pre-computed negative T5 embeddings.</span>
+<span class="sd">            negative_pooled_prompt_embeds (torch.FloatTensor, optional): Pre-computed negative CLIP embeddings.</span>
+<span class="sd">            output_type (str, optional): Output format. Options: &quot;pil&quot; (default), &quot;np&quot;, or &quot;latent&quot;.</span>
+<span class="sd">            callback_on_step_end (Callable, optional): Callback function executed after each denoising step.</span>
+<span class="sd">            callback_on_step_end_tensor_inputs (List[str], optional): Tensor names to pass to callback. Default: [&quot;latents&quot;].</span>
+<span class="sd">            max_sequence_length (int, optional): Maximum token sequence length for T5 encoder. Default: 512.</span>
+<span class="sd">            custom_config_path (str, optional): Path to custom JSON configuration file for compilation settings.</span>
+<span class="sd">            parallel_compile (bool, optional): Whether to compile modules in parallel. Default: False.</span>
+<span class="sd">            use_onnx_subfunctions (bool, optional): Whether to export transformer blocks as ONNX subfunctions. Default: False.</span>
+<span class="sd">            cache_threshold (float, optional): First-block-cache threshold.</span>
+<span class="sd">                Used only when `enable_first_block_cache=True`.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            QEffPipelineOutput: A dataclass containing:</span>
+<span class="sd">                - images: Generated image(s) in the format specified by `output_type`</span>
+<span class="sd">                - pipeline_module: Performance metrics for each pipeline component (text encoders, transformer, VAE)</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            ValueError: If input validation fails or parameters are incompatible.</span>
+<span class="sd">            RuntimeError: If compilation fails or QAIC devices are unavailable.</span>
+<span class="sd">            FileNotFoundError: If custom config file is specified but not found.</span>
+
+<span class="sd">        Example:</span>
+<span class="sd">            &gt;&gt;&gt; from QEfficient.diffusers.pipelines.flux import QEffFluxPipeline</span>
+<span class="sd">            &gt;&gt;&gt; pipeline = QEffFluxPipeline.from_pretrained(&quot;black-forest-labs/FLUX.1-schnell&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; result = pipeline(</span>
+<span class="sd">            ...     prompt=&quot;A serene mountain landscape at sunset&quot;,</span>
+<span class="sd">            ...     height=1024,</span>
+<span class="sd">            ...     width=1024,</span>
+<span class="sd">            ...     num_inference_steps=28,</span>
+<span class="sd">            ...     guidance_scale=7.5</span>
+<span class="sd">            ... )</span>
+<span class="sd">            &gt;&gt;&gt; result.images[0].save(&quot;mountain_sunset.png&quot;)</span>
+<span class="sd">            &gt;&gt;&gt; print(f&quot;Transformer inference time: {sum(result.pipeline_module[2].perf):.2f}s&quot;)</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">device</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">_execution_device</span>
+
+        <span class="k">if</span> <span class="n">height</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">width</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span><span class="s2">&quot;Height or width is None. Setting default values of 512 for both dimensions.&quot;</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span>
+            <span class="n">compile_config</span><span class="o">=</span><span class="n">custom_config_path</span><span class="p">,</span>
+            <span class="n">parallel</span><span class="o">=</span><span class="n">parallel_compile</span><span class="p">,</span>
+            <span class="n">height</span><span class="o">=</span><span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="o">=</span><span class="n">width</span><span class="p">,</span>
+            <span class="n">use_onnx_subfunctions</span><span class="o">=</span><span class="n">use_onnx_subfunctions</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Validate all inputs</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">check_inputs</span><span class="p">(</span>
+            <span class="n">prompt</span><span class="p">,</span>
+            <span class="n">prompt_2</span><span class="p">,</span>
+            <span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="p">,</span>
+            <span class="n">negative_prompt</span><span class="o">=</span><span class="n">negative_prompt</span><span class="p">,</span>
+            <span class="n">negative_prompt_2</span><span class="o">=</span><span class="n">negative_prompt_2</span><span class="p">,</span>
+            <span class="n">prompt_embeds</span><span class="o">=</span><span class="n">prompt_embeds</span><span class="p">,</span>
+            <span class="n">negative_prompt_embeds</span><span class="o">=</span><span class="n">negative_prompt_embeds</span><span class="p">,</span>
+            <span class="n">pooled_prompt_embeds</span><span class="o">=</span><span class="n">pooled_prompt_embeds</span><span class="p">,</span>
+            <span class="n">negative_pooled_prompt_embeds</span><span class="o">=</span><span class="n">negative_pooled_prompt_embeds</span><span class="p">,</span>
+            <span class="n">callback_on_step_end_tensor_inputs</span><span class="o">=</span><span class="n">callback_on_step_end_tensor_inputs</span><span class="p">,</span>
+            <span class="n">max_sequence_length</span><span class="o">=</span><span class="n">max_sequence_length</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_guidance_scale</span> <span class="o">=</span> <span class="n">guidance_scale</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_interrupt</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">enable_first_block_cache</span> <span class="ow">and</span> <span class="n">cache_threshold</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="s2">&quot;Ignoring cache_threshold because first-block-cache is disabled. &quot;</span>
+                <span class="s2">&quot;Set `enable_first_block_cache=True` to enable it.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Step 2: Determine batch size from inputs</span>
+        <span class="k">if</span> <span class="n">prompt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+            <span class="n">batch_size</span> <span class="o">=</span> <span class="mi">1</span>
+        <span class="k">elif</span> <span class="n">prompt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+            <span class="n">batch_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">batch_size</span> <span class="o">=</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c1"># Step 3: Encode prompts with both text encoders</span>
+        <span class="n">has_neg_prompt</span> <span class="o">=</span> <span class="n">negative_prompt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">or</span> <span class="p">(</span>
+            <span class="n">negative_prompt_embeds</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">negative_pooled_prompt_embeds</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+        <span class="p">)</span>
+        <span class="n">do_true_cfg</span> <span class="o">=</span> <span class="n">true_cfg_scale</span> <span class="o">&gt;</span> <span class="mi">1</span> <span class="ow">and</span> <span class="n">has_neg_prompt</span>
+
+        <span class="p">(</span><span class="n">prompt_embeds</span><span class="p">,</span> <span class="n">pooled_prompt_embeds</span><span class="p">,</span> <span class="n">text_ids</span><span class="p">,</span> <span class="n">text_encoder_perf</span><span class="p">)</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">encode_prompt</span><span class="p">(</span>
+            <span class="n">prompt</span><span class="o">=</span><span class="n">prompt</span><span class="p">,</span>
+            <span class="n">prompt_2</span><span class="o">=</span><span class="n">prompt_2</span><span class="p">,</span>
+            <span class="n">prompt_embeds</span><span class="o">=</span><span class="n">prompt_embeds</span><span class="p">,</span>
+            <span class="n">pooled_prompt_embeds</span><span class="o">=</span><span class="n">pooled_prompt_embeds</span><span class="p">,</span>
+            <span class="n">num_images_per_prompt</span><span class="o">=</span><span class="n">num_images_per_prompt</span><span class="p">,</span>
+            <span class="n">max_sequence_length</span><span class="o">=</span><span class="n">max_sequence_length</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Encode negative prompts if using true classifier-free guidance</span>
+        <span class="k">if</span> <span class="n">do_true_cfg</span><span class="p">:</span>
+            <span class="p">(</span><span class="n">negative_prompt_embeds</span><span class="p">,</span> <span class="n">negative_pooled_prompt_embeds</span><span class="p">,</span> <span class="n">negative_text_ids</span><span class="p">,</span> <span class="n">text_encoder_perf_2</span><span class="p">)</span> <span class="o">=</span> <span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">encode_prompt</span><span class="p">(</span>
+                    <span class="n">prompt</span><span class="o">=</span><span class="n">negative_prompt</span><span class="p">,</span>
+                    <span class="n">prompt_2</span><span class="o">=</span><span class="n">negative_prompt_2</span><span class="p">,</span>
+                    <span class="n">prompt_embeds</span><span class="o">=</span><span class="n">negative_prompt_embeds</span><span class="p">,</span>
+                    <span class="n">pooled_prompt_embeds</span><span class="o">=</span><span class="n">negative_pooled_prompt_embeds</span><span class="p">,</span>
+                    <span class="n">num_images_per_prompt</span><span class="o">=</span><span class="n">num_images_per_prompt</span><span class="p">,</span>
+                    <span class="n">max_sequence_length</span><span class="o">=</span><span class="n">max_sequence_length</span><span class="p">,</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Step 4: Prepare timesteps for denoising</span>
+        <span class="n">timesteps</span><span class="p">,</span> <span class="n">num_inference_steps</span> <span class="o">=</span> <span class="n">retrieve_timesteps</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="p">,</span> <span class="n">num_inference_steps</span><span class="p">,</span> <span class="n">device</span><span class="p">,</span> <span class="n">timesteps</span><span class="p">)</span>
+        <span class="n">num_warmup_steps</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">timesteps</span><span class="p">)</span> <span class="o">-</span> <span class="n">num_inference_steps</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">order</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_num_timesteps</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">timesteps</span><span class="p">)</span>
+
+        <span class="c1"># Step 5: Prepare initial latents</span>
+        <span class="n">num_channels_latents</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">in_channels</span> <span class="o">//</span> <span class="mi">4</span>
+        <span class="n">latents</span><span class="p">,</span> <span class="n">latent_image_ids</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">prepare_latents</span><span class="p">(</span>
+            <span class="n">batch_size</span> <span class="o">*</span> <span class="n">num_images_per_prompt</span><span class="p">,</span>
+            <span class="n">num_channels_latents</span><span class="p">,</span>
+            <span class="n">height</span><span class="p">,</span>
+            <span class="n">width</span><span class="p">,</span>
+            <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span>
+            <span class="n">device</span><span class="p">,</span>
+            <span class="n">generator</span><span class="p">,</span>
+            <span class="n">latents</span><span class="p">,</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Step 6: Calculate compressed latent dimension for transformer buffer allocation</span>
+        <span class="n">cl</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calculate_compressed_latent_dimension</span><span class="p">(</span><span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae_scale_factor</span><span class="p">)</span>
+
+        <span class="c1"># Deactivate text encoder sessions to free device resources before loading transformer</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">deactivate</span><span class="p">()</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">text_encoder_2</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">deactivate</span><span class="p">()</span>
+
+        <span class="c1"># Initialize transformer inference session</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span>
+                <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">device_ids</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Allocate output buffer for transformer</span>
+        <span class="n">output_buffer</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;output&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">cl</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">in_channels</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">),</span>
+        <span class="p">}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="n">output_buffer</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">enable_first_block_cache</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">skip_buffers</span><span class="p">(</span>
+                <span class="p">[</span>
+                    <span class="n">tensor_name</span>
+                    <span class="k">for</span> <span class="n">tensor_name</span> <span class="ow">in</span> <span class="p">(</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">input_names</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">output_names</span>
+                    <span class="p">)</span>
+                    <span class="k">if</span> <span class="n">tensor_name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;prev_&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">tensor_name</span><span class="o">.</span><span class="n">endswith</span><span class="p">(</span><span class="s2">&quot;_RetainedState&quot;</span><span class="p">)</span>
+                <span class="p">]</span>
+            <span class="p">)</span>
+
+        <span class="n">transformer_perf</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">set_begin_index</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+        <span class="c1"># Step 7: Denoising loop</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">progress_bar</span><span class="p">(</span><span class="n">total</span><span class="o">=</span><span class="n">num_inference_steps</span><span class="p">)</span> <span class="k">as</span> <span class="n">progress_bar</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">timesteps</span><span class="p">):</span>
+                <span class="c1"># Prepare timestep embedding</span>
+                <span class="n">timestep</span> <span class="o">=</span> <span class="n">t</span><span class="o">.</span><span class="n">expand</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">latents</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+                <span class="n">temb</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">time_text_embed</span><span class="p">(</span><span class="n">timestep</span><span class="p">,</span> <span class="n">pooled_prompt_embeds</span><span class="p">)</span>
+
+                <span class="c1"># Compute AdaLN (Adaptive Layer Normalization) embeddings for dual transformer blocks</span>
+                <span class="n">adaln_emb</span> <span class="o">=</span> <span class="p">[]</span>
+                <span class="k">for</span> <span class="n">block_idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">transformer_blocks</span><span class="p">)):</span>
+                    <span class="n">block</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">transformer_blocks</span><span class="p">[</span><span class="n">block_idx</span><span class="p">]</span>
+                    <span class="c1"># Process through norm1 and norm1_context</span>
+                    <span class="n">f1</span> <span class="o">=</span> <span class="n">block</span><span class="o">.</span><span class="n">norm1</span><span class="o">.</span><span class="n">linear</span><span class="p">(</span><span class="n">block</span><span class="o">.</span><span class="n">norm1</span><span class="o">.</span><span class="n">silu</span><span class="p">(</span><span class="n">temb</span><span class="p">))</span><span class="o">.</span><span class="n">chunk</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+                    <span class="n">f2</span> <span class="o">=</span> <span class="n">block</span><span class="o">.</span><span class="n">norm1_context</span><span class="o">.</span><span class="n">linear</span><span class="p">(</span><span class="n">block</span><span class="o">.</span><span class="n">norm1_context</span><span class="o">.</span><span class="n">silu</span><span class="p">(</span><span class="n">temb</span><span class="p">))</span><span class="o">.</span><span class="n">chunk</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+                    <span class="n">adaln_emb</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">f1</span><span class="p">)</span> <span class="o">+</span> <span class="nb">list</span><span class="p">(</span><span class="n">f2</span><span class="p">)))</span>
+                <span class="n">adaln_dual_emb</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span><span class="n">adaln_emb</span><span class="p">)</span>
+
+                <span class="c1"># Compute AdaLN embeddings for single transformer blocks</span>
+                <span class="n">adaln_emb</span> <span class="o">=</span> <span class="p">[]</span>
+                <span class="k">for</span> <span class="n">block_idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">single_transformer_blocks</span><span class="p">)):</span>
+                    <span class="n">block</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">single_transformer_blocks</span><span class="p">[</span><span class="n">block_idx</span><span class="p">]</span>
+                    <span class="n">f1</span> <span class="o">=</span> <span class="n">block</span><span class="o">.</span><span class="n">norm</span><span class="o">.</span><span class="n">linear</span><span class="p">(</span><span class="n">block</span><span class="o">.</span><span class="n">norm</span><span class="o">.</span><span class="n">silu</span><span class="p">(</span><span class="n">temb</span><span class="p">))</span><span class="o">.</span><span class="n">chunk</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+                    <span class="n">adaln_emb</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">f1</span><span class="p">)))</span>
+                <span class="n">adaln_single_emb</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span><span class="n">adaln_emb</span><span class="p">)</span>
+
+                <span class="c1"># Compute output AdaLN embedding</span>
+                <span class="n">temp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">norm_out</span>
+                <span class="n">adaln_out</span> <span class="o">=</span> <span class="n">temp</span><span class="o">.</span><span class="n">linear</span><span class="p">(</span><span class="n">temp</span><span class="o">.</span><span class="n">silu</span><span class="p">(</span><span class="n">temb</span><span class="p">))</span>
+
+                <span class="c1"># Normalize timestep to [0, 1] range</span>
+                <span class="n">timestep</span> <span class="o">=</span> <span class="n">timestep</span> <span class="o">/</span> <span class="mi">1000</span>
+
+                <span class="c1"># Prepare all inputs for transformer inference</span>
+                <span class="n">inputs_aic</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s2">&quot;hidden_states&quot;</span><span class="p">:</span> <span class="n">latents</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;encoder_hidden_states&quot;</span><span class="p">:</span> <span class="n">prompt_embeds</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;pooled_projections&quot;</span><span class="p">:</span> <span class="n">pooled_prompt_embeds</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;timestep&quot;</span><span class="p">:</span> <span class="n">timestep</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;img_ids&quot;</span><span class="p">:</span> <span class="n">latent_image_ids</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;txt_ids&quot;</span><span class="p">:</span> <span class="n">text_ids</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;adaln_emb&quot;</span><span class="p">:</span> <span class="n">adaln_dual_emb</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;adaln_single_emb&quot;</span><span class="p">:</span> <span class="n">adaln_single_emb</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                    <span class="s2">&quot;adaln_out&quot;</span><span class="p">:</span> <span class="n">adaln_out</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">(),</span>
+                <span class="p">}</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">enable_first_block_cache</span><span class="p">:</span>
+                    <span class="n">stage_cache_threshold</span> <span class="o">=</span> <span class="mf">0.0</span> <span class="k">if</span> <span class="n">cache_threshold</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">cache_threshold</span>
+                    <span class="n">inputs_aic</span><span class="p">[</span><span class="s2">&quot;cache_threshold&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">stage_cache_threshold</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+
+                <span class="c1"># Run transformer inference and measure time</span>
+                <span class="n">start_transformer_step_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+                <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">inputs_aic</span><span class="p">)</span>
+                <span class="n">end_transformer_step_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+                <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Time taken&quot;</span><span class="p">,</span> <span class="n">end_transformer_step_time</span> <span class="o">-</span> <span class="n">start_transformer_step_time</span><span class="p">)</span>
+                <span class="n">transformer_perf</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">end_transformer_step_time</span> <span class="o">-</span> <span class="n">start_transformer_step_time</span><span class="p">)</span>
+
+                <span class="n">noise_pred</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">outputs</span><span class="p">[</span><span class="s2">&quot;output&quot;</span><span class="p">])</span>
+
+                <span class="c1"># Update latents using scheduler (x_t -&gt; x_t-1)</span>
+                <span class="n">latents_dtype</span> <span class="o">=</span> <span class="n">latents</span><span class="o">.</span><span class="n">dtype</span>
+                <span class="n">latents</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">noise_pred</span><span class="p">,</span> <span class="n">t</span><span class="p">,</span> <span class="n">latents</span><span class="p">,</span> <span class="n">return_dict</span><span class="o">=</span><span class="kc">False</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+
+                <span class="c1"># Handle dtype mismatch (workaround for MPS backend bug)</span>
+                <span class="k">if</span> <span class="n">latents</span><span class="o">.</span><span class="n">dtype</span> <span class="o">!=</span> <span class="n">latents_dtype</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="n">torch</span><span class="o">.</span><span class="n">backends</span><span class="o">.</span><span class="n">mps</span><span class="o">.</span><span class="n">is_available</span><span class="p">():</span>
+                        <span class="n">latents</span> <span class="o">=</span> <span class="n">latents</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">latents_dtype</span><span class="p">)</span>
+
+                <span class="c1"># Execute callback if provided</span>
+                <span class="k">if</span> <span class="n">callback_on_step_end</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">callback_kwargs</span> <span class="o">=</span> <span class="p">{}</span>
+                    <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">callback_on_step_end_tensor_inputs</span><span class="p">:</span>
+                        <span class="n">callback_kwargs</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">=</span> <span class="nb">locals</span><span class="p">()[</span><span class="n">k</span><span class="p">]</span>
+                    <span class="n">callback_outputs</span> <span class="o">=</span> <span class="n">callback_on_step_end</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">t</span><span class="p">,</span> <span class="n">callback_kwargs</span><span class="p">)</span>
+                    <span class="n">latents</span> <span class="o">=</span> <span class="n">callback_outputs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;latents&quot;</span><span class="p">,</span> <span class="n">latents</span><span class="p">)</span>
+                    <span class="n">prompt_embeds</span> <span class="o">=</span> <span class="n">callback_outputs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;prompt_embeds&quot;</span><span class="p">,</span> <span class="n">prompt_embeds</span><span class="p">)</span>
+
+                <span class="c1"># Update progress bar</span>
+                <span class="k">if</span> <span class="n">i</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">timesteps</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span> <span class="ow">or</span> <span class="p">((</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">num_warmup_steps</span> <span class="ow">and</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">order</span> <span class="o">==</span> <span class="mi">0</span><span class="p">):</span>
+                    <span class="n">progress_bar</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+
+        <span class="c1"># Step 8: Decode latents to images (unless output_type is &quot;latent&quot;)</span>
+        <span class="k">if</span> <span class="n">output_type</span> <span class="o">==</span> <span class="s2">&quot;latent&quot;</span><span class="p">:</span>
+            <span class="n">image</span> <span class="o">=</span> <span class="n">latents</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># Unpack and denormalize latents</span>
+            <span class="n">latents</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">_unpack_latents</span><span class="p">(</span><span class="n">latents</span><span class="p">,</span> <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">vae_scale_factor</span><span class="p">)</span>
+            <span class="n">latents</span> <span class="o">=</span> <span class="p">(</span><span class="n">latents</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">scaling_factor</span><span class="p">)</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">shift_factor</span>
+
+            <span class="c1"># Deactivate transformer session to free device resources before loading VAE decoder</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">deactivate</span><span class="p">()</span>
+
+            <span class="c1"># Initialize VAE decoder inference session</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">qpc_session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">qpc_session</span> <span class="o">=</span> <span class="n">QAICInferenceSession</span><span class="p">(</span>
+                    <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">qpc_path</span><span class="p">),</span> <span class="n">device_ids</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">device_ids</span>
+                <span class="p">)</span>
+
+            <span class="c1"># Allocate output buffer for VAE decoder</span>
+            <span class="n">output_buffer</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;sample&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">rand</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">)}</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">set_buffers</span><span class="p">(</span><span class="n">output_buffer</span><span class="p">)</span>
+
+            <span class="c1"># Run VAE decoder inference and measure time</span>
+            <span class="n">inputs</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;latent_sample&quot;</span><span class="p">:</span> <span class="n">latents</span><span class="o">.</span><span class="n">numpy</span><span class="p">()}</span>
+            <span class="n">start_decode_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+            <span class="n">image</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">vae_decode</span><span class="o">.</span><span class="n">qpc_session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>
+            <span class="n">end_decode_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+            <span class="n">vae_decode_perf</span> <span class="o">=</span> <span class="n">end_decode_time</span> <span class="o">-</span> <span class="n">start_decode_time</span>
+
+            <span class="c1"># Post-process image</span>
+            <span class="n">image_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">from_numpy</span><span class="p">(</span><span class="n">image</span><span class="p">[</span><span class="s2">&quot;sample&quot;</span><span class="p">])</span>
+            <span class="n">image</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">image_processor</span><span class="o">.</span><span class="n">postprocess</span><span class="p">(</span><span class="n">image_tensor</span><span class="p">,</span> <span class="n">output_type</span><span class="o">=</span><span class="n">output_type</span><span class="p">)</span>
+
+            <span class="c1"># Build performance metrics</span>
+            <span class="n">perf_metrics</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">ModulePerf</span><span class="p">(</span><span class="n">module_name</span><span class="o">=</span><span class="s2">&quot;text_encoder&quot;</span><span class="p">,</span> <span class="n">perf</span><span class="o">=</span><span class="n">text_encoder_perf</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span>
+                <span class="n">ModulePerf</span><span class="p">(</span><span class="n">module_name</span><span class="o">=</span><span class="s2">&quot;text_encoder_2&quot;</span><span class="p">,</span> <span class="n">perf</span><span class="o">=</span><span class="n">text_encoder_perf</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span>
+                <span class="n">ModulePerf</span><span class="p">(</span><span class="n">module_name</span><span class="o">=</span><span class="s2">&quot;transformer&quot;</span><span class="p">,</span> <span class="n">perf</span><span class="o">=</span><span class="n">transformer_perf</span><span class="p">),</span>
+                <span class="n">ModulePerf</span><span class="p">(</span><span class="n">module_name</span><span class="o">=</span><span class="s2">&quot;vae_decoder&quot;</span><span class="p">,</span> <span class="n">perf</span><span class="o">=</span><span class="n">vae_decode_perf</span><span class="p">),</span>
+            <span class="p">]</span>
+
+            <span class="k">return</span> <span class="n">QEffPipelineOutput</span><span class="p">(</span>
+                <span class="n">pipeline_module</span><span class="o">=</span><span class="n">perf_metrics</span><span class="p">,</span>
+                <span class="n">images</span><span class="o">=</span><span class="n">image</span><span class="p">,</span>
+            <span class="p">)</span></div>
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Qualcomm.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="rst-versions" data-toggle="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      Version: release/v1.22.0
+      <span class="fa fa-caret-down"></span>
+    </span>
+    <div class="rst-other-versions">
+      Versions
+      <dl>
+        <dd><a href="../../../../../../../../index.html">main</a></dd>
+        <dd><a href="../../../../../../v1.23.0/index.html">release/v1.23.0</a></dd>
+        <dd><a href="../../../../../index.html">release/v1.22.0</a></dd>
+        <dd><a href="../../../../../../v1.21.6/index.html">release/v1.21.6</a></dd>
+        <dd><a href="../../../../../../v1.21/index.html">release/v1.21</a></dd>
+        <dd><a href="../../../../../../v1.20/index.html">release/v1.20</a></dd>
+        <dd><a href="../../../../../../v1.19/index.html">release/v1.19</a></dd>
+        <dd><a href="../../../../../../v1.18/index.html">release/v1.18</a></dd>
+      </dl>
+    </div>
+</div><script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

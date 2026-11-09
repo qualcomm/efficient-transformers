@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Efficient Transformer Library - 1.23.0 Release Notes</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+  </style>
+  <link rel="stylesheet" href="release-notes.css" />
+</head>
+<body>
+<nav class="version-navigation" aria-label="Documentation versions">
+  <a href="../../../index.html">main</a>
+  <a href="../../../index.html">release/v1.23.0</a>
+  <a href="../v1.22.0/index.html">release/v1.22.0</a>
+  <a href="../v1.21.6/index.html">release/v1.21.6</a>
+  <a href="../v1.21/index.html">release/v1.21</a>
+  <a href="../v1.20/index.html">release/v1.20</a>
+  <a href="../v1.19/index.html">release/v1.19</a>
+  <a href="../v1.18/index.html">release/v1.18</a>
+</nav>
+<header id="title-block-header">
+<h1 class="title">Efficient Transformer Library - 1.23.0 Release Notes</h1>
+</header>
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="#highlights">Highlights</a></li>
+<li><a href="#model-and-runtime-improvements">Model and Runtime Improvements</a></li>
+<li><a href="#onnx-export-and-compatibility-fixes">ONNX Export and Compatibility Fixes</a></li>
+<li><a href="#ci-and-repository-updates">CI and Repository Updates</a></li>
+<li><a href="#included-pull-requests">Included Pull Requests</a></li>
+</ul>
+</nav>
+<p>Efficient Transformer Library v1.23.0 adds DFlash speculative decoding, weight-free ONNX export for CausalLM models, and a more efficient KV-cache handoff for disaggregated serving. It also brings a set of blocking, MoE, ONNX export, VLM, and CI improvements.</p>
+<blockquote>
+<p>These changes are available on the <a href="https://github.com/qualcomm/efficient-transformers/tree/release/v1.23.0"><code>release/v1.23.0</code></a> branch and <a href="https://github.com/qualcomm/efficient-transformers/tree/main"><code>mainline</code></a>.</p>
+</blockquote>
+<hr />
+<h2 id="highlights">Highlights</h2>
+<ul>
+<li><strong>DFlash speculative decoding</strong> adds a block-diffusion draft model that predicts multiple tokens in parallel before target-model verification. The release includes the required transforms, runtime support, and <a href="https://github.com/quic/efficient-transformers/tree/main/examples/performance/dflash">example scripts</a>.</li>
+<li><strong>Weight-free CausalLM export</strong> can build the ONNX graph without loading the complete checkpoint into host memory. The compiler can then read the weights directly from the original safetensors files.</li>
+<li><strong>KV-cache handoff for disaggregated serving</strong> lets prefill and decode sessions share host-side KV buffers, avoiding an extra Python-side copy between the two stages. Examples are included for GPT-OSS, Qwen3-MoE, Qwen3.5-MoE, Qwen3-VL-MoE, and Gemma4-MoE.</li>
+<li><strong>A common optimized MoE transform</strong> now handles shared MoE behavior and configuration across supported model families, including expert-parallel weight handling and export options.</li>
+</ul>
+<h2 id="model-and-runtime-improvements">Model and Runtime Improvements</h2>
+<ul>
+<li>Expanded blocking support for Qwen3-VL-MoE and Gemma4, including head-parallel, prefill, decode-MoE, batch-fold, and disaggregated execution paths.</li>
+<li>Optimized Qwen3.5-MoE folded decode and improved generic blocked-attention performance for KV head-parallel decode and online prefill.</li>
+<li>Added a separate <code>vision_batch_size</code> option for dual-QPC VLM compilation. Existing callers keep the previous behavior when the option is not provided.</li>
+<li>Refactored GPT-OSS to use a per-layer dynamic cache while preserving compatibility with the legacy tuple-cache layout.</li>
+<li>Moved GPT-OSS attention-mask preparation outside decoder subfunctions to avoid repeating layer-invariant ONNX work.</li>
+<li>Added automatic compiler-dump generation when <code>mdp_strategy="intersection"</code> is used without an explicit dump path.</li>
+<li>Updated hardware detection to identify AI200 devices from the NSP image variant reported by <code>qaic-util</code>.</li>
+</ul>
+<h2 id="onnx-export-and-compatibility-fixes">ONNX Export and Compatibility Fixes</h2>
+<ul>
+<li>Preserved Hugging Face parameter names and FX source metadata in ONNX subfunction exports.</li>
+<li>Moved constant <code>ReduceSum</code> axes into ONNX functions so model code can use regular reduction operations.</li>
+<li>Fixed Gemma4 continuous-batching compilation with ONNX subfunctions.</li>
+<li>Fixed Qwen3.5 dense and MoE subfunction export in the Conv1D fallback path.</li>
+<li>Updated the Qwen3.5 Gated DeltaNet forward substitution.</li>
+<li>Added clear errors for model classes and options that do not support weight-free export.</li>
+<li>Fixed the continuous-batching QPC key mismatch between QEfficient and vLLM.</li>
+<li>Stabilized Kimi K2.5 setup and CI coverage.</li>
+<li>Updated NumPy support to <code>&gt;=2.2.6,&lt;3</code> and protobuf to <code>6.33.6</code>. Python 3.8 is no longer supported.</li>
+</ul>
+<h2 id="ci-and-repository-updates">CI and Repository Updates</h2>
+<ul>
+<li>Added change-aware regression-test selection based on affected models and features.</li>
+<li>Reworked CI model tiers, worker isolation, capability tracking, golden outputs, and report generation.</li>
+<li>Improved CI stage names, LLM-based impact analysis, runtime-stage gating, and failure reporting.</li>
+<li>Added repository migration workflows, pull-request templates, dependency updates, stale-issue handling, and a security policy.</li>
+<li>Added the <code>qeff-bug-fix</code> development agent to <code>skills_studio/agents</code>.</li>
+<li>Updated <code>.gitignore</code> for generated runtime files and local virtual environments.</li>
+</ul>
+<h2 id="included-pull-requests">Included Pull Requests</h2>
+<h3 id="runtime-export-and-model-changes">Runtime, Export, and Model Changes</h3>
+<ul>
+<li><a href="https://github.com/quic/efficient-transformers/pull/995">#995</a> - Add DFlash block-diffusion speculative decoding</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1147">#1147</a> - Detect AIC hardware from the NSP image variant</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1150">#1150</a> - Add efficient KV-cache handoff for disaggregated serving</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1190">#1190</a> - Add <code>OptimizedMoeTransform</code></li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1229">#1229</a> - Add head-parallel and batch-fold blocking for Qwen3-VL-MoE</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1231">#1231</a> - Hoist GPT-OSS attention-mask preparation out of decoder subfunctions</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1241">#1241</a> - Preserve semantic names in weighted ONNX subfunction exports</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1245">#1245</a> - Fix Gemma4 continuous batching with ONNX subfunctions</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1248">#1248</a> - Add weight-free ONNX export for CausalLM models</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1279">#1279</a> - Refactor the GPT-OSS cache implementation</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1289">#1289</a> - Generate MDP compiler dumps for the intersection strategy</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1294">#1294</a> - Localize constant <code>ReduceSum</code> axes inside ONNX subfunctions</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1308">#1308</a> - Enable Gemma4 blocking on mainline</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1315">#1315</a> - Optimize Qwen3.5-MoE folded decode</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1343">#1343</a> - Improve blocked-attention performance</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1351">#1351</a> - Decouple VLM vision and language batch sizes</li>
+</ul>
+<h3 id="reliability-and-compatibility">Reliability and Compatibility</h3>
+<ul>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1299">#1299</a> - Update the Gated DeltaNet forward substitution</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1316">#1316</a> - Guard unsupported weight-free model classes and options</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1321">#1321</a> - Update NumPy and protobuf versions</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1337">#1337</a> - Fix the QPC key mismatch between vLLM and QEfficient</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1340">#1340</a> - Restore Kimi K2.5 test utilities</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1341">#1341</a> - Fix Qwen3.5 Conv1D subfunction export</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1349">#1349</a> - Preserve Dynamo subfunction source metadata</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1353">#1353</a> - Stabilize Kimi K2.5 CI coverage</li>
+</ul>
+<h3 id="ci-and-repository-maintenance">CI and Repository Maintenance</h3>
+<ul>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1182">#1182</a> - Move the <code>qeff-bug-fix</code> agent into <code>skills_studio/agents</code></li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1216">#1216</a> - Consolidate CI model tiers and reporting</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1273">#1273</a> - Add intelligent regression-test selection</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1278">#1278</a> - Ignore generated runtime and virtual-environment files</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1283">#1283</a> - Improve CI display names</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1319">#1319</a> - Enable LLM-first CI impact analysis</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1323">#1323</a> - Fix LLM-based CI impact selection</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1325">#1325</a> - Fix runtime CI impact-stage gating</li>
+<li><a href="https://github.com/quic/efficient-transformers/pull/1330">#1330</a> - Prepare repository workflows and policy files for migration</li>
+</ul>
+</body>
+</html>
