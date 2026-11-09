@@ -2148,6 +2148,203 @@ def test_proxy_subfunction_validation_rejects_single_call_function(tmp_path):
         _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
 
 
+def test_proxy_subfunction_validation_matches_function_domain(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyModel:
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid"], domain="qeff.language"),
+            helper.make_node("DummyLayer", ["mid"], ["y"], domain="other.domain"),
+        ],
+        "proxy_subfunction_domain_collision",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "qeff.language",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[
+            helper.make_operatorsetid("", 17),
+            helper.make_operatorsetid("qeff.language", 1),
+            helper.make_operatorsetid("other.domain", 1),
+        ],
+    )
+    onnx_path = tmp_path / "domain_collision.onnx"
+    onnx.save(model, onnx_path)
+
+    with pytest.raises(RuntimeError, match="must be invoked more than once"):
+        _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_accepts_split_variants_for_logical_signature(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyConfig:
+        num_hidden_layers = 3
+
+    class DummyModel:
+        config = DummyConfig()
+
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid_0"]),
+            helper.make_node("DummyLayer_variant_1", ["mid_0"], ["mid_1"]),
+            helper.make_node("DummyLayer_variant_1", ["mid_1"], ["mid_2"]),
+            helper.make_node("DummyLayer_variant_2", ["mid_2"], ["y"]),
+        ],
+        "proxy_subfunction_split_variants",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    functions = [
+        helper.make_function(
+            "",
+            function_name,
+            ["x"],
+            ["y"],
+            [helper.make_node("Identity", ["x"], ["y"])],
+            [helper.make_operatorsetid("", 17)],
+        )
+        for function_name in ["DummyLayer", "DummyLayer_variant_1", "DummyLayer_variant_2"]
+    ]
+    model = helper.make_model(graph, functions=functions, opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "split_variants.onnx"
+    onnx.save(model, onnx_path)
+
+    _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_rejects_variant_reused_across_logical_signatures(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyConfig:
+        num_hidden_layers = 4
+        layer_types = ["dense", "moe"]
+
+    class DummyModel:
+        config = DummyConfig()
+
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid_0"]),
+            helper.make_node("DummyLayer", ["mid_0"], ["mid_1"]),
+            helper.make_node("DummyLayer", ["mid_1"], ["mid_2"]),
+            helper.make_node("DummyLayer", ["mid_2"], ["y"]),
+        ],
+        "proxy_subfunction_reused_variant",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(graph, functions=[function], opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "reused_variant.onnx"
+    onnx.save(model, onnx_path)
+
+    with pytest.raises(RuntimeError, match="multiple logical signatures"):
+        _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_rejects_unused_function_variant(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyConfig:
+        num_hidden_layers = 2
+
+    class DummyModel:
+        config = DummyConfig()
+
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid"]),
+            helper.make_node("DummyLayer", ["mid"], ["y"]),
+        ],
+        "proxy_subfunction_unused_variant",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    functions = [
+        helper.make_function(
+            "",
+            function_name,
+            ["x"],
+            ["y"],
+            [helper.make_node("Identity", ["x"], ["y"])],
+            [helper.make_operatorsetid("", 17)],
+        )
+        for function_name in ["DummyLayer", "DummyLayer_variant_1"]
+    ]
+    model = helper.make_model(graph, functions=functions, opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "unused_variant.onnx"
+    onnx.save(model, onnx_path)
+
+    with pytest.raises(RuntimeError, match="Unused exact function variants"):
+        _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
 def test_proxy_subfunction_validation_accepts_repeated_function_calls(tmp_path):
     from onnx import TensorProto, helper
 
