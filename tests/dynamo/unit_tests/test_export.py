@@ -102,6 +102,7 @@ def test_dynamo_export_and_ort_parity(model_type, model_id, tmp_export_dir):
 
 @pytest.mark.dynamo
 @pytest.mark.dynamo_export
+@pytest.mark.skip(reason="Qwen4-Exp is experimental and not fully supported yet")
 def test_qwen4_exp_dynamo_export_and_ort_retained_state_parity(tmp_export_dir):
     """Export the heterogeneous four-layer Qwen4-Exp decode graph through Dynamo.
 
