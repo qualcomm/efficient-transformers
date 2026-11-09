@@ -177,7 +177,6 @@ def main():
     if args.skip_generate:
         return
 
-    processor = AutoProcessor.from_pretrained(args.model_id, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
 
     messages = [

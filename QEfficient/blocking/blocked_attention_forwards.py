@@ -758,7 +758,7 @@ def blocked_kv_attention_forward(
             )
             causal_mask_block = _create_causal_mask(
                 position_ids=position_ids,
-                target_length=end_index,
+                target_length=target_length,
                 sliding_window=sliding_window,
                 start_index=start_index,
                 arange_end=end_index,

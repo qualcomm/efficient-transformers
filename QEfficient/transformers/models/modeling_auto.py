@@ -175,7 +175,7 @@ def _get_vlm_export_batch_size(model_type: str, dynamo: bool, qaic_config: Optio
         batch_size = max(2, batch_size)
     if model_type == "minimax_m3_vl" and qaic_config:
         dp_factors = [int(qaic_config.get(key, 1) or 1) for key in ("msa_indexer_dp", "msa_attn_dp", "attn_dp")]
-        batch_size = max(batch_size, max(dp_factors))
+        batch_size = math.lcm(*dp_factors)
     return batch_size
 
 
@@ -5779,8 +5779,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         TypeError
             If the QPC path is not set (i.e., `compile` was not run).
         NotImplementedError
-            If `runtime_ai100` is False.
+            If the model requires host-side inputs unsupported by the generic runner, or `runtime_ai100` is False.
         """
+        model_config = getattr(getattr(self, "model", None), "config", None)
+        model_type = getattr(model_config, "model_type", None)
+        if model_type in {"qwen4_exp", "qwen4_exp_text"}:
+            raise NotImplementedError("Qwen4-Exp is not supported by QEFFAutoModelForCausalLM.generate()")
         if artifacts is True:
             return write_causal_lm_runner_bundle(
                 model=self,

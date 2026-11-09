@@ -10,9 +10,9 @@
 from __future__ import annotations
 
 import numpy as np
+import onnx
 import pytest
 import torch
-import onnx
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
@@ -109,9 +109,8 @@ def test_qwen4_exp_dynamo_export_and_ort_retained_state_parity(tmp_export_dir):
     QSA), so repeated-subgraph extraction is intentionally disabled. Dynamo
     export itself must still preserve the complete flattened ONNX ABI.
     """
-    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
-
     from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
 
     ort = pytest.importorskip("onnxruntime")
 
@@ -162,7 +161,7 @@ def test_dynamo_export_reuses_equivalent_mixed_layer_subfunctions(tmp_export_dir
         config.dtype = MODEL_KWARGS["torch_dtype"]
         tokenizer = load_tokenizer(model_id)
     except Exception as exc:
-        skip_on_model_fetch_error(exc, model_id)
+        skip_on_hf_model_load_error(exc, model_id)
     torch.manual_seed(0)
     model_hf = AutoModelForCausalLM.from_config(
         config, attn_implementation=MODEL_KWARGS["attn_implementation"], dtype=MODEL_KWARGS["torch_dtype"]

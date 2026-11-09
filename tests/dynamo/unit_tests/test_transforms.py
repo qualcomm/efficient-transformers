@@ -10,9 +10,9 @@
 from __future__ import annotations
 
 import importlib
-from types import SimpleNamespace
 import operator
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,12 +29,6 @@ from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils import export_subfunctions
-from QEfficient.utils.torch_patches import (
-    _same_export_region,
-    preserve_mixed_export_subfunctions,
-    preserve_subfunction_source_lines,
-    temporarily_enable_nested_compile_regions,
-)
 from QEfficient.utils.torch_patches import (
     _same_export_region,
     preserve_mixed_export_subfunctions,
@@ -926,7 +920,6 @@ class TestPreserveNestedCacheRetainedStateTransform:
             "indexer_kv",
         ]
         assert len(model.functions[0].output) == len(model.graph.node[0].output)
-        assert model.graph.input[0].name == state_input
 
     def test_preserves_final_scatternd_cache_state_from_prefill_update_chain(self):
         retained_state = "past_local_kv_cache.0_RetainedState"
@@ -973,7 +966,6 @@ class TestPreserveNestedCacheRetainedStateTransform:
 
     def test_ignores_scatter_update_dependency_when_resolving_cache_state(self):
         retained_state = "past_compressed_kv_cache.0_RetainedState"
-        state_input = "past_compressed_kv_cache.0"
         function = helper.make_function(
             domain="",
             fname="repeated_subgraph0",

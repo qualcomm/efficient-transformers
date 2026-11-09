@@ -24,7 +24,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-
 NUM_DEVICES = 16
 NUM_CORES = 4
 BATCH_SIZE = 16
@@ -35,7 +34,6 @@ CONTEXT_LENGTH = 65_536
 def build_model(snapshot: Path, checkpoint: Path, compile_dir: Path):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from qwen4_exp_decode_parity import (
-        _prune_weight_free_checkpoint,
         _window_config,
     )
 

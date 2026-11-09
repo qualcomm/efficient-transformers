@@ -325,7 +325,6 @@ def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):
     """Check MiniMax expert-parallel prefill logits against the original HF model."""
     torch.manual_seed(7)
     vlm_config = _tiny_minimax_m3_vlm_config()
-    text_config = vlm_config.text_config
     model_hf = MiniMaxM3SparseForConditionalGeneration(vlm_config).eval()
     model_hf_orig = deepcopy(model_hf)
     qeff_model = QEFFAutoModelForImageTextToText(model_hf, kv_offload=True)

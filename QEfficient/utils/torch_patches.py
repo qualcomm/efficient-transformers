@@ -864,54 +864,6 @@ def _mixed_export_hop_compile_and_call(fn, args, kwargs):
 
 
 @contextmanager
-def preserve_mixed_export_subfunctions():
-    """Apply the mixed-layer non-strict export candidate when PyTorch supports it.
-
-    This is intentionally a scoped monkey patch of the private nested compile
-    hook and, when available, the ONNX preparation hook. The latter runs after
-    decomposition and before ONNX translation, when equivalent region bodies
-    can be compared using the enclosing ShapeEnv.
-    """
-    with _MIXED_EXPORT_PATCH_LOCK:
-        try:
-            utils = importlib.import_module("torch._higher_order_ops.utils")
-            original = utils._hop_compile_and_call
-        except (AttributeError, ModuleNotFoundError):
-            # PyTorch versions without this hook have a different
-            # invoke_subgraph implementation and need no QEff patch.
-            yield
-            return
-
-        def patched(fn, args, kwargs=None):
-            return _mixed_export_hop_compile_and_call(fn, args, kwargs)
-
-        try:
-            onnx_core = importlib.import_module("torch.onnx._internal.exporter._core")
-            original_prepare = onnx_core._prepare_exported_program_for_export
-        except (AttributeError, ModuleNotFoundError):
-            onnx_core = original_prepare = None
-            logger.warning(
-                "torch.onnx exporter hook '_prepare_exported_program_for_export' not found; "
-                "ONNX subfunction reuse is disabled and repeated layers may be exported as duplicates."
-            )
-
-        utils._hop_compile_and_call = patched
-        if onnx_core is not None:
-            from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
-
-            def prepare_with_reuse(*args, **kwargs):
-                return reuse_exported_subfunctions(original_prepare(*args, **kwargs))
-
-            onnx_core._prepare_exported_program_for_export = prepare_with_reuse
-        try:
-            yield
-        finally:
-            if onnx_core is not None:
-                onnx_core._prepare_exported_program_for_export = original_prepare
-            utils._hop_compile_and_call = original
-
-
-@contextmanager
 def preserve_subfunction_source_lines():
     """Preserve original FX source metadata while retracing Dynamo subfunctions.
 

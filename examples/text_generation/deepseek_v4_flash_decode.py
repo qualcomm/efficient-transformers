@@ -414,6 +414,10 @@ def main(defaults: dict[str, object] | None = None) -> None:
         raise ValueError("device_group must contain at least one QAIC device ID.")
     if args.batch_size % len(args.device_group):
         raise ValueError("DeepSeek V4 Flash decode requires batch_size to be divisible by the device-group size.")
+    if args.prefill_only and not args.export_only:
+        raise ValueError(
+            "DeepSeek V4 Flash prefill compile is not currently supported, either run decode only mode or run export only for prefill"
+        )
     os.environ["HF_HUB_CACHE"] = str(args.hf_cache)
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     os.environ.setdefault("QEFF_HOME", str(args.artifact_root))

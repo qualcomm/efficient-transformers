@@ -23,6 +23,8 @@ from QEfficient.customop.ctx_scatter_gather import (  # noqa: E402
     CtxGatherPagedKVHeads,
     CtxGatherRows,
     CtxPagedScatter,
+    CtxPagedScatterDP,
+    CtxPagedScatterPage,
     CtxScatter,
     CtxScatter3D,
     CtxScatter3DInt,
@@ -30,8 +32,6 @@ from QEfficient.customop.ctx_scatter_gather import (  # noqa: E402
     CtxScatterDPCP,
     CtxScatterFoldedRows,
     CtxScatterPagedAttention,
-    CtxPagedScatterDP,
-    CtxPagedScatterPage,
     M3CtxScatter,
 )
 from QEfficient.customop.ctx_scatter_gather_cb import (

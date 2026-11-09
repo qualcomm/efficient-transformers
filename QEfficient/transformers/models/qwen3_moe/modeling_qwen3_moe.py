@@ -168,27 +168,6 @@ class QEffQwen3MoeExperts(Qwen3MoeExperts):
     def transform_weights(self) -> MoEWeights:
         if getattr(self, "weights_transformed", False):
             return self.moe_weights
-        if getattr(self, "_qeff_use_original_checkpoint", False):
-            gate_up = self.gate_up_proj
-            down = self.down_proj
-            del self._parameters["gate_up_proj"]
-            del self._parameters["down_proj"]
-            hidden_size = int(gate_up.shape[-1])
-            intermediate_size = int(gate_up.shape[1] // 2)
-            for expert_index in range(int(gate_up.shape[0])):
-                self.add_module(
-                    str(expert_index),
-                    _QEffQwen3MoeOriginalExpert(
-                        hidden_size,
-                        intermediate_size,
-                        device=gate_up.device,
-                        dtype=gate_up.dtype,
-                    ),
-                )
-            self._qeff_original_checkpoint_layout = True
-            self.weights_transformed = True
-            self.moe_weights = self.original_moe_weights()
-            return self.moe_weights
         self.moe_weights = build_canonical_expert_weights(
             gate_up=self.gate_up_proj,
             down=self.down_proj,

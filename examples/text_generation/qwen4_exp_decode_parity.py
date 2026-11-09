@@ -27,8 +27,8 @@ from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextCo
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextRotaryEmbedding
 
 from QEfficient import QEFFAutoModelForCausalLM
-from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.exporter.weight_free import resolve_weight_spec_path
+from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.qwen4_exp.host_ngram import HostNGramHistory, ShardedNGramLookup
 from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpForCausalLM
 

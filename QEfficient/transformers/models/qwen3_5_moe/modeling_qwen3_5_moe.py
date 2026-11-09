@@ -1091,10 +1091,8 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                     + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
                 )
 
-        core_attn_out = torch.stack(chunk_outputs, dim=2).to(value.dtype)
         if not output_final_state:
             last_recurrent_state = None
-        core_attn_out = torch.stack(chunk_outputs, dim=2)
         core_attn_out = core_attn_out.reshape(
             core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1]
         )
@@ -1134,9 +1132,6 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
         dflash_commit_final: torch.Tensor | None = None,
     ):
         batch_size, seq_len, _ = hidden_states.shape
-        # Nested subfunctions cannot own cache mutation, so return new state to the decoder layer when requested.
-        new_conv_state_for_return = None
-        new_recurrent_state_for_return = None
 
         # ── Projections ──────────────────────────────────────
         mixed_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)
@@ -1432,7 +1427,7 @@ class QEffQwen3_5MoeDecoderLayer(Qwen3_5MoeDecoderLayer):
         layer_type = getattr(self, "layer_type", getattr(self, "block_type", None))
         self.layer_type = layer_type
         if layer_type == "linear_attention":
-            self.__class__ = QEffQwen3_5MoeLinearDecoderLayer
+            self.__class__ = QEffQwen3_5MoeLinearAttentionDecoderLayer
             self.linear_attn.__class__ = QEffQwen3_5MoeGatedDeltaNet
             self.linear_attn.__qeff_init__()
         elif layer_type == "full_attention":
@@ -1683,7 +1678,12 @@ class QEffQwen3_5MoeTextModel(Qwen3_5MoeTextModel):
             )
         hidden_states = inputs_embeds
 
-        rope_tables = (self.cos_cached, self.sin_cached)
+        rope_parameters = getattr(self.config, "rope_parameters", {}) or {}
+        mrope_section = rope_parameters.get("mrope_section", [11, 11, 10])
+        cos, sin = qeff_prepare_mrope_cos_sin(
+            self.cos_cached, self.sin_cached, rotary_position_ids, mrope_section, dtype=hidden_states.dtype
+        )
+        position_embeddings = (cos, sin)
         all_hidden_states = () if output_hidden_states else None
         target_hidden_list = []
         layer_indices_to_run = kwargs.get("layer_indices_to_run", None)
