@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from functools import partial
+
 import torch
 import torch.nn.functional as F
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
@@ -26,8 +27,8 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     apply_rotary_pos_emb,
 )
 
-from QEfficient.customop.rms_norm import CustomRMSNormFunc
 from QEfficient.customop import ctx_gather_rows, ctx_paged_scatter
+from QEfficient.customop.rms_norm import CustomRMSNormFunc
 from QEfficient.transformers.cache_utils import QEffQwen4ExpDynamicCache
 from QEfficient.transformers.moe import (
     MoEFlavour,
@@ -500,7 +501,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         batch_local = batch // dp
         pos = selected[:, None, :].expand(batch, kv_heads, count)
         pos_dp = pos.reshape(batch_local, dp, kv_heads, count)
-        slots = torch.div(pos_dp, cp, rounding_mode="trunc")
+        # slots = torch.div(pos_dp, cp, rounding_mode="trunc")
         ways = torch.zeros_like(pos_dp) if cp == 1 else pos_dp.remainder(cp)
         row = (
             torch.arange(dp, device=selected.device).view(1, dp, 1, 1) * cp * kv_heads

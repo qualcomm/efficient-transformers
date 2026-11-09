@@ -1039,7 +1039,6 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         if not output_final_state:
             last_recurrent_state = None
-        core_attn_out = torch.stack(output_chunks, dim=2)
         core_attn_out = core_attn_out.reshape(
             core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1]
         )

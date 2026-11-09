@@ -283,12 +283,12 @@ def main() -> None:
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    from QEfficient import QEFFAutoModelForCausalLM
     from examples.glm.glm53_four_layer_prefill_compile import (
         PREFILL_ATTENTION_PRESETS,
         install_partial_fp8_dequant_patch,
         validate_prefill_dimensions,
     )
+    from QEfficient import QEFFAutoModelForCausalLM
 
     if args.attention_preset not in PREFILL_ATTENTION_PRESETS:
         raise ValueError(

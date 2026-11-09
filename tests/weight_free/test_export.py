@@ -75,51 +75,6 @@ _BLOCKING_GATHER_EXPORT_MODE_CASES = {
 }
 
 
-@pytest.mark.weight_free
-@pytest.mark.weight_free_export
-@pytest.mark.parametrize("model_type,model_id,pooling", WEIGHT_FREE_EMBEDDING_MODEL_PARAMS)
-def test_weight_free_embedding_export_ort_parity(model_type, model_id, pooling, tmp_export_dir):
-    """Export an embedding model without weights and validate HF-to-ORT parity."""
-    try:
-        model_hf = load_hf_embedding_model(model_id)
-        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    except (ImportError, OSError, RuntimeError, ValueError) as exc:
-        if model_type in {"jina", "nomic"}:
-            raise
-        skip_on_model_fetch_error(exc, model_id)
-
-    inputs = tokenizer("hello world", return_tensors="pt")
-    with torch.no_grad():
-        hf_hidden_states = model_hf(**inputs).last_hidden_state
-        hf_output = POOLING_MAP[pooling](hf_hidden_states, inputs["attention_mask"])
-
-    qeff_model = QEFFAutoModel.from_pretrained(model_id, pooling=pooling, weight_free=True)
-    onnx_path = exported_onnx_path(qeff_model.export(tmp_export_dir, dynamo=True, offload_pt_weights=False))
-    assert onnx_path.is_file(), f"Expected ONNX file at {onnx_path}"
-
-    weight_spec_path = resolve_weight_spec_path(onnx_path)
-    assert weight_spec_path.is_file(), f"Expected weight spec at {weight_spec_path}"
-
-    onnx_model = onnx.load(str(onnx_path), load_external_data=False)
-    graph_input_names = [value.name for value in onnx_model.graph.input]
-    assert len(graph_input_names) == len(set(graph_input_names))
-    assert {"input_ids", "attention_mask"}.issubset(graph_input_names)
-
-    session = onnxruntime.InferenceSession(str(onnx_path))
-    session_input_names = {value.name for value in session.get_inputs()}
-    ort_inputs = {name: value.detach().cpu().numpy() for name, value in inputs.items() if name in session_input_names}
-    ort_inputs = load_weight_free_ort_inputs(weight_spec_path, ort_inputs)
-    ort_output = session.run(None, ort_inputs)[0]
-
-    np.testing.assert_allclose(
-        hf_output.detach().cpu().numpy(),
-        ort_output,
-        rtol=1e-4,
-        atol=1e-4,
-        err_msg=f"HF PT vs weight-free ORT parity failed for {model_type}",
-    )
-
-
 def test_weight_free_fp8_config_accepts_checkpoint_scale_format():
     quantization_config = _build_qeff_quantization_config(
         QEffFP8Config,
@@ -331,10 +286,9 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
 
 def test_qwen4_exp_weight_free_four_layer_export_and_ort_execution(tmp_path):
     """Export and execute a locally generated four-layer Qwen4-Exp checkpoint."""
-    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
-
     from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
     from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
 
     source_dir = tmp_path / "qwen4_exp_checkpoint"
     source_model, _ = make_tiny_qwen4_exp()

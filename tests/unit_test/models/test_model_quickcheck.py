@@ -24,8 +24,8 @@ import logging
 import os
 import shutil
 import tempfile
-from collections import Counter
 from argparse import Namespace
+from collections import Counter
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from copy import deepcopy
 from io import StringIO
@@ -40,7 +40,6 @@ import onnxruntime as ort
 import pytest
 import torch
 import torch.nn.functional as F
-import yaml
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -54,13 +53,13 @@ from transformers import (
     LlamaConfig,
     Qwen2Config,
 )
-from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4ForCausalLM,
     DeepseekV4UnweightedRMSNorm,
 )
+from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig, Qwen3_5VisionConfig
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
@@ -76,16 +75,16 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeVisionConfig,
 )
 
-from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
-    QEffDeepseekV4Attention,
-    QEffDeepseekV4Cache,
-    QEffDeepseekV4UnweightedRMSNorm,
-)
 from examples.text_generation.minimax_m3_paged_dp_decode_only_configurable_pages import (
     _build_qaic_config,
     build_block_table,
 )
 from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
+from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+    QEffDeepseekV4Attention,
+    QEffDeepseekV4Cache,
+    QEffDeepseekV4UnweightedRMSNorm,
+)
 from QEfficient.transformers.models.minimax_m3_vl import (
     MiniMaxM3SparseForConditionalGeneration,
     MiniMaxM3VLConfig,
@@ -4633,7 +4632,6 @@ def test_qwen3_5_moe_get_submodules_for_export_handles_fallback_and_headpar():
     """Mixed full/linear attention configs must still expose usable subfunction targets."""
     from types import SimpleNamespace
 
-    from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
         QEffQwen3_5MoeAttention,
         QEffQwen3_5MoeDecoderLayer,
@@ -4802,7 +4800,8 @@ def test_qwen3_5_moe_retained_state_specs_keep_flat_conv_and_recurrent_state_flo
     assert model.get_retained_state_custom_io_dtypes(default_dtype="float16")["recurrent_state.1"] == "float"
 
 
-def test_qwen3_5_moe_get_specializations_supports_multi_resolution():
+@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
+def test_qwen3_5_moe_get_specializations_supports_multi_resolution(moe):
     from types import SimpleNamespace
 
     from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5ForConditionalGeneration
@@ -8030,6 +8029,30 @@ def test_causal_generate_keeps_bool_artifacts_runner_bundle(monkeypatch, tmp_pat
 
     assert result == runner_dir
     runner_bundle.assert_called_once()
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("model_type", ["qwen4_exp", "qwen4_exp_text"])
+@pytest.mark.parametrize("artifacts", [False, True])
+def test_causal_generate_rejects_qwen4_without_host_ple_inputs(monkeypatch, model_type, artifacts):
+    from QEfficient.transformers.models import modeling_auto
+
+    model = object.__new__(QEFFAutoModelForCausalLM)
+    model.model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
+    runtime = MagicMock()
+    model.qpc_path = Path("model.qpc")
+    model.comp_ctx_lengths_prefill = None
+    model.comp_ctx_lengths_decode = None
+    model.is_tlm = False
+    runner_bundle = MagicMock()
+    monkeypatch.setattr(modeling_auto.QEfficient, "cloud_ai_100_exec_kv", runtime)
+    monkeypatch.setattr(modeling_auto, "write_causal_lm_runner_bundle", runner_bundle)
+
+    with pytest.raises(NotImplementedError, match="required host-side ngram_embeddings"):
+        model.generate(tokenizer=object(), prompts=["Hello"], artifacts=artifacts)
+
+    runtime.assert_not_called()
+    runner_bundle.assert_not_called()
 
 
 @pytest.mark.cpu_only

@@ -526,7 +526,6 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             pass  # no manifest → active_transform stays None, fallback to legacy aliases
 
     promoted_inputs: List[WeightSpecInput] = []
-    stored_shapes: Dict[str, Dict[str, List[int]]] = {}
     stored_tensor_info: Dict[str, Dict[str, tuple[List[int], str]]] = {}
 
     for name, init_value in list(model_ir.graph.initializers.items()):

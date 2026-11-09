@@ -283,16 +283,6 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeVisionAttention,
     Qwen3_5MoeVisionModel,
 )
-from transformers.models.qwen4_exp.modeling_qwen4_exp import (
-    Qwen4ExpForCausalLM,
-    Qwen4ExpTextAttention,
-    Qwen4ExpTextDecoderLayer,
-    Qwen4ExpTextExperts,
-    Qwen4ExpTextGatedDeltaNet,
-    Qwen4ExpTextModel,
-    Qwen4ExpTextPLELayer,
-    Qwen4ExpTextSparseMoeBlock,
-)
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeAttention,
     Qwen3MoeDecoderLayer,
@@ -328,6 +318,16 @@ from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3VLMoeTextTopKRouter,
     Qwen3VLMoeVisionAttention,
     Qwen3VLMoeVisionModel,
+)
+from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    Qwen4ExpForCausalLM,
+    Qwen4ExpTextAttention,
+    Qwen4ExpTextDecoderLayer,
+    Qwen4ExpTextExperts,
+    Qwen4ExpTextGatedDeltaNet,
+    Qwen4ExpTextModel,
+    Qwen4ExpTextPLELayer,
+    Qwen4ExpTextSparseMoeBlock,
 )
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings, RobertaModel
 from transformers.models.starcoder2.modeling_starcoder2 import (
@@ -389,12 +389,6 @@ from QEfficient.transformers.models.deepseek_v3.modeling_deepseek import (
     QEffDeepseekV3Model,
     QEffDeepseekV3MoE,
 )
-from QEfficient.transformers.models.dflash_draft.modeling_dflash_draft import (
-    QEffDFlashAttention,
-    QEffDFlashDecoderLayer,
-    QEffDFlashForCausalLM,
-    QEffDFlashModel,
-)
 from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Attention,
     QEffDeepseekV4DecoderLayer,
@@ -409,6 +403,12 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4SparseMoeBlock,
     QEffDeepseekV4TopKRouter,
     QEffDeepseekV4UnweightedRMSNorm,
+)
+from QEfficient.transformers.models.dflash_draft.modeling_dflash_draft import (
+    QEffDFlashAttention,
+    QEffDFlashDecoderLayer,
+    QEffDFlashForCausalLM,
+    QEffDFlashModel,
 )
 from QEfficient.transformers.models.falcon.modeling_falcon import (
     QEffFalconAttention,
@@ -684,16 +684,6 @@ from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     QEffQwen3_5MoeVisionAttention,
     QEffQwen3_5MoeVisionModel,
 )
-from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
-    QEffQwen4ExpForCausalLM,
-    QEffQwen4ExpTextAttention,
-    QEffQwen4ExpTextDecoderLayer,
-    QEffQwen4ExpTextExperts,
-    QEffQwen4ExpTextGatedDeltaNet,
-    QEffQwen4ExpTextModel,
-    QEffQwen4ExpTextPLELayer,
-    QEffQwen4ExpTextSparseMoeBlock,
-)
 from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import (
     QEffQwen3MoeAttention,
     QEffQwen3MoeDecoderLayer,
@@ -726,6 +716,16 @@ from QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     QEffQwen3VLMoeTextTopKRouter,
     QEffQwen3VLMoeVisionAttention,
     QEffQwen3VLMoeVisionModel,
+)
+from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    QEffQwen4ExpForCausalLM,
+    QEffQwen4ExpTextAttention,
+    QEffQwen4ExpTextDecoderLayer,
+    QEffQwen4ExpTextExperts,
+    QEffQwen4ExpTextGatedDeltaNet,
+    QEffQwen4ExpTextModel,
+    QEffQwen4ExpTextPLELayer,
+    QEffQwen4ExpTextSparseMoeBlock,
 )
 from QEfficient.transformers.models.starcoder2.modeling_starcoder2 import (
     QEffStarcoder2Attention,
@@ -1902,38 +1902,6 @@ class GatedDeltaConfigTransform:
         return model, transformed
 
 
-class FFNBlockingTransform(PytorchTransform):
-    """Configure DeepSeek V4 routed-expert FFN tiling from ``qaic_config``."""
-
-    _VALID_MODES = {"default", "token", "weight", "token_weight"}
-
-    @classmethod
-    def apply(cls, model: nn.Module, qaic_config: Optional[dict] = None) -> Tuple[nn.Module, bool]:
-        config = qaic_config or {}
-        mode = config.get("ffn_blocking_mode", "default")
-        token_block_size = config.get("ffn_token_block_size")
-        weight_block_size = config.get("ffn_weight_block_size")
-
-        if mode not in cls._VALID_MODES:
-            raise ValueError(
-                f"qaic_config['ffn_blocking_mode'] must be one of {sorted(cls._VALID_MODES)}, got {mode!r}."
-            )
-        for key, value in (
-            ("ffn_token_block_size", token_block_size),
-            ("ffn_weight_block_size", weight_block_size),
-        ):
-            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
-                raise ValueError(f"qaic_config['{key}'] must be a positive integer when provided.")
-
-        transformed = False
-        for module in model.modules():
-            if isinstance(module, QEffDeepseekV4Experts) or callable(getattr(module, "configure_ffn_blocking", None)):
-                module.configure_ffn_blocking(mode, token_block_size, weight_block_size)
-                transformed = True
-
-        return model, transformed
-
-
 class DeepseekV4PrefillMoETransform(PytorchTransform):
     """Configure expert-parallel routed MoE only for DeepSeek V4 prefill exports."""
 
@@ -2008,52 +1976,6 @@ class DeepseekV4PrefillMoETransform(PytorchTransform):
         return model, True
 
 
-class GatedDeltaConfigTransform:
-    @classmethod
-    def apply(cls, model: nn.Module, gated_delta_config: dict | None = None) -> tuple[nn.Module, bool]:
-        gated_delta_config = gated_delta_config or {}
-        full_state_update = bool(gated_delta_config.get("full_state_update", False))
-        target_modules = [module for module in model.modules() if hasattr(module, "torch_chunk_gated_delta_rule_qeff")]
-        full_state_targets = [module for module in target_modules if hasattr(module, "gdn_full_state_update")]
-        if full_state_update and not full_state_targets:
-            raise ValueError("qaic_config['gdn_full_state_update'] is not supported for this model")
-        if not target_modules:
-            return model, False
-
-        if not gated_delta_config:
-            # Preserve the legacy chunk-size reset and independently clear the
-            # model-specific full-state mode between prefill/decode compiles.
-            transformed = False
-            for module in target_modules:
-                if getattr(module, "gdn_chunk_size", 64) != 64:
-                    module.gdn_chunk_size = 64
-                    if hasattr(module, "__qeff_init__"):
-                        module.__qeff_init__()
-                    transformed = True
-            for module in full_state_targets:
-                if bool(module.gdn_full_state_update):
-                    module.gdn_full_state_update = False
-                    transformed = True
-            return model, transformed
-
-        chunk_size = gated_delta_config.get("chunk_size")
-        chunk_size = int(chunk_size) if chunk_size is not None else None
-
-        transformed = False
-        for module in target_modules:
-            if chunk_size is not None and chunk_size > 0:
-                module.gdn_chunk_size = chunk_size
-                if hasattr(module, "__qeff_init__"):
-                    module.__qeff_init__()
-                transformed = True
-        for module in full_state_targets:
-            if full_state_update or bool(module.gdn_full_state_update) != full_state_update:
-                transformed = True
-            module.gdn_full_state_update = full_state_update
-
-        return model, transformed
-
-
 class FFNBlockingTransform(PytorchTransform):
     """Configure DeepSeek V4 routed-expert FFN tiling from ``qaic_config``."""
 
@@ -2079,9 +2001,10 @@ class FFNBlockingTransform(PytorchTransform):
 
         transformed = False
         for module in model.modules():
-            if isinstance(module, QEffDeepseekV4Experts):
+            if isinstance(module, QEffDeepseekV4Experts) or callable(getattr(module, "configure_ffn_blocking", None)):
                 module.configure_ffn_blocking(mode, token_block_size, weight_block_size)
                 transformed = True
+
         return model, transformed
 
 
@@ -2444,33 +2367,6 @@ class OptimizedMoEExpertParallelWeightsTransform(PytorchTransform):
             del weights
             gc.collect()
             transformed = True
-        return model, transformed
-
-
-class FFNBlockingTransform(PytorchTransform):
-    """Configure optional token tiling for optimized routed MoE FFNs."""
-
-    _VALID_MODES = {"default", "token", "weight", "token_weight"}
-
-    @classmethod
-    def apply(cls, model: nn.Module, qaic_config: Optional[dict] = None) -> Tuple[nn.Module, bool]:
-        config = qaic_config or {}
-        mode = config.get("ffn_blocking_mode", "default")
-        token_block_size = config.get("ffn_token_block_size")
-        if mode not in cls._VALID_MODES:
-            raise ValueError(
-                f"qaic_config['ffn_blocking_mode'] must be one of {sorted(cls._VALID_MODES)}, got {mode!r}."
-            )
-        if token_block_size is not None and (
-            not isinstance(token_block_size, int) or isinstance(token_block_size, bool) or token_block_size < 1
-        ):
-            raise ValueError("qaic_config['ffn_token_block_size'] must be a positive integer when provided.")
-
-        transformed = False
-        for module in model.modules():
-            if isinstance(module, QEffMoEBlockMixin):
-                module.configure_ffn_blocking(mode, token_block_size)
-                transformed = True
         return model, transformed
 
 

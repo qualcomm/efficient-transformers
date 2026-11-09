@@ -5110,10 +5110,10 @@ class QEffMiniMaxM3SparseForConditionalGeneration(MiniMaxM3SparseForConditionalG
                 f"the combined MSA DP factor ({dp_multiplier})."
             )
         fbs = constants.ONNX_EXPORT_EXAMPLE_FBS
-        if fbs < dp_multiplier or fbs % dp_multiplier:
+        if continuous_batching and (fbs < dp_multiplier or fbs % dp_multiplier):
             raise ValueError(
                 f"export cache batch size ({fbs}) must be at least and divisible by "
-                f"the combined MSA DP factor ({dp_multiplier})."
+                f"the combined MSA DP factor ({dp_multiplier}) for continuous batching."
             )
         cache_batch_size = fbs
         dtype = getattr(self.config, "torch_dtype", torch.float32) or torch.float32
