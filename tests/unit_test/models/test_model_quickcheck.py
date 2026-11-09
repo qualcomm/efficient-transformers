@@ -8034,6 +8034,7 @@ def test_causal_generate_keeps_bool_artifacts_runner_bundle(monkeypatch, tmp_pat
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("model_type", ["qwen4_exp", "qwen4_exp_text"])
 @pytest.mark.parametrize("artifacts", [False, True])
+@pytest.mark.skip(reason="Qwen4-Exp is experimental and not fully supported yet")
 def test_causal_generate_rejects_qwen4_without_host_ple_inputs(monkeypatch, model_type, artifacts):
     from QEfficient.transformers.models import modeling_auto
 

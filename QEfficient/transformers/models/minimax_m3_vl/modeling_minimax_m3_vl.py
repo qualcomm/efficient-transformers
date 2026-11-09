@@ -235,7 +235,7 @@ class QEffMiniMaxM3VLRotaryEmbedding(MiniMaxM3VLRotaryEmbedding):
     """
 
     def __init__(self, config, device=None):
-        super().__init__(config=config, device=device)
+        super().__init__(config=config)
         self.__qeff_init__()
 
     def __qeff_init__(self):
