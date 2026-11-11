@@ -183,11 +183,9 @@ def check_causal_lm_pytorch_vs_kv_vs_ort_vs_ai100(
     if _RUN_CPU_REFERENCES and not compile_only and continuous_batching is False:
         pytorch_kv_tokens = api_runner.run_kv_model_on_pytorch(qeff_model.model)
 
-    if (
-        not compile_only
-        and model_name not in ModelConfig.SWIFTKV_MODELS
-        and model_name not in ModelConfig.EXTERNAL_MODELS
-    ):
+    # External (remote-code) models run the HF reference too unless their entry opts out.
+    skip_hf_reference = ModelConfig.EXTERNAL_MODELS.get(model_name, {}).get("skip_hf_reference", False)
+    if not compile_only and model_name not in ModelConfig.SWIFTKV_MODELS and not skip_hf_reference:
         # The HF PyTorch reference is a pure function of the model + effective config, so it
         # is served from a committed golden and generated once on first use. It is unaffected
         # by qaic_config (blocking / CCL / speculative / KV replication), which is why a single

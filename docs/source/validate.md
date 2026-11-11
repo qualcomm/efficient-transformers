@@ -39,6 +39,7 @@
 | **LlamaSwiftKVForCausalLM**  | swiftkv            | [Snowflake/Llama-3.1-SwiftKV-8B-Instruct](https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct)                                                  | ✔️          |
 | **Grok1ModelForCausalLM** ** |  grok-1②          | [hpcai-tech/grok-1](https://huggingface.co/hpcai-tech/grok-1)                                                  | ✕          |
 | **Glm4MoeForCausalLM**  |     GLM-4.5       | [zai-org/GLM-4.5](https://huggingface.co/zai-org/GLM-4.5)                                                  |          |
+| **K2HorizonForCausalLM** | K2 Horizon②④ (dense) | [IFM/K2-Horizon-0.9B](https://huggingface.co/IFM/K2-Horizon-0.9B)<br>[IFM/K2-Horizon-3.7B](https://huggingface.co/IFM/K2-Horizon-3.7B)<br>[IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B)<br>[IFM/K2-Horizon-32B](https://huggingface.co/IFM/K2-Horizon-32B) | ✕ |
 
 ---
 
@@ -194,6 +195,8 @@ Models marked with `**` are currently not functional on the `main` and `release/
 ② Set `trust_remote_code=True` for end-to-end inference with vLLM.
 
 ③ Pass `disable_sliding_window` for few family models when using vLLM.
+
+④ K2 Horizon dense sizes, validated on Cloud AI 100 Ultra against the Hugging Face model at the shipped shape (128-token prompt, 4096 context). Long context checked with a planted-fact recall: 3.7B and 7B at 32K and 64K, 32B at 32K (its 64K compile at `prefill_seq_len` 1024 does not finish; a run at 256 is not confirmed yet), 0.9B not yet. The 3.7B, 7B and 32B take MXFP6 weights with MXINT8 KV cache; the 0.9B keeps fp16 weights with MXINT8 KV cache, MXFP6 degrades its output (the first four layers are the sensitive ones). The 32B needs all 4 devices of a card. The rotary tables are capped at 65536 positions (`K2_HORIZON_MAX_POSITION_EMBEDDINGS`), so `ctx_len` is limited to 64K; the configs declare up to 512K.
 ```
 ---
 

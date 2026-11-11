@@ -163,6 +163,10 @@ VISION_FP16_INPUTS = {"pixel_values", "image_masks"}
 LLAMA4_ATTENTION_CHUNK_SIZE = 8192
 LLAMA4_MAX_POSITION_EMBEDDINGS = 65536
 
+# K2 Horizon Constants
+# the configs declare 524288 positions; the baked rotary tables are capped to keep the ONNX small
+K2_HORIZON_MAX_POSITION_EMBEDDINGS = 65536
+
 # DeepSeek Kimi-k2.5 Constants
 KIMI_PATCH_SIZE = 14
 KIMI_EXAMPLE_IMAGE_NUM_IMAGE_TOKENS = 600
