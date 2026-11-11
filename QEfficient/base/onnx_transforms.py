@@ -1973,11 +1973,7 @@ class OnnxTransformPipeline(BaseOnnxTransform):
 
         if PreserveNestedCacheRetainedStateTransform in requested:
             applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(
-<<<<<<< HEAD
-                model, kv_cache_prefix=kwargs.get("kv_cache_prefix")
-=======
-                model, model_type=kwargs.get("model_type")
->>>>>>> 44f3b2f2 (updated retained state transform for full model minimax accuracy)
+                model, kv_cache_prefix=kwargs.get("kv_cache_prefix"), model_type=kwargs.get("model_type")
             )
 
         if DeduplicateRepeatedSubgraphTransform in requested:
