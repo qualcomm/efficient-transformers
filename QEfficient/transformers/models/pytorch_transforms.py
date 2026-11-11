@@ -2153,6 +2153,7 @@ class ExternalOptimizedMoEMapperTransform(ExternalModuleMapperTransform):
             "get_supported_moe_flavours": QEffDeepseekV3MoE.get_supported_moe_flavours,
             "routing_input": QEffDeepseekV3MoE.routing_input,
             "execute_moe_flavour": QEffMoEBlockMixin.execute_moe_flavour,
+            "_execute_moe_flavour": QEffMoEBlockMixin._execute_moe_flavour,
             "moe_dispatch": QEffMoEBlockMixin.moe_dispatch,
             "transform_weights": QEffDeepseekV3MoE.transform_weights,
             "_stack_quantized_projection_params": QEffDeepseekV3MoE._stack_quantized_projection_params,

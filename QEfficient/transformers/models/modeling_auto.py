@@ -2303,7 +2303,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             If `full_batch_size`, `kv_cache_batch_size`, or `num_speculative_tokens` are not None.
             If both `skip_lang` and `skip_vision` are True.
         """
-        if self.model.config.model_type == "minimax_m3_vl" and qaic_config is not None:
+        if (hasattr(self, "model") and self.model.config.model_type == "minimax_m3_vl") and qaic_config is not None:
             # MiniMax get_specializations() and get_dummy_inputs() read the
             # model-local QAIC configuration to select DP/CP cache layouts.
             self.model.qaic_config = qaic_config
