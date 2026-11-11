@@ -1625,11 +1625,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
-<<<<<<< HEAD
-                dynamo=kwargs.get("dynamo", False),
-=======
                 dynamo=kwargs.get("dynamo", False) or self._weight_free,
->>>>>>> 3cc4985f (Add GLM-5.3 FP8 weight-free export)
                 onnx_transform_kwargs=onnx_transform_kwargs,
             )
 
