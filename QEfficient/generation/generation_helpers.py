@@ -212,20 +212,62 @@ def _weight_free_input_names(onnx_path: Path) -> set[str]:
     return {spec_input.name for spec_input in load_weight_spec(weight_spec_path).inputs}
 
 
-def _required_host_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[str]:
+def _retained_input_names(graph: onnx.GraphProto) -> set[str]:
     retained_inputs = set()
     for output in graph.output:
         for suffix in ("_InternalRetainedState", "_RetainedState"):
             if output.name.endswith(suffix):
                 retained_inputs.add(output.name[: -len(suffix)])
+    return retained_inputs
+
+
+def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
+    """Return inputs used only by Shape nodes, excluding direct graph outputs."""
+    input_names = {graph_input.name for graph_input in graph.input}
+    graph_output_names = {graph_output.name for graph_output in graph.output}
+    consumers = {name: [] for name in input_names}
+
+    def visit_graph(current_graph: onnx.GraphProto, shadowed_names: set[str]) -> None:
+        for node in current_graph.node:
+            for input_name in node.input:
+                if input_name in consumers and input_name not in shadowed_names:
+                    consumers[input_name].append(node.op_type)
+
+            for attribute in node.attribute:
+                if attribute.type == onnx.AttributeProto.GRAPH:
+                    nested_graphs = (attribute.g,)
+                elif attribute.type == onnx.AttributeProto.GRAPHS:
+                    nested_graphs = attribute.graphs
+                else:
+                    continue
+
+                for nested_graph in nested_graphs:
+                    local_names = {value.name for value in nested_graph.input}
+                    local_names.update(initializer.name for initializer in nested_graph.initializer)
+                    local_names.update(output for nested_node in nested_graph.node for output in nested_node.output)
+                    visit_graph(nested_graph, shadowed_names | local_names)
+
+    visit_graph(graph, set())
+    return {
+        input_name
+        for input_name, input_consumers in consumers.items()
+        if input_name not in graph_output_names
+        and input_consumers
+        and all(op_type == "Shape" for op_type in input_consumers)
+    }
+
+
+def _runtime_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[str]:
+    retained_inputs = _retained_input_names(graph)
+    shape_only_inputs = _shape_only_input_names(graph)
     initializer_names = {initializer.name for initializer in graph.initializer}
     weight_free_inputs = _weight_free_input_names(onnx_path)
     return {
         graph_input.name
         for graph_input in graph.input
-        if graph_input.name not in retained_inputs
-        and graph_input.name not in initializer_names
+        if graph_input.name not in initializer_names
         and graph_input.name not in weight_free_inputs
+        and (graph_input.name in retained_inputs or graph_input.name not in shape_only_inputs)
     }
 
 
@@ -242,6 +284,11 @@ class RunnerMetadata:
     output_names: set[str]
     custom_io_precisions: Dict[str, str]
     custom_io_item_sizes: Dict[str, int]
+    runtime_input_names: Optional[set[str]] = None
+
+    def __post_init__(self) -> None:
+        if self.runtime_input_names is None:
+            self.runtime_input_names = _runtime_input_names(self.graph, self.onnx_path)
 
     @classmethod
     def from_paths(cls, onnx_path: Union[str, Path], compile_dir: Union[str, Path]) -> "RunnerMetadata":
@@ -253,16 +300,18 @@ class RunnerMetadata:
         model = onnx.load(str(onnx_path), load_external_data=False)
         graph = model.graph
         custom_io_precisions, custom_io_item_sizes = _custom_io_maps(compile_dir)
+        runtime_input_names = _runtime_input_names(graph, onnx_path)
         return cls(
             onnx_path=onnx_path,
             compile_dir=compile_dir,
             model=model,
             graph=graph,
             input_names={graph_input.name for graph_input in graph.input},
-            required_host_input_names=_required_host_input_names(graph, onnx_path),
+            required_host_input_names=runtime_input_names - _retained_input_names(graph),
             output_names={output.name for output in graph.output},
             custom_io_precisions=custom_io_precisions,
             custom_io_item_sizes=custom_io_item_sizes,
+            runtime_input_names=runtime_input_names,
         )
 
 
@@ -322,7 +371,7 @@ def _filter_graph_inputs(
         name: np.asarray(value)
         for inputs in input_groups
         for name, value in inputs.items()
-        if name in runner_metadata.input_names
+        if name in runner_metadata.runtime_input_names
     }
 
 
@@ -340,6 +389,8 @@ def _add_cross_qpc_placeholders(
         "mxint8": np.int8,
     }
     for graph_input in graph.input:
+        if graph_input.name not in runner_metadata.runtime_input_names:
+            continue
         if graph_input.name in host_inputs or graph_input.name.startswith("past_"):
             continue
         if not any(token in graph_input.name for token in ("vision_embeds", "deepstack_features")):
