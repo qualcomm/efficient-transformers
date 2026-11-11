@@ -155,6 +155,7 @@ def write_causal_lm_runner_bundle(
 
     full_batch_size = specialization.get("full_batch_size")
     _add_specialization_control_inputs(runner_metadata, host_inputs, specialization, sampling_params=sampling_params)
+    host_inputs = _filter_graph_inputs(runner_metadata, host_inputs)
 
     shape_overrides = {}
     context_length = specialization.get("ctx_len")

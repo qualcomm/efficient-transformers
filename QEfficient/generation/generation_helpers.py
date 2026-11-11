@@ -222,8 +222,9 @@ def _retained_input_names(graph: onnx.GraphProto) -> set[str]:
 
 
 def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
-    """Return inputs used only by Shape nodes, including captured subgraph uses."""
+    """Return inputs used only by Shape nodes, excluding direct graph outputs."""
     input_names = {graph_input.name for graph_input in graph.input}
+    graph_output_names = {graph_output.name for graph_output in graph.output}
     consumers = {name: [] for name in input_names}
 
     def visit_graph(current_graph: onnx.GraphProto, shadowed_names: set[str]) -> None:
@@ -250,7 +251,9 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
     return {
         input_name
         for input_name, input_consumers in consumers.items()
-        if input_consumers and all(op_type == "Shape" for op_type in input_consumers)
+        if input_name not in graph_output_names
+        and input_consumers
+        and all(op_type == "Shape" for op_type in input_consumers)
     }
 
 

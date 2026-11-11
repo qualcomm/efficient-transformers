@@ -1989,6 +1989,30 @@ def test_runner_io_filters_and_rejects_shape_only_inputs(tmp_path):
 
 
 @pytest.mark.cpu_only
+def test_runner_metadata_keeps_graph_outputs_even_if_only_used_by_shape(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    passthrough = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1, 4])
+    output_shape = helper.make_tensor_value_info("position_ids_shape", TensorProto.INT64, [2])
+    graph = helper.make_graph(
+        [helper.make_node("Shape", ["position_ids"], ["position_ids_shape"])],
+        "shape_and_output",
+        [passthrough],
+        [passthrough, output_shape],
+    )
+    onnx_path = tmp_path / "shape-and-output.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"position_ids"}
+    assert runner_metadata.required_host_input_names == {"position_ids"}
+
+
+@pytest.mark.cpu_only
 def test_cross_qpc_placeholders_skip_shape_only_inputs_and_use_runtime_precision(tmp_path):
     import onnx
     from onnx import TensorProto, helper
@@ -2202,6 +2226,60 @@ def test_causal_lm_runner_bundle_matches_compiled_batch_size(tmp_path):
     assert input_dims["position_ids"] == [2, 4]
     assert np.fromfile(io_dir / "data/input_ids.raw", dtype=np.int64).tolist() == [1, 2, 0, 0, 2, 3, 0, 0]
     assert np.fromfile(io_dir / "data/position_ids.raw", dtype=np.int64).tolist() == [0, 1, -1, -1, 0, 1, -1, -1]
+
+
+@pytest.mark.cpu_only
+def test_causal_lm_runner_bundle_filters_shape_only_generated_inputs(tmp_path):
+    from types import SimpleNamespace
+
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_causal_lm_runner_bundle
+
+    class FakeTokenizer:
+        padding_side = "right"
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def __call__(self, prompt, return_tensors, padding, max_length=None):
+            del return_tensors
+            prompts = prompt if isinstance(prompt, list) else [prompt]
+            input_ids = np.array([[index + 1, index + 2] for index, _ in enumerate(prompts)], dtype=np.int64)
+            attention_mask = np.ones_like(input_ids)
+            if padding == "max_length":
+                pad_width = max_length - input_ids.shape[1]
+                input_ids = np.pad(input_ids, ((0, 0), (0, pad_width)))
+                attention_mask = np.pad(attention_mask, ((0, 0), (0, pad_width)))
+            return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 4])
+    position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1, 4])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 10])
+    graph = helper.make_graph(
+        [helper.make_node("Shape", ["position_ids"], ["position_ids_shape"])],
+        "causal_runner_shape_only_position_ids",
+        [input_ids, position_ids],
+        [logits],
+    )
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+    compile_dir = tmp_path / "qpc-hash"
+    compile_dir.mkdir()
+    (compile_dir / "specializations.json").write_text(
+        json.dumps({"specializations": [{"batch_size": 1, "seq_len": 4, "ctx_len": 8}]})
+    )
+    qeff_model = SimpleNamespace(
+        qpc_path=None,
+        compile_artifacts_path=compile_dir,
+        onnx_path=onnx_path,
+        model=SimpleNamespace(config=SimpleNamespace(n_head=2, n_embd=8)),
+    )
+
+    io_dir = write_causal_lm_runner_bundle(model=qeff_model, tokenizer=FakeTokenizer(), prompts=["hello"])
+    entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    input_names = [entry["map-to"] for entry in entries if entry["io-direction"] == "in"]
+    assert input_names == ["input_ids"]
 
 
 @pytest.mark.cpu_only
