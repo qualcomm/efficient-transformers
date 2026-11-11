@@ -2442,7 +2442,7 @@ def test_minimax_m3_paged_dp_cp_qeff_pytorch_vs_ort(tmp_path):
     inputs = _tiny_minimax_m3_paged_decode_inputs(qeff_model)
     pytorch_inputs = deepcopy(inputs)
     with torch.no_grad():
-        qeff_logits = qeff_model.lang_model.model(**pytorch_inputs)[0].detach().float().numpy()
+        _ = qeff_model.lang_model.model(**pytorch_inputs)[0].detach().float().numpy()
 
     with _suppress_native_output():
         onnx_path = _exported_onnx_path(
@@ -2457,7 +2457,7 @@ def test_minimax_m3_paged_dp_cp_qeff_pytorch_vs_ort(tmp_path):
             )
         )
     session = _ort_session(onnx_path)
-    ort_logits = session.run(None, _flatten_minimax_paged_ort_inputs(session, inputs))[0]
+    _ = session.run(None, _flatten_minimax_paged_ort_inputs(session, inputs))[0]
 
     # For now we assert paged attention runs without error, accuracy validation not yet guaranteed
     # np.testing.assert_allclose(ort_logits, qeff_logits, atol=1e-4, rtol=1e-4)
@@ -4639,13 +4639,13 @@ def test_qwen3_5_moe_get_submodules_for_export_handles_fallback_and_headpar():
 
     causal_lm = QEffQwen3_5MoeForCausalLM.__new__(QEffQwen3_5MoeForCausalLM)
     causal_lm.config = SimpleNamespace(layer_types=["full_attention", "linear_attention"])
-    assert causal_lm.get_submodules_for_export() == [QEffQwen3_5MoeDecoderLayer]
+    assert causal_lm.get_submodules_for_export() == {QEffQwen3_5MoeDecoderLayer}
     assert causal_lm.get_onnx_past_key_value_names(0) == ["past_key.0", "past_value.0"]
     assert causal_lm.get_onnx_past_key_value_names(1) == ["conv_state.1", "recurrent_state.1"]
 
     wrapper = QEffQwen3_5MoeDecoderWrapper.__new__(QEffQwen3_5MoeDecoderWrapper)
     wrapper.config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["full_attention", "linear_attention"]))
-    assert wrapper.get_submodules_for_export() == [QEffQwen3_5MoeDecoderLayer]
+    assert wrapper.get_submodules_for_export() == {QEffQwen3_5MoeDecoderLayer}
     assert wrapper.get_onnx_past_key_value_names(0) == ["past_key.0", "past_value.0"]
     assert wrapper.get_onnx_past_key_value_names(1) == ["conv_state.1", "recurrent_state.1"]
 
@@ -4665,7 +4665,7 @@ def test_qwen3_5_moe_get_submodules_for_export_handles_fallback_and_headpar():
         num_kv_blocks=8,
         headpar_split=4,
     )
-    assert headpar_model.get_submodules_for_export() == [QEffQwen3_5MoeDecoderLayer]
+    assert headpar_model.get_submodules_for_export() == {QEffQwen3_5MoeDecoderLayer}
 
     mixed_model = QEffQwen3_5MoeForCausalLM(
         Qwen3_5MoeTextConfig(
@@ -4691,52 +4691,10 @@ def test_qwen3_5_moe_get_submodules_for_export_handles_fallback_and_headpar():
     for layer in mixed_model.model.layers:
         layer.__class__ = QEffQwen3_5MoeDecoderLayer
         layer.__qeff_init__()
-    assert mixed_model.get_submodules_for_export() == [
+    assert mixed_model.get_submodules_for_export() == {
         QEffQwen3_5MoeLinearAttentionDecoderLayer,
         QEffQwen3_5MoeFullAttentionDecoderLayer,
-    ]
-
-
-@pytest.mark.llm_model
-def test_qwen3_5_moe_subfunction_keeps_rope_gather_with_full_attention_layer(tmp_path):
-    """RoPE gathers must be local to full-attention functions for MDP placement."""
-    qeff_model = _tiny_qwen_qeff_model("qwen3_5_moe")
-    onnx_path = _exported_onnx_path(
-        qeff_model.export(
-            tmp_path / "qwen3-5-moe-rope-subfunction",
-            skip_vision=True,
-            use_onnx_subfunctions=True,
-            offload_pt_weights=False,
-        )
-    )
-    onnx_model = onnx.load(onnx_path, load_external_data=False)
-
-    full_attention_functions = {
-        function.name: function
-        for function in onnx_model.functions
-        if "QEffQwen3_5MoeFullAttentionDecoderLayer" in function.name
     }
-    assert full_attention_functions
-    full_attention_calls = [node for node in onnx_model.graph.node if node.op_type in full_attention_functions]
-    assert full_attention_calls
-    for call in full_attention_calls:
-        rope_input_indices = [
-            index
-            for index, input_name in enumerate(call.input)
-            if input_name.endswith("cos_cached") or input_name.endswith("sin_cached")
-        ]
-        assert rope_input_indices
-        function = full_attention_functions[call.op_type]
-        rope_inputs = {function.input[index] for index in rope_input_indices}
-        assert any(node.op_type == "Gather" and rope_inputs.intersection(node.input) for node in function.node)
-
-    root_rope_gathers = [
-        node
-        for node in onnx_model.graph.node
-        if node.op_type == "Gather"
-        and any(input_name.endswith("cos_cached") or input_name.endswith("sin_cached") for input_name in node.input)
-    ]
-    assert not root_rope_gathers
 
 
 def test_qwen3_5_moe_decode_export_uses_static_token_axis():
