@@ -5498,7 +5498,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             self.model.config.qeff_csa_prefill_only = prefill_only is True
             self.model.config.qeff_hca_prefill_only = prefill_only is True
 
-        if self._weight_free and prefill_only is True:
+        if hasattr(self, "_weight_free") and self._weight_free and prefill_only is True:
             raise NotImplementedError(
                 "weight_free=True is not supported with disaggregated compile (prefill_only=True or prefill_seq_len=1)."
             )
@@ -5633,7 +5633,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if kw_spec := compiler_options.pop("specializations", None):
             specializations = kw_spec
 
-        if self.dflash_dlm and "dflash_target_seq_len" in (self.model.qaic_config or {}):
+        if (
+            hasattr(self, "dflash_dlm")
+            and self.dflash_dlm
+            and "dflash_target_seq_len" in (self.model.qaic_config or {})
+        ):
             target_seq_len = self.model.qaic_config["dflash_target_seq_len"]
             if not isinstance(target_seq_len, int) or isinstance(target_seq_len, bool) or target_seq_len <= 0:
                 raise ValueError("dflash_target_seq_len must be a positive integer.")

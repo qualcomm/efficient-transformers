@@ -1758,7 +1758,8 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
             QEffQwen3_5MoeLinearAttentionDecoderLayer,
             QEffQwen3_5MoeFullAttentionDecoderLayer,
         }
-        layer_classes = {layer.__class__ for layer in getattr(self, "layers", ())}
+        layers = getattr(getattr(self, "model", None), "layers", ())
+        layer_classes = {layer.__class__ for layer in layers}
         specialized_layers = layer_classes & specialized_classes
         return specialized_layers or {QEffQwen3_5MoeDecoderLayer}
 
