@@ -11,6 +11,12 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, THIS_DIR)
 
 import requests
 from PIL import Image
@@ -29,6 +35,7 @@ from utils import (
     load_spd_session,
     load_spd_sessions,
     resolve_model_name,
+    run_dspark_cli,
     validate_dlm_target_seq_len,
     validate_spd_decode_specialization,
 )
@@ -44,10 +51,6 @@ from QEfficient.generation.dflash_generation import (
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
-sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, THIS_DIR)
 
 console = Console()
 IMAGE_PROMPT = "Can you Describe this image in detail?"
@@ -60,6 +63,21 @@ def parse_device_list(value):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--technique", choices=["dflash", "dspark"], default="dflash")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run the offline tiny DSpark parity check.",
+    )
+    parser.add_argument("--manifest", type=Path, help="Reuse a DSpark compilation manifest.")
+    parser.add_argument("--metrics-output", type=Path, help="Write DSpark metrics as JSON.")
+    parser.add_argument(
+        "--dspark-output-dir",
+        type=Path,
+        help="DSpark compilation and manifest directory.",
+    )
+    parser.add_argument("--draft-prefill-target-seq-len", type=int, default=None)
+    parser.add_argument("--image-path", type=Path, help="Local image for DSpark vision inference.")
     parser.add_argument(
         "--model_name",
         default="gemma-4-31B-it",
@@ -79,7 +97,12 @@ def parse_args():
         default=None,
         help="Enable thinking when supported; default: model chat-template setting.",
     )
-    thinking.add_argument("--disable-thinking", "--disable_thinking", dest="enable_thinking", action="store_false")
+    thinking.add_argument(
+        "--disable-thinking",
+        "--disable_thinking",
+        dest="enable_thinking",
+        action="store_false",
+    )
     parser.add_argument("--tlm_qpc", default=None)
     parser.add_argument("--vision_qpc", default=None)
     parser.add_argument("--dlm_qpc", default=None)
@@ -163,7 +186,11 @@ def _run_gemma(
         user_prompt = args.image_prompt or IMAGE_PROMPT
         image = Image.open(requests.get(image_url, stream=True, timeout=60).raw).convert("RGB")
         input_ids, mm_token_type_ids, processor_inputs = build_inputs_gemma4(
-            processor, tokenizer, user_prompt, image=image, enable_thinking=args.enable_thinking
+            processor,
+            tokenizer,
+            user_prompt,
+            image=image,
+            enable_thinking=args.enable_thinking,
         )
         logger.info(f"Image: {image_url}")
         vision_devices = args.vision_devices if args.vision_devices is not None else args.tlm_devices
@@ -271,6 +298,9 @@ def _run_qwen3_vl(
 
 def main():
     args = parse_args()
+    if args.technique == "dspark":
+        run_dspark_cli(args, vision=args.image, default_prompt=IMAGE_PROMPT)
+        return
     batch_size = _resolve_batch_size(args.batch_size)
     if not args.image and not args.prompt:
         raise ValueError("Provide --prompt for text mode, or --image for image mode.")
@@ -311,7 +341,13 @@ def main():
             "hf_token": args.hf_token,
         }
         if is_qwen3vl:
-            compile_kwargs.update({"height": args.height, "width": args.width, "disagg_tlm": args.disagg_tlm})
+            compile_kwargs.update(
+                {
+                    "height": args.height,
+                    "width": args.width,
+                    "disagg_tlm": args.disagg_tlm,
+                }
+            )
         tlm_qpc, vision_qpc = compile_vlm(tlm_repo, dlm_repo, **compile_kwargs)
         if args.disagg_tlm:
             args.tlm_prefill_qpc, tlm_qpc = tlm_qpc["prefill"], tlm_qpc["decode"]

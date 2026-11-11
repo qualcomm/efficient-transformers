@@ -65,6 +65,7 @@ from QEfficient.transformers.modeling_utils import (
     SPECIALIZED_DISAGG_SERVING_MODEL_ARCH,
     _configure_proxy_for_model,
 )
+from QEfficient.transformers.models.dspark_draft import DSparkTLMTransform, QEffDSparkForCausalLM
 from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import override_gptoss_prefill_chunking
 from QEfficient.transformers.models.pytorch_transforms import (
     CustomOpsTransform,
@@ -1644,11 +1645,15 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         self.input_shapes, self.output_names = None, None
 
         # DFlash TLM: attach fc/hidden_norm and enable target-layer hidden-state collect.
+        self.dspark_tlm = bool(qaic_config and qaic_config.get("dspark_tlm", False))
         self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
         if self.dflash_tlm:
             qaic_config.setdefault("pretrained_model_name_or_path", kwargs.get("pretrained_model_name_or_path"))
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            transform = DSparkTLMTransform if self.dspark_tlm else DFlashTLMTransform
+            self.model, _ = transform.apply(self.model, qaic_config)
             self.lang_model.hash_params["dflash_dlm_repo"] = qaic_config.get("dflash_dlm_repo")
+            if self.dspark_tlm:
+                self.lang_model.hash_params["dspark_dlm_repo"] = qaic_config.get("dspark_dlm_repo")
             self.lang_model.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
 
         # ---Sampling---
@@ -1657,7 +1662,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             prefix = "qwen35_moe" if self.model.config.model_type == "qwen3_5_moe" else "qwen35"
             self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_kv_commit_v2"
-            self.lang_model.hash_params["dflash_chunk_size"] = 16
+            language_model = self.model.model.language_model
+            self.lang_model.hash_params["dflash_chunk_size"] = getattr(language_model, "dflash_chunk_size", 16)
+            if self.dspark_tlm:
+                self.lang_model.hash_params["dspark_target_features"] = "projected_scaled_custom_norm_v2"
         if self.dflash_tlm and self.model.config.model_type == "gemma4":
             self.lang_model.hash_params["dflash_cache_protocol"] = "gemma4_block_window_v1"
 
@@ -3983,9 +3991,24 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         # DFlash changes the model structure and output contract, so apply it before
         # the generic speculative-decoding and sampler transforms wrap model.forward.
-        self.dflash_dlm = bool(qaic_config and qaic_config.get("dflash_dlm", False))
+        self.dspark_dlm = isinstance(self.model, QEffDSparkForCausalLM)
+        if qaic_config and qaic_config.get("dspark_dlm", False) and not self.dspark_dlm:
+            raise TypeError("DSpark requires QEffDSparkForCausalLM; load it with from_pretrained and dspark_dlm=True.")
+        if (
+            self.dspark_dlm
+            and qaic_config
+            and (qaic_config.get("include_sampler", False) or qaic_config.get("speculative_model_type"))
+        ):
+            raise NotImplementedError("DSpark currently supports greedy draft logits without the generic sampler.")
+        self.dflash_dlm = self.dspark_dlm or bool(qaic_config and qaic_config.get("dflash_dlm", False))
+        if self.dspark_dlm:
+            self.hash_params["dspark_dlm_target_features"] = "projected_norm_v1"
+            self.model.return_token_ids = bool(qaic_config and qaic_config.get("dspark_return_token_ids", False))
+            if self.model.return_token_ids:
+                self.hash_params["dspark_dlm_output"] = "token_ids_native_markov_v2"
+        self.dspark_tlm = bool(qaic_config and qaic_config.get("dspark_tlm", False))
         self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
-        if self.dflash_dlm:
+        if self.dflash_dlm and not self.dspark_dlm:
             self.model, _ = DFlashTransform.apply(self.model, qaic_config)
             self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
             self.hash_params["dflash_attention"] = "per_layer_window_v1"
@@ -3993,8 +4016,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 self.hash_params["dflash_tlm_embedding_key"] = qaic_config["dflash_tlm_embedding_key"]
                 self.hash_params["dflash_tlm_repo"] = qaic_config["dflash_tlm_repo"]
         if self.dflash_tlm:
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            transform = DSparkTLMTransform if self.dspark_tlm else DFlashTLMTransform
+            self.model, _ = transform.apply(self.model, qaic_config)
             self.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
+            if self.dspark_tlm:
+                self.hash_params["dspark_dlm_repo"] = qaic_config.get("dspark_dlm_repo")
+                self.hash_params["dspark_target_features"] = "projected_scaled_custom_norm_v2"
             if self.model.config.model_type == "gpt_oss":
                 self.hash_params["dflash_hidden_norm"] = "custom_rms_norm_v1"
 
@@ -4130,6 +4157,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs)
+        if qaic_config and qaic_config.get("dspark_dlm", False) and (layerwise or weight_free):
+            raise NotImplementedError("DSpark weight-free and layerwise loading are not supported yet.")
         if layerwise:
             warnings.warn(
                 "layerwise export is deprecated and will be removed in a future release. "
@@ -4148,6 +4177,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             # checkpoint weights are ever materialized here. The real weights
             # are supplied later at export time via pretrained_model_name_or_path.
             model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
+        elif qaic_config and qaic_config.get("dspark_dlm", False):
+            model = QEffDSparkForCausalLM.from_pretrained(
+                pretrained_model_name_or_path,
+                *args,
+                tlm_repo=qaic_config.get("dspark_tlm_repo"),
+                **kwargs,
+            )
         else:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         if qaic_config is not None:
@@ -4387,6 +4423,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
 
+        if self.dspark_dlm:
+            seq_len = self.model.model.block_size
+        elif self.dspark_tlm:
+            chunk_size = self.model.model.dflash_chunk_size
+            seq_len = 2 * chunk_size if getattr(self.model.model, "dspark_fused_replay", False) else chunk_size
+
         # TODO: Remove this hack ##################
         if dynamo:
             # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
@@ -4443,6 +4485,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             fbs if self.continuous_batching else bs,
             seq_len * 2 if getattr(self, "dflash_dlm", None) else seq_len,
         )
+        if self.dspark_dlm and getattr(self.model.config, "attention_k_eq_v", False):
+            kv_cache_shape[1] = self.model.config.num_global_key_value_heads
+            kv_cache_shape[3] = self.model.config.global_head_dim
         if dynamo:
             kv_cache_shape = list(kv_cache_shape)
             kv_cache_shape[1 if len(kv_cache_shape) == 3 else 2] = max(
@@ -4531,7 +4576,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 raise ValueError("dflash_target_seq_len must be a positive integer.")
             target_axis = "target_seq_len" if "dflash_target_seq_len" in (qaic_config or {}) else "seq_len"
             kv_cache_shape[2] = max(kv_cache_shape[2], target_seq_len + seq_len)
-            example_inputs["target_hidden"] = torch.ones((bs, target_seq_len, self.hidden_size), dtype=torch.float)
+            target_feature_size = self.model.model.target_feature_size if self.dspark_dlm else self.hidden_size
+            example_inputs["target_hidden"] = torch.ones((bs, target_seq_len, target_feature_size), dtype=torch.float)
             example_inputs["position_ids"] = (
                 torch.arange(target_seq_len, target_seq_len + seq_len, dtype=torch.int64).view(1, seq_len).repeat(bs, 1)
             )
@@ -4540,6 +4586,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
             dynamic_axes["target_hidden"] = {0: "batch_size", 1: target_axis}
             dynamic_axes["position_ids_target"] = {0: "batch_size", 1: target_axis}
+
+        if self.dspark_dlm and self.model.model.markov_head is not None:
+            example_inputs["prev_token_ids"] = torch.zeros((bs, 1), dtype=torch.int64)
+            dynamic_axes["prev_token_ids"] = {0: "batch_size"}
 
         if self.ccl_enabled:
             example_inputs["comp_ctx_lengths"] = torch.randint(0, 127, (seq_len,), dtype=torch.int64)
@@ -4560,6 +4610,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             if self.model.qaic_config.get("return_pdfs", False):
                 output_names.append("probs")
             output_names.append("next_tokens")
+        elif self.dspark_dlm and self.model.return_token_ids:
+            output_names.append("draft_tokens")
         else:
             output_names.append("logits")
 
@@ -4682,6 +4734,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             nlk = constants.ONNX_EXPORT_EXAMPLE_NLK  # Number of Logits to Keep
             example_inputs["num_logits_to_keep"] = torch.arange(nlk).view(nlk, 1)
             dynamic_axes["num_logits_to_keep"] = {0: "num_logits_to_keep"}
+        if self.dspark_tlm and getattr(self.model.model, "dspark_fused_replay", False):
+            example_inputs["cache_commit"] = torch.ones(1, dtype=torch.int64)
 
         if self.model.qaic_config is not None and self.model.qaic_config.get("include_sampler", False):
             example_inputs, output_names, dynamic_axes = get_sampling_inputs_and_outputs(
@@ -4925,12 +4979,19 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         spec["num_logits_to_keep"] = (num_speculative_tokens + 1) if self.is_tlm else None
 
-        if getattr(self, "dflash_tlm", None) or getattr(self, "dflash_dlm", None):
-            spec["seq_len"] = dflash_block_size
-        if self.dflash_tlm:
-            if type(dflash_block_size) is not int or dflash_block_size < 2:
-                raise ValueError("DFlash TLM requires an integer dflash_block_size >= 2.")
-            spec["num_logits_to_keep"] = dflash_block_size
+        if self.dspark_tlm and getattr(self.model.model, "dspark_fused_replay", False):
+            chunk_size = self.model.model.dflash_chunk_size
+            if dflash_block_size is not None and dflash_block_size != chunk_size:
+                raise ValueError(f"DSpark dflash_block_size must match verification width ({chunk_size}).")
+            spec["seq_len"] = 2 * chunk_size
+            spec["num_logits_to_keep"] = chunk_size
+        else:
+            if getattr(self, "dflash_tlm", None) or getattr(self, "dflash_dlm", None):
+                spec["seq_len"] = dflash_block_size
+            if self.dflash_tlm:
+                if type(dflash_block_size) is not int or dflash_block_size < 2:
+                    raise ValueError("DFlash TLM requires an integer dflash_block_size >= 2.")
+                spec["num_logits_to_keep"] = dflash_block_size
 
         if self.continuous_batching:
             spec["full_batch_size"] = kv_cache_batch_size
@@ -5291,7 +5352,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             target_seq_len = self.model.qaic_config["dflash_target_seq_len"]
             if not isinstance(target_seq_len, int) or isinstance(target_seq_len, bool) or target_seq_len <= 0:
                 raise ValueError("dflash_target_seq_len must be a positive integer.")
-            specializations = [dict(spec, target_seq_len=target_seq_len) for spec in specializations]
+            specializations = [
+                spec if "target_seq_len" in spec else dict(spec, target_seq_len=target_seq_len)
+                for spec in specializations
+            ]
 
         target_dtype = getattr(self.model.config, "torch_dtype", torch.float32)
         kv_cache_dtype = "mxint8" if mxint8_kv_cache else CUSTOM_IO_DTYPE_MAP[target_dtype]
