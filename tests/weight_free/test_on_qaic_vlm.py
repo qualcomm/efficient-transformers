@@ -207,21 +207,7 @@ def _prepare_vlm_test_inputs(
     qeff_model,
     model_config,
     image_size=(536, 354),
-    skip_vision=False,
 ):
-    if skip_vision:
-        hf_inputs = processor(text=model_config["text_prompt"], return_tensors="pt")
-        qeff_inputs = {
-            key: value.clone() if isinstance(value, torch.Tensor) else value for key, value in hf_inputs.items()
-        }
-        if qeff_model is not None:
-            qeff_inputs = qeff_model.prepare_inputs_for_generation(
-                inputs=qeff_inputs,
-                prefill_seq_len=model_config["prompt_len"],
-                batch_size=model_config["batch_size"],
-            )
-        return hf_inputs, qeff_inputs
-
     image_width, image_height = image_size
     image = Image.new("RGB", image_size, color=(32, 96, 160))
     conversation = [
@@ -606,16 +592,13 @@ def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tm
         weight_free=True,
         dtype=torch.float32,
     )
-    skip_vision = model_type == "qwen2_5_vl"
-    # Skipped due to an ONNX issue in the vision module.
-
     export_paths = qeff_model.export(
         tmp_export_dir / f"{model_type}_cpu_export",
         use_onnx_subfunctions=True,
         offload_pt_weights=False,
         prefill_seq_len=model_config["prompt_len"],
         ctx_len=model_config["ctx_len"],
-        skip_vision=skip_vision,
+        skip_vision=False,
     )
     language_onnx = Path(export_paths[-1])
     assert language_onnx.is_file()
@@ -623,9 +606,6 @@ def test_weight_free_vlm_dummy_cpu_export_and_multispec_structure(model_type, tm
     _assert_vlm_weight_free_graph(model_type, language_onnx)
     if model_type in {"qwen3_5", "qwen3_5_moe"}:
         _assert_input_trace_length(language_onnx, model_config["prompt_len"])
-    if skip_vision:
-        return
-
     vision_onnx = Path(export_paths[0])
     assert vision_onnx.is_file()
     _assert_weight_spec(vision_onnx)
@@ -814,7 +794,6 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         skip_on_model_fetch_error(exc, model_id)
 
     image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
-    skip_vision = model_type == "qwen2_5_vl"
     compile_prefill_seq_len = model_config["prompt_len"]
     hf_inputs, _ = _prepare_vlm_test_inputs(
         processor,
@@ -822,7 +801,6 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         None,
         model_config,
         image_size,
-        skip_vision=skip_vision,
     )
 
     with torch.inference_mode():
@@ -846,7 +824,6 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         qeff_model.model,
         model_config,
         image_size,
-        skip_vision=skip_vision,
     )
     export_paths = qeff_model.export(
         tmp_export_dir / "weight_free_vlm_export",
@@ -854,16 +831,15 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         offload_pt_weights=False,
         prefill_seq_len=compile_prefill_seq_len,
         ctx_len=model_config["ctx_len"],
-        skip_vision=skip_vision,
+        skip_vision=False,
     )
     language_onnx = Path(export_paths[-1])
     assert language_onnx.is_file()
     _assert_weight_spec(language_onnx)
     _assert_vlm_weight_free_graph(model_type, language_onnx)
-    if not skip_vision:
-        vision_onnx = Path(export_paths[0])
-        assert vision_onnx.is_file()
-        _assert_weight_spec(vision_onnx)
+    vision_onnx = Path(export_paths[0])
+    assert vision_onnx.is_file()
+    _assert_weight_spec(vision_onnx)
 
     common_compile_kwargs = {
         "ctx_len": model_config["ctx_len"],
@@ -872,19 +848,16 @@ def test_weight_free_vlm_hf_qaic_parity(model_type, tmp_export_dir):
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }
-    if skip_vision:
-        common_compile_kwargs["skip_vision"] = True
-    else:
-        common_compile_kwargs.update(
-            _get_vlm_compile_kwargs(
-                qeff_model.model,
-                model_config,
-                image_size,
-                heights=image_size[1],
-                widths=image_size[0],
-                num_frames=1,
-            )
+    common_compile_kwargs.update(
+        _get_vlm_compile_kwargs(
+            qeff_model.model,
+            model_config,
+            image_size,
+            heights=image_size[1],
+            widths=image_size[0],
+            num_frames=1,
         )
+    )
     if model_type in {"qwen3_5", "qwen3_5_moe"}:
         vision_qpc = qeff_model.compile(
             **common_compile_kwargs,
@@ -1204,8 +1177,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
 @pytest.mark.parametrize("model_type", WEIGHT_FREE_VLM_QAIC_MODEL_PARAMS)
 def test_weight_free_vlm_multi_specialization_hf_qaic_parity(model_type, tmp_export_dir):
     """Compile two vision resolutions in one QPC and run the dummy VLM on QAIC."""
-    if model_type == "qwen2_5_vl":
-        pytest.skip("Qwen 2.5-VL vision QPC is deferred because QAIC reports a Conv3D bias-shape error")
     if model_type == "gemma4":
         pytest.skip("Gemma 4 does not support multi-specialization yet")
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
