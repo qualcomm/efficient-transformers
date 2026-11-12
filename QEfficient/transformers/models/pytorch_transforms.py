@@ -2101,6 +2101,7 @@ class ExternalOptimizedMoEMapperTransform(ExternalModuleMapperTransform):
             "get_supported_moe_flavours": QEffMoEBlockMixin.get_supported_moe_flavours,
             "routing_input": QEffMoEBlockMixin.routing_input,
             "execute_moe_flavour": QEffMoEBlockMixin.execute_moe_flavour,
+            "_execute_moe_flavour": QEffMoEBlockMixin._execute_moe_flavour,
             "moe_dispatch": QEffMoEBlockMixin.moe_dispatch,
             "transform_weights": QEffGrok1MoeBlock.transform_weights,
             "route": QEffGrok1MoeBlock.route,
