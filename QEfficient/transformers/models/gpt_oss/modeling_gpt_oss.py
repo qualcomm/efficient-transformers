@@ -1011,6 +1011,13 @@ class QEffGptOssModel(GptOssModel):
 
 
 class QEffGptOssForCausalLM(GptOssForCausalLM):
+    def get_weightfree_computed_initializers(self) -> dict[str, torch.Tensor]:
+        rotary_emb = QEffGptOssRotaryEmbedding(config=self.config)
+        return {
+            "model.sin_cached": rotary_emb.sin_cached * rotary_emb.attention_scaling,
+            "model.cos_cached": rotary_emb.cos_cached * rotary_emb.attention_scaling,
+        }
+
     def get_submodules_for_export(self) -> type[nn.Module]:
         """
         Return the set of class used as the repeated layer across the model for subfunction extraction.
