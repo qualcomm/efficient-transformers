@@ -473,6 +473,7 @@ class QEffPrefillOnlyChunkedGptOssAttention(GptOssAttention):
                 batch_index=batch_index,
                 sinks=self.sinks,
                 prefill_only=blocking_mode.is_prefill,
+                skip_kv_write=blocking_mode.is_prefill,
                 **kwargs,
             )
         else:
