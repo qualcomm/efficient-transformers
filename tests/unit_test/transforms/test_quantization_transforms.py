@@ -108,14 +108,14 @@ class TestQuantizationTransformImportability:
         from QEfficient.transformers.quantizers.quantizer_compressed_tensors import (
             FP8BlockWiseDequantLinear,
             QEffFP8Config,
-            _replace_with_fp8_dequant_linear_and_experts_if_qwen,
+            _replace_with_fp8_dequant_linear_and_experts,
         )
 
         model = torch.nn.Module()
         model.compatible = torch.nn.Linear(128, 128, bias=False)
         model.incompatible = torch.nn.Linear(4096, 64, bias=False)
 
-        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
+        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts(
             model,
             quantization_config=QEffFP8Config(
                 quant_method="fp8",
@@ -137,7 +137,7 @@ class TestQuantizationTransformImportability:
             FP8BlockWiseDequantLinear,
             QEffFP8Config,
             _get_model_specific_fp8_exclusions,
-            _replace_with_fp8_dequant_linear_and_experts_if_qwen,
+            _replace_with_fp8_dequant_linear_and_experts,
         )
 
         model = torch.nn.Module()
@@ -151,7 +151,7 @@ class TestQuantizationTransformImportability:
         model.self_attn.compressor.indexer.kv_proj = torch.nn.Linear(128, 128, bias=False)
         model.self_attn.compressor.indexer.gate_proj = torch.nn.Linear(128, 128, bias=False)
 
-        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts_if_qwen(
+        _, has_been_replaced = _replace_with_fp8_dequant_linear_and_experts(
             model,
             modules_to_not_convert=_get_model_specific_fp8_exclusions(model),
             quantization_config=QEffFP8Config(
@@ -189,11 +189,11 @@ class TestQuantizationTransformImportability:
         expert_converter = next(
             conversion
             for conversion in conversions
-            if isinstance(conversion, WeightConverter) and "mlp.experts.*.w1.weight$" in conversion.source_patterns
+            if isinstance(conversion, WeightConverter) and r"\.experts.*.w1.weight$" in conversion.source_patterns
         )
 
-        assert "mlp.experts.*.w1.weight_scale_inv$" in expert_converter.source_patterns
-        assert "mlp.experts.*.w3.weight_scale_inv$" in expert_converter.source_patterns
+        assert r"\.experts.*.w1.weight_scale_inv$" in expert_converter.source_patterns
+        assert r"\.experts.*.w3.weight_scale_inv$" in expert_converter.source_patterns
         assert isinstance(expert_converter.operations[0], Fp8Dequantize)
 
     def test_dp_context_scatter_and_gather_preserve_rows(self):

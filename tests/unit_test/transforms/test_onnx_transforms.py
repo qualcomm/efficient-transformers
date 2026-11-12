@@ -280,7 +280,8 @@ class TestONNXTransformsModuleStructure:
         )
         graph = onnx.load(path, load_external_data=False).graph
 
-        assert sum(node.op_type == "TopK" for node in graph.node) == 3
+        # current implementation is to run 1 topk on all collected blocks and then final merge across CP. 
+        assert sum(node.op_type == "TopK" for node in graph.node) == 2
         materialized_shapes = {
             tuple(dim.dim_value for dim in value.type.tensor_type.shape.dim)
             for value in graph.value_info
