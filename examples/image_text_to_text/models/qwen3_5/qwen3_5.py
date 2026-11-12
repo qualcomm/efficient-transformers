@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # -----------------------------------------------------------------------------
+from io import BytesIO
 
 import requests
 import transformers
@@ -176,8 +177,11 @@ else:
         print("=" * 80 + "\n")
 
     ### IMAGE + TEXT ###
-    image_url = "https://picsum.photos/id/237/536/354"
-    image = Image.open(requests.get(image_url, stream=True).raw)
+    image_url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/astronaut.jpg"
+    with requests.get(image_url, timeout=(5, 30)) as response:
+        response.raise_for_status()
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+        image = image.resize((536, 354))
 
     messages_1 = [
         {
