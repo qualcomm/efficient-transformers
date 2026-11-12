@@ -5,7 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""MiniMax M3 AIC parity coverage for the latest causal-model test suite."""
+"""Latest causal-model QAIC coverage."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 
 from examples.text_generation.minimax_m3_paged_dp_decode_only_configurable_pages import (
     _build_qaic_config,
@@ -26,7 +28,7 @@ from QEfficient.transformers.models.minimax_m3_vl import (
     MiniMaxM3VLTextConfig,
     MiniMaxM3VLVisionConfig,
 )
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
+from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 from tests.unit_test.models.test_model_quickcheck import _ort_session
 
 
@@ -572,3 +574,289 @@ def test_minimax_m3_prefill_decode_hf_pytorch_vs_aic(tmp_path):
     }
     aic_decode = run_stage(decode_qpc, aic_prefill["logits"].argmax(axis=-1), decode_positions, retained)
     np.testing.assert_allclose(aic_decode["logits"], pt_decode_logits.numpy(), atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.nightly
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+def test_deepseek_v4_folded_decode_4_device_qeff_pytorch_vs_aic(tmp_path):
+    """Compare a tiny four-layer folded DeepSeek V4 decode between QEff PyTorch and AIC."""
+    from examples.text_generation.deepseek_v4_flash_decode import (
+        build_ffn_blocking_config,
+        configure_qeff_parallel_layout,
+    )
+
+    ctx_len = 4096
+    batch_size = 16
+    config = DeepseekV4Config(
+        vocab_size=64,
+        hidden_size=32,
+        head_dim=8,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        q_lora_rank=16,
+        o_groups=2,
+        o_lora_rank=8,
+        num_hidden_layers=4,
+        layer_types=[
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+        ],
+        mlp_layer_types=["hash_moe"] * 4,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=16,
+        n_shared_experts=1,
+        hc_mult=2,
+        index_head_dim=4,
+        index_n_heads=2,
+        index_topk=2,
+        sliding_window=8,
+        compress_rates={"heavily_compressed_attention": 4, "compressed_sparse_attention": 2},
+        max_position_embeddings=ctx_len,
+    )
+    config.torch_dtype = torch.float32
+    configure_qeff_parallel_layout(
+        config,
+        SimpleNamespace(
+            batch_size=batch_size,
+            attn_dp=4,
+            indexer_cp=4,
+            num_kv_blocks=1,
+            hca_compressed_kv_cp=2,
+            hca_attn_blocks=8,
+            hw_version="ai100",
+            ctx_len=ctx_len,
+            device_group=[0, 1, 2, 3],
+        ),
+    )
+    qaic_config = build_ffn_blocking_config(
+        SimpleNamespace(ffn_blocking_mode="token", ffn_token_block_size=4, ffn_weight_block_size=None)
+    )
+
+    torch.manual_seed(7)
+    model_hf = DeepseekV4ForCausalLM(config).eval()
+    qeff_model = QEFFAutoModelForCausalLM(model_hf)
+    qeff_model.transform(
+        ctx_len=ctx_len,
+        seq_len=1,
+        bs=batch_size,
+        num_devices=4,
+        num_cores=16,
+        qaic_config=qaic_config,
+    )
+
+    input_ids = torch.arange(3, 3 + batch_size, dtype=torch.int64).view(batch_size, 1)
+    position_ids = torch.full((batch_size, 1), 4, dtype=torch.int64)
+    past_key_values = qeff_model.model.get_dummy_pkv_cache(config, batch_size, ctx_len)
+    cache_inputs = {
+        name: state.detach().cpu().numpy().copy()
+        for layer_idx, layer_state in enumerate(past_key_values)
+        for name, state in zip(qeff_model.model.get_onnx_past_key_value_names(layer_idx, layer_state), layer_state)
+    }
+    with torch.no_grad():
+        qeff_outputs = qeff_model.model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+    qeff_logits = qeff_outputs.logits.detach().float().cpu().numpy()
+
+    onnx_path = qeff_model.export(
+        export_dir=str(tmp_path / "deepseek-v4-folded-decode-onnx"),
+        prefill_only=False,
+        prefill_seq_len=1,
+        export_batch_size=batch_size,
+        cache_ctx_len=ctx_len,
+        qaic_config=qaic_config,
+        dynamo=True,
+    )
+    qpc_path = qeff_model.compile(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path / "deepseek-v4-folded-decode-aic",
+        prefill_seq_len=1,
+        ctx_len=ctx_len,
+        batch_size=batch_size,
+        prefill_only=False,
+        num_cores=16,
+        num_devices=4,
+        aic_hw_version="ai100",
+        mxint8_kv_cache=False,
+        mxfp6_matmul=True,
+        user_tiled=True,
+        qaic_config=qaic_config,
+        offload_pt_weights=False,
+        dynamo=True,
+    )
+    session = QAICInferenceSession(qpc_path)
+    try:
+
+        def binding_value(input_name, source=None):
+            binding = session.bindings[session.binding_index_map[input_name]]
+            shape = tuple(binding.dims)
+            dtype = session.aic_to_np_dtype_mapping[binding.type]
+            if source is None:
+                return np.zeros(shape, dtype=dtype)
+            source = np.asarray(source, dtype=dtype)
+            assert source.size == np.prod(shape), (
+                f"AIC binding shape mismatch for {input_name}: source {source.shape}, expected {shape}"
+            )
+            return source.reshape(shape)
+
+        aic_inputs = {}
+        for input_name in session.input_names:
+            if input_name == "input_ids":
+                aic_inputs[input_name] = binding_value(input_name, input_ids.numpy())
+            elif input_name == "position_ids":
+                aic_inputs[input_name] = binding_value(input_name, position_ids.numpy())
+            elif input_name in cache_inputs:
+                aic_inputs[input_name] = binding_value(input_name, cache_inputs[input_name])
+            else:
+                raise AssertionError(f"Unhandled DeepSeek V4 AIC input: {input_name}")
+        aic_outputs = session.run(aic_inputs)
+    finally:
+        session.deactivate()
+
+    np.testing.assert_allclose(aic_outputs["logits"], qeff_logits, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.nightly
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+def test_glm53_decode_16_device_qeff_pytorch_vs_aic(tmp_path):
+    """Compare a tiny four-layer GLM-5.3 DSA decode between QEff PyTorch and AIC."""
+    from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
+    from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
+
+    ctx_len = 4096
+    batch_size = 16
+    num_devices = 16
+    num_cores = 16
+    qaic_config = {
+        "indexer_dp": num_devices,
+        "indexer_cp": 1,
+        "attn_dp": num_devices,
+        "attn_cp": 1,
+        "indexer_num_blocks": 16,
+        "num_cores_per_device": num_cores,
+        "ffn_blocking_mode": "token",
+        "ffn_token_block_size": 4,
+    }
+    config = GlmMoeDsaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        moe_intermediate_size=16,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        q_lora_rank=16,
+        kv_lora_rank=8,
+        qk_rope_head_dim=4,
+        qk_nope_head_dim=8,
+        v_head_dim=8,
+        index_head_dim=8,
+        index_n_heads=2,
+        index_topk=16,
+        max_position_embeddings=ctx_len,
+        first_k_dense_replace=3,
+        n_group=1,
+        topk_group=1,
+        norm_topk_prob=True,
+        indexer_types=["full", "full", "full", "shared"],
+        mlp_layer_types=["dense", "dense", "dense", "sparse"],
+        rope_parameters={"rope_type": "default", "rope_theta": 10000},
+        dtype="float32",
+    )
+    config.torch_dtype = torch.float32
+
+    torch.manual_seed(7)
+    model_hf = GlmMoeDsaForCausalLM(config).eval()
+    qeff_model = QEFFAutoModelForCausalLM(model_hf)
+    qeff_model.transform(
+        ctx_len=ctx_len,
+        seq_len=1,
+        bs=batch_size,
+        num_devices=num_devices,
+        num_cores=num_cores,
+        qaic_config=qaic_config,
+    )
+
+    input_ids = torch.arange(3, 3 + batch_size, dtype=torch.int64).view(batch_size, 1)
+    position_ids = torch.full((batch_size, 1), 4, dtype=torch.int64)
+    compressed_kvs = qeff_model.model.get_dummy_pkv_cache(config, batch_size, ctx_len)
+    indexer_key_cache = qeff_model.model.get_dummy_indexer_cache(config, batch_size, ctx_len)
+    cache_inputs = {
+        name: state.detach().cpu().numpy().copy()
+        for layer_idx, layer_cache in enumerate(compressed_kvs)
+        for name, state in zip((f"compressed_kv.{layer_idx}", f"k_pe.{layer_idx}"), layer_cache)
+    }
+    cache_inputs.update(
+        {
+            f"indexer_key.{layer_idx}": indexer_key.detach().cpu().numpy().copy()
+            for layer_idx, indexer_key in zip(qeff_model.model.get_indexer_cache_layers(config), indexer_key_cache)
+        }
+    )
+    with torch.no_grad():
+        qeff_outputs = qeff_model.model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            compressed_kvs=list(compressed_kvs),
+            indexer_key_cache=list(indexer_key_cache),
+            use_cache=True,
+        )
+    qeff_logits = qeff_outputs.logits.detach().float().cpu().numpy()
+
+    onnx_path = qeff_model.export(
+        export_dir=str(tmp_path / "glm53-decode-onnx"),
+        prefill_only=False,
+        prefill_seq_len=1,
+        export_batch_size=batch_size,
+        cache_ctx_len=ctx_len,
+        qaic_config=qaic_config,
+    )
+    qpc_path = qeff_model.compile(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path / "glm53-decode-aic",
+        prefill_seq_len=1,
+        ctx_len=ctx_len,
+        batch_size=batch_size,
+        prefill_only=False,
+        num_cores=num_cores,
+        num_devices=num_devices,
+        aic_hw_version="ai100",
+        user_tiled=True,
+        qaic_config=qaic_config,
+        offload_pt_weights=False,
+    )
+    session = QAICInferenceSession(qpc_path)
+    try:
+
+        def binding_value(input_name):
+            binding = session.bindings[session.binding_index_map[input_name]]
+            shape = tuple(binding.dims)
+            dtype = session.aic_to_np_dtype_mapping[binding.type]
+            source = cache_inputs.get(input_name)
+            if input_name == "input_ids":
+                source = input_ids.numpy()
+            elif input_name == "position_ids":
+                source = position_ids.numpy()
+            if source is None:
+                return np.zeros(shape, dtype=dtype)
+            source = np.asarray(source, dtype=dtype)
+            assert source.size == np.prod(shape), (
+                f"AIC binding shape mismatch for {input_name}: source {source.shape}, expected {shape}"
+            )
+            return source.reshape(shape)
+
+        aic_inputs = {name: binding_value(name) for name in session.input_names}
+        aic_outputs = session.run(aic_inputs)
+    finally:
+        session.deactivate()
+
+    np.testing.assert_allclose(aic_outputs["logits"], qeff_logits, atol=2e-2, rtol=2e-2)
