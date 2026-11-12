@@ -119,6 +119,8 @@ CUSTOM_IO_DTYPE_MAP = {
     torch.float32: "float16",  # Since compiler doesn't support fp32
     "float32": "float16",  # Since compiler doesn't support fp32
 }
+
+
 def _should_convert_to_fp16(target_dtype: "torch.dtype", compiler_options: dict) -> bool:
     """Determine whether the compiler needs -convert-to-fp16.
 

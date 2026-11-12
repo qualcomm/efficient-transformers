@@ -220,9 +220,7 @@ SPECIALIZED_DISAGG_SERVING_MODEL_ARCH = {"gpt_oss", "qwen3_moe", "glm4_moe", "ki
 
 def _validate_retained_state_dtype(dtype: str | None, argument_name: str) -> None:
     if dtype is not None and dtype not in SUPPORTED_RETAINED_STATE_DTYPES:
-        raise ValueError(
-            f"{argument_name} must be one of {sorted(SUPPORTED_RETAINED_STATE_DTYPES)}, got {dtype!r}"
-        )
+        raise ValueError(f"{argument_name} must be one of {sorted(SUPPORTED_RETAINED_STATE_DTYPES)}, got {dtype!r}")
 
 
 def _resolve_retained_state_dtype(

@@ -3631,6 +3631,7 @@ def test_dual_qpc_compile_applies_recurrent_state_dtype_to_custom_io(monkeypatch
     model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
     model.continuous_batching = True
     model.ccl_enabled = False
+    model.dflash_tlm = False
     model.comp_ctx_lengths_prefill = None
     model.comp_ctx_lengths_decode = None
     model.transform = lambda **kwargs: None
@@ -4596,42 +4597,43 @@ def test_qwen3_5_moe_conv_decode_slice_keeps_prefill_gather_path():
 
 
 @pytest.mark.parametrize("dflash", [None, False, True])
-@pytest.mark.parametrize("grouped_state", [False, True])
 @pytest.mark.parametrize("valid_tokens", [0, 1, 2, 3, 4])
-def test_qwen3_5_moe_conv_history_dflash_guard(dflash, grouped_state, valid_tokens):
+def test_qwen3_5_moe_conv_history_dflash_guard(dflash, valid_tokens):
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
         qeff_torch_causal_conv1d_update,
     )
 
-    flat_state = torch.arange(24, dtype=torch.float32).reshape(1, 6, 4)
-    state = flat_state.reshape(1, 2, 3, 4) if grouped_state else flat_state
+    state = torch.arange(24, dtype=torch.float32).reshape(1, 4, 6)
     hidden = 100 + torch.arange(6 * 16, dtype=torch.float32).reshape(1, 6, 16)
     positions = torch.full((4, 1, 16), -1, dtype=torch.int64)
     positions[..., :valid_tokens] = torch.arange(40, 40 + valid_tokens)
     kwargs = {} if dflash is None else {"dflash": dflash}
     _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions, **kwargs)
 
+    channel_first_state = state.transpose(1, 2)
     if dflash:
-        expected = torch.cat([flat_state, hidden[..., :valid_tokens]], dim=-1)[..., -4:]
+        expected = torch.cat([channel_first_state, hidden[..., :valid_tokens]], dim=-1)[..., -4:]
     else:
         # Preserve the original baseline ordering, including its tied cached keys.
-        zeros = flat_state[:, 0, :].to(positions.dtype) * 0
+        zeros = state[:, :, 0].to(positions.dtype) * 0
         order = torch.argsort(torch.cat([zeros, positions[0]], dim=1), dim=1)
-        expected = torch.gather(torch.cat([flat_state, hidden], dim=-1), 2, order[:, None, -4:].expand(-1, 6, -1))
-    torch.testing.assert_close(actual, expected.reshape_as(state), rtol=0, atol=0)
+        expected = torch.gather(
+            torch.cat([channel_first_state, hidden], dim=-1), 2, order[:, None, -4:].expand(-1, 6, -1)
+        )
+    torch.testing.assert_close(actual, expected.transpose(1, 2), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("valid_tokens", [0, 1, 2, 3, 4])
 def test_qwen3_5_conv_replay_preserves_history_order(valid_tokens):
     from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import qeff_torch_causal_conv1d_update
 
-    state = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
+    state = torch.arange(24, dtype=torch.float32).reshape(1, 4, 6)
     hidden = 100 + torch.arange(6 * 64, dtype=torch.float32).reshape(1, 6, 64)
     positions = torch.full((4, 1, 64), -1, dtype=torch.int64)
     positions[..., :valid_tokens] = torch.arange(40, 40 + valid_tokens)
     _, actual = qeff_torch_causal_conv1d_update(hidden, state, torch.ones(6, 4), positions, dflash=True)
-    expected = torch.cat([state.reshape(1, 6, 4), hidden[..., :valid_tokens]], dim=-1)[..., -4:]
-    torch.testing.assert_close(actual, expected.reshape_as(state), rtol=0, atol=0)
+    expected = torch.cat([state.transpose(1, 2), hidden[..., :valid_tokens]], dim=-1)[..., -4:]
+    torch.testing.assert_close(actual, expected.transpose(1, 2), rtol=0, atol=0)
 
 
 def test_qwen3_5_conv_decode_slice_matches_gather_reference():
