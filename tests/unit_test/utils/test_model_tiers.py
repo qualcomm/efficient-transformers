@@ -200,6 +200,7 @@ _KNOWN_UNTYPED = frozenset(
         "meta-llama/Llama-Prompt-Guard-2-22M",  # bare string, sequence_model_configs
         "openai/whisper-tiny",  # bare string, audio_model_configs (pinned priority)
         "facebook/wav2vec2-base-960h",  # bare string, audio_model_configs (pinned priority)
+        "ResembleAI/chatterbox",  # bare string, audio_model_configs text_to_speech_models (legacy tier)
         "jinaai/jina-embeddings-v2-base-code",  # model_type null, embedding (pinned priority)
         "sentence-transformers/nli-bert-base-cls-pooling",  # model_type null, embedding (pinned priority)
     }
