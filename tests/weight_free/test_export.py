@@ -24,12 +24,16 @@ import onnx
 import onnxruntime
 import pytest
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs, resolve_weight_spec_path
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
+from QEfficient.transformers.models.modeling_auto import (
+    QEFFAutoModel,
+    QEFFAutoModelForCausalLM,
+    QEFFAutoModelForImageTextToText,
+)
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
 
@@ -66,6 +70,13 @@ _BLOCKING_GATHER_EXPORT_MODE_CASES = {
     "qkv": {"blocking_mode": "qkv", "num_kv_blocks": 2, "num_q_blocks": 2},
     "hkv": {"blocking_mode": "hkv", "head_block_size": 2, "num_kv_blocks": 2},
     "hqkv": {"blocking_mode": "hqkv", "head_block_size": 2, "num_kv_blocks": 2, "num_q_blocks": 2},
+}
+
+_PREFILL_ONLINE_EXPORT_MODEL_IDS = {
+    "gpt_oss": WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS["gpt_oss"],
+    "qwen3_vl_moe": "tiny-random/qwen3-vl-moe",
+    "gemma4": "tiny-random/gemma-4-dense",
+    "qwen3_5_moe": "tiny-random/qwen3.5-moe",
 }
 
 
@@ -252,41 +263,93 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
 @pytest.mark.weight_free
 @pytest.mark.weight_free_export
 @pytest.mark.weight_free_blocking
-@pytest.mark.parametrize("blocking_key", list(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES))
-def test_weight_free_gpt_oss_prefill_online_export_gather_ops(blocking_key, tmp_export_dir):
-    """GPT-OSS weight-free prefill-only export honors prefill_online blocking."""
-    model_type = "gpt_oss"
-    model_id = WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS[model_type]
-    qaic_config = dict(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES[blocking_key])
+@pytest.mark.parametrize("model_type,model_id", sorted(_PREFILL_ONLINE_EXPORT_MODEL_IDS.items()))
+def test_weight_free_prefill_online_export_gather_ops(model_type, model_id, tmp_export_dir):
+    """Weight-free prefill-only export honors prefill_online blocking across supported model families."""
+    qaic_config = dict(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES["prefill_online"])
     qaic_config["ctx_len"] = 16
+    if model_type.endswith("moe"):
+        qaic_config["moe_config"] = {"expert_parallel_chunk_size": 16}
+
     try:
-        config = load_causal_lm_config(model_id)
-        config.num_hidden_layers = 2
-        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
-            model_id,
-            config=config,
-            weight_free=True,
-            qaic_config=qaic_config,
-        )
-    except Exception as exc:  # noqa: BLE001
+        if model_type == "gpt_oss":
+            config = load_causal_lm_config(model_id)
+            config.num_hidden_layers = 2
+            qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+                model_id,
+                config=config,
+                weight_free=True,
+                qaic_config=qaic_config,
+            )
+            lang_model = qeff_model
+        else:
+            model_source = model_id
+            if model_type == "qwen3_5_moe":
+                # The tiny-random Hub checkpoint's fused expert keys do not
+                # match the canonical optimized-MoE parameters emitted by the
+                # weight-free exporter. Build the equivalent tiny checkpoint
+                # through Transformers, as the VLM export tests do.
+                from QEfficient.utils.test_utils import load_vlm_model_from_config
+
+                config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+                config.name_or_path = model_id
+                for nested_config in (
+                    config,
+                    getattr(config, "text_config", None),
+                    getattr(config, "vision_config", None),
+                ):
+                    if nested_config is not None:
+                        nested_config.dtype = "float32"
+                        nested_config.torch_dtype = torch.float32
+                checkpoint_dir = tmp_export_dir / f"wf_{model_type}_prefill_online_checkpoint"
+                load_vlm_model_from_config(config).save_pretrained(checkpoint_dir, safe_serialization=True)
+                model_source = str(checkpoint_dir)
+
+            config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
+                model_source,
+                config=config,
+                kv_offload=True,
+                weight_free=True,
+                dtype=torch.float32,
+                qaic_config=qaic_config,
+            )
+            lang_model = qeff_model.lang_model
+    except Exception as exc:
         skip_on_model_fetch_error(exc, model_id)
 
-    onnx_path = exported_onnx_path(
-        qeff_model.export(
-            tmp_export_dir / f"wf_{model_type}_{blocking_key}_prefill_export",
-            prefill_only=True,
-            enable_chunking=True,
-            prefill_seq_len=8,
+    export_kwargs = {
+        "prefill_only": True,
+        "enable_chunking": True,
+        "prefill_seq_len": 8,
+        "ctx_len": 16,
+        "qaic_config": qaic_config,
+        "use_onnx_subfunctions": False,
+        "offload_pt_weights": False,
+    }
+    if model_type != "gpt_oss":
+        export_kwargs["skip_vision"] = True
+        # The compile path applies compile-dependent transforms before export.
+        # This CPU-only export test must do the same so the language wrapper
+        # receives the prefill_online attention configuration.
+        qeff_model.transform(
+            ctx_len=qaic_config["ctx_len"],
+            seq_len=export_kwargs["prefill_seq_len"],
+            bs=1,
+            num_devices=1,
             qaic_config=qaic_config,
-            use_onnx_subfunctions=False,
-            offload_pt_weights=False,
+            prefill_only=True,
+            prefill_seq_len=export_kwargs["prefill_seq_len"],
+            enable_chunking=True,
         )
+    onnx_path = exported_onnx_path(
+        qeff_model.export(tmp_export_dir / f"wf_{model_type}_prefill_online_export", **export_kwargs)
     )
 
-    blocking_config = qeff_model.hash_params.get("blocking_kwargs")
+    blocking_config = lang_model.hash_params.get("blocking_kwargs")
     assert blocking_config is not None
-    assert blocking_config.mode == BlockingMode(qaic_config["blocking_mode"])
-    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
+    assert blocking_config.mode == BlockingMode.PREFILL_ONLINE
+    assert_blocked_kv_ops_for_mode(onnx_path, lang_model, "prefill_online")
 
 
 @pytest.mark.weight_free
