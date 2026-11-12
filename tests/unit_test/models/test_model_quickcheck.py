@@ -270,6 +270,7 @@ def test_deepseek_v4_example_parallel_layout_controls():
         build_ffn_blocking_config,
         configure_qeff_parallel_layout,
     )
+
     assert build_ffn_blocking_config(
         Namespace(ffn_blocking_mode="default", ffn_token_block_size=None, ffn_weight_block_size=None)
     ) == {

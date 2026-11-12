@@ -17,10 +17,6 @@ Covers the 14 architectures that had zero unit test coverage:
 All tests run on CPU only, using tiny in-memory models.
 """
 
-from typing import ClassVar
-from unittest.mock import patch
-
-import numpy as np
 import pytest
 import torch
 
