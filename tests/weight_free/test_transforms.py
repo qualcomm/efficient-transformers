@@ -494,6 +494,9 @@ class TestWeightFreeCheckpointTransforms:
         from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffGptOssExperts
 
         experts = QEffGptOssExperts(GptOssConfig(num_local_experts=2, hidden_size=4, intermediate_size=6))
+        with torch.no_grad():
+            for parameter in experts.parameters():
+                parameter.copy_(torch.arange(parameter.numel(), dtype=parameter.dtype).reshape_as(parameter))
         source = {name: parameter.detach().clone() for name, parameter in experts.named_parameters()}
         experts._qeff_use_original_checkpoint = True
 
