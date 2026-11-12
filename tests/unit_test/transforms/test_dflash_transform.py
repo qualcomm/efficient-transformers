@@ -265,7 +265,9 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
 
 
 @pytest.mark.parametrize("moe", [False, True])
-def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe):
+@pytest.mark.parametrize("continuous_batching", [False, True])
+@pytest.mark.parametrize("commit", [0, 1])
+def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe, continuous_batching, commit):
     import onnx
 
     from QEfficient import QEFFAutoModelForImageTextToText
@@ -274,7 +276,10 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe):
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeDynamicCache
 
     qeff = QEFFAutoModelForImageTextToText(
-        make_tiny_qwen3_5_vlm(moe=moe), kv_offload=True, qaic_config={"target_layer_ids": [1, 3]}
+        make_tiny_qwen3_5_vlm(moe=moe),
+        kv_offload=True,
+        continuous_batching=continuous_batching,
+        qaic_config={"target_layer_ids": [1, 3]},
     )
     model = qeff.lang_model.model.language_model
     cache_cls = QEffQwen3_5MoeDynamicCache if moe else QEffQwen3_5DynamicCache
@@ -284,28 +289,36 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe):
             super().__init__()
             self.attention = model.layers[1].self_attn
 
-        def forward(self, hidden, past_key, past_value, positions, cache_commit):
+        def forward(self, hidden, past_key, past_value, positions, cache_commit, batch_index=None):
             cache = cache_cls(model.config)
             cache.kv_layers[1].keys, cache.kv_layers[1].values = past_key, past_value
-            cos = hidden.new_ones((1, hidden.shape[1], self.attention.head_dim))
+            cos = hidden.new_ones((hidden.shape[0], 1, hidden.shape[1], self.attention.head_dim))
             output, _ = self.attention(
                 hidden_states=hidden,
                 position_embeddings=(cos, torch.zeros_like(cos)),
                 attention_mask=_create_causal_mask(positions[0], past_key.shape[2]),
                 past_key_values=cache,
                 position_ids=positions,
+                batch_index=batch_index,
                 dflash_chunk_size=16,
                 dflash_commit_final=cache_commit,
             )
             return output, *cache[1]
 
+    batch_size, cache_size = (2, 4) if continuous_batching else (1, 1)
+    positions = torch.arange(32).reshape(1, 1, -1).repeat(1, batch_size, 1)
+    positions[:, 0, 3:16] = -1
     inputs = (
-        torch.randn(1, 32, 32),
-        torch.randn(1, 1, 64, 16),
-        torch.randn(1, 1, 64, 16),
-        torch.arange(32).reshape(1, 1, -1),
-        torch.ones(1, dtype=torch.long),
+        torch.randn(batch_size, 32, 32),
+        torch.randn(cache_size, 1, 64, 16),
+        torch.randn(cache_size, 1, 64, 16),
+        positions,
+        torch.tensor([commit]),
     )
+    input_names = ["hidden", "past_key", "past_value", "positions", "cache_commit"]
+    if continuous_batching:
+        inputs += (torch.tensor([[2], [0]]),)
+        input_names.append("batch_index")
     buffer = io.BytesIO()
     torch.onnx.export(
         AttentionExport().eval(),
@@ -313,15 +326,16 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe):
         buffer,
         opset_version=17,
         dynamo=False,
-        input_names=["hidden", "past_key", "past_value", "positions", "cache_commit"],
+        input_names=input_names,
         output_names=["hidden_out", "past_key_out", "past_value_out"],
     )
     graph = onnx.load_from_string(buffer.getvalue())
     onnx.checker.check_model(graph)
     producers = {output: node for node in graph.graph.node for output in node.output}
     for output in ("past_key_out", "past_value_out"):
-        assert producers[output].op_type == "Where"
-        pending = [producers[output].input[0]]
+        assert producers[output].op_type == "CtxScatterCB"
+        assert producers[output].input[0] in {"past_key", "past_value"}
+        pending = list(producers[output].input[1:3])
         seen = set()
         while pending:
             name = pending.pop()
@@ -329,6 +343,8 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe):
                 pending.extend(producers[name].input)
             seen.add(name)
         assert "cache_commit" in seen
+        if continuous_batching:
+            assert "batch_index" in seen
 
 
 @pytest.mark.parametrize(
