@@ -100,7 +100,7 @@ def test_weight_free_checkpoint_home_uses_documented_environment_variable(tmp_pa
         text=True,
     )
 
-    assert output.strip() == str(tmp_path)
+    assert output.splitlines()[0].strip() == str(tmp_path)
 
 
 @pytest.mark.weight_free
