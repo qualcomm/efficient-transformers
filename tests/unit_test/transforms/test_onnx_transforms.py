@@ -349,6 +349,123 @@ class TestONNXTransformApplication:
                 )
 
 
+class TestReductionCastCleanupTransform:
+    def _make_reduction_model(self, input_dtype, reduction_op="ReduceSum", include_pow=False):
+        import numpy as np
+        import onnx
+        from onnx import helper, numpy_helper
+
+        input_info = helper.make_tensor_value_info("input", input_dtype, [2, 2])
+        output_info = helper.make_tensor_value_info("output", onnx.TensorProto.BFLOAT16, [2])
+        nodes = [helper.make_node("Cast", ["input"], ["input_fp32"], name="to_fp32", to=onnx.TensorProto.FLOAT)]
+        reduction_input = "input_fp32"
+        if include_pow:
+            exponent = numpy_helper.from_array(np.asarray(2.0, dtype=np.float32), name="exponent_value")
+            nodes.extend(
+                [
+                    helper.make_node("Constant", [], ["exponent"], name="pow_exponent", value=exponent),
+                    helper.make_node("Pow", [reduction_input, "exponent"], ["squared"], name="square"),
+                ]
+            )
+            reduction_input = "squared"
+        nodes.extend(
+            [
+                helper.make_node(
+                    reduction_op,
+                    [reduction_input, "axes"],
+                    ["reduced_fp32"],
+                    name="reduction",
+                    keepdims=0,
+                ),
+                helper.make_node("Cast", ["reduced_fp32"], ["output"], name="to_bf16", to=onnx.TensorProto.BFLOAT16),
+            ]
+        )
+        axes = numpy_helper.from_array(np.asarray([1], dtype=np.int64), name="axes")
+        graph = helper.make_graph(nodes, "reduction_casts", [input_info], [output_info], [axes])
+        return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+
+    def test_pipeline_removes_casts_when_model_transform_list_is_empty(self):
+        import onnx
+
+        from QEfficient.base.onnx_transforms import OnnxTransformPipeline
+
+        model = self._make_reduction_model(onnx.TensorProto.BFLOAT16)
+        model, applied = OnnxTransformPipeline(transforms=[]).apply(model)
+
+        assert applied
+        assert [node.op_type for node in model.graph.node] == ["ReduceSum"]
+        assert model.graph.node[0].input[0] == "input"
+        assert model.graph.node[0].output[0] == "output"
+        onnx.checker.check_model(model)
+
+    def test_removes_casts_around_reduce_mean(self):
+        import onnx
+
+        from QEfficient.base.onnx_transforms import ReductionCastCleanupTransform
+
+        model = self._make_reduction_model(onnx.TensorProto.BFLOAT16, reduction_op="ReduceMean")
+        assert ReductionCastCleanupTransform.apply(model)
+
+        nodes = {node.name: node for node in model.graph.node}
+        assert set(nodes) == {"reduction"}
+        assert nodes["reduction"].input[0] == "input"
+        assert nodes["reduction"].output[0] == "output"
+        assert not ReductionCastCleanupTransform.apply(model)
+        onnx.checker.check_model(model)
+
+    def test_leaves_pow_before_reduce_mean_unchanged(self):
+        import onnx
+
+        from QEfficient.base.onnx_transforms import ReductionCastCleanupTransform
+
+        model = self._make_reduction_model(onnx.TensorProto.BFLOAT16, reduction_op="ReduceMean", include_pow=True)
+
+        assert not ReductionCastCleanupTransform.apply(model)
+        assert [node.op_type for node in model.graph.node] == ["Cast", "Constant", "Pow", "ReduceMean", "Cast"]
+
+    def test_leaves_custom_rms_norm_function_unchanged(self):
+        import onnx
+        from onnx import helper
+
+        from QEfficient.base.onnx_transforms import ReductionCastCleanupTransform
+
+        graph_input = helper.make_tensor_value_info("graph_input", onnx.TensorProto.BFLOAT16, [2, 2])
+        graph_output = helper.make_tensor_value_info("graph_output", onnx.TensorProto.BFLOAT16, [2, 2])
+        graph = helper.make_graph(
+            [helper.make_node("Identity", ["graph_input"], ["graph_output"])],
+            "main",
+            [graph_input],
+            [graph_output],
+        )
+        function = helper.make_function(
+            "com.qti.aisw.onnx",
+            "CustomRMSNorm",
+            ["input", "axes"],
+            ["output"],
+            [
+                helper.make_node("Cast", ["input"], ["input_fp32"], to=onnx.TensorProto.FLOAT),
+                helper.make_node("ReduceMean", ["input_fp32", "axes"], ["mean_fp32"], keepdims=0),
+                helper.make_node("Cast", ["mean_fp32"], ["output"], to=onnx.TensorProto.BFLOAT16),
+            ],
+            [helper.make_opsetid("", 18)],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+        model.functions.append(function)
+
+        assert not ReductionCastCleanupTransform.apply(model)
+        assert [node.op_type for node in model.functions[0].node] == ["Cast", "ReduceMean", "Cast"]
+
+    def test_leaves_fp32_reductions_unchanged(self):
+        import onnx
+
+        from QEfficient.base.onnx_transforms import ReductionCastCleanupTransform
+
+        model = self._make_reduction_model(onnx.TensorProto.FLOAT)
+
+        assert not ReductionCastCleanupTransform.apply(model)
+        assert [node.op_type for node in model.graph.node] == ["Cast", "ReduceSum", "Cast"]
+
+
 # ---------------------------------------------------------------------------
 # Tests: FP16ClipTransform functional correctness
 # ---------------------------------------------------------------------------

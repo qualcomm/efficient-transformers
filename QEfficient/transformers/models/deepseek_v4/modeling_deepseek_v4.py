@@ -8,6 +8,7 @@
 import json
 import re
 import struct
+from copy import copy
 from pathlib import Path
 from typing import Any
 
@@ -1135,6 +1136,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "indexer_kv_cache",
         ):
             getattr(self, name).zero_()
+        if self.prefill_only:
+            self.compressor_score_state.fill_(float("-inf"))
+            self.indexer_score_state.fill_(float("-inf"))
         self.cumulative_length = 0
         self.compressor_entry_count = 0
         self.indexer_entry_count = 0
@@ -1370,15 +1374,16 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         kv_all = kv_proj(hidden_states).float()
         slots = torch.remainder(position_ids, ratio).to(torch.long)
         score_all = gate_proj(hidden_states).float() + F.embedding(slots, position_bias)
-        write_positions = ratio + slots
-        kv_state = self._csa_prefill_scatter(kv_state, write_positions, kv_all.to(kv_state.dtype))
-        score_state = self._csa_prefill_scatter(score_state, write_positions, score_all.to(score_state.dtype))
-
         lead_full = (ratio - pos0 % ratio) % ratio
         lead = lead_full if 0 < lead_full <= hidden_states.shape[1] else 0
         full_blocks = (hidden_states.shape[1] - lead) // ratio
 
         if lead > 0:
+            write_positions = ratio + slots[:, :lead]
+            kv_state = self._csa_prefill_scatter(kv_state, write_positions, kv_all[:, :lead].to(kv_state.dtype))
+            score_state = self._csa_prefill_scatter(
+                score_state, write_positions, score_all[:, :lead].to(score_state.dtype)
+            )
             prior_kv = kv_state[:, :ratio, :head_dim]
             prior_score = score_state[:, :ratio, :head_dim]
             if pos0 < ratio:
@@ -1419,7 +1424,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             if full_blocks > 1:
                 pooled_kv[:, 1:, :ratio] = block_kv[:, :-1, :, :head_dim]
                 pooled_score[:, 1:, :ratio] = block_score[:, :-1, :, :head_dim]
-            if pos0 >= ratio:
+            if pos0 + lead >= ratio:
                 pooled_kv[:, 0, :ratio] = kv_state[:, :ratio, :head_dim]
                 pooled_score[:, 0, :ratio] = score_state[:, :ratio, :head_dim]
             compressed = norm(
@@ -1438,6 +1443,19 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             kv_state = self._csa_prefill_scatter(kv_state, last_slots + ratio, last_kv)
             score_state = self._csa_prefill_scatter(score_state, last_slots, last_score)
             score_state = self._csa_prefill_scatter(score_state, last_slots + ratio, last_score)
+
+        tail_start = lead + full_blocks * ratio
+        if tail_start < hidden_states.shape[1]:
+            if (pos0 + tail_start) % ratio == 0:
+                kv_state = torch.cat((kv_state[:, :ratio], torch.zeros_like(kv_state[:, ratio:])), dim=1)
+                score_state = torch.cat(
+                    (score_state[:, :ratio], torch.full_like(score_state[:, ratio:], float("-inf"))), dim=1
+                )
+            tail_positions = ratio + slots[:, tail_start:]
+            kv_state = self._csa_prefill_scatter(kv_state, tail_positions, kv_all[:, tail_start:].to(kv_state.dtype))
+            score_state = self._csa_prefill_scatter(
+                score_state, tail_positions, score_all[:, tail_start:].to(score_state.dtype)
+            )
         return kv_cache, kv_state, score_state
 
     def _swa_prefill_forward(
@@ -1526,8 +1544,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         ratio = self.compressor.compress_rate
         q_block_size = int(getattr(self.config, "qeff_csa_prefill_q_block_size", self.sliding_window))
         gather_sub_block_size = int(getattr(self.config, "qeff_csa_prefill_attn_gather_sub_qc", 4))
-        if q_block_size < 1 or gather_sub_block_size < 1:
-            raise ValueError("CSA prefill block sizes must be positive.")
+        if q_block_size < ratio:
+            raise ValueError(f"CSA prefill query block size must be at least the compression rate ({ratio}).")
+        if gather_sub_block_size < 1:
+            raise ValueError("CSA prefill gather sub-block size must be positive.")
 
         cos, sin = position_embeddings["compress"]
         q_residual = self.q_a_norm(self.q_a_proj(hidden_states)).to(hidden_states.dtype)
@@ -1586,7 +1606,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 norm=self.compressor.kv_norm,
                 rotary_emb=self.compressor.rotary_emb,
                 head_dim=self.head_dim,
-                pos0=start,
+                pos0=cache_layer.cumulative_length + start,
             )
             indexer_kv_cache, indexer_kv_state, indexer_score_state = self._csa_prefill_update(
                 hidden_chunk,
@@ -1600,7 +1620,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 norm=indexer.kv_norm,
                 rotary_emb=indexer.rotary_emb,
                 head_dim=indexer.head_dim,
-                pos0=start,
+                pos0=cache_layer.cumulative_length + start,
             )
 
             q_index = indexer.q_b_proj(residual_chunk).view(
@@ -2587,9 +2607,9 @@ class QEffDeepseekV4Cache(Cache):
         super().__init__(layers=layers)
 
     @staticmethod
-    def _position(position_ids: torch.Tensor) -> int:
+    def _position(position_ids: torch.Tensor, export_position: int = 0) -> int:
         if _is_export_capture():
-            return 0
+            return export_position
         return int(position_ids[:, 0].min().item())
 
     @classmethod
@@ -2601,7 +2621,10 @@ class QEffDeepseekV4Cache(Cache):
     ) -> "QEffDeepseekV4Cache":
         if len(past_key_values) != config.num_hidden_layers:
             raise ValueError("DeepSeek V4 cache must contain one state tuple per decoder layer.")
-        cumulative_length = cls._position(position_ids)
+        export_position = 0
+        if bool(getattr(config, "qeff_csa_prefill_only", False)):
+            export_position = int(getattr(config, "qeff_csa_prefill_position_offset", 0))
+        cumulative_length = cls._position(position_ids, export_position)
         layers = []
         for layer_type, states in zip(config.layer_types, past_key_values):
             if layer_type == "sliding_attention":
@@ -2759,10 +2782,10 @@ class QEffDeepseekV4Cache(Cache):
                         torch.zeros(batch_size, config.sliding_window, config.head_dim, **common),
                         torch.zeros(batch_size, capacity, config.head_dim, **common),
                         torch.zeros(batch_size, 2 * ratio, 2 * config.head_dim, **common),
-                        torch.zeros(batch_size, 2 * ratio, 2 * config.head_dim, **common),
+                        torch.full((batch_size, 2 * ratio, 2 * config.head_dim), float("-inf"), **common),
                         torch.zeros(batch_size, capacity, config.index_head_dim, **common),
                         torch.zeros(batch_size, 2 * ratio, 2 * config.index_head_dim, **common),
-                        torch.zeros(batch_size, 2 * ratio, 2 * config.index_head_dim, **common),
+                        torch.full((batch_size, 2 * ratio, 2 * config.index_head_dim), float("-inf"), **common),
                     )
                 )
                 continue
@@ -3284,6 +3307,21 @@ class QEffDeepseekV4Model(DeepseekV4Model):
                 f"{layer_type}_sin_cached", getattr(rotary_emb, f"{layer_type}_sin_cached"), persistent=False
             )
         self.rotary_emb = nn.Identity()
+
+    def ensure_rope_cache_length(self, required_length: int) -> None:
+        cached_length = self.main_cos_cached.shape[0] - 1
+        if required_length <= cached_length:
+            return
+        rotary_config = copy(self.config)
+        rotary_config.max_seq_len_cached = required_length
+        rotary_emb = QEffDeepseekV4RotaryEmbedding(
+            rotary_config,
+            device=self.main_cos_cached.device,
+            dtype=self.embed_tokens.weight.dtype,
+        )
+        for layer_type in rotary_emb.layer_types:
+            self._buffers[f"{layer_type}_cos_cached"] = getattr(rotary_emb, f"{layer_type}_cos_cached")
+            self._buffers[f"{layer_type}_sin_cached"] = getattr(rotary_emb, f"{layer_type}_sin_cached")
 
     def forward(
         self,

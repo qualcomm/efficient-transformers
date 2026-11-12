@@ -688,6 +688,89 @@ def test_deepseek_v4_csa_prefill_matches_token_decode():
     torch.testing.assert_close(prefill_output.logits, decode_output.logits, atol=2e-4, rtol=2e-4)
 
 
+def test_deepseek_v4_csa_prefill_carries_partial_compression_state_across_calls():
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["compressed_sparse_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.compress_rates["compressed_sparse_attention"] = 4
+    config.qeff_csa_prefill_only = True
+    config.qeff_csa_prefill_q_block_size = 8
+    config.qeff_csa_prefill_attn_gather_sub_qc = 4
+    config.qeff_csa_prefill_indexer_kv_block_size = 2
+    config.qeff_csa_prefill_indexer_topk_per_block = 1
+    config.sliding_window = 8
+
+    model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    input_ids = torch.randint(0, config.vocab_size, (1, 8))
+    position_ids = torch.arange(input_ids.shape[1]).unsqueeze(0)
+    initial_cache = model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=32)
+    assert torch.isneginf(initial_cache[0][3]).all()
+    assert torch.isneginf(initial_cache[0][6]).all()
+
+    with torch.no_grad():
+        full_output = model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            past_key_values=model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=32),
+            use_cache=True,
+        )
+        first_output = model(
+            input_ids=input_ids[:, :5],
+            position_ids=position_ids[:, :5],
+            past_key_values=model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=32),
+            use_cache=True,
+        )
+        split_output = model(
+            input_ids=input_ids[:, 5:],
+            position_ids=position_ids[:, 5:],
+            past_key_values=first_output.past_key_values,
+            use_cache=True,
+        )
+
+    torch.testing.assert_close(split_output.logits, full_output.logits, atol=2e-4, rtol=2e-4)
+
+
+def test_deepseek_v4_csa_prefill_cache_reset_restores_invalid_score_sentinels():
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["compressed_sparse_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.qeff_csa_prefill_only = True
+    states = QEffDeepseekV4Cache.get_dummy_cache(config, batch_size=1, ctx_len=8, dtype=torch.float32)
+    cache = QEffDeepseekV4Cache.from_legacy_cache(config, states, torch.tensor([[0]]))
+    cache.layers[0].compressor_score_state.zero_()
+    cache.layers[0].indexer_score_state.zero_()
+
+    cache.reset()
+
+    assert torch.isneginf(cache.layers[0].compressor_score_state).all()
+    assert torch.isneginf(cache.layers[0].indexer_score_state).all()
+
+
+def test_deepseek_v4_csa_prefill_rejects_query_block_smaller_than_compression_rate():
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["compressed_sparse_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.compress_rates["compressed_sparse_attention"] = 4
+    config.qeff_csa_prefill_only = True
+    config.qeff_csa_prefill_q_block_size = 3
+    config.qeff_csa_prefill_attn_gather_sub_qc = 4
+    config.qeff_csa_prefill_indexer_kv_block_size = 2
+    config.qeff_csa_prefill_indexer_topk_per_block = 1
+    config.sliding_window = 8
+
+    model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.eval()
+    with pytest.raises(ValueError, match=r"at least the compression rate \(4\)"):
+        model(
+            input_ids=torch.randint(0, config.vocab_size, (1, 4)),
+            position_ids=torch.arange(4).unsqueeze(0),
+            past_key_values=model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=8),
+            use_cache=True,
+        )
+
+
 def test_deepseek_v4_swa_full_context_prefill_matches_decode():
     config = _tiny_deepseek_v4_config()
     config.num_hidden_layers = 1
@@ -1050,13 +1133,13 @@ def test_deepseek_v4_csa_prefill_indexer_global_selection_is_exact():
         compression_rate=2,
     )
 
-    torch.testing.assert_close(selected, torch.tensor([[[3, 1], [3, 1]]]))
+    torch.testing.assert_close(torch.sort(selected, dim=-1).values, torch.tensor([[[1, 3], [1, 3]]]))
     assert valid.all()
 
 
 def test_deepseek_v4_csa_prefill_indexer_admits_completed_entry_at_boundary():
     config = _tiny_deepseek_v4_config()
-    attention = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.layers[0].self_attn
+    attention = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval()).model.model.layers[0].self_attn
     q_index = torch.ones((1, 1, 1, 1))
     index_weights = torch.ones((1, 1, 1))
     position_ids = torch.tensor([[3]])
@@ -1387,6 +1470,84 @@ def test_deepseek_v4_csa_dp_cp_export_uses_requested_capture_layout(monkeypatch)
     assert csa_indexer_cache.shape == (2, 2, 4, config.index_head_dim)
     assert captured["dynamic_axes"]["past_sliding_window_kv.2"] == {}
     assert captured["dynamic_axes"]["past_actual_indexer_compressed_kv.2"] == {}
+
+
+def test_deepseek_v4_csa_prefill_export_specializes_nonzero_position_offset(monkeypatch, tmp_path):
+    from QEfficient.transformers.models.deepseek_v4 import modeling_deepseek_v4
+
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["compressed_sparse_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.max_position_embeddings = 64
+    config.max_seq_len_cached = 32
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    captured = {}
+    real_export = qeff_model._export
+
+    def fake_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["example_inputs"] = example_inputs
+        captured["dynamic_axes"] = dynamic_axes
+        return "unused.onnx"
+
+    monkeypatch.setattr(qeff_model, "_export", fake_export)
+    qeff_model.export(
+        prefill_only=True,
+        prefill_seq_len=8,
+        export_batch_size=1,
+        cache_ctx_len=13,
+        csa_prefill_position_offset=5,
+        dynamo=False,
+    )
+
+    torch.testing.assert_close(captured["example_inputs"]["position_ids"], torch.arange(5, 13).view(1, 8))
+    assert captured["example_inputs"]["past_key_values"][0][1].shape[1] == 7
+    qeff_model.model.model.ensure_rope_cache_length(70)
+    assert qeff_model.model.model.main_cos_cached.shape[0] == 71
+
+    monkeypatch.setattr(qeff_model, "_export", real_export)
+    onnx_path = qeff_model.export(
+        export_dir=str(tmp_path / "csa-offset"),
+        prefill_only=True,
+        prefill_seq_len=8,
+        export_batch_size=1,
+        cache_ctx_len=13,
+        csa_prefill_position_offset=5,
+        dynamo=True,
+        offload_pt_weights=False,
+    )
+    exported_graph = onnx.load(onnx_path, load_external_data=False).graph
+    assert any(value.name == "position_ids" for value in exported_graph.input)
+
+    monkeypatch.setattr(modeling_deepseek_v4, "_is_export_capture", lambda: True)
+    captured_cache = QEffDeepseekV4Cache.from_legacy_cache(
+        config,
+        qeff_model.model.get_dummy_pkv_cache(config, batch_size=1, ctx_len=13),
+        torch.arange(5, 13).view(1, 8),
+    )
+    assert captured_cache.layers[0].cumulative_length == 5
+    assert config.qeff_csa_prefill_position_offset == 5
+
+    def fake_get_onnx_path(**kwargs):
+        assert qeff_model.model.config.qeff_csa_prefill_position_offset == 5
+        return None
+
+    def fake_compile(**kwargs):
+        captured["compile_kwargs"] = kwargs
+        return "unused.qpc"
+
+    monkeypatch.setattr(qeff_model, "get_onnx_path", fake_get_onnx_path)
+    monkeypatch.setattr(qeff_model, "_compile", fake_compile)
+    assert (
+        qeff_model.compile(
+            prefill_seq_len=8,
+            ctx_len=13,
+            batch_size=1,
+            prefill_only=True,
+            csa_prefill_position_offset=5,
+        )
+        == "unused.qpc"
+    )
 
 
 def test_deepseek_v4_hca_dp_export_uses_requested_capture_layout(monkeypatch):
