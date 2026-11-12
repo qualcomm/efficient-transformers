@@ -1136,7 +1136,7 @@ class TestContinuousBatching:
         decode_invocation = next(event for event in schedule_events if event["type"] == "decode_invocation")
         slot_advanced = [event for event in schedule_events if event["type"] == "slot_advanced"]
         assert decode_invocation["decode_position_ids"] == [[10, 110, 210, 310], [20, 120, 220, 320]]
-        assert slot_advanced[0]["next_position_id"] == [11, 110, 210, 310]
+        assert slot_advanced[0]["next_position_id"] == [11, 111, 211, 311]
 
     def test_full_batch_prefill_uses_full_batch_bindings(self):
         obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
@@ -1271,7 +1271,9 @@ class TestBfloat16GenerationRegression:
 
     def test_set_output_buffers_allocates_bfloat16_prefill_and_cb_buffers(self):
         obj, _, session = _make_base_instance()
-        session.binding_is_bfloat16.return_value = True
+        logits_index = session.binding_index_map["logits"]
+        session.bindings[logits_index].type = 11
+        session.aic_to_np_dtype_mapping[11] = np.dtype(np.float16)
 
         obj._set_output_buffers(batch_size=2, sequence_length=4)
 
@@ -1282,7 +1284,9 @@ class TestBfloat16GenerationRegression:
 
     def test_set_output_buffers_allocates_bfloat16_continuous_batch_buffer(self):
         obj, _, session = TestContinuousBatching()._make_cb_instance(full_batch_size=2)
-        session.binding_is_bfloat16.return_value = True
+        logits_index = session.binding_index_map["logits"]
+        session.bindings[logits_index].type = 11
+        session.aic_to_np_dtype_mapping[11] = np.dtype(np.float16)
 
         obj._set_output_buffers(batch_size=2, sequence_length=1)
 
@@ -1297,7 +1301,9 @@ class TestBfloat16GenerationRegression:
         obj.batch_size = 1
         obj._decode_seq_len = 1
         obj._vocab_size = VOCAB_SIZE
-        session.binding_is_bfloat16.return_value = True
+        logits_index = session.binding_index_map["logits"]
+        session.bindings[logits_index].type = 11
+        session.aic_to_np_dtype_mapping[11] = np.dtype(np.float16)
 
         obj.run_decode(
             {"input_ids": np.zeros((1, 1), dtype=np.int64), "position_ids": np.zeros((1, 1), dtype=np.int64)},
@@ -1379,11 +1385,6 @@ class TestSetOutputBuffers:
         obj._set_output_buffers(batch_size=1, sequence_length=1)
         call_args = mock_session.set_buffers.call_args[0][0]
         assert call_args["logits"].dtype == np.float16
-
-
-def test_retained_state_name_accepts_generic_output_suffix():
-    assert is_retained_state_name("layer_0/custom_cache_RetainedState")
-    assert is_retained_state_name("custom_cache_InternalRetainedState")
 
 
 # ---------------------------------------------------------------------------

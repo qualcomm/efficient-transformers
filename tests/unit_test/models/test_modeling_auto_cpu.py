@@ -26,6 +26,7 @@ Run with: pytest tests/unit_test/models/test_modeling_auto_cpu.py -n auto -v
 
 import logging
 import os
+import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -65,7 +66,9 @@ VOCAB_SIZE = 500
 CTX_LEN = 32
 SEQ_LEN = 8
 UNSUPPORTED_WEIGHT_FREE_WARNING = "weight_free=True is only supported for QEFFAutoModelForCausalLM"
-UNSUPPORTED_WEIGHT_FREE_DISAGG_COMPILE = "weight_free=True is not supported with disaggregated prefill compile"
+UNSUPPORTED_WEIGHT_FREE_DISAGG_COMPILE = (
+    "weight_free=True is not supported with disaggregated compile (prefill_only=True or prefill_seq_len=1)."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +579,7 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
         model, _ = make_tiny_gpt2()
         qeff = QEFFAutoModelForCausalLM(model, weight_free=True)
 
-        with pytest.raises(NotImplementedError, match=UNSUPPORTED_WEIGHT_FREE_DISAGG_COMPILE):
+        with pytest.raises(NotImplementedError, match=re.escape(UNSUPPORTED_WEIGHT_FREE_DISAGG_COMPILE)):
             qeff.compile(ctx_len=128, **compile_kwargs)
 
     @pytest.mark.parametrize(

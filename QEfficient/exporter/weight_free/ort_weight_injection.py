@@ -36,6 +36,9 @@ def _default_weights_roots(weight_spec_path: Path, spec) -> List[Path]:
 
     candidate = Path(spec.model_id).expanduser()
     if candidate.exists():
+        cache_repo_dir = next((parent for parent in candidate.parents if parent.name.startswith("models--")), None)
+        if cache_repo_dir is not None:
+            roots.append(cache_repo_dir.parent)
         roots.append(candidate.parent)
     else:
         checkpoint_dir = resolve_checkpoint_dir(spec.model_id)

@@ -815,6 +815,9 @@ class CheckpointTransformPipeline:
             )
 
         config = kwargs.pop("config", None)
+        num_hidden_layers = kwargs.pop("num_hidden_layers", None)
+        if num_hidden_layers is None:
+            num_hidden_layers = getattr(config, "num_hidden_layers", None)
         hash_params = kwargs.pop("hash_params", None) or {}
         max_ram_bytes = kwargs.pop("max_ram_bytes", None)
         max_workers = kwargs.pop("max_workers", None)
@@ -843,6 +846,8 @@ class CheckpointTransformPipeline:
             active_group_id,
             plan_payload,
         )
+        if num_hidden_layers is not None:
+            expected_manifest["num_hidden_layers"] = int(num_hidden_layers)
         if (out / CHECKPOINT_PREPARED_SENTINEL).exists() and _manifest_matches(out, expected_manifest):
             if _prepared_checkpoint_is_readable(out):
                 return out
