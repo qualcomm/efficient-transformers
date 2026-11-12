@@ -206,12 +206,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
                     max=DYNAMO_DIM_MAX_BATCH_SIZE,
                 )
             elif "seq_len" in dim_name:
-                seq_min = (
-                    1
-                    if model_type
-                    in {"glm_moe_dsa", "minimax_m3_vl", "minimax_m3_vl_text"}
-                    else 2
-                )
+                seq_min = 1 if model_type in {"glm_moe_dsa", "minimax_m3_vl", "minimax_m3_vl_text"} else 2
                 dim_registry[dim_name] = Dim("seq_len", min=seq_min, max=max_seq_len)
             elif "comp_ctx_lengths" in dim_name:
                 dim_registry[dim_name] = Dim(

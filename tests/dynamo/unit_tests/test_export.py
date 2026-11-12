@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 import onnx
 import pytest
 import torch
