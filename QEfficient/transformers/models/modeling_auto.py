@@ -1416,8 +1416,8 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         self.model = model.get_qeff_language_decoder()
         self.qaic_config = qaic_config
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
-        if getattr(model.config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}:
-            self.hash_params["qwen3_5_conv_state_layout"] = constants.QWEN3_5_CONV_STATE_LAYOUT_VERSION
+        if getattr(model.config, "model_type", None) == "qwen3_5_moe":
+            self.hash_params["qwen3_5_moe_conv_state_layout"] = constants.QWEN3_5_MOE_CONV_STATE_LAYOUT_VERSION
         self.continuous_batching = False
         if qaic_config and (mla_absorption := qaic_config.get("mla_absorption", None)):
             self.hash_params["mla_absorption"] = mla_absorption
