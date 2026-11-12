@@ -22,7 +22,18 @@ from QEfficient.blocking.blocked_attention_forwards import blocked_qkv_attention
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from tests.dynamo.unit_tests import test_blocking_forward_dispatch as dynamo_dispatch
 
-_ENABLED_BLOCKING_MODES = {"h", "q", "kv", "qkv", "hq", "hkv", "hqkv", "bhqkv", "kv_headpar"}
+_ENABLED_BLOCKING_MODES = {
+    "h",
+    "q",
+    "kv",
+    "qkv",
+    "hq",
+    "hkv",
+    "hqkv",
+    "bhqkv",
+    "kv_headpar",
+    "prefill_online",
+}
 _ENABLED_DISPATCH_CASES = [
     case
     for case in dynamo_dispatch.DISPATCH_CASES
