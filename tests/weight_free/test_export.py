@@ -29,7 +29,11 @@ from transformers import AutoTokenizer
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs, resolve_weight_spec_path
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
+from QEfficient.transformers.models.modeling_auto import (
+    QEFFAutoModel,
+    QEFFAutoModelForCausalLM,
+    QEFFAutoModelForImageTextToText,
+)
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
 
@@ -41,12 +45,16 @@ from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
     WEIGHT_FREE_CAUSAL_LM_MODEL_IDS,
     WEIGHT_FREE_EMBEDDING_MODEL_PARAMS,
+    WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_PREFILL_ONLINE_EXPORT_MODEL_PARAMS,
+    WEIGHT_FREE_PREFILL_ONLINE_MOE_CHUNK_SIZE,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
     assert_no_int64_kv_cache_inputs,
     assert_retained_state_outputs,
     assert_subfunction_names_match_decoder_class,
     assert_unique_graph_input_names,
+    build_weight_free_vlm_test_checkpoint,
     exported_onnx_path,
     load_causal_lm_config,
     load_hf_embedding_model,
@@ -197,6 +205,88 @@ def test_weight_free_export_applies_causal_lm_blocking_from_qaic_config(model_ty
 @pytest.mark.weight_free
 @pytest.mark.weight_free_export
 @pytest.mark.weight_free_blocking
+@pytest.mark.parametrize(
+    "wrapper_kind,model_type,model_id",
+    WEIGHT_FREE_PREFILL_ONLINE_EXPORT_MODEL_PARAMS,
+)
+def test_weight_free_prefill_online_export(wrapper_kind, model_type, model_id, tmp_export_dir):
+    """CPU graph check for weight-free prefill_online export."""
+    qaic_config = dict(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES["prefill_online"])
+    if model_type in {"gpt_oss", "qwen3_vl_moe", "qwen3_5_moe"}:
+        qaic_config["moe_config"] = {"expert_parallel_chunk_size": WEIGHT_FREE_PREFILL_ONLINE_MOE_CHUNK_SIZE}
+
+    export_kwargs = {}
+    if wrapper_kind == "causal_lm":
+        prefill_seq_len = PROMPT_LEN
+        ctx_len = CTX_LEN
+        qaic_config["ctx_len"] = ctx_len
+        try:
+            config = load_causal_lm_config(model_id)
+            config.num_hidden_layers = 2
+            qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+                model_id,
+                config=config,
+                weight_free=True,
+                qaic_config=qaic_config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            skip_on_model_fetch_error(exc, model_id)
+        blocking_owner = qeff_model
+    else:
+        checkpoint_dir = tmp_export_dir / f"{model_type}_prefill_online_checkpoint"
+        try:
+            _model, model_config = build_weight_free_vlm_test_checkpoint(model_type, checkpoint_dir)
+            qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
+                str(checkpoint_dir),
+                kv_offload=True,
+                weight_free=True,
+                dtype=torch.float32,
+            )
+        except Exception as exc:  # noqa: BLE001
+            skip_on_model_fetch_error(exc, model_id)
+        prefill_seq_len = model_config["prompt_len"]
+        ctx_len = max(CTX_LEN, prefill_seq_len)
+        qaic_config["ctx_len"] = ctx_len
+        export_kwargs["skip_vision"] = True
+        blocking_owner = qeff_model.lang_model
+        # Direct VLM export does not run the compile path, so apply the same
+        # compile-dependent blocking transform that compile(..., skip_vision=True)
+        # applies before exporting the language graph.
+        qeff_model.transform(
+            ctx_len=ctx_len,
+            seq_len=prefill_seq_len,
+            bs=1,
+            num_devices=1,
+            qaic_config=qaic_config,
+            prefill_only=True,
+            prefill_seq_len=prefill_seq_len,
+            enable_chunking=True,
+        )
+
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            tmp_export_dir / f"{model_type}_prefill_online_export",
+            prefill_only=True,
+            enable_chunking=True,
+            prefill_seq_len=prefill_seq_len,
+            ctx_len=ctx_len,
+            qaic_config=qaic_config,
+            use_onnx_subfunctions=True,
+            offload_pt_weights=False,
+            **export_kwargs,
+        )
+    )
+
+    blocking_config = blocking_owner.hash_params.get("blocking_kwargs")
+    assert blocking_config is not None
+    assert blocking_config.mode == BlockingMode.PREFILL_ONLINE
+    assert_has_subfunctions(onnx_path, blocking_owner)
+    assert_blocked_kv_ops_for_mode(onnx_path, blocking_owner, "prefill_online")
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_export
+@pytest.mark.weight_free_blocking
 @pytest.mark.parametrize("blocking_key", list(_BLOCKING_GATHER_EXPORT_MODE_CASES))
 @pytest.mark.parametrize(
     "model_type,model_id",
@@ -265,7 +355,7 @@ def test_weight_free_dynamo_export_with_kv_cache_prefix(model_type, model_id, tm
         config = load_causal_lm_config(model_id)
         config.num_hidden_layers = 2
         qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     onnx_path = exported_onnx_path(
