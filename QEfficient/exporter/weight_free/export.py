@@ -77,12 +77,13 @@ def _resolve_weight_free_target_dtype(qeff_model) -> torch.dtype:
     target_dtype = None
     dtype_config = None
     for config in configs:
-        for attr in ("dtype", "torch_dtype"):
+        for attr in ("torch_dtype", "dtype"):
             dtype = getattr(config, attr, None)
-            if isinstance(dtype, torch.dtype):
-                target_dtype = dtype
-                dtype_config = config
-                break
+            if dtype is None:
+                continue
+            target_dtype = resolve_torch_dtype(dtype)
+            dtype_config = config
+            break
         if target_dtype is not None:
             break
     if dtype_config is None and configs:

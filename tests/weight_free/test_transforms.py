@@ -471,7 +471,7 @@ class TestWeightFreeCheckpointTransforms:
             prepared["model.layers.0.self_attn.q_proj.weight"], torch.ones(4, 4, dtype=torch.float16)
         )
 
-    def test_qwen3_original_layout_exposes_source_parameter_names(self):
+    def test_qwen3_transform_weights_exposes_canonical_parameter_names(self):
         from transformers import Qwen3MoeConfig
 
         from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import QEffQwen3MoeExperts
@@ -479,16 +479,11 @@ class TestWeightFreeCheckpointTransforms:
         experts = QEffQwen3MoeExperts(
             Qwen3MoeConfig(num_experts=2, hidden_size=4, moe_intermediate_size=6, intermediate_size=6)
         )
-        experts._qeff_use_original_checkpoint = True
 
         weights = experts.transform_weights()
         parameter_names = {name for name, _ in experts.named_parameters()}
 
-        assert parameter_names == {
-            f"{expert}.{projection}.weight"
-            for expert in ("0", "1")
-            for projection in ("gate_proj", "up_proj", "down_proj")
-        }
+        assert parameter_names == {"moe_weights.gate", "moe_weights.up", "moe_weights.down"}
         assert tuple(weights.gate.shape) == (2, 4, 6)
         assert tuple(weights.up.shape) == (2, 4, 6)
         assert tuple(weights.down.shape) == (2, 6, 4)
