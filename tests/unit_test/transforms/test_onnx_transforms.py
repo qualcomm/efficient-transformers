@@ -296,49 +296,6 @@ class TestONNXTransformsModuleStructure:
 
         assert select_interface(lambda: "eager", lambda: "custom")() == "custom"
 
-    def test_qsa_custom_ops_are_registered_for_onnx_functions(self):
-        from QEfficient.base.onnx_transforms import CustomOpTransform
-        from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
-
-        assert "CtxPagedScatterFunc" in CustomOpTransform._custom_ops
-        assert "CtxGatherRowsFunc" in CustomOpTransform._custom_ops
-        assert torch.ops.qefficient.ctx_paged_scatter.default in DYNAMO_CUSTOM_OP_TABLE
-        assert torch.ops.qefficient.ctx_gather_rows.default in DYNAMO_CUSTOM_OP_TABLE
-
-    def test_qsa_custom_ops_export_as_first_class_dynamo_nodes(self):
-        import onnx
-
-        from QEfficient.customop import ctx_gather_rows, ctx_paged_scatter
-        from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
-
-        class QSAOps(torch.nn.Module):
-            def forward(self, data, block_id, addr, updates, indices):
-                data = ctx_paged_scatter(data, block_id, addr, updates)
-                return ctx_gather_rows(data, indices)
-
-        args = (
-            torch.zeros(2, 4, 8, 16),
-            torch.zeros(2, 4, 1, dtype=torch.int32),
-            torch.zeros(2, 4, 1, dtype=torch.int32),
-            torch.zeros(2, 4, 1, 16),
-            torch.zeros(2, 4, 3, dtype=torch.int32),
-        )
-        onnx_program = torch.onnx.export(
-            QSAOps().eval(),
-            args,
-            f=None,
-            dynamo=True,
-            opset_version=18,
-            custom_translation_table=DYNAMO_CUSTOM_OP_TABLE,
-        )
-        nodes = {
-            (node.domain, node.op_type)
-            for node in onnx.load_from_string(onnx_program.model_proto.SerializeToString()).graph.node
-        }
-        assert ("com.qualcomm.cloud", "CtxPagedScatter") in nodes
-        assert ("com.qualcomm.cloud", "CtxGatherRows") in nodes
-        assert not any(op_type in {"GatherElements", "ScatterElements"} for _, op_type in nodes)
-
     def test_dp_cp_gather_uses_batch_dims_without_expanded_indices(self):
         from QEfficient.customop.ctx_scatter_gather import CtxGatherDPCP
         from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func

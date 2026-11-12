@@ -284,62 +284,6 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
 
 
-def test_qwen4_exp_weight_free_four_layer_export_and_ort_execution(tmp_path):
-    """Export and execute a locally generated four-layer Qwen4-Exp checkpoint."""
-    from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
-    from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
-    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
-
-    source_dir = tmp_path / "qwen4_exp_checkpoint"
-    source_model, _ = make_tiny_qwen4_exp()
-    source_model.save_pretrained(source_dir, safe_serialization=True)
-
-    qeff_weight_free = QEFFAutoModelForCausalLM.from_pretrained(
-        str(source_dir), weight_free=True, torch_dtype=torch.float32
-    )
-    onnx_path = exported_onnx_path(
-        qeff_weight_free.export(
-            str(tmp_path / "export"),
-            use_onnx_subfunctions=False,
-            offload_pt_weights=False,
-        )
-    )
-    weight_spec_path = resolve_weight_spec_path(onnx_path)
-    assert weight_spec_path.is_file()
-    assert json.loads(weight_spec_path.read_text())["inputs"]
-
-    graph = onnx.load(str(onnx_path), load_external_data=False)
-    assert_retained_state_outputs(onnx_path, expected_count=11)
-    computed_suffixes = {"sin_cached", "cos_cached", "inv_freq", "original_inv_freq", "_qeff_conv_positions"}
-    assert all(initializer.name.rsplit(".", 1)[-1] in computed_suffixes for initializer in graph.graph.initializer)
-
-    source_model = source_model.__class__.from_pretrained(str(source_dir)).eval()
-    source_model, _ = KVCacheTransform.apply(source_model)
-    qeff_inputs = source_model.get_dummy_inputs(batch_size=2)
-    with torch.no_grad():
-        pytorch_output = source_model(**qeff_inputs)
-
-    retained = [state for layer in qeff_inputs["past_key_values"] for state in layer]
-    runtime_inputs = {
-        name: value.detach().cpu().numpy()
-        for name, value in zip(
-            source_model.get_onnx_dynamic_axes(),
-            [qeff_inputs["input_ids"], qeff_inputs["ngram_embeddings"], qeff_inputs["position_ids"], *retained],
-            strict=True,
-        )
-    }
-    ort_inputs = load_weight_free_ort_inputs(weight_spec_path, runtime_inputs)
-    import onnxruntime as ort
-
-    ort_outputs = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"]).run(None, ort_inputs)
-    expected_outputs = [
-        pytorch_output.logits.detach().cpu().numpy(),
-        *[state.detach().cpu().numpy() for layer in pytorch_output.past_key_values for state in layer],
-    ]
-    for expected, actual in zip(expected_outputs, ort_outputs, strict=True):
-        np.testing.assert_allclose(expected, actual, rtol=1e-4, atol=1e-5)
-
-
 @pytest.mark.weight_free
 @pytest.mark.weight_free_export
 @pytest.mark.parametrize(

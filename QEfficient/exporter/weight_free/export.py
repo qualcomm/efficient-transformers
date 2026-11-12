@@ -124,17 +124,6 @@ def _restore_non_persistent_buffers(model: torch.nn.Module, preserved_buffers: d
         module._buffers[buffer_name] = buffer
 
 
-def _uses_qwen35_structure(model: torch.nn.Module) -> bool:
-    """Return whether ``model`` uses the Qwen3.5 text/MoE structure.
-
-    Qwen3.8 uses the Qwen3.5 MoE structure. Its generated GDN buffers must
-    remain on the meta device while Dynamo traces the weight-free graph;
-    their concrete values are restored directly into ONNX initializers later.
-    """
-    model_type = getattr(getattr(model, "config", None), "model_type", None)
-    return model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
-
-
 def _restore_embedded_initializers(onnx_program, preserved_buffers: dict[str, torch.Tensor]) -> None:
     """Replace meta ONNX initializers for generated buffers with their captured values."""
     for name, tensor in preserved_buffers.items():
@@ -217,10 +206,7 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
             quantizer._process_model_before_weight_loading(qeff_model.model)
         preserved_buffers = _preserve_non_persistent_buffers(qeff_model.model)
         qeff_model.model.to_empty(device="meta")
-        if _uses_qwen35_structure(qeff_model.model):
-            qeff_model._weight_free_embedded_buffers = preserved_buffers
-        else:
-            _restore_non_persistent_buffers(qeff_model.model, preserved_buffers)
+        _restore_non_persistent_buffers(qeff_model.model, preserved_buffers)
     else:
         qeff_model.model = qeff_model.model.to(dtype=target_dtype)
 
