@@ -1029,6 +1029,7 @@ class TestPreserveNestedCacheRetainedStateTransform:
             ],
             [
                 helper.make_tensor_value_info("output", TensorProto.FLOAT, None),
+                helper.make_tensor_value_info(retained_state, TensorProto.FLOAT, None),
             ],
         )
         model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
