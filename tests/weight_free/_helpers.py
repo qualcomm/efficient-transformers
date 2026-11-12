@@ -30,6 +30,7 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokeni
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
 from QEfficient.transformers.quantizers.quantizer_utils import blockwise_dequantize
+from QEfficient.utils.test_utils import load_vlm_model_from_config
 
 # ---------------------------------------------------------------------------
 # Worker-level model cache
@@ -67,6 +68,10 @@ WEIGHT_FREE_CAUSAL_LM_MODEL_IDS = {
 _CAUSAL_MODEL_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "causal_model_configs.json"
 with _CAUSAL_MODEL_CONFIG_PATH.open() as _config_file:
     _CAUSAL_MODEL_CONFIGS = json.load(_config_file)
+
+_IMAGE_TEXT_MODEL_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "image_text_model_configs.json"
+with _IMAGE_TEXT_MODEL_CONFIG_PATH.open() as _config_file:
+    _IMAGE_TEXT_MODEL_CONFIGS = {entry["model_type"]: entry for entry in json.load(_config_file)["image_text_models"]}
 
 FP8_RETAINED_QAIC_MODEL_CONFIGS = _CAUSAL_MODEL_CONFIGS["per_pr_fp8_quantized_models"]
 
@@ -134,6 +139,15 @@ WEIGHT_FREE_VLM_MODEL_PARAMS = [
         marks=pytest.mark.xdist_group(name="qaic-runtime-gemma-4-moe"),
         id="gemma-4-moe",
     ),
+]
+
+WEIGHT_FREE_PREFILL_ONLINE_MOE_CHUNK_SIZE = 16
+
+WEIGHT_FREE_PREFILL_ONLINE_EXPORT_MODEL_PARAMS = [
+    pytest.param("causal_lm", "gpt_oss", WEIGHT_FREE_CAUSAL_LM_MODEL_IDS["gpt_oss"], id="gpt-oss"),
+    pytest.param("vlm", "gemma4", "tiny-random/gemma-4-dense", id="gemma4"),
+    pytest.param("vlm", "qwen3_vl_moe", "tiny-random/qwen3-vl-moe", id="qwen3-vl-moe"),
+    pytest.param("vlm", "qwen3_5_moe", "tiny-random/qwen3.5-moe", id="qwen3-5-moe"),
 ]
 
 WEIGHT_FREE_BLOCKING_MODE_CASES = {
@@ -425,6 +439,20 @@ def load_weight_free_vlm_model(model_id: str) -> QEFFAutoModelForImageTextToText
     )
 
 
+def build_weight_free_vlm_test_checkpoint(model_type: str, checkpoint_dir: Path):
+    model_config = _IMAGE_TEXT_MODEL_CONFIGS[model_type]
+    config = AutoConfig.for_model(
+        model_type,
+        trust_remote_code=True,
+        **model_config.get("additional_params", {}),
+    )
+    config.name_or_path = model_config["model_name"]
+    torch.manual_seed(42)
+    model = load_vlm_model_from_config(config)
+    model.save_pretrained(checkpoint_dir, safe_serialization=True)
+    return model, model_config
+
+
 def exported_onnx_path(export_result) -> Path:
     if isinstance(export_result, (list, tuple)):
         export_result = export_result[-1]
@@ -594,6 +622,81 @@ def assert_blocked_kv_ops_for_mode(
 # ---------------------------------------------------------------------------
 
 
+def _pad_input_to_session_shape(
+    name: str,
+    value: np.ndarray,
+    expected_shape: list[int | str | None],
+    *,
+    pad_token_id: int,
+) -> np.ndarray:
+    """Pad a runtime input to ORT's static graph shape when Dynamo fixed an axis.
+
+    Weight-free ONNX currently uses the Dynamo path, whose exported graph can keep
+    the example sequence/cache length as a concrete dimension. The ApiRunner test
+    helper still prepares shorter legacy inputs. Padding with the same invalid
+    position sentinel used by QEff runtime inputs keeps the semantic token window
+    unchanged while satisfying ORT's static input validation.
+    """
+    if not isinstance(value, np.ndarray):
+        return value
+
+    pad_width = [(0, 0)] * value.ndim
+    for axis, expected_dim in enumerate(expected_shape):
+        if axis >= value.ndim or not isinstance(expected_dim, int) or expected_dim <= 0:
+            continue
+
+        current_dim = value.shape[axis]
+        if current_dim == expected_dim:
+            continue
+        if current_dim > expected_dim:
+            raise AssertionError(
+                f"Cannot feed input {name!r} with shape {value.shape}: axis {axis} is larger than "
+                f"the exported ONNX shape {expected_shape}."
+            )
+        pad_width[axis] = (0, expected_dim - current_dim)
+
+    if all(after == 0 for _, after in pad_width):
+        return value
+
+    if name == "position_ids":
+        pad_value = -1
+    elif name == "input_ids":
+        pad_value = pad_token_id
+    else:
+        pad_value = 0
+    return np.pad(value, pad_width, mode="constant", constant_values=pad_value)
+
+
+def _pad_inputs_to_session_shapes(
+    inputs: dict[str, np.ndarray],
+    session: onnxruntime.InferenceSession,
+    *,
+    pad_token_id: int,
+) -> dict[str, np.ndarray]:
+    """Return inputs padded to any concrete dimensions declared by the ORT session."""
+    session_shapes = {session_input.name: session_input.shape for session_input in session.get_inputs()}
+    return {
+        name: _pad_input_to_session_shape(name, value, session_shapes[name], pad_token_id=pad_token_id)
+        if name in session_shapes
+        else value
+        for name, value in inputs.items()
+    }
+
+
+def _select_next_token(logits: np.ndarray, position_ids: np.ndarray) -> np.ndarray:
+    """Select the generated token from the last real input token, not padded slots."""
+    if logits.ndim == 2:
+        token_logits = logits
+    elif logits.ndim == 3 and logits.shape[1] == 1:
+        token_logits = logits[:, -1, :]
+    elif logits.ndim == 3:
+        logit_indices = np.argmax(position_ids, axis=1)
+        token_logits = logits[np.arange(logits.shape[0]), logit_indices, :]
+    else:
+        raise AssertionError(f"Unexpected logits rank for weight-free ORT generation: shape={logits.shape}")
+    return token_logits.argmax(-1).reshape(-1, 1)
+
+
 def run_weight_free_ort(api_runner, onnx_path: Path, weight_spec_path: Path) -> np.ndarray:
     """Run token generation on a weight-free ONNX using ORT, injecting real weights
     from the checkpoint at every step via load_weight_free_ort_inputs.
@@ -608,6 +711,11 @@ def run_weight_free_ort(api_runner, onnx_path: Path, weight_spec_path: Path) -> 
 
     # Prepare runtime inputs (input_ids, position_ids, initial KV cache zeros)
     inputs = api_runner.input_handler.prepare_ort_inputs()
+    inputs = _pad_inputs_to_session_shapes(
+        inputs,
+        session,
+        pad_token_id=api_runner.input_handler.tokenizer.pad_token_id,
+    )
     # Inject model weights from HF cache
     inputs = load_weight_free_ort_inputs(weight_spec_path, inputs)
 
@@ -616,13 +724,20 @@ def run_weight_free_ort(api_runner, onnx_path: Path, weight_spec_path: Path) -> 
 
     generated_ids = []
     for _ in range(1, api_runner.gen_len):
-        generated_ids.append(ort_outputs["logits"].argmax(-1).reshape(-1, 1))
+        next_token = _select_next_token(ort_outputs["logits"], inputs["position_ids"])
+        generated_ids.append(next_token)
         inputs = api_runner.input_handler.update_ort_inputs(inputs, ort_outputs)
+        inputs["input_ids"] = next_token
+        inputs = _pad_inputs_to_session_shapes(
+            inputs,
+            session,
+            pad_token_id=api_runner.input_handler.tokenizer.pad_token_id,
+        )
         # Re-inject weights: update_ort_inputs only updates runtime tensors (input_ids,
         # position_ids, KV cache) and does not carry weights forward.
         inputs = load_weight_free_ort_inputs(weight_spec_path, inputs)
         ort_outputs_raw = api_runner.run_ort_session(inputs, session)
         ort_outputs = api_runner.input_handler.update_ort_outputs(ort_outputs_raw)
 
-    generated_ids.append(ort_outputs["logits"].argmax(-1).reshape(-1, 1))
+    generated_ids.append(_select_next_token(ort_outputs["logits"], inputs["position_ids"]))
     return np.concatenate(generated_ids, axis=1)
