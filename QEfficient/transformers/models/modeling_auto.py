@@ -5781,10 +5781,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         NotImplementedError
             If the model requires host-side inputs unsupported by the generic runner, or `runtime_ai100` is False.
         """
-        model_config = getattr(getattr(self, "model", None), "config", None)
-        model_type = getattr(model_config, "model_type", None)
-        if model_type in {"qwen4_exp", "qwen4_exp_text"}:
-            raise NotImplementedError("Qwen4-Exp is not supported by QEFFAutoModelForCausalLM.generate()")
         if artifacts is True:
             return write_causal_lm_runner_bundle(
                 model=self,

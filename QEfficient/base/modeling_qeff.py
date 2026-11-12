@@ -33,7 +33,6 @@ from QEfficient.base.onnx_transforms import (
     SplitTensorsTransform,
 )
 from QEfficient.base.pytorch_transforms import PytorchTransform
-from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.blocking.blocking_configurator import (
     build_gated_delta_config_for_transform,
     build_transformer_blocking_config_for_transform,
@@ -1434,43 +1433,6 @@ class QEFFBaseModel(ABC):
             # Without a model config, this is not a model that is possible to block.
             blocking_config = None
 
-        qsa_config_keys = {
-            "indexer_dp",
-            "indexer_cp",
-            "attn_dp",
-            "attn_cp",
-            "indexer_num_blocks",
-            "indexer_ql_chunk",
-            "indexer_q_block_size",
-            "indexer_topk_blocking",
-            "sparse_q_block_size",
-            "sparse_kv_num_blocks",
-        }
-        if blocking_config is None and qaic_config and qsa_config_keys.intersection(qaic_config):
-            blocking_config = AttentionBlockingConfig()
-            blocking_config.qsa_config = dict(qaic_config)
-            blocking_config.ctx_len = ctx_len
-            blocking_config.seq_len = seq_len
-
-        if blocking_config is not None and qaic_config is not None:
-            blocking_config.qsa_config = {
-                key: qaic_config[key]
-                for key in (
-                    "indexer_dp",
-                    "indexer_cp",
-                    "attn_dp",
-                    "attn_cp",
-                    "num_cores_per_device",
-                    "indexer_num_blocks",
-                    "indexer_ql_chunk",
-                    "indexer_q_block_size",
-                    "indexer_topk_blocking",
-                    "sparse_q_block_size",
-                    "sparse_kv_num_blocks",
-                    "skip_kv",
-                )
-                if key in qaic_config
-            }
         gated_delta_config = build_gated_delta_config_for_transform(seq_len=seq_len, qaic_config=qaic_config)
         self.model, gated_delta_transformed = GatedDeltaConfigTransform.apply(
             self.model, gated_delta_config=gated_delta_config
@@ -1488,28 +1450,9 @@ class QEFFBaseModel(ABC):
                 configure = getattr(module, "configure_ffn_blocking", None)
                 if callable(configure):
                     configure(mode, token_block_size, weight_block_size)
-            self.hash_params["qsa_config"] = {
-                key: qaic_config[key]
-                for key in (
-                    "indexer_dp",
-                    "indexer_cp",
-                    "attn_dp",
-                    "attn_cp",
-                    "num_cores_per_device",
-                    "indexer_num_blocks",
-                    "indexer_ql_chunk",
-                    "indexer_q_block_size",
-                    "indexer_topk_blocking",
-                    "sparse_q_block_size",
-                    "sparse_kv_num_blocks",
-                    "skip_kv",
-                )
-                if key in qaic_config
-            }
             self.hash_params["qaic_config"] = qaic_config
         else:
             self.hash_params.pop("qaic_config", None)
-            self.hash_params.pop("qsa_config", None)
         self.hash_params["num_replicate_kv_heads"] = effective_num_replicate_kv_heads
 
         # Apply the transformations that are dependent on compilation parameters

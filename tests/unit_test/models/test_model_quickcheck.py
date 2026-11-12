@@ -270,24 +270,6 @@ def test_deepseek_v4_example_parallel_layout_controls():
         build_ffn_blocking_config,
         configure_qeff_parallel_layout,
     )
-    from examples.text_generation.deepseek_v4_flash_decode_micro_benmark import (
-        MICROBENCH_DEFAULTS,
-        PREFILL_MICROBENCH_DEFAULTS,
-    )
-
-    assert MICROBENCH_DEFAULTS["attn_dp"] == 16
-    assert MICROBENCH_DEFAULTS["indexer_cp"] == 16
-    assert MICROBENCH_DEFAULTS["num_hidden_layers"] == 4
-    assert MICROBENCH_DEFAULTS["num_kv_blocks"] == 1
-    assert MICROBENCH_DEFAULTS["hca_compressed_kv_cp"] == 2
-    assert MICROBENCH_DEFAULTS["hca_attn_blocks"] == 8
-    assert MICROBENCH_DEFAULTS["hw_version"] == "ai100"
-    assert MICROBENCH_DEFAULTS["ffn_blocking_mode"] == "token"
-    assert MICROBENCH_DEFAULTS["ffn_token_block_size"] == 4
-    assert PREFILL_MICROBENCH_DEFAULTS["csa_prefill_attn_gather_sub_qc"] == 4
-    assert PREFILL_MICROBENCH_DEFAULTS["csa_prefill_indexer_kv_block_size"] == 512
-    assert PREFILL_MICROBENCH_DEFAULTS["csa_prefill_indexer_topk_per_block"] == 4
-
     assert build_ffn_blocking_config(
         Namespace(ffn_blocking_mode="default", ffn_token_block_size=None, ffn_weight_block_size=None)
     ) == {
@@ -7981,31 +7963,6 @@ def test_causal_generate_keeps_bool_artifacts_runner_bundle(monkeypatch, tmp_pat
 
     assert result == runner_dir
     runner_bundle.assert_called_once()
-
-
-@pytest.mark.cpu_only
-@pytest.mark.parametrize("model_type", ["qwen4_exp", "qwen4_exp_text"])
-@pytest.mark.parametrize("artifacts", [False, True])
-@pytest.mark.skip(reason="Qwen4-Exp is experimental and not fully supported yet")
-def test_causal_generate_rejects_qwen4_without_host_ple_inputs(monkeypatch, model_type, artifacts):
-    from QEfficient.transformers.models import modeling_auto
-
-    model = object.__new__(QEFFAutoModelForCausalLM)
-    model.model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
-    runtime = MagicMock()
-    model.qpc_path = Path("model.qpc")
-    model.comp_ctx_lengths_prefill = None
-    model.comp_ctx_lengths_decode = None
-    model.is_tlm = False
-    runner_bundle = MagicMock()
-    monkeypatch.setattr(modeling_auto.QEfficient, "cloud_ai_100_exec_kv", runtime)
-    monkeypatch.setattr(modeling_auto, "write_causal_lm_runner_bundle", runner_bundle)
-
-    with pytest.raises(NotImplementedError, match="required host-side ngram_embeddings"):
-        model.generate(tokenizer=object(), prompts=["Hello"], artifacts=artifacts)
-
-    runtime.assert_not_called()
-    runner_bundle.assert_not_called()
 
 
 @pytest.mark.cpu_only

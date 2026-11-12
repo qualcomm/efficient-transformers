@@ -209,7 +209,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 seq_min = (
                     1
                     if model_type
-                    in {"qwen4_exp", "qwen4_exp_text", "glm_moe_dsa", "minimax_m3_vl", "minimax_m3_vl_text"}
+                    in {"glm_moe_dsa", "minimax_m3_vl", "minimax_m3_vl_text"}
                     else 2
                 )
                 dim_registry[dim_name] = Dim("seq_len", min=seq_min, max=max_seq_len)
@@ -219,12 +219,6 @@ def convert_dynamic_axes_to_dynamic_shapes(
                     min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS,
                     max=max_seq_len,
                 )
-            elif dim_name == "local_pooled_ctx_len":
-                # Folded QSA index caches expose a per-device pooled context
-                # dimension.  For small CP configurations this can be one
-                # even though the global pooled context has the usual minimum
-                # of two required by the generic cache exporters.
-                dim_registry[dim_name] = Dim("local_pooled_ctx_len", min=1, max=max_seq_len)
             elif "pooled_ctx_len" in dim_name:
                 dim_registry[dim_name] = Dim("pooled_ctx_len", min=2, max=max_seq_len)
             elif dim_name.startswith("compressed_ctx_len_"):
@@ -289,28 +283,6 @@ def convert_dynamic_axes_to_dynamic_shapes(
             indexer_key_layers[int(input_name.split(".")[1])] = resolved
         else:
             dynamic_shapes[input_name] = resolved
-
-    # Qwen4-Exp exposes a heterogeneous retained-state ABI.  ONNX input names
-    # are flattened (for example ``gdn_conv_state.0`` and
-    # ``qsa_key_state.3``), while the model.forward signature still receives a
-    # nested ``past_key_values`` list.  Reconstruct the nested shape structure
-    # required by torch.export from the layer suffixes, preserving the order in
-    # which get_onnx_retained_state_specs emitted each layer's states.
-    if model_type in {"qwen4_exp", "qwen4_exp_text"}:
-        retained_by_layer: dict[int, list] = {}
-        retained_names = []
-        for input_name in dynamic_axes:
-            match = re.search(r"\.(\d+)$", input_name)
-            if match and input_name not in {"input_ids", "position_ids", "ngram_embeddings"}:
-                retained_names.append(input_name)
-        for input_name in retained_names:
-            layer_idx = int(input_name.rsplit(".", 1)[1])
-            retained_by_layer.setdefault(layer_idx, []).append(dynamic_shapes.pop(input_name))
-        if retained_by_layer:
-            max_layer = max(retained_by_layer)
-            dynamic_shapes["past_key_values"] = [
-                retained_by_layer.get(layer_idx, []) for layer_idx in range(max_layer + 1)
-            ]
 
     cache_layer_indices = set(past_keys) | set(past_values) | set(conv_states) | set(recurrent_states)
     if cache_layer_indices:

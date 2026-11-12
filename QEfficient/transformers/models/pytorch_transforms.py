@@ -319,16 +319,6 @@ from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3VLMoeVisionAttention,
     Qwen3VLMoeVisionModel,
 )
-from transformers.models.qwen4_exp.modeling_qwen4_exp import (
-    Qwen4ExpForCausalLM,
-    Qwen4ExpTextAttention,
-    Qwen4ExpTextDecoderLayer,
-    Qwen4ExpTextExperts,
-    Qwen4ExpTextGatedDeltaNet,
-    Qwen4ExpTextModel,
-    Qwen4ExpTextPLELayer,
-    Qwen4ExpTextSparseMoeBlock,
-)
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings, RobertaModel
 from transformers.models.starcoder2.modeling_starcoder2 import (
     Starcoder2Attention,
@@ -717,16 +707,6 @@ from QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     QEffQwen3VLMoeVisionAttention,
     QEffQwen3VLMoeVisionModel,
 )
-from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
-    QEffQwen4ExpForCausalLM,
-    QEffQwen4ExpTextAttention,
-    QEffQwen4ExpTextDecoderLayer,
-    QEffQwen4ExpTextExperts,
-    QEffQwen4ExpTextGatedDeltaNet,
-    QEffQwen4ExpTextModel,
-    QEffQwen4ExpTextPLELayer,
-    QEffQwen4ExpTextSparseMoeBlock,
-)
 from QEfficient.transformers.models.starcoder2.modeling_starcoder2 import (
     QEffStarcoder2Attention,
     QEFFStarcoder2DecoderLayer,
@@ -1042,15 +1022,6 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen3_5MoeAttention: QEffQwen3_5MoeAttention,
         Qwen3_5MoeVisionAttention: QEffQwen3_5MoeVisionAttention,
         Qwen3_5MoeVisionModel: QEffQwen3_5MoeVisionModel,
-        # Qwen4-Exp text-only decode
-        Qwen4ExpForCausalLM: QEffQwen4ExpForCausalLM,
-        Qwen4ExpTextModel: QEffQwen4ExpTextModel,
-        Qwen4ExpTextDecoderLayer: QEffQwen4ExpTextDecoderLayer,
-        Qwen4ExpTextAttention: QEffQwen4ExpTextAttention,
-        Qwen4ExpTextGatedDeltaNet: QEffQwen4ExpTextGatedDeltaNet,
-        Qwen4ExpTextPLELayer: QEffQwen4ExpTextPLELayer,
-        Qwen4ExpTextSparseMoeBlock: QEffQwen4ExpTextSparseMoeBlock,
-        Qwen4ExpTextExperts: QEffQwen4ExpTextExperts,
         # Qwen2.5 VL
         Qwen2_5_VLForConditionalGeneration: QEffQwen_2_5_vl_ForConditionalGeneration,
         Qwen2_5_VLModel: QEffQwen2_5_VLModel,
@@ -1840,14 +1811,7 @@ class BlockingAttentionTransform:
                 or "DeepseekV3ForCausalLM" in model_architectures
             ):
                 module.attn_blocking_config = attn_blocking_config
-                if isinstance(module, QEffQwen4ExpTextAttention):
-                    module.configure_qsa(
-                        getattr(attn_blocking_config, "qsa_config", None),
-                        ctx_len=getattr(attn_blocking_config, "ctx_len", None),
-                        seq_len=getattr(attn_blocking_config, "seq_len", None),
-                    )
-                    module.forward = MethodType(QEffQwen4ExpTextAttention.qsa_forward, module)
-                elif isinstance(module, QEffQwen3_5GatedDeltaNet):
+                if isinstance(module, QEffQwen3_5GatedDeltaNet):
                     module.forward = MethodType(QEffQwen3_5GatedDeltaNet.forward, module)
                 elif isinstance(module, QEffQwen3_5MoeGatedDeltaNet):
                     module.forward = MethodType(QEffQwen3_5MoeGatedDeltaNet.forward, module)
