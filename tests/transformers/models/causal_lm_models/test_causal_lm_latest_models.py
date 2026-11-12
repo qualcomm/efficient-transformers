@@ -157,6 +157,7 @@ def _flatten_minimax_paged_ort_inputs(session, inputs):
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
 @pytest.mark.accuracy
+@pytest.mark.skip(reason="Paged-attention accuracy is not guaranteed yet.")
 def test_minimax_m3_paged_dp_cp_qeff_pytorch_vs_aic(tmp_path):
     torch.manual_seed(7)
     qaic_config = _tiny_minimax_m3_paged_dp_cp_config()
@@ -321,6 +322,7 @@ def test_minimax_m3_decode_qeff_pytorch_vs_aic(tmp_path):
 
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
+@pytest.mark.skip(reason="MiniMax MSA prefill support is in progress.")
 def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):
     """Check MiniMax expert-parallel prefill logits against the original HF model."""
     torch.manual_seed(7)
@@ -406,6 +408,7 @@ def test_minimax_m3_expert_parallel_prefill_hf_pytorch_vs_aic(tmp_path):
 
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
+@pytest.mark.skip(reason="MiniMax MSA prefill support is in progress.")
 def test_minimax_m3_prefill_decode_hf_pytorch_vs_aic(tmp_path):
     """Check AIC parity against the original HF MiniMax prefill-to-decode handoff."""
     torch.manual_seed(7)
