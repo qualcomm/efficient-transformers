@@ -5,7 +5,7 @@
 #
 # -----------------------------------------------------------------------------
 
-"""Basic Qwen3-VL-MoE disaggregated inference without attention blocking."""
+"""Basic Qwen3-VL-MoE weight-free disaggregated inference."""
 
 import argparse
 from time import perf_counter
@@ -50,6 +50,10 @@ def parse_args():
     )
     parser.add_argument("--prefill-num-devices", type=int, default=1)
     parser.add_argument("--decode-num-devices", type=int, default=1)
+    parser.add_argument("--prefill-blocking-mode", choices=["none", "prefill_online"], default="none")
+    parser.add_argument("--prefill-num-kv-blocks", type=int, default=2)
+    parser.add_argument("--prefill-num-q-blocks", type=int, default=2)
+    parser.add_argument("--prefill-n-rep-chunk", type=int, default=1)
     parser.add_argument(
         "--num-layers",
         type=int,
@@ -104,6 +108,16 @@ def main():
         skip_lang=True,
         use_onnx_subfunctions=True,
     )
+    prefill_qaic_config = None
+    if args.prefill_blocking_mode != "none":
+        prefill_qaic_config = {
+            "blocking_mode": args.prefill_blocking_mode,
+            "num_kv_blocks": args.prefill_num_kv_blocks,
+            "num_q_blocks": args.prefill_num_q_blocks,
+            "n_rep_chunk": args.prefill_n_rep_chunk,
+            "ctx_len": args.ctx_len,
+            "skip_kv": True,
+        }
     prefill_qpc = qeff_model.compile(
         batch_size=batch_size,
         prefill_seq_len=args.prefill_seq_len,
@@ -123,6 +137,7 @@ def main():
         skip_vision=True,
         use_onnx_subfunctions=True,
         layerwise=False,
+        qaic_config=prefill_qaic_config,
     )
     decode_qpc = qeff_model.compile(
         batch_size=batch_size,

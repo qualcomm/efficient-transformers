@@ -35,6 +35,7 @@ from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalL
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES,
     WEIGHT_FREE_VLM_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     assert_has_subfunctions,
@@ -116,6 +117,13 @@ def _build_moe_decode_qaic_config() -> dict:
     return {"moe_config": {"flavour": "decode_bmm"}}
 
 
+def _build_disagg_prefill_blocking_qaic_config(blocking_key: str, ctx_len: int = CTX_LEN) -> dict:
+    qaic_config = dict(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES[blocking_key])
+    qaic_config["ctx_len"] = ctx_len
+    qaic_config["moe_config"] = {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}
+    return qaic_config
+
+
 def _assert_disagg_blocking_artifact(
     onnx_path: Path,
     qeff_model: QEFFAutoModelForCausalLM,
@@ -128,7 +136,12 @@ def _assert_disagg_blocking_artifact(
     assert blocking_config.mode == BlockingMode(qaic_config["blocking_mode"])
     if use_onnx_subfunctions:
         assert_has_subfunctions(onnx_path, qeff_model)
-    assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key, continuous_batching=True)
+    assert_blocked_kv_ops_for_mode(
+        onnx_path,
+        qeff_model,
+        blocking_key,
+        continuous_batching=True,
+    )
 
 
 PREFILL_NUM_DEVICES = 2
@@ -663,7 +676,7 @@ def test_weight_free_vlm_disaggregated_prefill_and_decode(
         hf_model = _load_vlm_hf_reference(model_id)
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
         qeff_model = load_weight_free_vlm_model(model_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         skip_on_model_fetch_error(exc, model_id)
 
     processor_inputs = _prepare_vlm_inputs(processor)
@@ -1139,6 +1152,71 @@ def test_weight_free_qwen3_moe_disagg_cb_kv_handoff_and_hf_parity(
             f"{first_mismatch} (matched {num_matched}/{QWEN3_MOE_PARITY_GENERATION_LEN} leading tokens): "
             f"HF={hf_tokens[first_mismatch]} vs QAIC={qaic_tokens[first_mismatch]}"
         )
+
+
+@pytest.mark.weight_free
+@pytest.mark.on_qaic
+@pytest.mark.llm_model
+@pytest.mark.disagg_dma
+@pytest.mark.parametrize("dma_config", [GPT_OSS_PARITY_DMA_CONFIG])
+def test_weight_free_gpt_oss_disagg_cb_prefill_online_compile_and_artifact_metrics(
+    manual_cleanup,
+    tmp_export_dir,
+    dma_config,
+    record_property,
+):
+    """Compile GPT-OSS CB disaggregated prefill with prefill_online blocking."""
+    model_id = dma_config["model_id"]
+    use_onnx_subfunctions = dma_config.get("use_onnx_subfunctions", True)
+    qaic_config = _build_disagg_prefill_blocking_qaic_config("prefill_online", ctx_len=GPT_OSS_PARITY_CTX_LEN)
+
+    try:
+        qeff_model = _load_weight_free_model(model_id, continuous_batching=True)
+    except Exception as exc:  # noqa: BLE001
+        skip_on_model_fetch_error(exc, model_id)
+
+    compiled_onnx_paths = {}
+    try:
+        compile_start = time.perf_counter()
+        prefill_qpc = Path(
+            qeff_model.compile(
+                compile_dir=_compile_dir(tmp_export_dir, "gpt_oss_wf_cb_prefill_online"),
+                prefill_seq_len=PREFILL_SEQ_LEN,
+                ctx_len=GPT_OSS_PARITY_CTX_LEN,
+                full_batch_size=GPT_OSS_PARITY_FULL_BATCH_SIZE,
+                num_cores=GPT_OSS_PARITY_NUM_CORES,
+                qaic_config=qaic_config,
+                num_devices=dma_config["prefill_num_devices"],
+                mdp_num_partitions=dma_config["stages"],
+                split_retained_state_io=True,
+                mos=1,
+                mxfp6_matmul=False,
+                mxint8_kv_cache=False,
+                aic_enable_depth_first=True,
+                num_speculative_tokens=None,
+                offload_pt_weights=True,
+                prefill_only=True,
+                enable_chunking=True,
+                retain_full_kv=True,
+                use_onnx_subfunctions=use_onnx_subfunctions,
+            )
+        )
+        compile_seconds = time.perf_counter() - compile_start
+        compiled_onnx_paths["prefill"] = _assert_onnx_path(qeff_model.onnx_path, "prefill")
+        _assert_disagg_blocking_artifact(
+            compiled_onnx_paths["prefill"],
+            qeff_model,
+            "prefill_online",
+            qaic_config,
+            use_onnx_subfunctions,
+        )
+
+        assert prefill_qpc
+        assert prefill_qpc.exists(), f"prefill QPC path does not exist: {prefill_qpc}"
+        record_property("prefill_online_qpc_compile_seconds", compile_seconds)
+    finally:
+        cleanup_paths = list(compiled_onnx_paths.values()) or [getattr(qeff_model, "onnx_path", None)]
+        manual_cleanup([path for path in cleanup_paths if path is not None])
 
 
 @pytest.mark.weight_free

@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import random
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import onnx
@@ -44,12 +46,13 @@ from transformers import (
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.generation.cloud_infer import QAICInferenceSession
-from QEfficient.utils import constants
+from QEfficient.utils import constants, resolve_retained_state_output
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
 from QEfficient.utils.test_utils import load_vlm_model_from_config
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
+    WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES,
     WEIGHT_FREE_VLM_MODEL_PARAMS,
     assert_blocked_kv_ops_for_mode,
     skip_on_model_fetch_error,
@@ -114,6 +117,100 @@ def _vlm_blocking_compile_options(model_type: str, blocking_key: str) -> dict:
     if device_ids is None:
         pytest.skip("No available QAIC device")
     return {}
+
+
+VLM_PREFILL_BLOCKING_MODEL_TYPES = ("gemma4", "qwen3_vl_moe", "qwen3_5_moe")
+VLM_PREFILL_BLOCKING_GENERATION_LEN = 10
+VLM_MOE_PREFILL_PACKED_CHUNK_SIZE = 16
+VLM_PREFILL_ONLINE_XDIST_GROUP = "qaic-vlm-prefill-online"
+VLM_PREFILL_ONLINE_E2E_GENERATION_LEN = 100
+VLM_PREFILL_ONLINE_E2E_IMAGE_URL = "https://picsum.photos/id/237/536/354"
+VLM_PREFILL_ONLINE_E2E_PROMPT = "Describe all the colors seen in the image."
+GEMMA4_PREFILL_ONLINE_E2E_IMAGE_URL = (
+    "https://wallup.net/wp-content/uploads/2017/03/28/351036-San_Francisco-USA-bridge-sunset-"
+    "Golden_Gate_Bridge-lights.jpg"
+)
+GEMMA4_PREFILL_ONLINE_E2E_PROMPT = "Can you Describe this image in detail?"
+VLM_PREFILL_ONLINE_E2E_CASES = [
+    pytest.param(
+        "qwen3_vl_moe",
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        128,
+        4,
+        1,
+        marks=pytest.mark.xdist_group(name="qaic-prefill-online-e2e"),
+        id="qwen3-vl-moe-30b",
+    ),
+    pytest.param(
+        "qwen3_5",
+        "Qwen/Qwen3.5-0.8B",
+        256,
+        4,
+        1,
+        marks=pytest.mark.xdist_group(name="qaic-prefill-online-e2e"),
+        id="qwen3-5-0-8b",
+    ),
+    pytest.param(
+        "gemma4",
+        "google/gemma-4-26B-A4B-it",
+        1024,
+        16,
+        2,
+        marks=pytest.mark.xdist_group(name="qaic-prefill-online-e2e"),
+        id="gemma4-26b",
+    ),
+    pytest.param(
+        "qwen3_5_moe",
+        "Qwen/Qwen3.5-35B-A3B",
+        512,
+        16,
+        1,
+        marks=pytest.mark.xdist_group(name="qaic-prefill-online-e2e"),
+        id="qwen3-5-moe-35b",
+    ),
+]
+VLM_IMAGE_INPUT_NAMES = {
+    "pixel_values",
+    "image_grid_thw",
+    "image_masks",
+    "image_input_idx",
+    "valid_idx",
+    "aspect_ratio_ids",
+    "aspect_ratio_mask",
+    "image_position_ids",
+}
+
+
+def _runtime_device_ids(device_ids: list[int]) -> list[int]:
+    """Translate discovered QAIC IDs to visible-device indices when required."""
+    if "QAIC_VISIBLE_DEVICES" in os.environ:
+        return list(range(len(device_ids)))
+    return device_ids
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    "visible_devices,discovered_device_ids,expected_device_ids",
+    [
+        (None, [4], [4]),
+        ("4,5", [4], [0]),
+    ],
+)
+def test_vlm_runtime_device_ids_respect_qaic_visibility(
+    monkeypatch,
+    visible_devices,
+    discovered_device_ids,
+    expected_device_ids,
+):
+    if visible_devices is None:
+        monkeypatch.delenv("QAIC_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("QAIC_VISIBLE_DEVICES", visible_devices)
+
+    assert _runtime_device_ids(discovered_device_ids) == expected_device_ids
+
+
+VLM_SEQUENCE_INPUT_NAMES = {"input_ids", "attention_mask", "position_ids", "mm_token_type_ids", "token_type_ids"}
 
 
 def _build_moe_prefill_qaic_config() -> dict:
@@ -201,40 +298,57 @@ def _build_vlm_test_checkpoint(
     return model, model_config
 
 
+def test_weight_free_gemma4_checkpoint_matches_decode_config(tmp_path):
+    """Build the same unmodified tiny-random Gemma4 config used by decode tests."""
+    model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS["gemma4"]
+    expected_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    model, _ = _build_vlm_test_checkpoint("gemma4", tmp_path / "gemma4_checkpoint", model_id)
+
+    assert model.config.text_config.layer_types == expected_config.text_config.layer_types
+
+
 def _prepare_vlm_test_inputs(
     processor,
     model,
     qeff_model,
     model_config,
     image_size=(536, 354),
+    prefill_seq_len: int | None = None,
+    image: Image.Image | None = None,
+    prompt: str = VLM_PROMPT,
+    skip_vision: bool = False,
 ):
     image_width, image_height = image_size
-    image = Image.new("RGB", image_size, color=(32, 96, 160))
+    if image is None and not skip_vision:
+        image = Image.new("RGB", image_size, color=(32, 96, 160))
+    content = [{"type": "text", "text": prompt}]
+    if not skip_vision:
+        content.append({"type": "image"})
     conversation = [
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": model_config["text_prompt"]},
-                {"type": "image"},
-            ],
+            "content": content,
         }
     ]
     prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
-    pixel_count = image_width * image_height
-    hf_inputs = processor(
-        images=image,
-        text=prompt,
-        return_tensors="pt",
-        min_pixels=pixel_count,
-        max_pixels=pixel_count,
-    )
+    processor_kwargs = {"text": prompt, "return_tensors": "pt"}
+    if not skip_vision:
+        pixel_count = image_width * image_height
+        processor_kwargs.update(
+            {
+                "images": image,
+                "min_pixels": pixel_count,
+                "max_pixels": pixel_count,
+            }
+        )
+    hf_inputs = processor(**processor_kwargs)
     qeff_inputs = {key: value.clone() if isinstance(value, torch.Tensor) else value for key, value in hf_inputs.items()}
     if qeff_model is not None:
         config_model_type = getattr(qeff_model.model.config, "model_type", None)
         if config_model_type != "gemma4":
             qeff_inputs = qeff_model.prepare_inputs_for_generation(
                 inputs=qeff_inputs,
-                prefill_seq_len=model_config["prompt_len"],
+                prefill_seq_len=(prefill_seq_len if prefill_seq_len is not None else model_config["prompt_len"]),
                 batch_size=model_config["batch_size"],
             )
     if "image_grid_thw" in qeff_inputs and qeff_inputs["image_grid_thw"].ndim == 2:
@@ -246,6 +360,32 @@ def _prepare_vlm_test_inputs(
     if "pixel_values" in qeff_inputs:
         qeff_inputs["pixel_values"] = qeff_inputs["pixel_values"].to(torch.float32)
     return hf_inputs, qeff_inputs
+
+
+@pytest.mark.cpu_only
+def test_prepare_vlm_test_inputs_can_skip_vision():
+    class TextOnlyProcessor:
+        def apply_chat_template(self, conversation, add_generation_prompt):
+            self.conversation = conversation
+            return "text-only prompt"
+
+        def __call__(self, **kwargs):
+            self.processor_kwargs = kwargs
+            return {"input_ids": torch.tensor([[1]])}
+
+    processor = TextOnlyProcessor()
+    hf_inputs, qeff_inputs = _prepare_vlm_test_inputs(
+        processor,
+        model=None,
+        qeff_model=None,
+        model_config={},
+        skip_vision=True,
+    )
+
+    assert "images" not in processor.processor_kwargs
+    assert all(item["type"] == "text" for item in processor.conversation[0]["content"])
+    assert "pixel_values" not in hf_inputs
+    assert "pixel_values" not in qeff_inputs
 
 
 def _get_vlm_specialization_kwargs(model, model_config, heights, widths, num_frames):
@@ -352,6 +492,11 @@ def _assert_weight_spec(onnx_path: Path) -> None:
     assert weight_spec.is_file(), f"Missing weight-free spec next to {onnx_path}"
 
 
+def _assert_has_image_inputs(inputs: dict, model_type: str) -> None:
+    present_inputs = VLM_IMAGE_INPUT_NAMES.intersection(inputs)
+    assert present_inputs, f"Expected image inputs for {model_type}, got input keys: {sorted(inputs)}"
+
+
 def _update_retained_states(target_inputs, source_outputs, layer_types):
     for layer_idx, layer_type in enumerate(layer_types):
         state_names = (
@@ -359,10 +504,11 @@ def _update_retained_states(target_inputs, source_outputs, layer_types):
             if layer_type == "full_attention"
             else (f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}")
         )
-        for state_name in state_names:
-            retained_name = f"{state_name}_RetainedState"
-            if retained_name in source_outputs:
-                target_inputs[state_name] = np.array(source_outputs[retained_name], copy=True)
+        for logical_name in state_names:
+            retained_state = resolve_retained_state_output(source_outputs, logical_name)
+            if retained_state is not None:
+                target_name, value = retained_state
+                target_inputs[target_name] = np.array(value, copy=True)
 
 
 def _language_layer_types(qeff_model) -> list[str]:
@@ -403,10 +549,32 @@ def _reshape_vision_output_for_language_session(session, name: str, value: np.nd
     if binding_index is None:
         return value
 
+    target_shape = None
     for allowed_shape in session.allowed_shapes:
         shape = allowed_shape[binding_index][1]
-        if len(shape) > 1 and int(np.prod(shape)) == value.size:
-            return value.reshape(shape)
+        if len(shape) > 1:
+            target_shape = tuple(shape)
+            if int(np.prod(shape)) == value.size:
+                return value.reshape(shape)
+            break
+    if target_shape is None:
+        target_shape = tuple(session.bindings[binding_index].dims)
+
+    if len(target_shape) == value.ndim:
+        if (
+            name == "vision_embeds"
+            and value.shape[0] == target_shape[0]
+            and value.shape[2:] == target_shape[2:]
+            and value.shape[1] <= target_shape[1]
+        ):
+            return np.pad(value, ((0, 0), (0, target_shape[1] - value.shape[1]), (0, 0)))
+        if (
+            name == "deepstack_features"
+            and value.shape[:2] == target_shape[:2]
+            and value.shape[3:] == target_shape[3:]
+            and value.shape[2] <= target_shape[2]
+        ):
+            return np.pad(value, ((0, 0), (0, 0), (0, target_shape[2] - value.shape[2]), (0, 0)))
     return value
 
 
@@ -449,12 +617,37 @@ def _update_retained_vision_inputs(target_inputs, source_outputs):
         target_inputs["image_idx"] = source_outputs["image_idx_output"]
 
 
+def _slice_prefill_chunk(value: np.ndarray, start: int, end: int, padded_len: int) -> np.ndarray:
+    if value.ndim >= 2 and value.shape[-1] == padded_len:
+        return value[..., start:end]
+    return value
+
+
+def _pad_sequence_input(name: str, value: np.ndarray, target_len: int, pad_token_id: int) -> np.ndarray:
+    if not isinstance(value, np.ndarray) or value.ndim < 2 or value.shape[-1] >= target_len:
+        return value
+
+    pad_width = [(0, 0)] * value.ndim
+    pad_width[-1] = (0, target_len - value.shape[-1])
+    constant_values = {
+        "input_ids": pad_token_id,
+        "attention_mask": 0,
+        "position_ids": -1,
+        "mm_token_type_ids": 0,
+        "token_type_ids": 0,
+    }.get(name, 0)
+    return np.pad(value, pad_width, constant_values=constant_values)
+
+
 def _run_vlm_three_qpc(
     qeff_model,
     qeff_inputs,
     qpc_paths,
     layer_types,
     generation_len,
+    device_ids: list[int] | None = None,
+    decode_num_devices: int = 1,
+    return_metrics: bool = False,
 ):
     """Run vision, chunked prefill, and greedy decode with separate QAIC sessions.
 
@@ -462,7 +655,20 @@ def _run_vlm_three_qpc(
     sessions are deactivated even if a stage raises. This path is used for
     head-blocked Qwen3-VL and split-QPC Qwen3.5 cases.
     """
-    vision_session = QAICInferenceSession(qpc_paths["vision_qpc_path"]) if qpc_paths.get("vision_qpc_path") else None
+    runtime_start = perf_counter()
+    if device_ids is None:
+        available_device_ids = get_available_device_id()
+        if available_device_ids is None:
+            pytest.skip("No available QAIC device")
+        runtime_device_ids = _runtime_device_ids(available_device_ids)
+    else:
+        runtime_device_ids = _runtime_device_ids(device_ids)
+
+    vision_session = (
+        QAICInferenceSession(qpc_paths["vision_qpc_path"], device_ids=runtime_device_ids[:1])
+        if qpc_paths.get("vision_qpc_path")
+        else None
+    )
     prefill_session = None
     decode_session = None
     try:
@@ -474,6 +680,7 @@ def _run_vlm_three_qpc(
         _ensure_position_ids(inputs)
         vision_inputs = {}
         vision_outputs = {}
+        prefill_start = perf_counter()
         if vision_session is not None:
             vision_inputs = {name: inputs[name] for name in vision_session.input_names if name in inputs}
             vision_fp16_inputs = {"pixel_values", "image_embeds"}
@@ -487,24 +694,43 @@ def _run_vlm_three_qpc(
             vision_session.deactivate()
             vision_session = None
 
-        prefill_session = QAICInferenceSession(qpc_paths["lang_prefill_qpc_path"])
-        if "vision_embeds" in vision_outputs:
-            vision_outputs["vision_embeds"] = _reshape_vision_output_for_language_session(
-                prefill_session, "vision_embeds", vision_outputs["vision_embeds"]
-            )
+        prefill_session = QAICInferenceSession(qpc_paths["lang_prefill_qpc_path"], device_ids=runtime_device_ids[:1])
+        for vision_output_name in ("vision_embeds", "deepstack_features"):
+            if vision_output_name in vision_outputs:
+                vision_outputs[vision_output_name] = _reshape_vision_output_for_language_session(
+                    prefill_session,
+                    vision_output_name,
+                    vision_outputs[vision_output_name],
+                )
 
         prefill_binding = prefill_session.binding_index_map["input_ids"]
         prefill_seq_len = prefill_session.bindings[prefill_binding].dims[1]
         input_ids = inputs["input_ids"]
-        padded_len = int(np.ceil(input_ids.shape[1] / prefill_seq_len) * prefill_seq_len)
-        if padded_len != input_ids.shape[1]:
-            pad_len = padded_len - input_ids.shape[1]
-            pad_token_id = 1 if model_type == "gemma4" else int(input_ids[0, -1])
-            inputs["input_ids"] = np.pad(input_ids, ((0, 0), (0, pad_len)), constant_values=pad_token_id)
-            inputs["position_ids"] = _pad_position_ids(inputs["position_ids"], pad_len)
-            for sequence_name in ("mm_token_type_ids", "token_type_ids"):
-                if sequence_name in inputs:
-                    inputs[sequence_name] = np.pad(inputs[sequence_name], ((0, 0), (0, pad_len)), constant_values=0)
+        sequence_lengths = [
+            value.shape[-1]
+            for name, value in inputs.items()
+            if name in VLM_SEQUENCE_INPUT_NAMES
+            and name in prefill_session.input_names
+            and isinstance(value, np.ndarray)
+            and value.ndim >= 2
+        ]
+        assert sequence_lengths, f"No sequence inputs matched the prefill QPC: {prefill_session.input_names}"
+        padded_len = int(np.ceil(max(sequence_lengths) / prefill_seq_len) * prefill_seq_len)
+        pad_token_id = 1 if model_type == "gemma4" else int(input_ids[0, -1])
+        for name, value in list(inputs.items()):
+            if name in VLM_SEQUENCE_INPUT_NAMES and name in prefill_session.input_names:
+                inputs[name] = _pad_sequence_input(name, value, padded_len, pad_token_id)
+        if "attention_mask" in inputs:
+            prefill_attention_mask = _pad_sequence_input(
+                "attention_mask", inputs["attention_mask"], padded_len, pad_token_id
+            )
+            assert np.any(prefill_attention_mask[:, -prefill_seq_len:]), (
+                "Final prefill chunk contains only padding; prepare QEff inputs with the compiled "
+                f"prefill_seq_len ({prefill_seq_len})."
+            )
+        if "position_ids" not in inputs:
+            attention_mask = inputs.get("attention_mask", np.ones_like(inputs["input_ids"]))
+            inputs["position_ids"] = np.where(attention_mask, np.arange(padded_len), -1)
 
         lang_inputs = {
             name: inputs[name] for name in prefill_session.input_names if name in inputs and name not in vision_inputs
@@ -517,36 +743,44 @@ def _run_vlm_three_qpc(
 
         if vision_outputs:
             prefill_session.set_buffers(vision_outputs)
-        chunk_inputs = dict(lang_inputs)
+        static_prefill_inputs = set(vision_outputs).intersection(prefill_session.input_names)
+        chunk_inputs = {name: value for name, value in lang_inputs.items() if name not in static_prefill_inputs}
         for chunk_idx in range(padded_len // prefill_seq_len):
             start = chunk_idx * prefill_seq_len
             end = start + prefill_seq_len
-            chunk_inputs["input_ids"] = lang_inputs["input_ids"][:, start:end]
-            chunk_inputs["position_ids"] = lang_inputs["position_ids"][..., start:end]
-            for sequence_name in ("mm_token_type_ids", "token_type_ids"):
-                if sequence_name in lang_inputs:
-                    chunk_inputs[sequence_name] = lang_inputs[sequence_name][:, start:end]
+            for name, value in lang_inputs.items():
+                if (
+                    name not in static_prefill_inputs
+                    and name in prefill_session.input_names
+                    and value.ndim >= 2
+                    and value.shape[-1] == padded_len
+                ):
+                    chunk_inputs[name] = _slice_prefill_chunk(value, start, end, padded_len)
             prefill_outputs = prefill_session.run(chunk_inputs)
             _update_retained_states(chunk_inputs, prefill_outputs, layer_types)
             if "image_idx_output" in prefill_outputs:
                 chunk_inputs["image_idx"] = prefill_outputs["image_idx_output"]
 
+        prefill_time = perf_counter() - prefill_start
         prefill_session.deactivate()
         prefill_session = None
 
-        decode_session = QAICInferenceSession(qpc_paths["lang_decode_qpc_path"])
+        decode_session = QAICInferenceSession(
+            qpc_paths["lang_decode_qpc_path"], device_ids=runtime_device_ids[:decode_num_devices]
+        )
         generated_tokens = [np.argmax(prefill_outputs["logits"], axis=-1)[:, -1]]
         decode_inputs = {
             "input_ids": generated_tokens[-1].reshape(1, 1),
             "position_ids": np.max(inputs["position_ids"], axis=-1, keepdims=True) + 1,
         }
-        if model_type != "gemma4":
-            for sequence_name in ("mm_token_type_ids", "token_type_ids"):
-                if sequence_name in decode_session.input_names:
-                    decode_inputs[sequence_name] = np.zeros((1, 1), dtype=np.int64)
+        for sequence_name in ("mm_token_type_ids", "token_type_ids"):
+            if sequence_name in decode_session.input_names:
+                binding = decode_session.bindings[decode_session.binding_index_map[sequence_name]]
+                decode_inputs[sequence_name] = np.zeros(tuple(binding.dims), dtype=np.int64)
         _update_retained_states(decode_inputs, prefill_outputs, layer_types)
         _update_retained_vision_inputs(decode_inputs, prefill_outputs)
 
+        decode_start = perf_counter()
         if model_type == "gemma4":
             for _ in range(generation_len - 1):
                 decode_outputs = decode_session.run(decode_inputs)
@@ -561,20 +795,42 @@ def _run_vlm_three_qpc(
                     if retained_input in decode_inputs and retained_input not in next_decode_inputs:
                         next_decode_inputs[retained_input] = decode_inputs[retained_input]
                 decode_inputs = next_decode_inputs
-            return np.stack(generated_tokens[:generation_len], axis=1)
+            decode_time = perf_counter() - decode_start
+            generated_ids = np.stack(generated_tokens[:generation_len], axis=1)
+            if return_metrics:
+                return generated_ids, {
+                    "runtime_s": perf_counter() - runtime_start,
+                    "prefill_s": prefill_time,
+                    "decode_s": decode_time,
+                }
+            return generated_ids
 
         for _ in range(generation_len - 1):
             decode_outputs = decode_session.run(decode_inputs)
             generated_tokens.append(np.argmax(decode_outputs["logits"], axis=-1)[:, -1])
             decode_inputs["input_ids"] = generated_tokens[-1].reshape(1, 1)
             decode_inputs["position_ids"] = decode_inputs["position_ids"] + 1
+            if "mm_token_type_ids" in decode_inputs:
+                decode_inputs["mm_token_type_ids"] = np.zeros_like(decode_inputs["mm_token_type_ids"])
             _update_retained_states(decode_inputs, decode_outputs, layer_types)
             _update_retained_vision_inputs(decode_inputs, decode_outputs)
-        return np.stack(generated_tokens[:generation_len], axis=1)
+        decode_time = perf_counter() - decode_start
+        generated_ids = np.stack(generated_tokens[:generation_len], axis=1)
+        if return_metrics:
+            return generated_ids, {
+                "runtime_s": perf_counter() - runtime_start,
+                "prefill_s": prefill_time,
+                "decode_s": decode_time,
+            }
+        return generated_ids
     finally:
         for session in (vision_session, prefill_session, decode_session):
             if session is not None:
                 session.deactivate()
+
+
+def _run_qwen35_three_qpc(qeff_model, qeff_inputs, qpc_paths, layer_types, generation_len):
+    return _run_vlm_three_qpc(qeff_model, qeff_inputs, qpc_paths, layer_types, generation_len)
 
 
 @pytest.mark.weight_free
@@ -775,6 +1031,161 @@ def test_weight_free_vlm_combined_compile(model_type, model_id, tmp_export_dir):
     assert qaic_tokens.shape == hf_tokens.shape == (1, VLM_GENERATION_LEN)
     assert np.array_equal(qaic_tokens, hf_tokens), (
         f"Weight-free VLM QAIC/HF parity failed for {model_id}: HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
+    )
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_blocking
+@pytest.mark.on_qaic
+@pytest.mark.multimodal
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        pytest.param(
+            model_type,
+            marks=pytest.mark.xdist_group(name=VLM_PREFILL_ONLINE_XDIST_GROUP),
+            id=model_type.replace("_", "-"),
+        )
+        for model_type in VLM_PREFILL_BLOCKING_MODEL_TYPES
+    ],
+)
+def test_weight_free_vlm_prefill_online_hf_qaic_parity(model_type, tmp_export_dir):
+    """Run a blocked language-prefill VLM QPC and compare generated tokens with HF."""
+    model_config = _VLM_MODEL_CONFIGS[model_type]
+    model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
+    checkpoint_dir = tmp_export_dir / f"{model_type}_prefill_online_parity_checkpoint"
+
+    try:
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        hf_model, model_config = _build_vlm_test_checkpoint(
+            model_type,
+            checkpoint_dir,
+            model_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        skip_on_model_fetch_error(exc, model_id)
+
+    image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
+    hf_inputs, _ = _prepare_vlm_test_inputs(processor, hf_model, None, model_config, image_size)
+    _assert_has_image_inputs(hf_inputs, model_type)
+    with torch.inference_mode():
+        hf_output = hf_model.generate(
+            **hf_inputs,
+            min_new_tokens=VLM_PREFILL_BLOCKING_GENERATION_LEN,
+            max_new_tokens=VLM_PREFILL_BLOCKING_GENERATION_LEN,
+            do_sample=False,
+        )
+    hf_tokens = hf_output[0, hf_inputs["input_ids"].shape[1] :].cpu().numpy()
+
+    qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
+        str(checkpoint_dir),
+        kv_offload=True,
+        weight_free=True,
+        dtype=torch.float32,
+    )
+    prefill_seq_len = VLM_PREFILL_SEQ_LEN
+    _, qeff_inputs = _prepare_vlm_test_inputs(
+        processor,
+        hf_model,
+        qeff_model.model,
+        model_config,
+        image_size,
+        prefill_seq_len=prefill_seq_len,
+    )
+    _assert_has_image_inputs(qeff_inputs, model_type)
+    if model_type == "gemma4":
+        prefill_seq_len = int(qeff_inputs["input_ids"].shape[1])
+    qaic_config = dict(WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES["prefill_online"])
+    qaic_config["ctx_len"] = VLM_CTX_LEN
+    if model_type.endswith("moe"):
+        qaic_config["moe_config"] = {"expert_parallel_chunk_size": VLM_MOE_PREFILL_PACKED_CHUNK_SIZE}
+
+    common_compile_kwargs = {
+        "batch_size": 1,
+        "ctx_len": VLM_CTX_LEN,
+        "num_devices": 1,
+        "num_cores": VLM_NUM_CORES,
+        "mxfp6_matmul": False,
+        "use_onnx_subfunctions": True,
+        "offload_pt_weights": False,
+        "split_model_io": True,
+    }
+    common_compile_kwargs.update(
+        _get_vlm_compile_kwargs(
+            qeff_model.model,
+            model_config,
+            image_size,
+            heights=image_size[1],
+            widths=image_size[0],
+            num_frames=1,
+        )
+    )
+    qwen35_language_compile_kwargs = {}
+    if model_type == "qwen3_5_moe":
+        qwen35_language_compile_kwargs = {
+            "full_batch_size": 1,
+            "user_tiled": True,
+            "kv_cache_prefix": "vllmKvCache",
+            "allow_mxint8_mdp_io": True,
+        }
+    language_mxint8_kv_cache = model_type == "qwen3_5_moe"
+    decode_depth_first = model_type != "qwen3_5_moe"
+
+    vision_qpc = qeff_model.compile(
+        compile_dir=str(tmp_export_dir / f"{model_type}_prefill_online_parity_vision"),
+        **common_compile_kwargs,
+        mxint8_kv_cache=False,
+        prefill_seq_len=prefill_seq_len,
+        aic_enable_depth_first=False,
+        skip_lang=True,
+        skip_vision=False,
+    )
+    prefill_qpc = qeff_model.compile(
+        compile_dir=str(tmp_export_dir / f"{model_type}_prefill_online_parity_prefill"),
+        **common_compile_kwargs,
+        **qwen35_language_compile_kwargs,
+        mxint8_kv_cache=language_mxint8_kv_cache,
+        prefill_seq_len=prefill_seq_len,
+        aic_enable_depth_first=False,
+        retain_full_kv=True,
+        prefill_only=True,
+        enable_chunking=True,
+        skip_vision=True,
+        qaic_config=qaic_config,
+    )
+    blocking_config = qeff_model.lang_model.hash_params.get("blocking_kwargs")
+    decode_qpc = qeff_model.compile(
+        compile_dir=str(tmp_export_dir / f"{model_type}_prefill_online_parity_decode"),
+        **common_compile_kwargs,
+        **qwen35_language_compile_kwargs,
+        mxint8_kv_cache=language_mxint8_kv_cache,
+        prefill_seq_len=1,
+        aic_enable_depth_first=decode_depth_first,
+        retain_full_kv=True,
+        prefill_only=False,
+        skip_vision=True,
+    )
+
+    assert vision_qpc.get("vision_qpc_path")
+    assert prefill_qpc.get("lang_prefill_qpc_path")
+    assert decode_qpc.get("lang_decode_qpc_path")
+    assert blocking_config is not None
+    assert blocking_config.mode == BlockingMode.PREFILL_ONLINE
+
+    qaic_tokens = _run_vlm_three_qpc(
+        qeff_model,
+        qeff_inputs,
+        {
+            "vision_qpc_path": vision_qpc["vision_qpc_path"],
+            "lang_prefill_qpc_path": prefill_qpc["lang_prefill_qpc_path"],
+            "lang_decode_qpc_path": decode_qpc["lang_decode_qpc_path"],
+        },
+        _language_layer_types(qeff_model),
+        VLM_PREFILL_BLOCKING_GENERATION_LEN,
+    )[0]
+    assert np.array_equal(hf_tokens[:VLM_PREFILL_BLOCKING_GENERATION_LEN], qaic_tokens), (
+        f"Weight-free prefill_online HF/QAIC parity failed for {model_type}: "
+        f"HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
     )
 
 
