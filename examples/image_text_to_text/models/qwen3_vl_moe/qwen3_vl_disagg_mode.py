@@ -271,7 +271,7 @@ def main():
         prefill_compile_kwargs.update(
             batch_size=1,
             full_batch_size=1,
-            kv_cache_batch_size=7,
+            kv_cache_batch_size=1,
             user_tiled=True,
             qaic_config=prefill_qaic_config,
         )

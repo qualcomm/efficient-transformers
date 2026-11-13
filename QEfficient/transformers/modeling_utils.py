@@ -44,6 +44,17 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4TextModel,
     Gemma4TextRouter,
 )
+from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import (
+    GlmMoeDsaAttention,
+    GlmMoeDsaDecoderLayer,
+    GlmMoeDsaForCausalLM,
+    GlmMoeDsaIndexer,
+    GlmMoeDsaModel,
+    GlmMoeDsaMoE,
+    GlmMoeDsaRMSNorm,
+    GlmMoeDsaRotaryEmbedding,
+    GlmMoeDsaTopkRouter,
+)
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block, GPT2LMHeadModel, GPT2Model
 from transformers.models.gpt_bigcode.modeling_gpt_bigcode import (
     GPTBigCodeAttention,
@@ -132,6 +143,16 @@ from .models.gemma4.modeling_gemma4 import (
     QEffGemma4TextModel,
     QEffGemma4TextRouter,
 )
+from .models.glm_moe_dsa.modeling_glm_moe_dsa import (
+    QEffGlmMoeDsaAttention,
+    QEffGlmMoeDsaDecoderLayer,
+    QEffGlmMoeDsaForCausalLM,
+    QEffGlmMoeDsaIndexer,
+    QEffGlmMoeDsaModel,
+    QEffGlmMoeDsaMoE,
+    QEffGlmMoeDsaRotaryEmbedding,
+    QEffGlmMoeDsaTopkRouter,
+)
 from .models.gpt2.modeling_gpt2 import QEffGPT2Attention, QEffGPT2Block, QEffGPT2LMHeadModel, QEffGPT2Model
 from .models.gpt_bigcode.modeling_gpt_bigcode import (
     QEffGPTBigCodeAttention,
@@ -197,6 +218,7 @@ qeff_supported_architectures = ModelArchitectures(
         GemmaForCausalLM.__name__,
         Gemma2ForCausalLM.__name__,
         Gemma4ForCausalLM.__name__,
+        GlmMoeDsaForCausalLM.__name__,
         MistralForCausalLM.__name__,
         MixtralForCausalLM.__name__,
         Phi3ForCausalLM.__name__,
@@ -215,7 +237,15 @@ qeff_supported_architectures = ModelArchitectures(
 DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH = {"gemma3", "gemma3_text", "gemma4_text", "llama4", "llama4_text"}
 
 # This is for supporting different modelling classes specially written for prefill-only model
-SPECIALIZED_DISAGG_SERVING_MODEL_ARCH = {"gpt_oss", "qwen3_moe", "glm4_moe", "kimi_k2", "kimi_k25", "gemma4"}
+SPECIALIZED_DISAGG_SERVING_MODEL_ARCH = {
+    "gpt_oss",
+    "qwen3_moe",
+    "glm4_moe",
+    "glm_moe_dsa",
+    "kimi_k2",
+    "kimi_k25",
+    "gemma4",
+}
 
 # This is for supporting dynamic prefill sequence length for prefill_only model
 DYNAMIC_PREFILL_SEQ_LEN_SUPPORTED_MODEL_ARCH = {"gemma4"}
@@ -281,6 +311,16 @@ TransformersToQEffModulesDict: Dict[Type[nn.Module], Type[nn.Module]] = {
     Gemma4TextDecoderLayer: QEffGemma4TextDecoderLayer,
     Gemma4TextRouter: QEffGemma4TextRouter,
     Gemma4RMSNorm: QEffGemma4CustomRMSNormAIC,
+    # GLM-MoE-DSA model layers
+    GlmMoeDsaModel: QEffGlmMoeDsaModel,
+    GlmMoeDsaAttention: QEffGlmMoeDsaAttention,
+    GlmMoeDsaForCausalLM: QEffGlmMoeDsaForCausalLM,
+    GlmMoeDsaDecoderLayer: QEffGlmMoeDsaDecoderLayer,
+    GlmMoeDsaRMSNorm: CustomRMSNormAIC,
+    GlmMoeDsaRotaryEmbedding: QEffGlmMoeDsaRotaryEmbedding,
+    GlmMoeDsaIndexer: QEffGlmMoeDsaIndexer,
+    GlmMoeDsaMoE: QEffGlmMoeDsaMoE,
+    GlmMoeDsaTopkRouter: QEffGlmMoeDsaTopkRouter,
     # MPT model layers
     MptAttention: QEffMptAttention,
     MptBlock: QEffMptBlock,

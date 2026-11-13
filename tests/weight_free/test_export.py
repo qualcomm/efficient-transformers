@@ -19,6 +19,10 @@ CPU-only. No QAIC hardware required.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import numpy as np
 import onnx
 import onnxruntime
@@ -28,8 +32,10 @@ from transformers import AutoTokenizer
 
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs, resolve_weight_spec_path
+from QEfficient.exporter.weight_free.export import _build_qeff_quantization_config
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModel, QEFFAutoModelForCausalLM
+from QEfficient.transformers.quantizers.quantizer_compressed_tensors import QEffFP8Config
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
 
@@ -66,6 +72,35 @@ _BLOCKING_GATHER_EXPORT_MODE_CASES = {
     "hkv": {"blocking_mode": "hkv", "head_block_size": 2, "num_kv_blocks": 2},
     "hqkv": {"blocking_mode": "hqkv", "head_block_size": 2, "num_kv_blocks": 2, "num_q_blocks": 2},
 }
+
+
+def test_weight_free_fp8_config_accepts_checkpoint_scale_format():
+    quantization_config = _build_qeff_quantization_config(
+        QEffFP8Config,
+        {
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "quant_method": "fp8",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    )
+
+    assert quantization_config.activation_scheme == "dynamic"
+    assert quantization_config.fmt == "e4m3"
+    assert quantization_config.scale_fmt == "ue8m0"
+    assert quantization_config.weight_block_size == [128, 128]
+
+
+def test_weight_free_checkpoint_home_uses_documented_environment_variable(tmp_path):
+    environment = {**os.environ, "QEFF_CHECKPOINT_HOME": str(tmp_path), "QEFF_WF_HOME": ""}
+    output = subprocess.check_output(
+        [sys.executable, "-c", "from QEfficient.utils.cache import QEFF_CHECKPOINT_HOME; print(QEFF_CHECKPOINT_HOME)"],
+        env=environment,
+        text=True,
+    )
+
+    assert output.splitlines()[0].strip() == str(tmp_path)
 
 
 @pytest.mark.weight_free

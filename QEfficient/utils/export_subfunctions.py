@@ -100,6 +100,40 @@ def _operand_key(value):
     return _symbolic_key(value)
 
 
+def canonical_operand_keys(values, names=None):
+    """Return operand keys that ignore the names of free symbols.
+
+    Layers traced before shared ``Dim`` constraints are solved carry
+    independent symbols (for example one cache length symbol per layer).
+    Symbols are renamed by first appearance across all operands, so two calls
+    match when their operands have the same shapes and the same pattern of
+    shared sizes, which is all a region body can depend on. ``names`` receives
+    the symbol renaming so callers can canonicalize expressions the same way.
+    """
+    names = {} if names is None else names
+
+    def canon(item):
+        if isinstance(item, tuple) and item and item[0] == "sym":
+            expr = item[2]
+            ordered = sorted(expr.free_symbols, key=str)
+            for symbol in ordered:
+                names.setdefault(symbol, sympy.Symbol(f"_c{len(names)}"))
+            return ("sym", expr.xreplace({symbol: names[symbol] for symbol in ordered}))
+        return item
+
+    def canon_key(key):
+        if isinstance(key, tuple) and len(key) == 2 and key[0] == "tensor":
+            return ("tensor", tuple((name, canon_field(item)) for name, item in key[1]))
+        return canon(key)
+
+    def canon_field(item):
+        if isinstance(item, tuple) and not (item and item[0] == "sym"):
+            return tuple(canon(element) for element in item)
+        return canon(item)
+
+    return tuple(canon_key(_operand_key(value)) for value in values)
+
+
 def _is_kept_in_comparison(node):
     """Keep every node except unused scalar and shape operations.
 
@@ -272,3 +306,12 @@ def reuse_exported_subfunctions(exported_program):
     logger.debug("Subfunction reuse: %d region call(s) now share an earlier body.", len(merges))
     exported_program.validate()
     return exported_program
+
+
+def canonical_symbolic_expr(value, names):
+    """Return an int or SymInt as a sympy expression using canonical symbol names."""
+    key = _symbolic_key(value)
+    if isinstance(key, tuple) and key and key[0] == "sym":
+        expr = key[2]
+        return expr.xreplace({symbol: names[symbol] for symbol in expr.free_symbols if symbol in names})
+    return key
