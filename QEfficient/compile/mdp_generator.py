@@ -8,6 +8,7 @@
 
 import bisect
 import logging
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -90,7 +91,12 @@ def _find_mdp_partition_order_violations(onnx_path: str, mdp_json: Dict[str, Any
     return violations
 
 
-def _drop_alias_prone_top_level_nodes(onnx_path: str, mdp_json: Dict[str, Any], dropped_nodes: Set[str]) -> int:
+def _drop_alias_prone_top_level_nodes(
+    onnx_path: str,
+    mdp_json: Dict[str, Any],
+    dropped_nodes: Set[str],
+    protected_nodes: Set[str],
+) -> int:
     """Drop alias-prone top-level nodes that conflict with /language_model siblings.
 
     In some subfunction compile flows, compiler IR may materialize dotted aliases
@@ -116,7 +122,7 @@ def _drop_alias_prone_top_level_nodes(onnx_path: str, mdp_json: Dict[str, Any], 
     for node_name in name_to_node:
         if not node_name.startswith("/") or node_name.startswith("/language_model/"):
             continue
-        if node_name in dropped_nodes:
+        if node_name in dropped_nodes or node_name in protected_nodes:
             continue
         if _is_decoder_layer_callsite(node_name):
             continue
@@ -157,10 +163,12 @@ def precheck_and_autofix_mdp_partition_order(
     onnx_path: str,
     mdp_json: Dict[str, Any],
     max_rounds: int = 8,
+    protected_nodes: Optional[Set[str]] = None,
 ) -> int:
     """Best-effort pre-check: scan all violation pairs and auto-fix before compile."""
     removed_total = 0
     dropped_nodes: Set[str] = set()
+    protected_nodes = protected_nodes or set()
     for _ in range(max_rounds):
         violations = _find_mdp_partition_order_violations(onnx_path=onnx_path, mdp_json=mdp_json)
         if not violations:
@@ -168,6 +176,7 @@ def precheck_and_autofix_mdp_partition_order(
                 onnx_path=onnx_path,
                 mdp_json=mdp_json,
                 dropped_nodes=dropped_nodes,
+                protected_nodes=protected_nodes,
             )
             if alias_removed <= 0:
                 break
@@ -192,7 +201,7 @@ def precheck_and_autofix_mdp_partition_order(
         trigger_consumer, trigger_producer = violations[0]
         for consumer_node, producer_node in violations:
             for candidate in (consumer_node, producer_node):
-                if not candidate or candidate in dropped_nodes:
+                if not candidate or candidate in dropped_nodes or candidate in protected_nodes:
                     continue
                 if _is_decoder_layer_callsite(candidate):
                     continue
@@ -283,6 +292,19 @@ def _get_layer_num(node_name: str) -> Optional[int]:
             suffix = part[len("layer_") :]
             if suffix.isdigit():
                 return int(suffix)
+    return None
+
+
+def _get_layer_num_from_inputs(node_inputs: List[str]) -> Optional[int]:
+    """Return a layer index from model parameter inputs on generic callsites.
+
+    Dynamo names repeated decoder-layer callsites generically, but their
+    weight inputs retain paths such as ``model.layers.3.self_attn.q_proj``.
+    """
+    for input_name in node_inputs:
+        match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", input_name)
+        if match:
+            return int(match.group(1))
     return None
 
 
@@ -499,6 +521,10 @@ def generate_disagg_mdp_partition_config(
             continue
 
         layer_num = _get_layer_num(node.name)
+        if layer_num is None:
+            # GPT-OSS/Dynamo repeated-subgraph callsites have generic names,
+            # while their model-layer parameter inputs retain ``layers.N``.
+            layer_num = _get_layer_num_from_inputs(list(node.input))
         if layer_num is not None:
             seen_first_layer = True
             partition_idx = bisect.bisect_right(partition_bounds, layer_num)
@@ -543,6 +569,208 @@ def generate_disagg_mdp_partition_config(
     }
 
 
+def _create_equal_compiler_pp_dump(
+    compiler_dump: Dict[str, Any],
+    num_partitions: int,
+    output_path: Path,
+    mdp_layout: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Create an equally split compiler dump in the final MDP layout."""
+    compiler_partitions = compiler_dump.get("partitions", [])
+    ordered_nodes = [
+        node_name for partition in compiler_partitions for node_name in partition.get("nodeList", []) if node_name
+    ]
+    if not ordered_nodes:
+        raise ValueError("Compiler dump contains no nodes")
+    if num_partitions <= 0:
+        raise ValueError(f"Invalid target partition count: {num_partitions}")
+    if num_partitions > len(ordered_nodes):
+        raise ValueError(f"Cannot split {len(ordered_nodes)} compiler nodes into {num_partitions} non-empty partitions")
+
+    base, remainder = divmod(len(ordered_nodes), num_partitions)
+    equal_partitions = []
+    start = 0
+    for partition_idx in range(num_partitions):
+        size = base + (1 if partition_idx < remainder else 0)
+        partition = {
+            "name": f"Partition{partition_idx}",
+            "nodeList": ordered_nodes[start : start + size],
+        }
+        if mdp_layout is not None:
+            layout_partitions = mdp_layout.get("partitions", [])
+            if partition_idx < len(layout_partitions):
+                layout_partition = layout_partitions[partition_idx]
+                if "devices" in layout_partition:
+                    partition["devices"] = layout_partition["devices"]
+        equal_partitions.append(partition)
+        start += size
+
+    equal_dump = dict(compiler_dump)
+    if mdp_layout is not None and "connections" in mdp_layout:
+        equal_dump["connections"] = mdp_layout["connections"]
+    equal_dump["partitions"] = equal_partitions
+    create_json(str(output_path), equal_dump)
+    logger.warning(
+        "Compiler dump has %d partitions; wrote equally split compiler dump to %s with %d partitions and sizes %s",
+        len(compiler_partitions),
+        output_path,
+        num_partitions,
+        [len(partition["nodeList"]) for partition in equal_partitions],
+    )
+    return equal_dump
+
+
+def _repair_scoped_alias_partitioning(
+    onnx_path: str,
+    mdp_json: Dict[str, Any],
+    compiler_dump: Dict[str, Any],
+    compiler_dump_path: Optional[str] = None,
+) -> int:
+    """Align compiler-visible top-level nodes with the compiler dump partition.
+
+    If the compiler dump was generated with a different number of partitions,
+    first create ``tmp_compiler_pp_updated.json`` by flattening its node lists in
+    compiler order and splitting them evenly across the final MDP partitions.
+    The equalized dump then goes through the same repair path as a dump whose
+    partition count already matches the final MDP.
+    """
+    compiler_partitions = compiler_dump.get("partitions", [])
+    mdp_partitions = mdp_json.get("partitions", [])
+    if len(compiler_partitions) != len(mdp_partitions):
+        output_path = (
+            Path(compiler_dump_path).with_name("tmp_compiler_pp_updated.json")
+            if compiler_dump_path
+            else Path("tmp_compiler_pp_updated.json")
+        )
+        compiler_dump = _create_equal_compiler_pp_dump(
+            compiler_dump=compiler_dump,
+            num_partitions=len(mdp_partitions),
+            output_path=output_path,
+            mdp_layout=mdp_json,
+        )
+        compiler_partitions = compiler_dump["partitions"]
+
+    model = onnx.load(onnx_path, load_external_data=False)
+    compiler_partition, compiler_position = {}, {}
+    for partition_idx, partition in enumerate(compiler_partitions):
+        for node_pos, node_name in enumerate(partition.get("nodeList", [])):
+            if node_name:
+                compiler_partition.setdefault(node_name, partition_idx)
+                compiler_position.setdefault(node_name, (partition_idx, node_pos))
+    current_partition = {}
+    for partition_idx, partition in enumerate(mdp_partitions):
+        for node_name in partition.get("nodeList", []):
+            if node_name:
+                current_partition[node_name] = partition_idx
+    node_by_name = {node.name: node for node in model.graph.node if node.name}
+    producer_by_value = {}
+    consumers_by_value = {}
+    for node in model.graph.node:
+        if not node.name:
+            continue
+        for output_name in node.output:
+            if output_name:
+                producer_by_value[output_name] = node.name
+        for input_name in node.input:
+            if input_name:
+                consumers_by_value.setdefault(input_name, []).append(node.name)
+
+    def retained_producers(node_name: str) -> Set[str]:
+        """Find retained producers through ONNX nodes omitted from the MDP."""
+        retained: Set[str] = set()
+        visited_values: Set[str] = set()
+
+        def visit_value(value_name: str) -> None:
+            if not value_name or value_name in visited_values:
+                return
+            visited_values.add(value_name)
+            producer_name = producer_by_value.get(value_name)
+            if not producer_name:
+                return
+            if producer_name in current_partition:
+                retained.add(producer_name)
+                return
+            producer_node = node_by_name.get(producer_name)
+            if producer_node is not None:
+                for input_name in producer_node.input:
+                    visit_value(input_name)
+
+        node = node_by_name.get(node_name)
+        if node is not None:
+            for input_name in node.input:
+                visit_value(input_name)
+        return retained
+
+    def retained_consumers(node_name: str) -> Set[str]:
+        """Find retained consumers through ONNX nodes omitted from the MDP."""
+        retained: Set[str] = set()
+        visited_values: Set[str] = set()
+
+        def visit_value(value_name: str) -> None:
+            if not value_name or value_name in visited_values:
+                return
+            visited_values.add(value_name)
+            for consumer_name in consumers_by_value.get(value_name, []):
+                if consumer_name in current_partition:
+                    retained.add(consumer_name)
+                    continue
+                consumer_node = node_by_name.get(consumer_name)
+                if consumer_node is not None:
+                    for output_name in consumer_node.output:
+                        visit_value(output_name)
+
+        node = node_by_name.get(node_name)
+        if node is not None:
+            for output_name in node.output:
+                visit_value(output_name)
+        return retained
+
+    repairs = []
+    for node_name, source_idx in current_partition.items():
+        if not node_name.startswith("/") or node_name.startswith("/language_model/"):
+            continue
+        target_idx = compiler_partition.get(node_name)
+        if target_idx is None or target_idx == source_idx:
+            continue
+        node = node_by_name.get(node_name)
+        if node is not None:
+            producer_partitions = {current_partition[producer_name] for producer_name in retained_producers(node_name)}
+            if any(producer_idx > target_idx for producer_idx in producer_partitions):
+                logger.warning(
+                    "Skipping compiler partition repair for %r: target Partition%d would "
+                    "precede an existing producer partition",
+                    node_name,
+                    target_idx,
+                )
+                continue
+            consumer_partitions = {current_partition[consumer_name] for consumer_name in retained_consumers(node_name)}
+            if any(consumer_idx < target_idx for consumer_idx in consumer_partitions):
+                logger.warning(
+                    "Skipping compiler partition repair for %r: target Partition%d would follow "
+                    "an existing consumer partition",
+                    node_name,
+                    target_idx,
+                )
+                continue
+        repairs.append((node_name, source_idx, target_idx, compiler_position[node_name]))
+    for node_name, source_idx, target_idx, dump_pos in sorted(repairs, key=lambda item: item[3]):
+        mdp_json["partitions"][source_idx]["nodeList"].remove(node_name)
+        target_nodes = mdp_json["partitions"][target_idx]["nodeList"]
+        insert_at = len(target_nodes)
+        for idx, existing_name in enumerate(target_nodes):
+            if compiler_position.get(existing_name, (10**9, 10**9)) > dump_pos:
+                insert_at = idx
+                break
+        target_nodes.insert(insert_at, node_name)
+        logger.warning(
+            "MDP repaired compiler-visible node %r: moved from Partition%d to Partition%d",
+            node_name,
+            source_idx,
+            target_idx,
+        )
+    return len(repairs)
+
+
 def generate_disagg_mdp_intersection_config(
     onnx_path: str,
     compiler_dump_path: str,
@@ -558,7 +786,9 @@ def generate_disagg_mdp_intersection_config(
     QEff MDP, but the QEff MDP also contains nodes the compiler optimises away
     (constant-folded, etc.).  The intersection keeps only nodes that survive
     into the compiler IR, while preserving the **QEff MDP node order and
-    partition assignment** as the authoritative source of truth.
+    partition assignment** as the authoritative source of truth, except for
+    scoped aliases whose partition is aligned with the compiler dump when the
+    compiler materializes only the unscoped alias.
 
     Algorithm
     ---------
@@ -569,12 +799,16 @@ def generate_disagg_mdp_intersection_config(
        names the compiler will actually process.
     3. For each partition in the QEff MDP, retain only nodes whose names appear
        in the compiler dump set, in the original QEff order.
+    4. For scoped aliases with a compiler-only unscoped name, move the alias to
+       the compiler dump partition while preserving the compiler-relative order
+       needed by the compiler's partition validator.
 
     Why this is better than re-assigning compiler-dump nodes by heuristic:
     - Node order follows the ONNX topsort (compiler's SplitPlanMerge requires
       this); the compiler dump order is the compiler's internal IR order which
       may differ after constant-folding and other transforms.
-    - Partition boundaries are the same as the onnx strategy — no divergence.
+    - Partition boundaries are the same as the onnx strategy, except for the
+      narrow scoped-alias repair described above.
     - Every retained node is an exact-match hit in ``doManualPartitioning()``.
     - Output JSON is compact (~1-2 MB) because constant-folded nodes are pruned.
 
@@ -646,6 +880,18 @@ def generate_disagg_mdp_intersection_config(
             }
         )
 
+    mdp_json = {
+        "connections": qeff_mdp["connections"],
+        "partitions": partition_objs,
+    }
+
+    _repair_scoped_alias_partitioning(
+        onnx_path=onnx_path,
+        mdp_json=mdp_json,
+        compiler_dump=dump,
+        compiler_dump_path=str(dump_path),
+    )
+
     logger.info(
         f"Intersection: {total_kept} nodes kept, {total_dropped} dropped "
         f"({total_dropped * 100 // max(qeff_total, 1)}% pruned by compiler)"
@@ -658,10 +904,7 @@ def generate_disagg_mdp_intersection_config(
             f"(compiler may have renamed them). Examples: {list(in_dump_not_qeff)[:5]}"
         )
 
-    return {
-        "connections": qeff_mdp["connections"],
-        "partitions": partition_objs,
-    }
+    return mdp_json
 
 
 def generate_disagg_mdp_config(
@@ -723,10 +966,18 @@ def generate_disagg_mdp_config(
             num_cores=num_cores,
         )
 
+    # Every intersection node was observed in the compiler dump and must remain assigned.
+    protected_nodes = (
+        {name for partition in mdp_ts_json["partitions"] for name in partition["nodeList"]}
+        if mdp_strategy is MdpStrategy.INTERSECTION
+        else set()
+    )
+
     # Best-effort pre-check for producer->consumer ordering in nodeList before compile.
     precheck_removed = precheck_and_autofix_mdp_partition_order(
         onnx_path=str(onnx_path),
         mdp_json=mdp_ts_json,
+        protected_nodes=protected_nodes,
     )
     if precheck_removed:
         logger.warning(
