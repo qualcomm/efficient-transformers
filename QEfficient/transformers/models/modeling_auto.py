@@ -2230,6 +2230,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         skip_vision: bool | None = False,
         skip_lang: bool | None = False,
         use_onnx_subfunctions: bool = False,
+        dynamo: bool = False,
         prefill_only=None,
         offload_pt_weights: bool | None = None,
         enable_chunking=False,
@@ -2282,6 +2283,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             If True, skips compilation of the language decoder. Default is False.
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
+        dynamo : bool, optional
+            Use Dynamo for PyTorch-to-ONNX export. Defaults to False.
         **compiler_options : dict
             Additional compiler options for QAIC or QNN compilers.
             Use ``mdp_num_partitions`` to select the number of pipeline-parallel
@@ -2493,6 +2496,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             with export_from_compile():
                 self.export(
                     use_onnx_subfunctions=use_onnx_subfunctions,
+                    dynamo=dynamo,
                     skip_vision=skip_vision,
                     skip_lang=skip_lang,
                     prefill_only=prefill_only,
