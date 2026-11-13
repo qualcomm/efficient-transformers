@@ -8,6 +8,7 @@
 import copy
 import json
 import os
+from types import SimpleNamespace
 from typing import List, Optional
 
 import pytest
@@ -34,7 +35,7 @@ from QEfficient.utils.test_utils import (
     set_num_layers_vlm,
 )
 from tests.two_phase import model_export_compile_lock, resolve_two_phase_cleanup
-from tests.utils.image_utils import load_test_image
+from tests.utils.image_utils import DEFAULT_TEST_IMAGE_SIZE, load_test_image
 from tests.utils.load_kimi_utils import (
     get_kimi_k25_test_config,
     is_kimi_k25,
@@ -61,6 +62,50 @@ test_mm_moe_models = [model["model_name"] for model in multimodal_models if "moe
 test_mm_blocking_models = [model["model_name"] for model in multimodal_models if model.get("supports_blocking")]
 
 NEW_GENERATION_TOKENS = 10
+
+
+def test_load_test_image_url_fallback_uses_default_size():
+    class _UnavailableImageSession:
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("image host unavailable")
+
+    image = load_test_image("https://example.invalid/test-image.png", session=_UnavailableImageSession())
+
+    assert image.size == DEFAULT_TEST_IMAGE_SIZE
+
+
+@pytest.mark.parametrize(
+    ("wrapper_cls", "nested_model"),
+    [
+        (
+            "QEFFLlavaEncoderWrapper",
+            SimpleNamespace(vision_tower=torch.nn.Identity()),
+        ),
+        ("QEffLlama4EncoderWrapper", None),
+        (
+            "QEFFMistral3EncoderWrapper",
+            SimpleNamespace(vision_tower=torch.nn.Identity()),
+        ),
+    ],
+)
+def test_vlm_encoder_wrappers_expose_model_config(wrapper_cls, nested_model):
+    from QEfficient.transformers.models.llama4.modeling_llama4 import QEffLlama4EncoderWrapper
+    from QEfficient.transformers.models.llava.modeling_llava import QEFFLlavaEncoderWrapper
+    from QEfficient.transformers.models.mistral3.modeling_mistral3 import QEFFMistral3EncoderWrapper
+
+    config = SimpleNamespace(model_type="test_vlm")
+    model = torch.nn.Module()
+    model.config = config
+    if nested_model is not None:
+        model.model = nested_model
+
+    wrappers = {
+        "QEFFLlavaEncoderWrapper": QEFFLlavaEncoderWrapper,
+        "QEffLlama4EncoderWrapper": QEffLlama4EncoderWrapper,
+        "QEFFMistral3EncoderWrapper": QEFFMistral3EncoderWrapper,
+    }
+
+    assert wrappers[wrapper_cls](model).config is config
 
 
 def _assert_runtime_token_parity(reference_tokens, qpc_tokens, parity_issue=None):
@@ -223,6 +268,8 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             qaic_config = qaic_config or {}
             qaic_config["replicate_kv_heads"] = True
         model_hf = load_vlm_model_from_config(config)
+        if compile_only and torch_dtype == torch.bfloat16:
+            model_hf = model_hf.to(dtype=torch_dtype)
         qeff_model = QEFFAutoModelForImageTextToText(
             copy.deepcopy(model_hf),
             kv_offload=kv_offload,

@@ -213,6 +213,7 @@ class QEFFMistral3EncoderWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
+        self.config = model.config
         self.model.model.vision_model = self.model.model.vision_tower
 
     def get_submodules_for_export(self) -> Type[nn.Module]:
