@@ -155,6 +155,17 @@ def main():
         help="Forward -time-passes to qaic-compile.",
     )
     parser.add_argument(
+        "--user-tiled",
+        action="store_true",
+        help="Forward -user-tiled to qaic-compile for explicitly blocked models.",
+    )
+    parser.add_argument(
+        "--stats-level",
+        type=int,
+        default=None,
+        help="Forward -stats-level to qaic-compile for profiling builds.",
+    )
+    parser.add_argument(
         "--profile-export",
         choices=("off", "stages", "cprofile"),
         default="off",
@@ -370,6 +381,10 @@ def main():
         compiler_options["compile_threads"] = args.compile_threads
     if args.time_passes:
         compiler_options["time_passes"] = True
+    if args.user_tiled:
+        compiler_options["user_tiled"] = True
+    if args.stats_level is not None:
+        compiler_options["stats_level"] = args.stats_level
     if args.export_only:
         compiler_options["export_only"] = True
 
@@ -378,6 +393,7 @@ def main():
         prefill_only=True,
         enable_chunking=True,
         mdp_num_partitions=args.mdp_num_partitions,
+        mdp_strategy="intersection",
         batch_size=execution_batch_size,
         ctx_len=args.ctx_len,
         num_cores=args.num_cores,

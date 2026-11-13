@@ -607,7 +607,7 @@ def _build_synthetic_gpt2_onnx(num_layers: int, out_path: Path) -> None:
 
 
 def _build_synthetic_qwen_mdp_onnx(out_path: Path) -> None:
-    """Write a small Qwen-shaped graph with compiler-visible external values."""
+    """Write a Qwen-shaped graph with compiler-visible external graph values."""
     initializers = [
         helper.make_tensor("model.layers.0.linear_attn._ones_lower", TensorProto.FLOAT, [1], [1.0]),
         helper.make_tensor("model.layers.1.linear_attn._ones_lower", TensorProto.FLOAT, [1], [1.0]),
@@ -618,28 +618,19 @@ def _build_synthetic_qwen_mdp_onnx(out_path: Path) -> None:
         helper.make_tensor_value_info("recurrent_state.1", TensorProto.FLOAT, [1]),
         # Ordinary external parameters are not compiler partition nodes.
         helper.make_tensor_value_info("model.layers.0.self_attn.q_proj.weight", TensorProto.FLOAT, [1, 1]),
-        # Weight-free MoE expert tensors are compiler-visible graph values and
-        # must follow their decoder layer's MDP partition.
-        helper.make_tensor_value_info("model.layers.0.mlp.experts.moe_weights.gate", TensorProto.FLOAT, [1, 1]),
-        helper.make_tensor_value_info("model.layers.0.mlp.experts.moe_weights.up", TensorProto.FLOAT, [1, 1]),
-        helper.make_tensor_value_info("model.layers.0.mlp.experts.moe_weights.down", TensorProto.FLOAT, [1, 1]),
-        helper.make_tensor_value_info("model.layers.1.mlp.experts.moe_weights.gate", TensorProto.FLOAT, [1, 1]),
-        helper.make_tensor_value_info("model.layers.1.mlp.experts.moe_weights.up", TensorProto.FLOAT, [1, 1]),
-        helper.make_tensor_value_info("model.layers.1.mlp.experts.moe_weights.down", TensorProto.FLOAT, [1, 1]),
+        # Weight-free MoE expert tensors are compiler-visible graph values.
+        helper.make_tensor_value_info("model.layers.0.mlp.moe_weights.gate", TensorProto.FLOAT, [1, 1]),
+        helper.make_tensor_value_info("model.layers.0.mlp.moe_weights.up", TensorProto.FLOAT, [1, 1]),
+        helper.make_tensor_value_info("model.layers.0.mlp.moe_weights.down", TensorProto.FLOAT, [1, 1]),
+        helper.make_tensor_value_info("model.layers.1.mlp.moe_weights.gate", TensorProto.FLOAT, [1, 1]),
+        helper.make_tensor_value_info("model.layers.1.mlp.moe_weights.up", TensorProto.FLOAT, [1, 1]),
+        helper.make_tensor_value_info("model.layers.1.mlp.moe_weights.down", TensorProto.FLOAT, [1, 1]),
     ]
     nodes = [
         helper.make_node(
-            "Identity",
-            inputs=["hidden_states"],
-            outputs=["layer_0_output"],
-            name="/model/layers.0/decoder",
+            "Identity", inputs=["hidden_states"], outputs=["layer_0_output"], name="/model/layers.0/decoder"
         ),
-        helper.make_node(
-            "Identity",
-            inputs=["layer_0_output"],
-            outputs=["logits"],
-            name="/model/layers.1/decoder",
-        ),
+        helper.make_node("Identity", inputs=["layer_0_output"], outputs=["logits"], name="/model/layers.1/decoder"),
     ]
     graph = helper.make_graph(
         nodes,
@@ -768,8 +759,8 @@ class TestMdpLayerPartitionBounds:
 class TestMdpExternalGraphValues:
     """Cover compiler-visible graph values omitted by NodeProto-only enumeration."""
 
-    def test_intersection_keeps_layer_scoped_initializers_and_retained_states(self, tmp_path, caplog):
-        """Qwen compiler-dump values remain in their decoder-layer partition."""
+    def test_intersection_keeps_layer_scoped_external_values(self, tmp_path, caplog):
+        """Retained state, MoE inputs, and initializers follow their decoder-layer partition."""
         onnx_path = tmp_path / "qwen_mdp.onnx"
         compiler_dump_path = tmp_path / "compiler_dump.json"
         _build_synthetic_qwen_mdp_onnx(onnx_path)
@@ -781,15 +772,15 @@ class TestMdpExternalGraphValues:
                             "nodeList": [
                                 "recurrent_state.0",
                                 "model.layers.0.linear_attn._ones_lower",
-                                "model.layers.0.mlp.experts.moe_weights.gate",
-                                "model.layers.0.mlp.experts.moe_weights.up",
-                                "model.layers.0.mlp.experts.moe_weights.down",
+                                "model.layers.0.mlp.moe_weights.gate",
+                                "model.layers.0.mlp.moe_weights.up",
+                                "model.layers.0.mlp.moe_weights.down",
                                 "/model/layers.0/decoder",
                                 "recurrent_state.1",
                                 "model.layers.1.linear_attn._ones_lower",
-                                "model.layers.1.mlp.experts.moe_weights.gate",
-                                "model.layers.1.mlp.experts.moe_weights.up",
-                                "model.layers.1.mlp.experts.moe_weights.down",
+                                "model.layers.1.mlp.moe_weights.gate",
+                                "model.layers.1.mlp.moe_weights.up",
+                                "model.layers.1.mlp.moe_weights.down",
                                 "/model/layers.1/decoder",
                                 "compiler_generated_only",
                             ]
@@ -811,23 +802,22 @@ class TestMdpExternalGraphValues:
 
         assert mdp["partitions"][0]["nodeList"] == [
             "recurrent_state.0",
-            "model.layers.0.mlp.experts.moe_weights.gate",
-            "model.layers.0.mlp.experts.moe_weights.up",
-            "model.layers.0.mlp.experts.moe_weights.down",
+            "model.layers.0.mlp.moe_weights.gate",
+            "model.layers.0.mlp.moe_weights.up",
+            "model.layers.0.mlp.moe_weights.down",
             "model.layers.0.linear_attn._ones_lower",
             "/model/layers.0/decoder",
         ]
         assert mdp["partitions"][1]["nodeList"] == [
             "recurrent_state.1",
-            "model.layers.1.mlp.experts.moe_weights.gate",
-            "model.layers.1.mlp.experts.moe_weights.up",
-            "model.layers.1.mlp.experts.moe_weights.down",
+            "model.layers.1.mlp.moe_weights.gate",
+            "model.layers.1.mlp.moe_weights.up",
+            "model.layers.1.mlp.moe_weights.down",
             "model.layers.1.linear_attn._ones_lower",
             "/model/layers.1/decoder",
         ]
-        assert "model.layers.0.self_attn.q_proj.weight" not in {
-            name for partition in mdp["partitions"] for name in partition["nodeList"]
-        }
+        all_partition_nodes = {name for partition in mdp["partitions"] for name in partition["nodeList"]}
+        assert "model.layers.0.self_attn.q_proj.weight" not in all_partition_nodes
         assert "1 compiler-dump nodes not found in QEff MDP" in caplog.text
         assert "compiler_generated_only" in caplog.text
 
