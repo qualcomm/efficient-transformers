@@ -664,14 +664,14 @@ def test_deepseek_v4_folded_decode_4_device_qeff_pytorch_vs_aic(tmp_path):
 @pytest.mark.nightly
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
-def test_glm53_decode_16_device_qeff_pytorch_vs_aic(tmp_path):
+def test_glm53_decode_4_device_qeff_pytorch_vs_aic(tmp_path):
     """Compare a tiny four-layer GLM-5.3 DSA decode between QEff PyTorch and AIC."""
     from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
     from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaForCausalLM
 
     ctx_len = 4096
-    batch_size = 16
-    num_devices = 16
+    batch_size = 4
+    num_devices = 4
     num_cores = 16
     qaic_config = {
         "indexer_dp": num_devices,
