@@ -263,6 +263,7 @@ def _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size):
         generation_len=args.generation_len,
         batch_size=batch_size,
         draft_selector=selector,
+        hybrid=tlm_config.model_type in {"qwen3_5", "qwen3_5_moe"},
     )
     return metrics, {"vision_encode_time_s": None}, tokenizer
 
