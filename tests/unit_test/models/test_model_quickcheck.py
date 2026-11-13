@@ -220,66 +220,110 @@ def _ort_session(onnx_path: Path) -> ort.InferenceSession:
     options.inter_op_num_threads = 1
 
     onnx_model = onnx.load(onnx_path, load_external_data=True)
-    int32_max = torch.iinfo(torch.int32).max
     graph_was_patched = False
-    added_initializers = {}
-
-    def _zero_int32_max_tensor_attr(attr) -> bool:
-        if attr.type != onnx.AttributeProto.TENSOR:
-            return False
-        np_tensor = onnx.numpy_helper.to_array(attr.t, os.path.dirname(onnx_path))
-        if np.issubdtype(np_tensor.dtype, np.integer) and np.any(np_tensor == int32_max):
-            patched_tensor = np.where(np_tensor == int32_max, np.array(0, dtype=np_tensor.dtype), np_tensor)
-            attr.t.CopyFrom(onnx.numpy_helper.from_array(patched_tensor.astype(np_tensor.dtype, copy=False)))
-            return True
-        return False
-
-    def _patch_constant_nodes(nodes, *, allow_initializers: bool = False) -> bool:
-        patched = False
-        for node in nodes:
-            if node.op_type in {"Constant", "ConstantOfShape"}:
-                for attr in node.attribute:
-                    if _zero_int32_max_tensor_attr(attr):
-                        patched = True
-                        if allow_initializers and node.op_type == "Constant":
-                            np_tensor = onnx.numpy_helper.to_array(attr.t, os.path.dirname(onnx_path))
-                            added_initializers[node.output[0]] = ort.OrtValue.ortvalue_from_numpy(np_tensor)
-        return patched
 
     def _patch_ort_index_inputs(nodes) -> bool:
         patched = False
-        for index, node in list(enumerate(nodes)):
+        patched_nodes = []
+        for node in nodes:
             if node.op_type not in {"GatherND", "ScatterND"} or len(node.input) < 2:
+                patched_nodes.append(node)
                 continue
-            indices_name = node.input[1]
-            cast_output = f"{indices_name}__ort_int64"
-            cast_node = onnx.helper.make_node(
-                "Cast",
-                inputs=[indices_name],
-                outputs=[cast_output],
-                name=f"{node.name or node.op_type}_IndicesCastToInt64",
-                to=onnx.TensorProto.INT64,
-            )
-            nodes.insert(index, cast_node)
-            node.input[1] = cast_output
+            prefix = f"{node.output[0]}__ort"
+
+            def add(op_type, inputs, suffix, *, prefix=prefix, **attrs):
+                name = f"{prefix}_{suffix}"
+                patched_nodes.append(onnx.helper.make_node(op_type, inputs, [name], name=name, **attrs))
+                return name
+
+            def constant(value, suffix):
+                return add("Constant", [], suffix, value=onnx.numpy_helper.from_array(np.array(value, dtype=np.int64)))
+
+            indices = add("Cast", [node.input[1]], "indices", to=onnx.TensorProto.INT64)
+            invalid_index = constant(torch.iinfo(torch.int32).max, "invalid_index")
+            zero = constant(0, "zero")
+            if node.op_type == "GatherND":
+                invalid = add("Equal", [indices, invalid_index], "invalid")
+                node.input[1] = add("Where", [invalid, zero, indices], "safe_indices")
+            else:
+                # QAIC skips INT32_MAX writes. Mapping them to zero would corrupt
+                # retained state; remove those index/update pairs only for ORT.
+                axis_zero = constant([0], "axis_zero")
+                axis_one = constant([1], "axis_one")
+                minus_one = constant([-1], "minus_one")
+                indices_shape = add("Shape", [indices], "indices_shape")
+                depth = add("Gather", [indices_shape, minus_one], "depth", axis=0)
+                flat_shape = add("Concat", [minus_one, depth], "flat_shape", axis=0)
+                flat_indices = add("Reshape", [indices, flat_shape], "flat_indices")
+                invalid = add("Equal", [flat_indices, invalid_index], "invalid")
+                invalid_int = add("Cast", [invalid], "invalid_int", to=onnx.TensorProto.INT64)
+                invalid_count = add("ReduceSum", [invalid_int, axis_one], "invalid_count", keepdims=0)
+                valid = add("Equal", [invalid_count, zero], "valid")
+                rank = add("Size", [indices_shape], "rank")
+                prefix_rank = add("Sub", [rank, constant(1, "one")], "prefix_rank")
+                tail_start = add("Unsqueeze", [prefix_rank, axis_zero], "tail_start")
+                updates_shape = add("Shape", [node.input[2]], "updates_shape")
+                tail_shape = add("Slice", [updates_shape, tail_start, constant([2**31 - 1], "end")], "tail_shape")
+                flat_updates_shape = add("Concat", [minus_one, tail_shape], "flat_updates_shape", axis=0)
+                flat_updates = add("Reshape", [node.input[2], flat_updates_shape], "flat_updates")
+                node.input[1] = add("Compress", [flat_indices, valid], "valid_indices", axis=0)
+                node.input[2] = add("Compress", [flat_updates, valid], "valid_updates", axis=0)
+            patched_nodes.append(node)
             patched = True
+        if patched:
+            del nodes[:]
+            nodes.extend(patched_nodes)
         return patched
 
-    graph_was_patched |= _patch_constant_nodes(onnx_model.graph.node, allow_initializers=True)
     graph_was_patched |= _patch_ort_index_inputs(onnx_model.graph.node)
     for function_proto in onnx_model.functions:
-        graph_was_patched |= _patch_constant_nodes(function_proto.node)
         graph_was_patched |= _patch_ort_index_inputs(function_proto.node)
 
-    for name, value in added_initializers.items():
-        options.add_initializer(name, value)
     if graph_was_patched:
         session = ort.InferenceSession(onnx_model.SerializeToString(), sess_options=options)
     else:
         session = ort.InferenceSession(str(onnx_path), sess_options=options)
-    # SessionOptions does not own the OrtValue buffers registered above.
-    session._qeff_added_initializers = added_initializers
     return session
+
+
+@pytest.mark.parametrize("nested_indices", [False, True])
+@pytest.mark.parametrize("scalar_updates", [False, True])
+@pytest.mark.parametrize("all_invalid", [False, True])
+def test_ort_session_preserves_skipped_scatter_writes(tmp_path, nested_indices, scalar_updates, all_invalid):
+    data = np.arange(4 if scalar_updates else 8, dtype=np.float32).reshape((1, 4) if scalar_updates else (1, 4, 2))
+    invalid_index = torch.iinfo(torch.int32).max
+    indices = np.array([[0, 1], [0, invalid_index], [0, 3]], dtype=np.int32)
+    updates = np.full((3,) if scalar_updates else (3, 2), 99, dtype=np.float32)
+    if all_invalid:
+        indices[:, 1] = invalid_index
+    if nested_indices:
+        indices, updates = indices[None], updates[None]
+    gather_indices = np.array([[0, invalid_index], [0, 1]], dtype=np.int32)
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node("ScatterND", ["data", "indices", "updates"], ["retained"]),
+            onnx.helper.make_node("GatherND", ["retained", "gather_indices"], ["gathered"]),
+        ],
+        "skipped_scatter_writes",
+        [onnx.helper.make_tensor_value_info("data", onnx.TensorProto.FLOAT, list(data.shape))],
+        [
+            onnx.helper.make_tensor_value_info("retained", onnx.TensorProto.FLOAT, list(data.shape)),
+            onnx.helper.make_tensor_value_info("gathered", onnx.TensorProto.FLOAT, [2, *data.shape[2:]]),
+        ],
+        [
+            onnx.numpy_helper.from_array(value, name)
+            for name, value in (("indices", indices), ("updates", updates), ("gather_indices", gather_indices))
+        ],
+    )
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 17)], ir_version=9)
+    path = tmp_path / "skipped-scatter.onnx"
+    onnx.save(model, path)
+    retained, gathered = _ort_session(path).run(None, {"data": data})
+    expected = data.copy()
+    if not all_invalid:
+        expected[0, [1, 3]] = 99
+    np.testing.assert_array_equal(retained, expected)
+    np.testing.assert_array_equal(gathered, expected[0, [0, 1]])
 
 
 def _ort_session_zeroing_int32_max_constants(onnx_path: Path):
@@ -2145,6 +2189,203 @@ def test_proxy_subfunction_validation_rejects_single_call_function(tmp_path):
     onnx.save(model, onnx_path)
 
     with pytest.raises(RuntimeError, match="must be invoked more than once"):
+        _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_matches_function_domain(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyModel:
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid"], domain="qeff.language"),
+            helper.make_node("DummyLayer", ["mid"], ["y"], domain="other.domain"),
+        ],
+        "proxy_subfunction_domain_collision",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "qeff.language",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[
+            helper.make_operatorsetid("", 17),
+            helper.make_operatorsetid("qeff.language", 1),
+            helper.make_operatorsetid("other.domain", 1),
+        ],
+    )
+    onnx_path = tmp_path / "domain_collision.onnx"
+    onnx.save(model, onnx_path)
+
+    with pytest.raises(RuntimeError, match="must be invoked more than once"):
+        _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_accepts_split_variants_for_logical_signature(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyConfig:
+        num_hidden_layers = 3
+
+    class DummyModel:
+        config = DummyConfig()
+
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid_0"]),
+            helper.make_node("DummyLayer_variant_1", ["mid_0"], ["mid_1"]),
+            helper.make_node("DummyLayer_variant_1", ["mid_1"], ["mid_2"]),
+            helper.make_node("DummyLayer_variant_2", ["mid_2"], ["y"]),
+        ],
+        "proxy_subfunction_split_variants",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    functions = [
+        helper.make_function(
+            "",
+            function_name,
+            ["x"],
+            ["y"],
+            [helper.make_node("Identity", ["x"], ["y"])],
+            [helper.make_operatorsetid("", 17)],
+        )
+        for function_name in ["DummyLayer", "DummyLayer_variant_1", "DummyLayer_variant_2"]
+    ]
+    model = helper.make_model(graph, functions=functions, opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "split_variants.onnx"
+    onnx.save(model, onnx_path)
+
+    _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_rejects_variant_reused_across_logical_signatures(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyConfig:
+        num_hidden_layers = 4
+        layer_types = ["dense", "moe"]
+
+    class DummyModel:
+        config = DummyConfig()
+
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid_0"]),
+            helper.make_node("DummyLayer", ["mid_0"], ["mid_1"]),
+            helper.make_node("DummyLayer", ["mid_1"], ["mid_2"]),
+            helper.make_node("DummyLayer", ["mid_2"], ["y"]),
+        ],
+        "proxy_subfunction_reused_variant",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(graph, functions=[function], opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "reused_variant.onnx"
+    onnx.save(model, onnx_path)
+
+    with pytest.raises(RuntimeError, match="multiple logical signatures"):
+        _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
+def test_proxy_subfunction_validation_rejects_unused_function_variant(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyConfig:
+        num_hidden_layers = 2
+
+    class DummyModel:
+        config = DummyConfig()
+
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid"]),
+            helper.make_node("DummyLayer", ["mid"], ["y"]),
+        ],
+        "proxy_subfunction_unused_variant",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    functions = [
+        helper.make_function(
+            "",
+            function_name,
+            ["x"],
+            ["y"],
+            [helper.make_node("Identity", ["x"], ["y"])],
+            [helper.make_operatorsetid("", 17)],
+        )
+        for function_name in ["DummyLayer", "DummyLayer_variant_1"]
+    ]
+    model = helper.make_model(graph, functions=functions, opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "unused_variant.onnx"
+    onnx.save(model, onnx_path)
+
+    with pytest.raises(RuntimeError, match="Unused exact function variants"):
         _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
 
 
