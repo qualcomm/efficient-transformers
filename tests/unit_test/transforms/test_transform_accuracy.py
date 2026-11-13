@@ -424,7 +424,7 @@ class TestRepeatKVTransformFast:
         ).weight.shape
         assert second_shape == first_shape
 
-    def test_repeat_kv_skips_encoder_wrapper_without_config(self):
+    def test_repeat_kv_skips_vision_encoder_wrapper(self):
         cfg = AutoConfig.for_model(
             "llava",
             text_config={
@@ -454,7 +454,6 @@ class TestRepeatKVTransformFast:
         )
         model_hf = AutoModelForImageTextToText.from_config(cfg)
         qeff_model = QEFFAutoModelForImageTextToText(copy.deepcopy(model_hf), kv_offload=True, qaic_config={})
-        assert not hasattr(qeff_model.vision_model.model, "config")
         qeff_model.vision_model.transform(ctx_len=64, seq_len=8, bs=1, qaic_config={"replicate_kv_heads": True})
         assert qeff_model.vision_model.hash_params["num_replicate_kv_heads"] == 1
 
