@@ -63,6 +63,8 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     expert_num_ffn_blocks: int | None = None
     # Set by OptimizedMoEWeightsTransform after model-local canonicalization.
     weights_transformed: bool = False
+    # Optional token tiling for routed FFN execution. Disabled by default.
+    ffn_token_block_size: int | None = None
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -105,6 +107,16 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
     def apply_shared_experts(self, out: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
         return out
 
+    def configure_ffn_blocking(
+        self,
+        mode: str = "default",
+        token_block_size: int | None = None,
+        weight_block_size: int | None = None,
+    ) -> None:
+        """Configure optional token tiling for routed expert execution."""
+        del weight_block_size
+        self.ffn_token_block_size = token_block_size if mode in {"token", "token_weight"} else None
+
     def get_supported_moe_flavours(self) -> tuple[MoEFlavour, ...]:
         if not hasattr(self, "supported_moe_flavours"):
             raise TypeError(f"{type(self).__name__} must explicitly define supported_moe_flavours")
@@ -112,6 +124,20 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
 
     # ---- orchestration (shared) ----------------------------------------------
     def execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:
+        token_block_size = getattr(self, "ffn_token_block_size", None)
+        if token_block_size is not None and token_block_size < x.shape[0]:
+            outputs = []
+            for start in range(0, x.shape[0], token_block_size):
+                end = min(start + token_block_size, x.shape[0])
+                if isinstance(routing, tuple):
+                    block_routing = tuple(value[start:end] for value in routing)
+                else:
+                    block_routing = routing[start:end]
+                outputs.append(self._execute_moe_flavour(x[start:end], block_routing))
+            return torch.cat(outputs, dim=0)
+        return self._execute_moe_flavour(x, routing)
+
+    def _execute_moe_flavour(self, x: torch.Tensor, routing) -> torch.Tensor:
         if not getattr(self, "weights_transformed", False):
             raise RuntimeError(
                 f"{type(self).__name__} weights are not transformed; run OptimizedMoEWeightsTransform before forward"
@@ -126,7 +152,8 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
             quantized_weights = QuantizedMoEWeights.from_module(self)
             num_experts = quantized_weights.num_experts
         else:
-            weights = self.moe_weights
+            weights_for_forward = getattr(self, "_moe_weights_for_forward", None)
+            weights = weights_for_forward() if callable(weights_for_forward) else self.moe_weights
             num_experts = weights.num_experts
             profile = self.moe_profile
             if callable(profile):
@@ -143,11 +170,12 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
 
         dense, _ = resolve_routing(routing, num_experts)
         if flavour is MoEFlavour.EXPERT_PARALLEL:
+            packed_weights = not quantized_experts and weights.gate.ndim == 4
             num_pipeline_stages = getattr(self, "num_pipeline_stages", None) or (
-                1 if quantized_experts else weights.gate.shape[1]
+                weights.gate.shape[1] if packed_weights else 1
             )
             num_parallelized_experts = getattr(self, "num_parallelized_experts", None) or (
-                num_experts if quantized_experts else weights.gate.shape[0]
+                weights.gate.shape[0] if packed_weights else num_experts
             )
             num_packed_chunks = self.expert_parallel_num_packed_chunks
             if quantized_experts:
@@ -179,6 +207,9 @@ class QEffMoEBlockMixin(metaclass=ABCMeta):
 
     def moe_dispatch(self, x: torch.Tensor, routing) -> torch.Tensor:
         return self.execute_moe_flavour(x, routing)
+
+    def _moe_weights_for_forward(self):
+        return self.moe_weights
 
     def forward(self, hidden_states: torch.Tensor):
         B, S, H = hidden_states.shape

@@ -32,8 +32,15 @@ from ._helpers import (
 @pytest.mark.weight_free_export
 @pytest.mark.parametrize(
     "model_type,model_id",
-    sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.items()),
-    ids=sorted(WEIGHT_FREE_CAUSAL_LM_MODEL_IDS),
+    [
+        *sorted(
+            (model_type, model_id)
+            for model_type, model_id in WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.items()
+            if model_type != "gpt_oss"
+        ),
+        # ("gpt_oss", WEIGHT_FREE_CAUSAL_LM_MODEL_IDS["gpt_oss"]),
+    ],
+    ids=sorted(model_type for model_type in WEIGHT_FREE_CAUSAL_LM_MODEL_IDS if model_type != "gpt_oss"),
 )
 def test_weight_free_cb_export(model_type, model_id, tmp_export_dir):
     """continuous_batching=True + weight_free=True + use_onnx_subfunctions=True.

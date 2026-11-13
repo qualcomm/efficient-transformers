@@ -58,6 +58,30 @@ from QEfficient.utils.logging_utils import QEFFLogger
 logger = QEFFLogger.get_logger("MODEL")
 
 
+class _QEffGptOssOriginalWeights:
+    """Views over the fused checkpoint tensors used by weight-free export."""
+
+    def __init__(self, gate, up, down, gate_bias, up_bias, down_bias):
+        self.gate = gate
+        self.up = up
+        self.down = down
+        self.gate_bias = gate_bias
+        self.up_bias = up_bias
+        self.down_bias = down_bias
+
+    @property
+    def num_experts(self) -> int:
+        return self.gate.shape[0]
+
+    @property
+    def hidden_size(self) -> int:
+        return self.gate.shape[1]
+
+    @property
+    def intermediate_size(self) -> int:
+        return self.gate.shape[2]
+
+
 def override_gptoss_prefill_chunking(config, prefill_only: bool | None, enable_chunking: bool | None) -> bool | None:
     if prefill_only is True and enable_chunking is False and getattr(config, "model_type", None) == "gpt_oss":
         logger.warning(
@@ -75,6 +99,11 @@ class QEffGptOssExperts(GptOssExperts):
     def transform_weights(self) -> MoEWeights:
         if getattr(self, "weights_transformed", False):
             return self.moe_weights
+        if getattr(self, "_qeff_use_original_checkpoint", False):
+            self._qeff_original_checkpoint_layout = True
+            self.weights_transformed = True
+            self.moe_weights = self.original_moe_weights()
+            return self.moe_weights
         self.moe_weights = build_canonical_expert_weights(
             gate_up=self.gate_up_proj,
             down=self.down_proj,
@@ -91,6 +120,18 @@ class QEffGptOssExperts(GptOssExperts):
         self.weights_transformed = True
         return self.moe_weights
 
+    def original_moe_weights(self) -> _QEffGptOssOriginalWeights:
+        gate_up = self.gate_up_proj
+        gate_up_bias = self.gate_up_proj_bias
+        return _QEffGptOssOriginalWeights(
+            gate=gate_up[..., ::2],
+            up=gate_up[..., 1::2],
+            down=self.down_proj,
+            gate_bias=gate_up_bias[..., ::2],
+            up_bias=gate_up_bias[..., 1::2],
+            down_bias=self.down_proj_bias,
+        )
+
 
 class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
     _moe_return_router_logits = True
@@ -104,8 +145,15 @@ class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
         if getattr(self, "weights_transformed", False):
             return self.moe_weights
         weights = self.experts.transform_weights()
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            self._qeff_original_checkpoint_layout = True
         self.moe_weights = weights
         self.weights_transformed = True
+        return self.moe_weights
+
+    def _moe_weights_for_forward(self):
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            return self.experts.original_moe_weights()
         return self.moe_weights
 
     @property
@@ -157,10 +205,10 @@ class QEffGptOssMLP(QEffMoEBlockMixin, GptOssMLP):
             )
 
         T, H = x.shape
-        dense, _ = resolve_routing(routing, self.moe_weights.num_experts)
+        weights = self._moe_weights_for_forward()
+        dense, _ = resolve_routing(routing, weights.num_experts)
         block_size = T // num_ffn_blocks
 
-        weights = self.moe_weights
         if weights.gate.ndim == 4:
             weights = unpack_moe_weights_from_expert_parallel(weights)
 
@@ -963,6 +1011,13 @@ class QEffGptOssModel(GptOssModel):
 
 
 class QEffGptOssForCausalLM(GptOssForCausalLM):
+    def get_weightfree_computed_initializers(self) -> dict[str, torch.Tensor]:
+        rotary_emb = QEffGptOssRotaryEmbedding(config=self.config)
+        return {
+            "model.sin_cached": rotary_emb.sin_cached * rotary_emb.attention_scaling,
+            "model.cos_cached": rotary_emb.cos_cached * rotary_emb.attention_scaling,
+        }
+
     def get_submodules_for_export(self) -> type[nn.Module]:
         """
         Return the set of class used as the repeated layer across the model for subfunction extraction.

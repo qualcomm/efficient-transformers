@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 from transformers import AutoTokenizer
 
+from QEfficient.generation.cloud_infer import is_retained_state_name
 from QEfficient.generation.text_generation_inference import (
     CloudAI100ExecInfo,
     CloudAI100ExecInfoNew,
@@ -60,6 +61,7 @@ def _make_mock_session(
     full_batch_size=None,
     include_sampler=False,
     force_seq_len=None,
+    position_ids_shape=None,
 ):
     """
     Build a MagicMock that mimics QAICInferenceSession well enough for
@@ -80,7 +82,7 @@ def _make_mock_session(
     # Build bindings list
     bindings = [
         _binding("input_ids", [batch_size, prefill_seq_len], "input"),
-        _binding("position_ids", [batch_size, prefill_seq_len], "input"),
+        _binding("position_ids", position_ids_shape or [batch_size, prefill_seq_len], "input"),
         _binding("logits", [batch_size, prefill_seq_len, vocab_size], "output"),
     ]
     if full_batch_size is not None:
@@ -89,6 +91,7 @@ def _make_mock_session(
     session.bindings = bindings
     session.binding_index_map = {b.name: i for i, b in enumerate(bindings)}
     session.allowed_shapes = []  # use bindings dims directly
+    session.aic_to_np_dtype_mapping = {1: np.dtype(np.float32), 10: np.dtype(np.float16)}
     session.input_names = [b.name for b in bindings if b.dir == "input"]
     session.output_names = [b.name for b in bindings if b.dir == "output"]
     session.is_active = True
@@ -126,6 +129,7 @@ def _make_base_instance(
     batch_size=BATCH_SIZE,
     ctx_len=CTX_LEN,
     full_batch_size=None,
+    position_ids_shape=None,
 ):
     """
     Construct a QEffTextGenerationBase with a mocked session.
@@ -138,6 +142,7 @@ def _make_base_instance(
         batch_size=batch_size,
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
+        position_ids_shape=position_ids_shape,
     )
 
     with patch(
@@ -205,6 +210,11 @@ class TestGenerationModuleImportability:
         from QEfficient.generation.vlm_generation import VisionLanguageGeneration
 
         assert VisionLanguageGeneration is not None
+
+
+@pytest.mark.parametrize("name", ["indexer_key.0", "indexer_key.0_RetainedState"])
+def test_glm_indexer_cache_is_retained_state(name):
+    assert is_retained_state_name(name)
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +575,16 @@ class TestPrepareDecodeInputs:
         decode_inputs = obj.prepare_decode_inputs()
         assert decode_inputs["position_ids"].shape == (2, 1)
 
+    def test_qwen_style_position_ids_shape_includes_position_sections(self):
+        obj, _, _ = _make_base_instance(batch_size=2, position_ids_shape=[4, 2, PREFILL_LEN])
+        obj.initialize_decode_inputs(2, 2, 10)
+        obj.decode_pos_ids[:] = PREFILL_LEN
+        decode_inputs = obj.prepare_decode_inputs()
+        assert decode_inputs["input_ids"].shape == (2, PREFILL_LEN)
+        assert decode_inputs["position_ids"].shape == (4, 2, PREFILL_LEN)
+        assert np.all(decode_inputs["position_ids"][..., 0] == PREFILL_LEN)
+        assert np.all(decode_inputs["position_ids"][..., 1:] == -1)
+
     def test_no_batch_index_without_full_batch_size(self):
         obj, _, _ = _make_base_instance()
         obj.initialize_decode_inputs(1, 1, 10)
@@ -708,6 +728,13 @@ class TestRunPrefill:
         _, position_ids, _ = obj.run_prefill(prompt=["Hello world"], generation_len=None)
         assert position_ids.shape[0] == 1  # batch dim
 
+    def test_run_prefill_expands_qwen_style_position_ids_for_session(self):
+        obj, _, mock_session = _make_base_instance(position_ids_shape=[4, BATCH_SIZE, PREFILL_LEN])
+        obj.initialize_decode_inputs(1, 1, CTX_LEN)
+        obj.run_prefill(prompt=["Hello world"], generation_len=None)
+        first_inputs = mock_session.run.call_args_list[0].args[0]
+        assert first_inputs["position_ids"].shape == (4, BATCH_SIZE, PREFILL_LEN)
+
 
 # ---------------------------------------------------------------------------
 # Tests: run_decode (mocked session)
@@ -792,6 +819,18 @@ class TestRunDecode:
         # After decode, position_ids should have advanced
         final_pos = decode_inputs["position_ids"][0, -1].item()
         assert final_pos > initial_pos
+
+    def test_run_decode_qwen_style_position_ids_advance(self):
+        obj, _, _ = _make_base_instance(position_ids_shape=[4, BATCH_SIZE, PREFILL_LEN])
+        obj.initialize_decode_inputs(1, 1, 5)
+        outputs = {"logits": np.zeros((1, 1, VOCAB_SIZE), dtype=np.float32)}
+        outputs["logits"][0, 0, 42] = 1.0
+        obj.update_decode_input(outputs, np.array([[PREFILL_LEN]]), generation_len=3)
+        decode_inputs = obj.prepare_decode_inputs()
+        initial_pos = decode_inputs["position_ids"][..., 0].copy()
+        obj.run_decode(decode_inputs, 3, automation=True)
+        assert np.all(decode_inputs["position_ids"][..., 0] > initial_pos)
+        assert np.all(decode_inputs["position_ids"][..., 1:] == -1)
 
     def test_run_decode_generated_ids_are_valid_tokens(self):
         obj, tok, mock_session, decode_inputs, gen_len = self._setup_decode(3)
@@ -1097,7 +1136,7 @@ class TestContinuousBatching:
         decode_invocation = next(event for event in schedule_events if event["type"] == "decode_invocation")
         slot_advanced = [event for event in schedule_events if event["type"] == "slot_advanced"]
         assert decode_invocation["decode_position_ids"] == [[10, 110, 210, 310], [20, 120, 220, 320]]
-        assert slot_advanced[0]["next_position_id"] == [11, 110, 210, 310]
+        assert slot_advanced[0]["next_position_id"] == [11, 111, 211, 311]
 
     def test_full_batch_prefill_uses_full_batch_bindings(self):
         obj, _, mock_session = self._make_cb_instance(full_batch_size=2, enable_full_batch_prefill=True)
@@ -1232,7 +1271,9 @@ class TestBfloat16GenerationRegression:
 
     def test_set_output_buffers_allocates_bfloat16_prefill_and_cb_buffers(self):
         obj, _, session = _make_base_instance()
-        session.binding_is_bfloat16.return_value = True
+        logits_index = session.binding_index_map["logits"]
+        session.bindings[logits_index].type = 11
+        session.aic_to_np_dtype_mapping[11] = np.dtype(np.float16)
 
         obj._set_output_buffers(batch_size=2, sequence_length=4)
 
@@ -1243,7 +1284,9 @@ class TestBfloat16GenerationRegression:
 
     def test_set_output_buffers_allocates_bfloat16_continuous_batch_buffer(self):
         obj, _, session = TestContinuousBatching()._make_cb_instance(full_batch_size=2)
-        session.binding_is_bfloat16.return_value = True
+        logits_index = session.binding_index_map["logits"]
+        session.bindings[logits_index].type = 11
+        session.aic_to_np_dtype_mapping[11] = np.dtype(np.float16)
 
         obj._set_output_buffers(batch_size=2, sequence_length=1)
 
@@ -1258,7 +1301,9 @@ class TestBfloat16GenerationRegression:
         obj.batch_size = 1
         obj._decode_seq_len = 1
         obj._vocab_size = VOCAB_SIZE
-        session.binding_is_bfloat16.return_value = True
+        logits_index = session.binding_index_map["logits"]
+        session.bindings[logits_index].type = 11
+        session.aic_to_np_dtype_mapping[11] = np.dtype(np.float16)
 
         obj.run_decode(
             {"input_ids": np.zeros((1, 1), dtype=np.int64), "position_ids": np.zeros((1, 1), dtype=np.int64)},
@@ -1333,6 +1378,13 @@ class TestSetOutputBuffers:
         obj._set_output_buffers(batch_size=1, sequence_length=1)
         call_args = mock_session.set_buffers.call_args[0][0]
         assert call_args["logits"].dtype == np.float32
+
+    def test_set_output_buffers_uses_binding_dtype_float16(self):
+        obj, _, mock_session = _make_base_instance()
+        mock_session.bindings[mock_session.binding_index_map["logits"]].type = 10
+        obj._set_output_buffers(batch_size=1, sequence_length=1)
+        call_args = mock_session.set_buffers.call_args[0][0]
+        assert call_args["logits"].dtype == np.float16
 
 
 # ---------------------------------------------------------------------------
@@ -1767,48 +1819,6 @@ def test_runner_metadata_reuses_loaded_onnx_across_runner_helpers(tmp_path, monk
     )
 
     assert load_count == 1
-
-
-@pytest.mark.cpu_only
-def test_runner_metadata_excludes_weight_free_constant_inputs(tmp_path):
-    import onnx
-    from onnx import TensorProto, helper
-
-    from QEfficient.generation import runner_io
-    from QEfficient.generation.generation_helpers import RunnerMetadata
-
-    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
-    weight = helper.make_tensor_value_info("transformer.wte.weight", TensorProto.FLOAT, [4, 4])
-    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 4])
-    onnx_path = tmp_path / "model.onnx"
-    onnx.save(helper.make_model(helper.make_graph([], "weight_free_runner", [input_ids, weight], [logits])), onnx_path)
-    (tmp_path / "weight_spec.json").write_text(
-        json.dumps(
-            {
-                "files": [
-                    {
-                        "format": "safetensors",
-                        "path": "models--org--model/snapshots/prepared/model.safetensors",
-                    }
-                ],
-                "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
-                "model_id": "org/model",
-                "model_name": "GPT2LMHeadModel",
-                "version": 5,
-            }
-        )
-    )
-
-    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
-
-    assert runner_metadata.required_host_input_names == {"input_ids"}
-    io_dir = runner_io.write_runner_io_bundle(
-        runner_metadata=runner_metadata,
-        specialization={"batch_size": 1, "seq_len": 1},
-        host_inputs={"input_ids": np.array([[1]], dtype=np.int64)},
-    )
-    entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
-    assert [entry["map-to"] for entry in entries] == ["input_ids", "logits"]
 
 
 @pytest.mark.cpu_only

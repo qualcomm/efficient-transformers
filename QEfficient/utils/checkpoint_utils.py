@@ -33,17 +33,6 @@ def huggingface_hub_cache_dir() -> Path:
     return Path.home() / ".cache" / "huggingface" / "hub"
 
 
-def _all_checkpoint_files_under(root: Path, checkpoint_files: Sequence[str]) -> bool:
-    """Return True when every checkpoint file is contained under ``root``."""
-    root = root.expanduser()
-    for checkpoint_file in checkpoint_files:
-        try:
-            Path(checkpoint_file).expanduser().relative_to(root)
-        except ValueError:
-            return False
-    return True
-
-
 def load_checkpoint_weights(checkpoint_path: str, keys: set[str]) -> dict[str, torch.Tensor]:
     """Read selected tensors from safetensors; pickle-backed PyTorch checkpoints are unsupported for security."""
     path = Path(checkpoint_path)
@@ -120,8 +109,9 @@ def requires_dtype_conversion(src: Path, weight_map: dict[str, str], target_dtyp
     """Return True when any floating-point checkpoint tensor differs from ``target_dtype``."""
     for shard_name in sorted(set(weight_map.values())):
         with safe_open(str(src / shard_name), framework="pt") as handle:
-            keys = handle.keys()
-            for key in keys:
+            for key in handle.keys():
+                if key not in weight_map:
+                    continue
                 dtype = safetensors_dtype_to_torch(handle.get_slice(key).get_dtype())
                 if dtype is not None and dtype != target_dtype:
                     return True
@@ -147,6 +137,16 @@ def read_weight_map(src: Path) -> dict[str, str]:
         "model.safetensors.index.json. The checkpoint is malformed — "
         "re-download or regenerate the index file."
     )
+
+
+def checkpoint_files_complete(src: Path) -> bool:
+    """Return True when a checkpoint directory has all shards referenced by its weight map."""
+    try:
+        weight_map = read_weight_map(src)
+    except Exception:
+        return False
+
+    return all((src / shard_name).is_file() for shard_name in set(weight_map.values()))
 
 
 @cache
@@ -236,10 +236,6 @@ def checkpoint_root(model_id_or_path: str, checkpoint_files: Sequence[str]) -> P
     if not checkpoint_files:
         return None
 
-    hf_cache_root = huggingface_hub_cache_dir()
-    if _all_checkpoint_files_under(hf_cache_root, checkpoint_files):
-        return hf_cache_root
-
     candidate = Path(model_id_or_path).expanduser()
     if candidate.exists():
         return candidate.parent
@@ -325,8 +321,14 @@ def convert_bin_to_safetensors(src: Path, out: Path) -> None:
 
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    if bool(list(out.glob("*.safetensors"))) or (out / "model.safetensors.index.json").exists():
+    if checkpoint_files_complete(out):
         return
+
+    if out.exists():
+        if out.is_dir():
+            shutil.rmtree(out)
+        else:
+            out.unlink()
 
     out.mkdir(parents=True, exist_ok=True)
     copy_checkpoint_aux_files(src, out)
@@ -341,4 +343,6 @@ def convert_bin_to_safetensors(src: Path, out: Path) -> None:
     model.save_pretrained(str(out), safe_serialization=True)
     del model
     gc.collect()
+    if not checkpoint_files_complete(out):
+        raise FileNotFoundError(f"Failed to create a complete safetensors checkpoint in {out}")
     logger.info(f"Conversion complete — safetensors files written to {out}")

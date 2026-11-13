@@ -50,6 +50,40 @@ from QEfficient.transformers.moe import (
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
 
 
+class _QEffQwen3MoeOriginalExpert(nn.Module):
+    """One Qwen3-MoE expert with names matching the source checkpoint."""
+
+    def __init__(self, hidden_size: int, intermediate_size: int, *, device, dtype):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False, device=device, dtype=dtype)
+
+
+class _QEffQwen3MoeOriginalWeights:
+    """Canonical views assembled from original per-expert parameters."""
+
+    def __init__(self, gate, up, down):
+        self.gate = gate
+        self.up = up
+        self.down = down
+        self.gate_bias = None
+        self.up_bias = None
+        self.down_bias = None
+
+    @property
+    def num_experts(self) -> int:
+        return self.gate.shape[0]
+
+    @property
+    def hidden_size(self) -> int:
+        return self.gate.shape[1]
+
+    @property
+    def intermediate_size(self) -> int:
+        return self.gate.shape[2]
+
+
 class QEffQwen3MoeRotaryEmbedding(Qwen3MoeRotaryEmbedding):
     def __init__(self, config: Qwen3MoeConfig, device=None):
         super().__init__(config=config)
@@ -147,6 +181,14 @@ class QEffQwen3MoeExperts(Qwen3MoeExperts):
         self.weights_transformed = True
         return self.moe_weights
 
+    def original_moe_weights(self) -> _QEffQwen3MoeOriginalWeights:
+        experts = [self._modules[str(index)] for index in range(self.num_experts)]
+        return _QEffQwen3MoeOriginalWeights(
+            gate=torch.stack([expert.gate_proj.weight.transpose(0, 1) for expert in experts]),
+            up=torch.stack([expert.up_proj.weight.transpose(0, 1) for expert in experts]),
+            down=torch.stack([expert.down_proj.weight.transpose(0, 1) for expert in experts]),
+        )
+
 
 class QEffQwen3MoeSparseMoeBlock(QEffMoEBlockMixin, Qwen3MoeSparseMoeBlock):
     _moe_return_router_logits = True
@@ -167,7 +209,14 @@ class QEffQwen3MoeSparseMoeBlock(QEffMoEBlockMixin, Qwen3MoeSparseMoeBlock):
             return self.moe_weights
         weights = self.experts.transform_weights()
         self.moe_weights = weights
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            self._qeff_original_checkpoint_layout = True
         self.weights_transformed = True
+        return self.moe_weights
+
+    def _moe_weights_for_forward(self):
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            return self.experts.original_moe_weights()
         return self.moe_weights
 
     @property
