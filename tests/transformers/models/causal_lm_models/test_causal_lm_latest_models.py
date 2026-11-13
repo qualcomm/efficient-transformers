@@ -27,12 +27,7 @@ from QEfficient.transformers.models.minimax_m3_vl import (
     MiniMaxM3VLTextConfig,
     MiniMaxM3VLVisionConfig,
 )
-<<<<<<< HEAD
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
-from tests.unit_test.models.test_model_quickcheck import _ort_session
-=======
-from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
->>>>>>> bc2c4aac (Minimax prefill dummy model tests)
 
 
 def _tiny_minimax_m3_text_config(dtype=torch.float32, microbench=False) -> MiniMaxM3VLTextConfig:
