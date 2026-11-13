@@ -3106,6 +3106,27 @@ def test_qwen3_5_batch_fold_dynamic_axes_separate_input_and_cache_batches():
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen3_5_vision_rotary_positions_repeat_for_batch(model_type):
+    from types import SimpleNamespace
+
+    if model_type == "qwen3_5":
+        from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5VisionModel as VisionModel
+    else:
+        from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            QEffQwen3_5MoeVisionModel as VisionModel,
+        )
+
+    vision_model = SimpleNamespace(
+        spatial_merge_size=2,
+        rotary_pos_emb=lambda max_hw: torch.arange(max_hw).unsqueeze(-1).expand(-1, 2),
+    )
+    rotary_positions = VisionModel.rot_pos_emb(vision_model, torch.empty(2, 1, 4, 6))
+
+    assert rotary_positions.shape == (2 * 4 * 6, 4)
+    torch.testing.assert_close(rotary_positions[:24], rotary_positions[24:])
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
 def test_qwen3_5_decoder_wrapper_folds_decode_only(model_type):
     from types import SimpleNamespace
 

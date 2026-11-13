@@ -1564,7 +1564,7 @@ class QEffQwen3_5VisionModel(Qwen3_5VisionModel):
         max_hw = max(grid_thw.shape)
         freq_table = self.rotary_pos_emb(max_hw)
         device = freq_table.device
-        _bs, num_frames, height, width = grid_thw.shape
+        batch_size, num_frames, height, width = grid_thw.shape
         grid_thw = (torch.tensor(grid_thw.shape, dtype=torch.int64)).unsqueeze(0)
 
         total_tokens = int(torch.prod(grid_thw, dim=1).sum().item())
@@ -1588,6 +1588,7 @@ class QEffQwen3_5VisionModel(Qwen3_5VisionModel):
         if num_frames > 1:
             coords = coords.repeat(num_frames, 1)
 
+        coords = coords.repeat(batch_size, 1)
         pos_ids = coords
         embeddings = freq_table[pos_ids]
         embeddings = embeddings.flatten(1)
