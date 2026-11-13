@@ -798,17 +798,15 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
                     mask_s = attention_mask[:, :, t_start:t_end, s_start : s_start + split_block_len]
                 # mask_s: [B, 1, Q, split_block_len]
                 split_causal_masks.append(mask_s)
-            causal_mask_block = (
-                torch.stack(split_causal_masks, dim=2)
-                .expand(batch_size, num_kv_heads, split, tc, split_block_len)
-                .reshape(batch_size, num_kv_heads * split, tc, split_block_len)
+            causal_mask_block = torch.cat([torch.stack(split_causal_masks, dim=2)] * num_kv_heads, dim=1).reshape(
+                batch_size, num_kv_heads * split, tc, split_block_len
             )
             skip_split = (kv_offsets[:, 0] > (pos_sub.max() - start_index)).view(1, num_kv_heads * split)
 
             for acc in accs:
                 rc = acc["rc"]
                 # causal_mask_block: [B, num_kv_heads*split, tc, split_block_len] → expand to [B, num_kv_heads*split, rc*tc, split_block_len]
-                causal_rc = causal_mask_block.repeat(1, 1, rc, 1) if rc > 1 else causal_mask_block
+                causal_rc = torch.cat([causal_mask_block] * rc, dim=2) if rc > 1 else causal_mask_block
                 attn_weights_block = torch.matmul(acc["query"], K_4d.transpose(-1, -2)) * scaling
                 masked_tensor = torch.full_like(
                     attn_weights_block, MIN_MASKED_ATTENTION_VALUE, dtype=query.dtype, device=query.device
