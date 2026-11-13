@@ -270,6 +270,7 @@ def main():
         generation_len=args.generation_len,
         batch_size=batch_size,
         tlm_prefill_session=tlm_prefill_session,
+        hybrid=tlm_config.model_type in {"qwen3_5", "qwen3_5_moe"},
     )
 
     output_parts = ["Output: "]

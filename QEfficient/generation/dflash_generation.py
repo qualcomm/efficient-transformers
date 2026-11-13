@@ -354,9 +354,23 @@ def run_spd_inference_single(
     batch_size: int = 1,
     tlm_prefill_session: QAICInferenceSession | None = None,
     draft_selector: Callable[[dict[str, np.ndarray], np.ndarray], np.ndarray] | None = None,
+    hybrid: bool | None = None,
 ) -> SpecDecodingMetrics:
     input_ids, position_ids = _prepare_text_inputs(tokenizer, prompt_text, prompt_chunk_size)
-    is_hybrid = "cache_commit" in getattr(tlm_session, "input_names", ())
+    input_names = getattr(tlm_session, "input_names", None)
+    if hybrid is None:
+        if input_names is None:
+            raise ValueError("hybrid must be specified when the TLM session does not expose input_names.")
+        is_hybrid = "cache_commit" in input_names
+    else:
+        is_hybrid = hybrid
+        if input_names is None:
+            raise ValueError("The TLM session must expose input_names when hybrid is specified.")
+        has_cache_commit = "cache_commit" in input_names
+        if is_hybrid and not has_cache_commit:
+            raise ValueError("hybrid=True requires a TLM QPC with the cache_commit input.")
+        if not is_hybrid and has_cache_commit:
+            raise ValueError("hybrid=False cannot be used with a TLM QPC that exposes cache_commit.")
     generation_ctx_len = ctx_len - block_size if is_hybrid else ctx_len
     generated_ids = _initialize_generated_ids(
         batch_size, generation_ctx_len, input_ids.shape[1], tokenizer.pad_token_id

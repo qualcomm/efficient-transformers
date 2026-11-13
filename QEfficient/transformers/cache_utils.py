@@ -82,6 +82,26 @@ def _remainder_with_symbolic_divisor(value: torch.Tensor, divisor) -> torch.Tens
     return torch.remainder(value, divisor_tensor)
 
 
+def _ctx_scatter_preserving_invalid(
+    data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor
+) -> torch.Tensor:
+    invalid_positions = position_ids < 0
+    last_position = data.shape[2] - 1
+    last_position_ids = torch.full_like(position_ids[:, :1], last_position)
+    scatter_position_ids = torch.where(invalid_positions, last_position_ids, position_ids)
+
+    last_update_mask = position_ids == last_position
+    selected_last_update = torch.where(last_update_mask[:, None, :, None], updates, torch.zeros_like(updates)).sum(
+        dim=2, keepdim=True
+    )
+    preserved_last = torch.where(
+        last_update_mask.any(dim=1)[:, None, None, None], selected_last_update, data[:, :, -1:, :]
+    )
+
+    data = ctx_scatter(data, scatter_position_ids, updates)
+    return ctx_scatter(data, last_position_ids, preserved_last)
+
+
 class QEffDynamicLayer(CacheLayerMixin):
     is_compileable = False
 
@@ -1665,8 +1685,12 @@ class QEffSlidingWindowCache:
                 self.value_cache[layer_idx], batch_index, scatter_position_ids, value_states
             )
         else:
-            self.key_cache[layer_idx] = ctx_scatter(self.key_cache[layer_idx], kv_position_ids, key_states)
-            self.value_cache[layer_idx] = ctx_scatter(self.value_cache[layer_idx], kv_position_ids, value_states)
+            self.key_cache[layer_idx] = _ctx_scatter_preserving_invalid(
+                self.key_cache[layer_idx], kv_position_ids, key_states
+            )
+            self.value_cache[layer_idx] = _ctx_scatter_preserving_invalid(
+                self.value_cache[layer_idx], kv_position_ids, value_states
+            )
 
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 

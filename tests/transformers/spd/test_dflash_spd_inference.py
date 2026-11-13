@@ -843,6 +843,30 @@ def test_dflash2_text_path_rejects_old_qwen35_verification_qpc():
         )
 
 
+def test_dflash_text_path_validates_explicit_hybrid_contract():
+    common = {
+        "prompt_text": "hi",
+        "tokenizer": _FakeTokenizer(),
+        "dlm_session": _FakeDLMSession(),
+        "mask_token_id": MASK_TOKEN_ID,
+        "vocab_size": VOCAB_SIZE,
+        "prompt_chunk_size": PROMPT_CHUNK_SIZE,
+        "ctx_len": CTX_LEN,
+        "block_size": BLOCK_SIZE,
+        "hidden_size": HIDDEN_SIZE,
+    }
+
+    with pytest.raises(ValueError, match="hybrid=True requires.*cache_commit"):
+        run_spd_inference_single(tlm_session=_FakeTLMSession(), hybrid=True, **common)
+    with pytest.raises(ValueError, match="hybrid=False cannot be used.*cache_commit"):
+        run_spd_inference_single(tlm_session=_FakeCommitTLMSession(), hybrid=False, **common)
+
+    session_without_input_names = _FakeTLMSession()
+    del session_without_input_names.input_names
+    with pytest.raises(ValueError, match="hybrid must be specified"):
+        run_spd_inference_single(tlm_session=session_without_input_names, **common)
+
+
 def test_dflash_rejects_padded_prompt_longer_than_context():
     with pytest.raises(ValueError, match=r"ctx_len \(7\) must be greater than or equal to padded_len \(8\)"):
         run_spd_inference_single(
