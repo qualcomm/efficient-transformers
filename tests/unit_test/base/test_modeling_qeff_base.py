@@ -30,12 +30,6 @@ from QEfficient.base.modeling_qeff import (
     _weight_free_external_data_root,
     generate_mdp_compiler_dump,
 )
-from QEfficient.compile.mdp_generator import (
-    _get_layer_num_from_inputs,
-    _layer_partition_bounds,
-    generate_disagg_mdp_intersection_config,
-    precheck_and_autofix_mdp_partition_order,
-)
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
 VOCAB_SIZE = 500
