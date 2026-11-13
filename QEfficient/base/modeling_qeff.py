@@ -320,6 +320,24 @@ def _restore_output_names_exact(model: onnx.ModelProto, output_names: List[str])
         _rename_graph_value(model.graph, current_name, expected_name)
 
 
+def _mdp_compiler_command_prefix() -> List[str]:
+    """Return an optional launcher/compiler prefix for the MDP discovery pass."""
+    compiler_path = os.environ.get("QEFF_MDP_COMPILER_PATH")
+    if not compiler_path:
+        return []
+
+    command = []
+    compiler_wrapper = os.environ.get("QEFF_MDP_COMPILER_WRAPPER")
+    if compiler_wrapper:
+        command.append(compiler_wrapper)
+    command.append(compiler_path)
+
+    tools_dir = os.environ.get("QEFF_MDP_COMPILER_TOOLS_DIR")
+    if compiler_wrapper and tools_dir:
+        command.extend(["--tools-dir", tools_dir])
+    return command
+
+
 def generate_mdp_compiler_dump(
     compile_dir: Path,
     mdp_ts_num_devices: int,
@@ -336,6 +354,7 @@ def generate_mdp_compiler_dump(
     # compile options, specializations, or custom IO cannot reuse a stale dump.
     dump_hash_params = {
         "compile_command": compile_command,
+        "mdp_compiler_command_prefix": _mdp_compiler_command_prefix(),
         "specializations": specializations,
         "specialization_module_name": specialization_module_name,
         "custom_io": custom_io,
@@ -352,7 +371,12 @@ def generate_mdp_compiler_dump(
 
     dump_path.parent.mkdir(parents=True, exist_ok=True)
 
-    dump_command = list(compile_command)
+    compiler_command_prefix = dump_hash_params["mdp_compiler_command_prefix"]
+    dump_command = (
+        compiler_command_prefix + compile_command[1:]
+        if compiler_command_prefix
+        else list(compile_command)
+    )
     if specializations is not None:
         mdp_dump_dir.mkdir(parents=True, exist_ok=True)
         dump_specializations_json = mdp_dump_dir / "specializations.json"
