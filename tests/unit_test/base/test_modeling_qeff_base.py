@@ -563,8 +563,14 @@ def _build_synthetic_gpt2_onnx(
         nodes.append(helper.make_node("Identity", inputs=["input_ids"], outputs=["embed_out"], name="embed_tokens"))
     else:
         initializers.append(numpy_helper.from_array(np.zeros((1, 8), dtype=np.float32), name="embed_bias"))
+        initializers.append(numpy_helper.from_array(np.ones((1, 8), dtype=np.float32), name="embed_scale"))
         nodes.append(
-            helper.make_node("Add", inputs=["input_ids", "embed_bias"], outputs=["embed_out"], name="embed_tokens")
+            helper.make_node("Add", inputs=["input_ids", "embed_bias"], outputs=["embed_bias_out"], name="embed_tokens")
+        )
+        nodes.append(
+            helper.make_node(
+                "Mul", inputs=["embed_bias_out", "embed_scale"], outputs=["embed_out"], name="embed_tokens_scale"
+            )
         )
     prev_out = "embed_out"
     for layer_idx in range(num_layers):
@@ -882,6 +888,15 @@ class TestMdpCompileIntegration:
         real_copy2 = shutil.copy2
 
         _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path, external_data_file=external_data_name)
+        model = onnx.load(onnx_path, load_external_data=False)
+        external_data_locations = [
+            entry.value
+            for tensor in onnx.external_data_helper._get_all_tensors(model)
+            if tensor.data_location == onnx.TensorProto.EXTERNAL
+            for entry in tensor.external_data
+            if entry.key == "location"
+        ]
+        assert external_data_locations.count(external_data_name) > 1
 
         with patch("QEfficient.base.modeling_qeff.shutil.copy2", side_effect=real_copy2) as copy2_mock:
             _copy_onnx_external_data_files(onnx_path, artifact_path)
