@@ -42,6 +42,7 @@ def compile_length_sequence_chunk(
 def ctx_scatter(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxScatterFunc
 
+    updates = updates.to(dtype=data.dtype)
     return select_interface(CtxScatterFunc.apply, torch.ops.qefficient.ctx_scatter)(data, position_ids, updates)
 
 

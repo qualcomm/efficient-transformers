@@ -19,6 +19,7 @@ All tests run on CPU only.
 import pytest
 import torch
 
+from QEfficient.customop.utils import ctx_scatter
 from QEfficient.transformers.cache_utils import (
     InvalidIndexProvider,
     QEffDynamicCache,
@@ -81,6 +82,16 @@ class TestQEffDynamicLayerCorrectness:
         layer = QEffDynamicLayer()
         assert layer.keys is None
         assert layer.values is None
+
+    def test_scatter_casts_updates_to_cache_dtype(self):
+        cache = torch.zeros((1, 2, 4, 3), dtype=torch.bfloat16)
+        positions = torch.tensor([[0, 2]], dtype=torch.int32)
+        updates = torch.ones((1, 2, 2, 3), dtype=torch.float32)
+
+        result = ctx_scatter(cache, positions, updates)
+
+        assert result.dtype == torch.bfloat16
+        torch.testing.assert_close(result[:, :, [0, 2]], updates.to(torch.bfloat16))
 
     def test_first_update_stores_tensors(self):
         layer = QEffDynamicLayer()

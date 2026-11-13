@@ -10259,6 +10259,27 @@
   },
   "image_text_to_text": {
     "Qwen/Qwen2.5-VL-3B-Instruct": {
+      "float32_gl10_0f4ab037_7b4582da7652": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://picsum.photos/id/237/536/354",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          110313,
+          110313,
+          110313,
+          110313,
+          110313,
+          110313,
+          110313,
+          110313,
+          110313,
+          110313
+        ],
+        "timestamp": "2026-11-13T09:33:25.076380",
+        "variant_key": "float32_gl10_0f4ab037_7b4582da7652"
+      },
       "float32_gl10_f5c4e91a_18865c53cb98": {
         "dtype": "torch.float32",
         "gen_len": 10,
@@ -10302,6 +10323,27 @@
         ],
         "timestamp": "2026-08-13T23:53:10.833297",
         "variant_key": "float32_gl10_7f28b461_c4c87837558b"
+      },
+      "float32_gl10_bdc6b234_7849cd309bc1": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://picsum.photos/id/237/536/354",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          2676,
+          2676,
+          2676,
+          2676,
+          2676,
+          2676,
+          2676,
+          2676,
+          2676,
+          2676
+        ],
+        "timestamp": "2026-11-13T10:22:07.273397",
+        "variant_key": "float32_gl10_bdc6b234_7849cd309bc1"
       }
     },
     "llava-hf/llava-1.5-7b-hf": {
@@ -10323,11 +10365,32 @@
           12758,
           4728
         ],
-        "timestamp": "2026-09-30T00:00:00",
+        "timestamp": "2026-11-13T09:30:44.508812",
         "variant_key": "float32_gl10_681e5064_33b1484c7715"
       }
     },
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+      "float32_gl10_6d39d2ea_662765c8a4e8": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/ai2d-demo.jpg",
+        "prompt": "What does the label 15 represent? (1) lava (2) core (3) tunnel (4) ash cloud",
+        "pytorch_hf_tokens": [
+          181392,
+          83430,
+          83430,
+          83430,
+          83430,
+          83430,
+          43526,
+          83430,
+          43526,
+          83430
+        ],
+        "timestamp": "2026-11-13T09:30:57.363126",
+        "variant_key": "float32_gl10_6d39d2ea_662765c8a4e8"
+      },
       "float32_gl10_f5c96fc8_3f1891ed0ed4": {
         "dtype": "torch.float32",
         "gen_len": 10,
@@ -10369,7 +10432,7 @@
           107,
           107
         ],
-        "timestamp": "2026-08-14T00:18:00.606905",
+        "timestamp": "2026-11-13T07:27:46.280663",
         "variant_key": "float32_gl10_f0cabe9f_4e0ee2a95114"
       }
     },
@@ -10394,6 +10457,27 @@
         ],
         "timestamp": "2026-08-13T23:57:35.739882",
         "variant_key": "float32_gl10_69d49d41_08d573073b6c"
+      },
+      "float32_gl10_957dfb6d_20f7008377b0": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://picsum.photos/id/237/536/354",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          201220,
+          24091,
+          51805,
+          24091,
+          51805,
+          24091,
+          51805,
+          24091,
+          51805,
+          24091
+        ],
+        "timestamp": "2026-11-13T07:24:03.087549",
+        "variant_key": "float32_gl10_957dfb6d_20f7008377b0"
       }
     },
     "tiny-random/gemma-4-moe": {
@@ -10417,9 +10501,51 @@
         ],
         "timestamp": "2026-08-13T23:56:08.096442",
         "variant_key": "float32_gl10_032eba72_91318adfd57f"
+      },
+      "float32_gl10_256a8d53_e3503236b6a4": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://picsum.photos/id/237/536/354",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          92455,
+          94101,
+          92455,
+          94101,
+          92455,
+          94101,
+          92455,
+          94101,
+          92455,
+          94101
+        ],
+        "timestamp": "2026-11-13T07:26:38.504802",
+        "variant_key": "float32_gl10_256a8d53_e3503236b6a4"
       }
     },
     "tiny-random/mistral-3": {
+      "float32_gl10_184cf2b7_9d91147033a0": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/datasets/cat_style_layout.png",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          112201,
+          112201,
+          112201,
+          112201,
+          112201,
+          112201,
+          112201,
+          112201,
+          112201,
+          112201
+        ],
+        "timestamp": "2026-11-13T09:31:07.906575",
+        "variant_key": "float32_gl10_184cf2b7_9d91147033a0"
+      },
       "float32_gl10_65f65b50_2a73c8b3c491": {
         "dtype": "torch.float32",
         "gen_len": 10,
@@ -10442,7 +10568,43 @@
         "variant_key": "float32_gl10_65f65b50_2a73c8b3c491"
       }
     },
+    "tiny-random/qwen3-vl-moe": {
+      "float32_gl2_a9f8e633_9a9a60739430": {
+        "dtype": "torch.float32",
+        "gen_len": 2,
+        "generation_len": 2,
+        "image_url": "https://picsum.photos/id/237/536/354",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          96924,
+          96924
+        ],
+        "timestamp": "2026-11-13T09:39:53.520959",
+        "variant_key": "float32_gl2_a9f8e633_9a9a60739430"
+      }
+    },
     "tiny-random/qwen3.5": {
+      "float32_gl10_1819ac3a_ff99779a9dee": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://picsum.photos/id/237/536/354",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          24035,
+          98594,
+          120354,
+          116169,
+          143755,
+          7980,
+          35735,
+          224655,
+          37128,
+          170209
+        ],
+        "timestamp": "2026-11-13T09:42:38.589824",
+        "variant_key": "float32_gl10_1819ac3a_ff99779a9dee"
+      },
       "float32_gl10_59bdf555_5b77fc1bf18e": {
         "dtype": "torch.float32",
         "gen_len": 10,
@@ -10486,6 +10648,27 @@
         ],
         "timestamp": "2026-08-14T21:33:00.623212",
         "variant_key": "float32_gl10_1bf4efe3_9d4a6ac341f9"
+      },
+      "float32_gl10_8a3e9b70_5fb235b577ba": {
+        "dtype": "torch.float32",
+        "gen_len": 10,
+        "generation_len": 10,
+        "image_url": "https://picsum.photos/id/237/536/354",
+        "prompt": "Can you describe the image in detail.",
+        "pytorch_hf_tokens": [
+          52904,
+          164222,
+          52160,
+          11810,
+          188392,
+          96351,
+          3430,
+          41142,
+          6932,
+          121492
+        ],
+        "timestamp": "2026-11-13T09:06:49.759760",
+        "variant_key": "float32_gl10_8a3e9b70_5fb235b577ba"
       }
     }
   }
