@@ -30,9 +30,10 @@ class _CompileOnlyModule:
         self.onnx_path = f"{name}.onnx"
         self.qpc_path = None
         self._calls = calls
+        self.transform_calls = []
 
     def transform(self, **kwargs):
-        pass
+        self.transform_calls.append(kwargs)
 
     def _compile(self, **kwargs):
         self._calls.append(kwargs)
@@ -53,6 +54,23 @@ class _CompileOnlyVLM:
         if kwargs.get("kv_offload"):
             return {"vision": [{"batch_size": 1}], "lang": [{"batch_size": 1}]}, dict(kwargs)
         return [{"batch_size": 1}], dict(kwargs)
+
+
+@pytest.fixture
+def dual_qpc_compile_model():
+    from QEfficient.transformers.models.modeling_auto import _QEffAutoModelForImageTextToTextDualQPC
+
+    calls = []
+    model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
+    model.model = _CompileOnlyVLM()
+    model.dflash_tlm = False
+    model.vision_model = _CompileOnlyModule("vision", calls)
+    model.lang_model = _CompileOnlyModule("lang", calls)
+    model.continuous_batching = False
+    model.ccl_enabled = False
+    model.comp_ctx_lengths_prefill = None
+    model.comp_ctx_lengths_decode = None
+    return model, calls
 
 
 class _ExportOnlyVLM(_CompileOnlyVLM):
@@ -413,6 +431,94 @@ class TestQEffAutoModelForImageTextToTextDualQPCStructure:
         assert all(call["mdp_ts_num_devices"] == 4 for call in calls)
         assert all(call["mdp_num_partitions"] == 2 for call in calls)
         assert "`mdp_ts_num_devices` passed to compile() is ignored" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "lang_devices,lang_cores,vision_devices,vision_cores",
+    [(4, 8, 4, 4), (2, 16, 1, 16), (8, 8, 4, 8), (4, 8, None, None), (4, 8, None, 4), (4, 8, 2, None)],
+)
+@pytest.mark.parametrize("skip_lang,skip_vision", [(False, False), (True, False), (False, True)])
+def test_dual_qpc_independent_vision_resources(
+    dual_qpc_compile_model, lang_devices, lang_cores, vision_devices, vision_cores, skip_lang, skip_vision
+):
+    model, calls = dual_qpc_compile_model
+    qpc_paths = model.compile(
+        vision_onnx_path="vision.onnx",
+        lang_onnx_path="lang.onnx",
+        num_devices=lang_devices,
+        num_cores=lang_cores,
+        vision_num_devices=vision_devices,
+        vision_num_cores=vision_cores,
+        skip_lang=skip_lang,
+        skip_vision=skip_vision,
+    )
+    expected_vision_devices = lang_devices if vision_devices is None else vision_devices
+    expected_vision_cores = lang_cores if vision_cores is None else vision_cores
+    assert len(calls) == 2 - skip_lang - skip_vision
+    assert ("vision_qpc_path" in qpc_paths) is not skip_vision
+    assert ("lang_qpc_path" in qpc_paths) is not skip_lang
+    for call in calls:
+        is_vision = call["onnx_path"] == "vision.onnx"
+        assert call["mdp_ts_num_devices"] == (expected_vision_devices if is_vision else lang_devices)
+        assert call["aic_num_cores"] == (expected_vision_cores if is_vision else lang_cores)
+        assert "vision_num_devices" not in call
+        assert "vision_num_cores" not in call
+    vision_transform = model.vision_model.transform_calls[0]
+    lang_transform = model.lang_model.transform_calls[0]
+    assert vision_transform["num_devices"] == expected_vision_devices
+    assert vision_transform["aic_num_cores"] == expected_vision_cores
+    assert lang_transform["num_devices"] == lang_devices
+    assert lang_transform["aic_num_cores"] == lang_cores
+    for transform in (vision_transform, lang_transform):
+        assert "vision_num_devices" not in transform
+        assert "vision_num_cores" not in transform
+
+
+@pytest.mark.parametrize("name", ["vision_num_devices", "vision_num_cores"])
+@pytest.mark.parametrize("value", [0, -1, True, "4", 4.0])
+def test_dual_qpc_rejects_invalid_vision_resources(dual_qpc_compile_model, name, value):
+    model, calls = dual_qpc_compile_model
+    with pytest.raises(ValueError, match=name):
+        model.compile(**{name: value})
+    assert calls == []
+    assert model.vision_model.transform_calls == []
+    assert model.lang_model.transform_calls == []
+
+
+def test_dual_qpc_rejects_excess_vision_cores(dual_qpc_compile_model):
+    model, calls = dual_qpc_compile_model
+    with pytest.raises(ValueError, match="vision_num_cores"):
+        model.compile(vision_num_cores=17)
+    assert calls == []
+
+
+@pytest.mark.parametrize("skip_lang", [False, True])
+def test_dual_qpc_layerwise_forwards_vision_resources(dual_qpc_compile_model, monkeypatch, skip_lang):
+    model, calls = dual_qpc_compile_model
+    forwarded = []
+    expected_paths = {"vision_qpc_path": "vision.qpc"}
+
+    def compile_layerwise(**kwargs):
+        forwarded.append(kwargs)
+        return expected_paths
+
+    vision_wrapper = SimpleNamespace(
+        compile=compile_layerwise,
+        vision_model=SimpleNamespace(onnx_path="vision.onnx", qpc_path="vision.qpc", compile_artifacts_path=None),
+    )
+    monkeypatch.setattr(model, "_run_layerwise_compile", compile_layerwise)
+    monkeypatch.setattr(model, "_build_layerwise_vision_wrapper", lambda: vision_wrapper)
+    assert (
+        model.compile(
+            layerwise=True, skip_lang=skip_lang, num_devices=4, num_cores=8, vision_num_devices=4, vision_num_cores=4
+        )
+        == expected_paths
+    )
+    assert forwarded[0]["num_devices"] == 4
+    assert forwarded[0]["num_cores"] == 8
+    assert forwarded[0]["vision_num_devices"] == 4
+    assert forwarded[0]["vision_num_cores"] == 4
+    assert calls == []
 
 
 class TestQEffAutoModelForImageTextToTextSingleQPCCompile:

@@ -201,6 +201,24 @@ Models marked with `**` are currently not functional on the `main` and `release/
 (models_coming_soon)=
 # Models Coming Soon
 
+## DFlash-2 Integration
+
+The DFlash-2 example configures the following target/draft pairing:
+
+| Target checkpoint | Native draft checkpoint | Draft architecture |
+|-------------------|-------------------------|--------------------|
+| [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | [z-lab/Qwen3.8-27B-DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) | `DFlash2DraftModel` |
+
+This entry records integration support, not completed model-validation status.
+The `examples/performance/dflash/basic_inference_vision.py --dflash-method dflash-2`
+path currently accepts text prompts only and requires safetensors draft weights.
+CPU transform/runtime and checkpoint regressions are available, but independent
+reference-to-QEff, complete ONNXRuntime, and QAIC token/state parity for this
+DFlash-2 pairing still require validation. Do not infer on-device throughput or
+deployment parity from CPU tests or export/compile success.
+
+## Other Models
+
 | Architecture            | Model Family | Representative Models                      |
 |-------------------------|--------------|--------------------------------------------|
 | **NemotronHForCausalLM** | NVIDIA Nemotron v3   | [NVIDIA Nemotron v3](https://huggingface.co/collections/nvidia/nvidia-nemotron-v3)             |

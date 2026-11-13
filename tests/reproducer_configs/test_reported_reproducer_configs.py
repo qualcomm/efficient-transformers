@@ -1103,6 +1103,17 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
         summary="full Mixtral export RAM spike requires memory measurement",
         skip_reason="full-model memory regression requires dedicated memory measurement job",
     ),
+    RegressionScenario(
+        name="dflash-tokens-after-eos",
+        stage="inference",
+        source_model_card="Qwen/Qwen3-8B + z-lab/Qwen3-8B-DFlash-b16",
+        tiny_model_id=None,
+        summary="tokens after an EOS verified mid-block are emitted (4/20 prompts, 2 tokens each)",
+        skip_reason="requires QAIC DFlash TLM+DLM QPCs",
+        follow_up=(
+            "tests/transformers/spd/test_dflash_spd_inference.py::test_dflash_stops_at_eos_inside_an_accepted_block"
+        ),
+    ),
 )
 
 

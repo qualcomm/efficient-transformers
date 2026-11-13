@@ -68,6 +68,8 @@ from QEfficient.transformers.modeling_utils import (
 from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import override_gptoss_prefill_chunking
 from QEfficient.transformers.models.pytorch_transforms import (
     CustomOpsTransform,
+    DFlash2DLMTransform,
+    DFlash2TLMTransform,
     DFlashDLMTransform,
     DFlashTLMTransform,
     DFlashTransform,
@@ -1644,10 +1646,22 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         self.input_shapes, self.output_names = None, None
 
         # DFlash TLM: attach fc/hidden_norm and enable target-layer hidden-state collect.
-        self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
+        self.dflash_tlm = bool(
+            qaic_config and (qaic_config.get("dflash2_checkpoint") or qaic_config.get("target_layer_ids"))
+        )
         if self.dflash_tlm:
             qaic_config.setdefault("pretrained_model_name_or_path", kwargs.get("pretrained_model_name_or_path"))
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            if qaic_config.get("dflash2_checkpoint"):
+                self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+                self.lang_model.hash_params["dflash2_checkpoint"] = str(qaic_config["dflash2_checkpoint"])
+                self.lang_model.hash_params["dflash_target_absmax"] = float(
+                    qaic_config.get("dflash_target_absmax", constants._DFLASH_TARGET_ABSMAX)
+                )
+                self.lang_model.hash_params["dflash_hidden_norm"] = str(
+                    qaic_config.get("dflash_hidden_norm", "standard")
+                ).lower()
+            else:
+                self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
             self.lang_model.hash_params["dflash_dlm_repo"] = qaic_config.get("dflash_dlm_repo")
             self.lang_model.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
 
@@ -1657,7 +1671,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             prefix = "qwen35_moe" if self.model.config.model_type == "qwen3_5_moe" else "qwen35"
             self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_kv_commit_v2"
-            self.lang_model.hash_params["dflash_chunk_size"] = 16
+            self.lang_model.hash_params["dflash_chunk_size"] = getattr(
+                self.model.model.language_model, "dflash_chunk_size", 16
+            )
         if self.dflash_tlm and self.model.config.model_type == "gemma4":
             self.lang_model.hash_params["dflash_cache_protocol"] = "gemma4_block_window_v1"
 
@@ -1922,6 +1938,17 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             )
         return self.onnx_path
 
+    @staticmethod
+    def _resolve_vision_resources(num_devices, num_cores, vision_num_devices, vision_num_cores):
+        if vision_num_devices is not None and (type(vision_num_devices) is not int or vision_num_devices < 1):
+            raise ValueError("vision_num_devices must be a positive integer.")
+        if vision_num_cores is not None and (type(vision_num_cores) is not int or not 1 <= vision_num_cores <= 16):
+            raise ValueError("vision_num_cores must be an integer between 1 and 16.")
+        return (
+            num_devices if vision_num_devices is None else vision_num_devices,
+            num_cores if vision_num_cores is None else vision_num_cores,
+        )
+
     def transform(
         self,
         ctx_len: int | None = None,
@@ -1929,15 +1956,23 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         bs: int | None = 1,
         num_devices: int = 1,
         qaic_config: dict | None = None,
+        vision_num_devices: int | None = None,
+        vision_num_cores: int | None = None,
         **compiler_options,
     ):
+        vision_devices, vision_cores = self._resolve_vision_resources(
+            num_devices, compiler_options.get("aic_num_cores", 16), vision_num_devices, vision_num_cores
+        )
+        vision_compiler_options = dict(compiler_options)
+        if vision_num_cores is not None:
+            vision_compiler_options["aic_num_cores"] = vision_cores
         self.vision_model.transform(
             ctx_len=ctx_len,
             seq_len=seq_len,
             bs=bs,
-            num_devices=num_devices,
+            num_devices=vision_devices,
             qaic_config=qaic_config,
-            **compiler_options,
+            **vision_compiler_options,
         )
 
         if (
@@ -2106,6 +2141,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         kv_cache_batch_size: int | None = None,
         num_devices: int = 1,
         num_cores: int = 16,  # FIXME: Make this mandatory arg
+        vision_num_devices: int | None = None,
+        vision_num_cores: int | None = None,
         mxfp6_matmul: bool = False,
         mxint8_kv_cache: bool = False,
         skip_vision: bool | None = False,
@@ -2151,6 +2188,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             Total number of devices to compile for. Default is 1.
         num_cores : int, optional
             Number of cores to use for compilation.
+        vision_num_devices : int, optional
+            Number of devices for the separate vision QPC. Defaults to ``num_devices``.
+        vision_num_cores : int, optional
+            Cores per device for the separate vision QPC. Defaults to ``num_cores``.
         mxfp6_matmul : bool, optional
             Use MXFP6 compression for weights in the language model. Default is False.
         mxint8_kv_cache : bool, optional
@@ -2184,6 +2225,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             compiler_options["artifacts"] = True
         if skip_lang and skip_vision:
             raise ValueError("Expected at least one of 'skip_lang' or 'skip_vision' to be False")
+        vision_devices, vision_cores = self._resolve_vision_resources(
+            num_devices, num_cores, vision_num_devices, vision_num_cores
+        )
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         if self.dflash_tlm and dflash_block_size is None and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             dflash_block_size = getattr(self.model.model.language_model, "dflash_chunk_size", 16)
@@ -2230,6 +2274,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                     kv_cache_batch_size=kv_cache_batch_size,
                     num_devices=num_devices,
                     num_cores=num_cores,
+                    vision_num_devices=vision_num_devices,
+                    vision_num_cores=vision_num_cores,
                     mxfp6_matmul=mxfp6_matmul,
                     mxint8_kv_cache=mxint8_kv_cache,
                     skip_vision=skip_vision,
@@ -2262,6 +2308,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 kv_cache_batch_size=kv_cache_batch_size,
                 num_devices=num_devices,
                 num_cores=num_cores,
+                vision_num_devices=vision_num_devices,
+                vision_num_cores=vision_num_cores,
                 mxfp6_matmul=mxfp6_matmul,
                 mxint8_kv_cache=mxint8_kv_cache,
                 skip_vision=skip_vision,
@@ -2318,6 +2366,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             bs=batch_size,
             moe_batch_size=moe_batch_size,
             num_devices=num_devices,
+            vision_num_devices=vision_num_devices,
+            vision_num_cores=vision_num_cores,
             qaic_config=qaic_config,
             aic_num_cores=num_cores,
             mdp_num_partitions=compiler_options.get("mdp_num_partitions", 1),
@@ -2413,8 +2463,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 specialization_module_name="Vision",
                 convert_to_fp16=_should_convert_to_fp16(target_dtype, compiler_options),
                 mxfp6_matmul=constants.VISION_MXFP6_MATMUL,
-                mdp_ts_num_devices=num_devices,
-                aic_num_cores=num_cores,
+                mdp_ts_num_devices=vision_devices,
+                aic_num_cores=vision_cores,
                 custom_io=custom_io_vision,
                 mxint8_kv_cache=mxint8_kv_cache,
                 use_onnx_subfunctions=use_onnx_subfunctions,
@@ -3832,6 +3882,38 @@ MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP = {
 }
 
 
+def _peek_architectures(pretrained_model_name_or_path, kwargs: dict) -> list[str]:
+    """Read checkpoint architecture metadata without loading its weights."""
+    config = kwargs.get("config")
+    if config is None:
+        from transformers import AutoConfig
+
+        hub_kwargs = {
+            key: kwargs[key]
+            for key in ("cache_dir", "revision", "token", "local_files_only", "subfolder", "force_download")
+            if key in kwargs
+        }
+        config = AutoConfig.from_pretrained(
+            pretrained_model_name_or_path,
+            trust_remote_code=kwargs.get("trust_remote_code", False),
+            **hub_kwargs,
+        )
+    architectures = list(getattr(config, "architectures", None) or [])
+    dflash_config = getattr(config, "dflash_config", None)
+    if (
+        isinstance(dflash_config, dict)
+        and {"conv_group_size", "conv_kernel_size", "selector_rank"}.issubset(dflash_config)
+        and "DFlash2DraftModel" not in architectures
+    ):
+        raise ValueError(
+            "The checkpoint contains DFlash-2 convolution/selector metadata but does not declare "
+            "'DFlash2DraftModel' in config.architectures. Use a supported DFlash-2 checkpoint or "
+            "supply its corrected configuration explicitly; the HF AutoModel loader is not a fallback "
+            "for this native draft format."
+        )
+    return architectures
+
+
 class QEFFAutoModelForCausalLM(QEFFBaseModel):
     """
     QEfficient class for Causal Language Models from the HuggingFace hub (e.g., GPT-2, Llama).
@@ -3984,18 +4066,38 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         # DFlash changes the model structure and output contract, so apply it before
         # the generic speculative-decoding and sampler transforms wrap model.forward.
         self.dflash_dlm = bool(qaic_config and qaic_config.get("dflash_dlm", False))
-        self.dflash_tlm = bool(qaic_config and qaic_config.get("target_layer_ids", None))
+        self.dflash_tlm = bool(
+            qaic_config and (qaic_config.get("dflash2_checkpoint") or qaic_config.get("target_layer_ids"))
+        )
         if self.dflash_dlm:
-            self.model, _ = DFlashTransform.apply(self.model, qaic_config)
-            self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
-            self.hash_params["dflash_attention"] = "per_layer_window_v1"
-            if qaic_config.get("dflash_tlm_embedding_key"):
-                self.hash_params["dflash_tlm_embedding_key"] = qaic_config["dflash_tlm_embedding_key"]
-                self.hash_params["dflash_tlm_repo"] = qaic_config["dflash_tlm_repo"]
+            from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+            if isinstance(self.model, DFlash2ForCausalLM):
+                self.model, _ = DFlash2DLMTransform.apply(self.model, qaic_config)
+                self.hash_params["dflash_architecture"] = "dflash2"
+                self.hash_params["dflash_residual_scale"] = float(self.model.model.residual_scale)
+                self.hash_params["dflash_emit_selector_hidden"] = bool(self.model.emit_selector_hidden)
+                if qaic_config.get("dflash_tlm_repo"):
+                    self.hash_params["dflash_tlm_repo"] = str(qaic_config["dflash_tlm_repo"])
+            else:
+                self.model, _ = DFlashTransform.apply(self.model, qaic_config)
+                self.model, _ = DFlashDLMTransform.apply(self.model, qaic_config)
+                self.hash_params["dflash_attention"] = "per_layer_window_v1"
+                if qaic_config.get("dflash_tlm_embedding_key"):
+                    self.hash_params["dflash_tlm_embedding_key"] = qaic_config["dflash_tlm_embedding_key"]
+                    self.hash_params["dflash_tlm_repo"] = qaic_config["dflash_tlm_repo"]
         if self.dflash_tlm:
-            self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
+            if qaic_config.get("dflash2_checkpoint"):
+                self.model, _ = DFlash2TLMTransform.apply(self.model, qaic_config)
+                self.hash_params["dflash2_checkpoint"] = str(qaic_config["dflash2_checkpoint"])
+                self.hash_params["dflash_target_absmax"] = float(
+                    qaic_config.get("dflash_target_absmax", constants._DFLASH_TARGET_ABSMAX)
+                )
+                self.hash_params["dflash_hidden_norm"] = str(qaic_config.get("dflash_hidden_norm", "standard")).lower()
+            else:
+                self.model, _ = DFlashTLMTransform.apply(self.model, qaic_config)
             self.hash_params["target_layer_ids"] = tuple(qaic_config["target_layer_ids"])
-            if self.model.config.model_type == "gpt_oss":
+            if self.model.config.model_type == "gpt_oss" and not qaic_config.get("dflash2_checkpoint"):
                 self.hash_params["dflash_hidden_norm"] = "custom_rms_norm_v1"
 
         self.model, transformed = SpDTransform.apply(self.model, qaic_config=qaic_config, **kwargs)
@@ -4148,6 +4250,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             # checkpoint weights are ever materialized here. The real weights
             # are supplied later at export time via pretrained_model_name_or_path.
             model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
+        elif "DFlash2DraftModel" in _peek_architectures(pretrained_model_name_or_path, kwargs):
+            from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+            model = DFlash2ForCausalLM.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         else:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         if qaic_config is not None:
@@ -4417,6 +4523,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     qaic_config=qaic_config,
                     aic_num_cores=num_cores,
                 )
+
+        if getattr(self, "dflash_dlm", None) and prefill_seq_len is not None:
+            seq_len = min(seq_len, prefill_seq_len)
+
+        if getattr(self, "dflash_tlm", None) and any(
+            layer_type == "linear_attention" for layer_type in getattr(self.model.config, "layer_types", ())
+        ):
+            text_model = getattr(self.model, "model", None)
+            chunk_size = int(getattr(text_model, "dflash_chunk_size", seq_len))
+            seq_len = min(seq_len, chunk_size)
 
         supports_paged_attention = False
         # increase seq_len if using a larger number of blocks and set PagedAttention params if required
@@ -4751,6 +4867,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             # to PreserveNestedCacheRetainedStateTransform, which creates that wiring.
             onnx_transform_kwargs["kv_cache_prefix"] = kv_cache_prefix
 
+        if getattr(self, "dflash_dlm", None) and getattr(self.model, "emit_selector_hidden", False):
+            output_names.append("selector_hidden")
+            dynamic_axes["selector_hidden"] = {0: "batch_size", 1: "seq_len"}
         if getattr(self, "dflash_tlm", None):
             output_names.append("hidden_states")
             dynamic_axes["logits"] = {0: "batch_size", 1: "num_logits_to_keep"}

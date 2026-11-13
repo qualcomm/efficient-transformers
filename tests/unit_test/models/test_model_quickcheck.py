@@ -1297,6 +1297,73 @@ def test_dflash_mixed_window_ort_parity(tmp_path):
         previous = actual
 
 
+def test_dflash2_quickcheck_qeff_ort_parity(tmp_path):
+    """Export the complete DFlash-2 draft and compare logits plus retained KV state in ORT."""
+    from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
+
+    torch.manual_seed(31)
+    config = Qwen3Config(
+        hidden_size=32,
+        intermediate_size=64,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        num_hidden_layers=2,
+        vocab_size=64,
+        max_position_embeddings=64,
+        use_sliding_window=True,
+        sliding_window=8,
+        layer_types=["sliding_attention", "sliding_attention"],
+        dflash_config={
+            "block_size": 4,
+            "conv_group_size": 16,
+            "conv_kernel_size": 2,
+            "mask_token_id": 63,
+            "selector_rank": 8,
+            "selector_top_k": 1,
+        },
+    )
+    model = DFlash2ForCausalLM(config).eval()
+    for layer in model.model.layers:
+        for conv in (layer.attention_conv, layer.mlp_conv):
+            nn.init.normal_(conv.base_kernel, std=config.initializer_range)
+
+    qaic_config = {
+        "dflash_dlm": True,
+        "dflash_residual_scale": 1.0,
+        "dflash_target_seq_len": 4,
+    }
+    qeff = QEFFAutoModelForCausalLM(model, qaic_config=qaic_config)
+    onnx_path = _exported_onnx_path(
+        qeff.export(
+            tmp_path / "dflash2-quickcheck",
+            prefill_seq_len=4,
+            offload_pt_weights=False,
+        )
+    )
+    onnx.checker.check_model(onnx.load(onnx_path, load_external_data=True))
+    session = _ort_session(onnx_path)
+    session_inputs = [item.name for item in session.get_inputs()]
+    session_outputs = [item.name for item in session.get_outputs()]
+    cache = tuple((torch.randn(1, 1, 8, 16), torch.randn(1, 1, 8, 16)) for _ in range(2))
+    inputs = {
+        "input_ids": torch.randint(0, config.vocab_size, (1, 4)),
+        "target_hidden": torch.randn(1, 4, config.hidden_size),
+        "position_ids_target": torch.arange(4).unsqueeze(0),
+        "position_ids": torch.arange(4, 8).unsqueeze(0),
+        "past_key_values": cache,
+    }
+    with torch.no_grad():
+        expected = qeff.model(**deepcopy(inputs))
+    feed = _flatten_qwen_ort_inputs(inputs, session_inputs, qeff.model)
+    actual = dict(zip(session_outputs, session.run(session_outputs, feed)))
+
+    np.testing.assert_allclose(actual["logits"], expected.logits.numpy(), atol=3e-4, rtol=3e-4)
+    for layer_idx, layer_cache in enumerate(expected.past_key_values):
+        for name, tensor in zip((f"past_key.{layer_idx}", f"past_value.{layer_idx}"), layer_cache):
+            np.testing.assert_allclose(actual[name + "_RetainedState"], tensor.numpy(), atol=3e-4, rtol=3e-4)
+
+
 @pytest.mark.parametrize(
     "moe,prompt_length,block_size",
     [
