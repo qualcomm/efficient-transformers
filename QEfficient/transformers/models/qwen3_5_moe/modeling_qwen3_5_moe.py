@@ -739,7 +739,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
 
     def __qeff_init__(self):
         self.chunk_gated_delta_rule = self.torch_chunk_gated_delta_rule_qeff
-        self.chunk_gated_delta_solver = "forward_sub"
+        self.chunk_gated_delta_solver = "tree"
         self.torch_dtype = self.out_proj.weight.dtype
         self.gdn_full_state_update = bool(getattr(self, "gdn_full_state_update", False))
         chunk_size = int(getattr(self, "gdn_chunk_size", 64) or 64)
