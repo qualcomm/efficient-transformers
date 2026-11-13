@@ -20,6 +20,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForCausalLM
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.transformers.disaggregated._disagg_dma_config import disagg_dma_configs
 
 MODEL_ID = "yujiepan/qwen3-moe-tiny-random"
@@ -33,7 +34,7 @@ PREFILL_NUM_DEVICES = 2
 DECODE_NUM_DEVICES = 1
 FULL_BATCH_SIZE = 1
 
-NUM_CORES = 4
+NUM_CORES = DEFAULT_AIC_NUM_CORES
 MOE_PREFILL_PACKED_CHUNK_SIZE = 128
 
 HF_COMPARE_TOKENS = int(os.environ.get("QEFF_QWEN3MOE_HF_COMPARE_TOKENS", NUM_TOKEN_MATCH))

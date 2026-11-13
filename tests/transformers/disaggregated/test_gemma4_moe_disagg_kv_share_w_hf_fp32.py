@@ -25,6 +25,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageText
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.base.onnx_transforms import FP16ClipTransform
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.transformers.disaggregated._disagg_dma_config import disagg_dma_configs
 
 MODEL_NAME = "tiny-random/gemma-4-moe"
@@ -497,7 +498,7 @@ def _compile_vision(qeff_model, num_devices: int = 1, use_onnx_subfunctions: boo
         batch_size=BATCH_SIZE,
         prefill_seq_len=PREFILL_SEQ_LEN,
         ctx_len=CTX_LEN,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_devices=num_devices,
         mos=1,
         aic_enable_depth_first=True,
@@ -526,7 +527,7 @@ def _compile_kv_share_lang(
         "batch_size": BATCH_SIZE,
         "prefill_seq_len": 1,
         "ctx_len": CTX_LEN,
-        "num_cores": 16,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "num_devices": decode_num_devices,
         "retain_full_kv": True,  # required for DMA slice writes into full KV
         "split_retained_state_io": True,
@@ -553,7 +554,7 @@ def _compile_kv_share_lang(
         "batch_size": BATCH_SIZE,
         "prefill_seq_len": PREFILL_SEQ_LEN,
         "ctx_len": CTX_LEN,
-        "num_cores": 16,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "num_devices": prefill_num_devices,
         "retain_full_kv": True,
         "split_retained_state_io": True,

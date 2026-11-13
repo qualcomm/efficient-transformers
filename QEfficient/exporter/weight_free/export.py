@@ -98,7 +98,7 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
                 raise NotImplementedError(
                     f"Weight-free export is not implemented for quantization type '{quant_type}'. Supported: mxfp4"
                 )
-            init_kwargs = {k: v for k, v in quant_config.items() if k != "quant_method"}
+            init_kwargs = dict(quant_config)
             quant_config = config_cls(**init_kwargs)
         else:
             quant_method = getattr(quant_config, "quant_method", None) or getattr(quant_config, "quant_type", None)
@@ -112,7 +112,7 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
         quantizer = quantizer_cls(quant_config)
         # Run inside init_empty_weights so newly created quantized layer buffers stay on
         # the meta device and are treated as weight-spec entries, not embedded constants.
-        with init_empty_weights():
+        with init_empty_weights(include_buffers=True):
             quantizer._process_model_before_weight_loading(qeff_model.model)
     else:
         qeff_model.model = qeff_model.model.to(dtype=target_dtype)
@@ -137,6 +137,46 @@ def _prune_unused_fake_initializers(onnx_program) -> None:
         raw_value = getattr(const_value, "raw", None)
         if isinstance(raw_value, FakeTensor) and name not in used_names:
             del initializers[name]
+
+
+def _materialize_lifted_attention_mask_zero_initializers(onnx_program) -> bool:
+    """Replace meta scalar zero constants from Transformers attention masks with real CPU tensors."""
+    initializers = onnx_program.model.graph.initializers
+    replacements = {}
+
+    for name, init_value in initializers.items():
+        if "lifted_tensor" not in name:
+            continue
+
+        const_value = getattr(init_value, "const_value", None)
+        raw_value = getattr(const_value, "raw", None)
+        if (
+            not isinstance(raw_value, torch.Tensor)
+            or not getattr(raw_value, "is_meta", False)
+            or raw_value.numel() != 1
+        ):
+            continue
+
+        for node in onnx_program.model.graph:
+            if getattr(node, "op_type", None) != "Where":
+                continue
+            inputs = list(getattr(node, "inputs", ()))
+            if len(inputs) < 2 or getattr(inputs[1], "name", None) != name:
+                continue
+
+            metadata = getattr(node, "metadata_props", {}) or {}
+            metadata_text = "\n".join(str(value) for value in metadata.values())
+            if "aten.where.ScalarOther" not in metadata_text or "create_bidirectional_mask" not in metadata_text:
+                continue
+
+            replacements[name] = torch.zeros(tuple(raw_value.shape), dtype=raw_value.dtype)
+            break
+
+    if not replacements:
+        return False
+
+    onnx_program.apply_weights(replacements)
+    return True
 
 
 def _prepared_checkpoint_hash(
@@ -273,6 +313,12 @@ def export_weight_free_onnx(
     target_dtype = _resolve_weight_free_target_dtype(qeff_model)
     meta_qeff_model = _run_quantizer_for_wf(qeff_model, target_dtype)
 
+    from QEfficient.base.modeling_qeff import _build_blocked_translation_table
+
+    export_kwargs.setdefault("custom_translation_table", {}).update(
+        _build_blocked_translation_table(meta_qeff_model.model)
+    )
+
     # export_wrapper (the @export_wrapper decorator on _export) already ran
     # _setup_onnx_subfunctions on this same object before calling into this
     # function, and already has temporarily_enable_nested_compile_regions active
@@ -318,6 +364,7 @@ def export_weight_free_onnx(
         model_name=qeff_model.model_name,
         qeff_model=meta_qeff_model,
     )
+    _materialize_lifted_attention_mask_zero_initializers(onnx_program)
     _prune_unused_fake_initializers(onnx_program)
     onnx_program.save(str(onnx_path))
     save_weight_spec(resolve_weight_spec_path(onnx_path), spec)

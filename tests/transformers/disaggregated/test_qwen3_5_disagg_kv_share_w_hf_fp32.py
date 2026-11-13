@@ -20,6 +20,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageText
 
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.transformers.disaggregated._disagg_dma_config import disagg_dma_configs
 
 MODEL_NAME = "tiny-random/qwen3.5-moe"
@@ -566,7 +567,7 @@ def _compile_disagg_sessions(
         ctx_len=CTX_LEN,
         height=image.height,
         width=image.width,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_devices=vision_num_devices,
         mos=1,
         aic_enable_depth_first=True,
@@ -584,7 +585,7 @@ def _compile_disagg_sessions(
         ctx_len=CTX_LEN,
         height=image.height,
         width=image.width,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_devices=decode_num_devices,
         retain_full_kv=True,  # required for DMA slice writes into full KV
         split_retained_state_io=True,
@@ -606,7 +607,7 @@ def _compile_disagg_sessions(
         ctx_len=CTX_LEN,
         height=image.height,
         width=image.width,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_devices=prefill_num_devices,
         retain_full_kv=True,
         split_retained_state_io=True,
@@ -644,7 +645,7 @@ def _compile_gdn_full_batch_sessions(qeff_model, sessions: list, compiled_onnx_p
         ctx_len=CTX_LEN,
         height=IMAGE_SIZE[1],
         width=IMAGE_SIZE[0],
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_devices=2,
         retain_full_kv=True,
         split_retained_state_io=True,
@@ -669,7 +670,7 @@ def _compile_gdn_full_batch_sessions(qeff_model, sessions: list, compiled_onnx_p
         ctx_len=CTX_LEN,
         height=IMAGE_SIZE[1],
         width=IMAGE_SIZE[0],
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_devices=1,
         retain_full_kv=True,
         split_retained_state_io=True,

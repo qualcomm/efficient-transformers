@@ -97,25 +97,14 @@ from transformers.models.granite.modeling_granite import (
 from transformers.models.granitemoe.modeling_granitemoe import (
     GraniteMoeAttention,
     GraniteMoeDecoderLayer,
+    GraniteMoeExperts,
     GraniteMoeForCausalLM,
     GraniteMoeModel,
     GraniteMoeMoE,
     GraniteMoeRMSNorm,
     GraniteMoeRotaryEmbedding,
+    GraniteMoeTopKRouter,
 )
-
-try:
-    from transformers.models.granitemoe.modeling_granitemoe import (
-        GraniteMoeParallelExperts,
-        GraniteMoeTopKGating,
-    )
-except ImportError:
-    from transformers.models.granitemoe.modeling_granitemoe import (
-        GraniteMoeExperts as GraniteMoeParallelExperts,
-    )
-    from transformers.models.granitemoe.modeling_granitemoe import (
-        GraniteMoeTopKRouter as GraniteMoeTopKGating,
-    )
 from transformers.models.llama.modeling_llama import (
     LlamaAttention,
     LlamaDecoderLayer,
@@ -201,6 +190,7 @@ from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2RMSNorm,
 )
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLAttention,
     Qwen2_5_VLDecoderLayer,
@@ -440,12 +430,12 @@ from QEfficient.transformers.models.granite.modeling_granite import (
 from QEfficient.transformers.models.granitemoe.modeling_granitemoe import (
     QEffGraniteMoeAttention,
     QEffGraniteMoeDecoderLayer,
+    QEffGraniteMoeExperts,
     QEffGraniteMoeForCausalLM,
     QEffGraniteMoeModel,
     QEffGraniteMoeMoE,
-    QEffGraniteMoeParallelExperts,
     QEffGraniteMoeRotaryEmbedding,
-    QEffGraniteMoeTopKGating,
+    QEffGraniteMoeTopKRouter,
 )
 from QEfficient.transformers.models.grok_1.modeling_grok1 import (
     QEFFGrok1CustomRMSNormAIC,
@@ -562,6 +552,7 @@ from QEfficient.transformers.models.qwen2.modeling_qwen2 import (
     QEffQwen2Model,
 )
 from QEfficient.transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    QEffQwen2_5_VisionPatchEmbed,
     QEffQwen2_5_VisionTransformerPretrainedModel,
     QEffQwen2_5_VLAttention,
     QEffQwen2_5_VLDecoderLayer,
@@ -925,6 +916,7 @@ class KVCacheTransform(ModuleMappingTransform):
         Qwen2_5_VLModel: QEffQwen2_5_VLModel,
         Qwen2_5_VLAttention: QEffQwen2_5_VLAttention,
         Qwen2_5_VLDecoderLayer: QEffQwen2_5_VLDecoderLayer,
+        Qwen2_5_VisionPatchEmbed: QEffQwen2_5_VisionPatchEmbed,
         Qwen2_5_VisionTransformerPretrainedModel: QEffQwen2_5_VisionTransformerPretrainedModel,
         Qwen2_5_VLVisionAttention: QEffQwen2_5_VLVisionAttention,
         Qwen2_5_VLVisionBlock: QEffQwen2_5_VLVisionBlock,
@@ -1166,6 +1158,12 @@ class SpDTransform:
             raise ValueError(
                 f"Speculative model type {speculative_model_type} is not supported. we currently only support {supported_spd_model_types}"
             )
+        elif (
+            speculative_model_type == SPD_TARGET
+            and qaic_config.get("target_layer_ids")
+            and isinstance(model, QEffGptOssForCausalLM)
+        ):
+            return model, True
         elif (model_class := model.__class__) in cls._module_mapping:
             model.forward = MethodType(tlm_forward, model)
             if speculative_model_type != SPD_TARGET:
@@ -1274,11 +1272,12 @@ class DFlashDLMTransform:
         if not tlm_repo:
             return model, True
 
-        w = load_checkpoint_weights(tlm_repo, {"lm_head.weight", "lm_head.bias", "model.embed_tokens.weight"})
-        embed_w = w.get("model.embed_tokens.weight")
+        embed_key = qaic_config.get("dflash_tlm_embedding_key", "model.embed_tokens.weight")
+        w = load_checkpoint_weights(tlm_repo, {"lm_head.weight", "lm_head.bias", embed_key})
+        embed_w = w.get(embed_key)
         lm_head_w = w.get("lm_head.weight", embed_w)  # tie_word_embeddings: lm_head is a view of embed_tokens
         if lm_head_w is None or embed_w is None:
-            return model, True
+            raise ValueError(f"DFlash could not load target embeddings from {tlm_repo}: missing {embed_key}.")
 
         with torch.no_grad():
             model.lm_head.weight.data.copy_(lm_head_w.float())
@@ -1324,6 +1323,8 @@ class DFlashTLMTransform:
                 RMSNorm = Qwen3RMSNorm
             elif "llama" in model_type:
                 RMSNorm = LlamaRMSNorm
+            elif model_type == "gpt_oss":
+                RMSNorm = CustomRMSNormAIC
             else:
                 RMSNorm = nn.RMSNorm
             inner.fc = nn.Linear(n * hidden_size, hidden_size, bias=False).to(device=module_device, dtype=module_dtype)
@@ -1707,8 +1708,8 @@ class OptimizedMoEMapperTransform(ModuleMappingTransform):
         GptOssExperts: QEffGptOssExperts,
         # GraniteMoE
         GraniteMoeMoE: QEffGraniteMoeMoE,
-        GraniteMoeParallelExperts: QEffGraniteMoeParallelExperts,
-        GraniteMoeTopKGating: QEffGraniteMoeTopKGating,
+        GraniteMoeExperts: QEffGraniteMoeExperts,
+        GraniteMoeTopKRouter: QEffGraniteMoeTopKRouter,
         # Mixtral
         MixtralSparseMoeBlock: QEffMixtralSparseMoeBlock,
     }
@@ -1860,6 +1861,21 @@ class OptimizedMoEExportConfigTransform(PytorchTransform):
                 module.tree_reduce = tree_reduce
                 module.expert_parallel_num_packed_chunks = num_packed_chunks
                 module.expert_blocking_packed_chunk_size = expert_parallel_chunk_size
+            expert_intermediate_block_size = moe_config.get("expert_intermediate_block_size", None)
+            if expert_intermediate_block_size is not None:
+                expert_intermediate_block_size = int(expert_intermediate_block_size)
+                if expert_intermediate_block_size <= 0:
+                    raise ValueError(
+                        f"moe_config['expert_intermediate_block_size'] must be a positive integer, "
+                        f"got {expert_intermediate_block_size}"
+                    )
+            module.expert_intermediate_block_size = expert_intermediate_block_size
+            num_ffn_blocks = moe_config.get("num_ffn_blocks", None)
+            if num_ffn_blocks is not None:
+                num_ffn_blocks = int(num_ffn_blocks)
+                if num_ffn_blocks <= 0:
+                    raise ValueError(f"moe_config['num_ffn_blocks'] must be a positive integer, got {num_ffn_blocks}")
+            module.expert_num_ffn_blocks = num_ffn_blocks
             transformed = True
 
         if uses_expert_parallel and compile_num_tokens % expert_parallel_chunk_size != 0:
@@ -1885,6 +1901,9 @@ class OptimizedMoEExportConfigTransform(PytorchTransform):
 
         if transformed and hash_params is not None:
             hash_params["moe_prefill_flavour"] = (flavour or MoEFlavour.DECODE_BMM).value
+            num_ffn_blocks_cfg = moe_config.get("num_ffn_blocks", None)
+            if num_ffn_blocks_cfg is not None:
+                hash_params["num_ffn_blocks"] = int(num_ffn_blocks_cfg)
             if flavour is MoEFlavour.EXPERT_PARALLEL and layout is not None:
                 total_avl_cores, num_pipeline_stages, num_parallelized_experts, _ = layout
                 hash_params["moe_prefill_total_avl_cores"] = total_avl_cores
