@@ -1045,19 +1045,16 @@ def blocked_kv_attention_forward_headpar_offline(
 
         causal_mask = abs_kv_pos > q_pos
 
-        masked_tensor = torch.full_like(
-            attn_weights_block,
-            HEADPAR_MASKED_ATTENTION_VALUE,
-            dtype=attn_weights_block.dtype,
-            device=attn_weights_block.device,
-        )
-        attn_weights_block = torch.where(causal_mask, masked_tensor, attn_weights_block)
+        causal_mask = causal_mask.to(attn_weights_block.dtype)
+        attn_weights_block = attn_weights_block * (1 - causal_mask) + HEADPAR_MASKED_ATTENTION_VALUE * causal_mask
 
         max_block = attn_weights_block.max(dim=-1).values
         exp_block = torch.exp(attn_weights_block - max_block.unsqueeze(-1))
         if skip_kv and _is_export_or_trace():
-            max_block = torch.where(skip_future, torch.full_like(max_block, HEADPAR_MASKED_ATTENTION_VALUE), max_block)
-            exp_block = torch.where(skip_future, torch.zeros_like(exp_block), exp_block)
+            skip_future_4d = skip_future.reshape(1, 1, 1, 1)
+            max_block = torch.where(
+                skip_future_4d, torch.full_like(max_block, HEADPAR_MASKED_ATTENTION_VALUE), max_block
+            )
 
         v_block = past_key_value.read_only_blocked_V(start_index, end_index, layer_idx, cache_kwargs)
         if pad_len > 0:
@@ -1066,8 +1063,8 @@ def blocked_kv_attention_forward_headpar_offline(
         sum_block = exp_block.sum(dim=-1)
         out_block = torch.matmul(exp_block, value_5d)
         if skip_kv and _is_export_or_trace():
-            sum_block = torch.where(skip_future, torch.zeros_like(sum_block), sum_block)
-            out_block = torch.where(skip_future, torch.zeros_like(out_block), out_block)
+            sum_block = torch.where(skip_future_4d, torch.zeros_like(sum_block), sum_block)
+            out_block = torch.where(skip_future_4d.unsqueeze(-1), torch.zeros_like(out_block), out_block)
 
         max_blocks.append(max_block)
         sum_blocks.append(sum_block)
