@@ -130,12 +130,17 @@ def _restore_embedded_initializers(onnx_program, preserved_buffers: dict[str, to
     for name, tensor in preserved_buffers.items():
         initializer = onnx_program.model.graph.initializers.get(name)
         if initializer is not None:
-            initializer.const_value = ir.Tensor(
-                tensor,
-                dtype=initializer.dtype,
-                shape=initializer.shape,
-                name=name,
-            )
+            if tensor.dtype == torch.bfloat16:
+                from onnx_ir.tensor_adapters import TorchTensor
+
+                initializer.const_value = TorchTensor(tensor, name=name)
+            else:
+                initializer.const_value = ir.Tensor(
+                    tensor,
+                    dtype=initializer.dtype,
+                    shape=initializer.shape,
+                    name=name,
+                )
 
 
 def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
