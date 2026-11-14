@@ -17,6 +17,6 @@ else:
     QEFF_HOME = Path("~/.cache/qeff_models").expanduser()
 
 QEFF_CHECKPOINT_HOME: Path | None = None
-_wf_home = os.environ.get("QEFF_WF_HOME")
+_wf_home = os.environ.get("QEFF_CHECKPOINT_HOME") or os.environ.get("QEFF_WF_HOME")
 if _wf_home:
     QEFF_CHECKPOINT_HOME = Path(_wf_home)

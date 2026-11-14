@@ -112,6 +112,35 @@ def _batch_index_gather(tensor: torch.Tensor, batch_index: torch.Tensor) -> torc
     return tensor.index_select(0, batch_index.reshape(-1).long())
 
 
+def _qeff_resolve_torch_dtype(dtype, default=torch.float32):
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if isinstance(dtype, str):
+        normalized = dtype.replace("torch.", "").lower()
+        return {
+            "float": torch.float32,
+            "float32": torch.float32,
+            "fp32": torch.float32,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "half": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+        }.get(normalized, default)
+    return default
+
+
+def _qeff_custom_io_precision(dtype, default_dtype="float16"):
+    dtype = _qeff_resolve_torch_dtype(dtype, default=None)
+    if dtype == torch.float32:
+        return "float"
+    if dtype == torch.float16:
+        return "float16"
+    if dtype == torch.bfloat16:
+        return "bfloat16"
+    return default_dtype
+
+
 class QEffQwen3_5MoeGatedDeltaNetCustomRMSNormAIC(nn.Module):
     """
     RMSNorm module that works by replacing the current module with compiler known custom-op.
@@ -248,6 +277,10 @@ class QEffQwen3_5MoeDynamicCache(Cache):
         if layer is None:
             raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
         return layer.read_only_blocked_kv(start_index, end_index, cache_kwargs)
+
+    def read_only_blockedKV(self, start_index: int, end_index: int, layer_idx: int, cache_kwargs: dict):
+        """Compatibility alias for callers using the legacy combined K/V name."""
+        return self.read_only_blocked_kv(start_index, end_index, layer_idx, cache_kwargs)
 
     def read_only_blocked_K(self, start_index: int, end_index: int, layer_idx: int, cache_kwargs: dict):
         layer = self.kv_layers[layer_idx]
@@ -413,7 +446,7 @@ def qeff_prepare_mrope_cos_sin(cos, sin, position_ids, mrope_section, dtype=None
     sin = sin.to(device=position_ids.device)
     invalid_pos_mask = position_ids < 0
     safe_position_ids = torch.where(invalid_pos_mask, torch.zeros_like(position_ids), position_ids)
-    flat_pos = safe_position_ids.reshape(-1)
+    flat_pos = safe_position_ids.reshape(-1).to(cos.device)
     cos = cos.index_select(0, flat_pos).reshape(*safe_position_ids.shape, cos.shape[-1])
     sin = sin.index_select(0, flat_pos).reshape(*safe_position_ids.shape, sin.shape[-1])
     cos = qeff_apply_interleaved_mrope(cos, mrope_section).unsqueeze(1)
@@ -467,6 +500,8 @@ def qeff_apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, mrope_section=N
 
     # Keep half or full tensor for later concatenation
     rotary_dim = cos.shape[-1]
+    cos = cos.to(device=q.device)
+    sin = sin.to(device=q.device)
     q_rot, q_pass = q[:, :, :, :rotary_dim], q[:, :, :, rotary_dim:]
     k_rot, k_pass = k[:, :, :, :rotary_dim], k[:, :, :, rotary_dim:]
 
@@ -534,7 +569,7 @@ def qeff_torch_causal_conv1d_update(
         conv_state_flat = conv_state
 
     state_len = conv_state_flat.shape[-1]
-    pos_ids = position_ids[0]
+    pos_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
     hidden_states_new = torch.cat([conv_state_flat, hidden_states], dim=-1).to(weight.dtype)
 
     position_scalar = pos_ids.reshape(-1)[0]
@@ -751,6 +786,16 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
             attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(dim=-2)
         return attn + eye.to(dtype=attn.dtype)
 
+    def _solve_chunk_attn_forward_sub(self, attn: torch.Tensor, mask: torch.Tensor, eye: torch.Tensor, chunk_size: int):
+        del mask
+        solved_rows = [attn[..., 0, :]]
+        for i in range(1, chunk_size):
+            row = attn[..., i, :i]
+            sub = torch.stack(solved_rows, dim=-2)[..., :i]
+            solved = row + (row.unsqueeze(-1) * sub).sum(dim=-2)
+            solved_rows.append(torch.cat((solved, attn[..., i, i:]), dim=-1))
+        return torch.stack(solved_rows, dim=-2) + eye.to(device=attn.device, dtype=attn.dtype)
+
     def _solve_chunk_attn_tree(self, attn: torch.Tensor, mask: torch.Tensor, eye: torch.Tensor, chunk_size: int):
         if chunk_size <= 0 or (chunk_size & (chunk_size - 1)) != 0:
             raise ValueError(f"tree solver requires power-of-two chunk_size, got {chunk_size}")
@@ -867,6 +912,8 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
 
     def _solve_chunk_attn(self, attn: torch.Tensor, mask: torch.Tensor, eye: torch.Tensor, chunk_size: int):
         solver = getattr(self, "chunk_gated_delta_solver", "recursive_sns")
+        if solver == "forward_sub":
+            return self._solve_chunk_attn_forward_sub(attn, mask, eye, chunk_size)
         if solver == "original":
             return self._solve_chunk_attn_original(attn, mask, eye, chunk_size)
         if solver in ("tree", "forward_sub_tree"):
@@ -981,16 +1028,18 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
             x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value, k_beta, v_beta)
         ]
         g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
-        mask = mask_causal
+        mask = mask_causal.to(device=g.device) if mask_causal is not None else None
+        mask_strict = mask_strict.to(device=g.device) if mask_strict is not None else None
 
         # chunk decay
-        # g = g.cumsum(dim=-1)
+        # Use the precomputed cumsum matrix so strict dynamo subfunctions do not alias a captured buffer.
+        if ones_lower is None:
+            idx = torch.arange(g.size(-1), device=g.device)
+            ones_lower = (idx.unsqueeze(1) >= idx.unsqueeze(0)).to(g.dtype)
+        else:
+            ones_lower = ones_lower.to(device=g.device, dtype=g.dtype).clone()
 
-        L = g.size(-1)
-        idx = torch.arange(L, device=g.device)
-        mask_g = (idx.unsqueeze(1) >= idx.unsqueeze(0)).to(g.dtype)
-
-        g = g @ mask_g.T
+        g = g @ ones_lower.T
 
         # decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril() # original decay_mask
 
@@ -1097,6 +1146,20 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
             # The decoder wrapper clears batch_index only after placing a full
             # compute batch into physical cache-slot order.
             state_batch_index = batch_index
+
+            if conv_state_all is None or recurrent_state_all is None:
+                # Eager prefill can create the hybrid cache before GDN state exists.
+                conv_state_all = mixed_qkv.new_zeros(batch_size, self.conv_dim, self.conv_kernel_size)
+                recurrent_state_all = torch.zeros(
+                    batch_size,
+                    self.num_v_heads,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                    dtype=self.A_log.dtype,
+                    device=hidden_states.device,
+                )
+                cache_params.conv_states[self.layer_idx] = conv_state_all
+                cache_params.recurrent_states[self.layer_idx] = recurrent_state_all
 
             # Continuous batching path: gather only active rows, then scatter updates back.
             if state_batch_index is not None:
@@ -1332,6 +1395,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 value,
                 g=g,
                 beta=beta,
+                position_ids=position_ids,
                 chunk_size=self.gdn_chunk_size,
                 initial_state=None,
                 output_final_state=False,
@@ -1363,9 +1427,11 @@ class QEffQwen3_5MoeDecoderLayer(Qwen3_5MoeDecoderLayer):
         layer_type = getattr(self, "layer_type", getattr(self, "block_type", None))
         self.layer_type = layer_type
         if layer_type == "linear_attention":
+            self.__class__ = QEffQwen3_5MoeLinearAttentionDecoderLayer
             self.linear_attn.__class__ = QEffQwen3_5MoeGatedDeltaNet
             self.linear_attn.__qeff_init__()
         elif layer_type == "full_attention":
+            self.__class__ = QEffQwen3_5MoeFullAttentionDecoderLayer
             self.self_attn.__class__ = QEffQwen3_5MoeAttention
             self.self_attn.__qeff_init__()
 
@@ -1384,7 +1450,7 @@ class QEffQwen3_5MoeDecoderLayer(Qwen3_5MoeDecoderLayer):
         cache_position: Optional[torch.LongTensor] = None,
         dflash_chunk_size: int | None = None,
         **kwargs,
-    ) -> torch.FloatTensor:
+    ) -> Union[torch.FloatTensor, Tuple[torch.FloatTensor, torch.Tensor, torch.Tensor]]:
         del use_cache
         return_cache_states = kwargs.pop("return_cache_states", False)
         dflash_commit_final = kwargs.pop("dflash_commit_final", None)
@@ -1590,18 +1656,26 @@ class QEffQwen3_5MoeTextModel(Qwen3_5MoeTextModel):
             position_ids[1:] if position_ids.ndim == 3 and position_ids.shape[0] == 4 else position_ids
         )
 
-        target_length = attention_mask.shape[-1] if isinstance(attention_mask, torch.Tensor) else past_seen_tokens
+        if isinstance(attention_mask, torch.Tensor):
+            target_length = attention_mask.shape[-1]
+        elif past_seen_tokens > 0:
+            # QEff caches are preallocated, so this is the cache storage length.
+            target_length = past_seen_tokens
+        else:
+            target_length = text_position_ids.shape[-1]
 
         causal_mask = _create_causal_mask(
             position_ids=text_position_ids, target_length=target_length, sliding_window=None
         )
-        linear_attn_mask = create_recurrent_attention_mask(
-            config=self.config,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-        )
-
+        if hasattr(self, "_update_linear_attn_mask"):
+            linear_attn_mask = self._update_linear_attn_mask(attention_mask, past_key_values)
+        else:
+            linear_attn_mask = create_recurrent_attention_mask(
+                config=self.config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+            )
         hidden_states = inputs_embeds
 
         rope_parameters = getattr(self.config, "rope_parameters", {}) or {}
@@ -1684,7 +1758,8 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
             QEffQwen3_5MoeLinearAttentionDecoderLayer,
             QEffQwen3_5MoeFullAttentionDecoderLayer,
         }
-        layer_classes = {layer.__class__ for layer in getattr(self, "layers", ())}
+        layers = getattr(getattr(self, "model", None), "layers", ())
+        layer_classes = {layer.__class__ for layer in layers}
         specialized_layers = layer_classes & specialized_classes
         return specialized_layers or {QEffQwen3_5MoeDecoderLayer}
 
@@ -1706,10 +1781,56 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
     def get_retained_state_names(self) -> List[str]:
         return self._iter_retained_state_names()
 
+    @staticmethod
+    def get_onnx_export_seq_len(
+        default_seq_len: int,
+        prefill_seq_len: Optional[int] = None,
+        prefill_only: Optional[bool] = None,
+        **kwargs,
+    ) -> int:
+        del prefill_only, kwargs
+        # GDN unrolls its chunk loop during Dynamo export, so prefill must trace
+        # the exact fixed specialization length requested for runtime dispatch.
+        return prefill_seq_len if prefill_seq_len is not None else default_seq_len
+
+    @staticmethod
+    def prepare_onnx_export_inputs(
+        example_inputs: dict,
+        dynamic_axes: dict,
+        seq_len: int,
+        **kwargs,
+    ) -> Tuple[dict, dict]:
+        del kwargs
+        example_inputs["position_ids"] = example_inputs["position_ids"].unsqueeze(0).repeat(4, 1, 1)
+        dynamic_axes["position_ids"] = {1: "batch_size", 2: "seq_len"}
+        if seq_len == 1:
+            dynamic_axes["input_ids"] = {0: "batch_size"}
+            dynamic_axes["position_ids"] = {1: "batch_size"}
+        return example_inputs, dynamic_axes
+
     def get_onnx_past_key_value_names(self, layer_idx: int, layer_state=None) -> List[str]:
         if self.config.layer_types[layer_idx] == "full_attention":
             return [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
         return [f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}"]
+
+    def _retained_state_dtypes(self) -> dict:
+        kv_dtype = _qeff_resolve_torch_dtype(getattr(self.config, "torch_dtype", torch.float32))
+        recurrent_dtype = _qeff_resolve_torch_dtype(getattr(self.config, "mamba_ssm_dtype", None))
+        dtypes = {}
+        for layer_idx, layer_type in enumerate(self.config.layer_types):
+            if layer_type == "full_attention":
+                dtypes[f"past_key.{layer_idx}"] = kv_dtype
+                dtypes[f"past_value.{layer_idx}"] = kv_dtype
+            else:
+                dtypes[f"conv_state.{layer_idx}"] = kv_dtype
+                dtypes[f"recurrent_state.{layer_idx}"] = recurrent_dtype
+        return dtypes
+
+    def get_retained_state_custom_io_dtypes(self, default_dtype: str = "float16") -> dict:
+        return {
+            name: _qeff_custom_io_precision(dtype, default_dtype=default_dtype)
+            for name, dtype in self._retained_state_dtypes().items()
+        }
 
     def get_onnx_retained_state_specs(
         self,
@@ -1726,15 +1847,16 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
             "input_names": [],
             "output_names": [],
             "dynamic_axes": {},
+            "state_dtypes": {},
         }
 
-        kv_dtype = getattr(self.config, "torch_dtype", torch.float32)
+        state_dtypes = self._retained_state_dtypes()
         for layer_idx, layer_type in enumerate(self.config.layer_types):
             if layer_type == "full_attention":
                 layer_names = [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
                 layer_tensors = [
-                    torch.zeros(tuple(kv_cache_shape), dtype=kv_dtype),
-                    torch.zeros(tuple(kv_cache_shape), dtype=kv_dtype),
+                    torch.zeros(tuple(kv_cache_shape), dtype=state_dtypes[layer_names[0]]),
+                    torch.zeros(tuple(kv_cache_shape), dtype=state_dtypes[layer_names[1]]),
                 ]
                 layer_axes = [
                     {0: batch_axis_name, 2: "ctx_len"},
@@ -1742,12 +1864,13 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
                 ]
             else:
                 layer = self.model.layers[layer_idx].linear_attn
+                # Keep the exported retained-state contract flat; the conv kernel consumes [B, conv_dim, K].
                 conv_shape = (batch_size, layer.conv_dim, layer.conv_kernel_size)
                 recurrent_shape = (batch_size, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
                 layer_names = [f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}"]
                 layer_tensors = [
-                    torch.zeros(conv_shape, dtype=kv_dtype),
-                    torch.zeros(recurrent_shape, dtype=kv_dtype),
+                    torch.zeros(conv_shape, dtype=state_dtypes[layer_names[0]]),
+                    torch.zeros(recurrent_shape, dtype=state_dtypes[layer_names[1]]),
                 ]
                 layer_axes = [{0: batch_axis_name}, {0: batch_axis_name}]
 
@@ -1756,6 +1879,7 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
                 specs["input_names"].append(name)
                 specs["output_names"].append(f"{name}_RetainedState")
                 specs["dynamic_axes"][name] = axes
+                specs["state_dtypes"][name] = state_dtypes[name]
 
         return specs
 
@@ -2119,10 +2243,10 @@ class QEffQwen3_5MoeDecoderWrapper(nn.Module):
 
     def _get_attention_blocking_config(self) -> Optional[AttentionBlockingConfig]:
         for layer in getattr(self.language_model, "layers", ()):
-            attention = getattr(layer, "self_attn", None)
-            blocking_config = getattr(attention, "attn_blocking_config", None)
-            if blocking_config is not None:
-                return blocking_config
+            for attention in (getattr(layer, "self_attn", None), getattr(layer, "linear_attn", None)):
+                blocking_config = getattr(attention, "attn_blocking_config", None)
+                if blocking_config is not None:
+                    return blocking_config
         return None
 
     def _uses_gdn_full_state_update(self) -> bool:
@@ -2751,6 +2875,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
                     lang_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=kv_dtype))
             else:
                 layer = self.model.language_model.layers[i].linear_attn
+                # Keep the exported retained-state contract flat; the conv kernel consumes [B, conv_dim, K].
                 conv_shape = (linear_batch_size, layer.conv_dim, layer.conv_kernel_size)
                 recurrent_shape = (linear_batch_size, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
                 lang_inputs["past_key_values"][i].append(torch.zeros(conv_shape, dtype=kv_dtype))

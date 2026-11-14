@@ -6,6 +6,7 @@
 # ----------------------------------------------------------------------------
 
 import json
+import struct
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -35,21 +36,31 @@ _MOE_WEIGHT_LEGACY_SUFFIXES = {
 _COMPUTED_INITIALIZER_NAMES = {
     "cos_cached",
     "sin_cached",
+    "main_cos_cached",
+    "main_sin_cached",
+    "compress_cos_cached",
+    "compress_sin_cached",
     "inv_freq",
     "full_attention_sin_cached",
     "full_attention_cos_cached",
     "sliding_attention_sin_cached",
     "sliding_attention_cos_cached",
     "original_inv_freq",
+    "main_inv_freq",
+    "main_original_inv_freq",
+    "compress_inv_freq",
+    "compress_original_inv_freq",
     "embed_positions",
     "embed_scale",
-    "position_ids",
-    "token_type_ids",
     "_qeff_unit_weight",
+    "_qeff_conv_positions",
+    "sinks",
     "_mask_causal",
     "_mask_strict",
     "_ones_lower",
     "_eye",
+    "position_ids",
+    "token_type_ids",
 }
 
 
@@ -111,6 +122,8 @@ def _router_gate_aliases(name: str) -> List[str]:
         return [name[: -len(".mlp.gate.weight")] + ".mlp.router.weight"]
     if name.endswith(".mlp.router.weight"):
         return [name[: -len(".mlp.router.weight")] + ".mlp.gate.weight"]
+    if name.endswith(".mlp.gate.e_score_correction_bias"):
+        return [name[: -len(".mlp.gate.e_score_correction_bias")] + ".mlp.e_score_correction_bias"]
     return []
 
 
@@ -127,6 +140,49 @@ def _vision_model_aliases(name: str) -> List[str]:
     if name.startswith("model.visual."):
         return [name.replace("model.visual.", "model.vision_model.", 1)]
     return []
+
+
+def _vlm_language_model_aliases(name: str) -> List[str]:
+    """Return checkpoint aliases for language weights exported through a VLM wrapper.
+
+    A VLM decoder wrapper can expose the transformed text model through paths such
+    as ``model.model.language_model.layers.*`` while Hugging Face stores the same
+    weights under ``language_model.model.layers.*``. Keep this as a fallback so
+    exact causal-LM checkpoint names continue to take precedence.
+    """
+    aliases = []
+    language_model_marker = "language_model."
+    if language_model_marker in name:
+        suffix = name.split(language_model_marker, 1)[1]
+        suffix = suffix.removeprefix("model.")
+        aliases.extend(
+            [
+                f"language_model.{suffix}",
+                f"language_model.model.{suffix}",
+                f"model.language_model.{suffix}",
+                f"model.language_model.model.{suffix}",
+            ]
+        )
+    elif ".lm_head." in name or name.startswith("lm_head."):
+        suffix = name.split("lm_head.", 1)[1]
+        aliases.extend(
+            [
+                f"language_model.lm_head.{suffix}",
+                f"model.language_model.lm_head.{suffix}",
+            ]
+        )
+    return aliases
+
+
+def _minimax_indexer_aliases(name: str) -> List[str]:
+    """Return checkpoint aliases for MiniMax indexer parameters nested during export."""
+    marker = ".self_attn.indexer."
+    if marker not in name:
+        return []
+    prefix, suffix = name.split(marker, 1)
+    if suffix not in {"q_proj.weight", "k_proj.weight", "q_norm.weight", "k_norm.weight"}:
+        return []
+    return [f"{prefix}.self_attn.index_{suffix}"]
 
 
 def _find_checkpoint_key(candidates: List[str], checkpoint_index: Dict[str, str], onnx_name: str) -> Optional[str]:
@@ -181,9 +237,11 @@ def find_checkpoint_key(
 
     Resolution order:
     1. Universal HF prefix rules (base_model., base_model_prefix).
-    2. Legacy sparse-MoE router/gate spelling fallback.
-    3. Transform-specific explicit mapping via resolve_onnx_key().
-    4. Legacy MoE weight aliases fallback for old checkpoints.
+    2. VLM language-model wrapper aliases.
+    3. MiniMax indexer module aliases.
+    4. Legacy sparse-MoE router/gate spelling fallback.
+    5. Transform-specific explicit mapping via resolve_onnx_key().
+    6. Legacy MoE weight aliases fallback for old checkpoints.
     """
     # 1. Universal HF prefix rules
     candidates = [onnx_name, *_vision_model_aliases(onnx_name)]
@@ -248,26 +306,47 @@ def find_checkpoint_key(
         candidates.append(unprefixed)
         candidates.append(f"{prefix}.language_model.{unprefixed}")
 
+    if stripped.endswith(".block_sparse_moe.router.weight"):
+        candidates.append(stripped[: -len(".router.weight")] + ".router.layer.weight")
+
     key = _find_checkpoint_key(candidates, checkpoint_index, onnx_name)
     if key is not None:
         return key
 
-    # 2. Keep the historic sparse-MoE router/gate compatibility after exact lookup.
-    router_gate_candidates = [alias for candidate in candidates for alias in _router_gate_aliases(candidate)]
+    # 2. VLM wrappers add module nesting that is absent from the checkpoint
+    # namespace. Expand those aliases only after the exact causal-LM paths fail.
+    vlm_candidates = [alias for candidate in candidates for alias in _vlm_language_model_aliases(candidate)]
+    key = _find_checkpoint_key(vlm_candidates, checkpoint_index, onnx_name)
+    if key is not None:
+        return key
+
+    all_candidates = [*candidates, *vlm_candidates]
+
+    # 3. MiniMax checkpoints flatten the indexer projection/norm parameters into
+    # self_attn, while the transformed module exposes them through self_attn.indexer.
+    indexer_candidates = [alias for candidate in all_candidates for alias in _minimax_indexer_aliases(candidate)]
+    key = _find_checkpoint_key(indexer_candidates, checkpoint_index, onnx_name)
+    if key is not None:
+        return key
+
+    all_candidates.extend(indexer_candidates)
+
+    # 4. Keep the historic sparse-MoE router/gate compatibility after exact lookup.
+    router_gate_candidates = [alias for candidate in all_candidates for alias in _router_gate_aliases(candidate)]
     key = _find_checkpoint_key(router_gate_candidates, checkpoint_index, onnx_name)
     if key is not None:
         return key
 
-    # 3. Transform-specific explicit mapping
+    # 5. Transform-specific explicit mapping
     if active_transform is not None and hasattr(active_transform, "resolve_onnx_key"):
-        for candidate in [onnx_name, *_router_gate_aliases(onnx_name)]:
+        for candidate in [*all_candidates, *router_gate_candidates]:
             key = active_transform.resolve_onnx_key(candidate, checkpoint_index)
             if key is not None:
                 return key
 
-    # 4. Legacy MoE weight aliases (kept for old prepared checkpoints)
+    # Legacy MoE weight aliases (kept for old prepared checkpoints)
     return _find_checkpoint_key(
-        [alias for c in candidates for alias in _moe_weight_aliases(c)],
+        [alias for candidate in all_candidates for alias in _moe_weight_aliases(candidate)],
         checkpoint_index,
         onnx_name,
     )
@@ -279,6 +358,108 @@ def _named_state_keys(module: nn.Module, iterator_name: str) -> set[str]:
         return {name for name, _ in iterator(remove_duplicate=False)}
     except TypeError:
         return {name for name, _ in iterator()}
+
+
+def _safetensors_shapes(checkpoint_file: str) -> Dict[str, List[int]]:
+    """Return ``{key: shape}`` from a safetensors header without reading tensor data."""
+    return {key: shape for key, (shape, _) in _safetensors_tensor_info(checkpoint_file).items()}
+
+
+def _safetensors_tensor_info(checkpoint_file: str) -> Dict[str, tuple[List[int], str]]:
+    """Return ``{key: (shape, dtype)}`` from a safetensors header without reading tensor data."""
+    with open(checkpoint_file, "rb") as handle:
+        (header_size,) = struct.unpack("<Q", handle.read(8))
+        header = json.loads(handle.read(header_size))
+    return {
+        key: ([int(dim) for dim in entry["shape"]], entry["dtype"])
+        for key, entry in header.items()
+        if key != "__metadata__"
+    }
+
+
+_SAFETENSORS_TO_ONNX_DTYPE = {
+    "BOOL": ir.DataType.BOOL,
+    "U8": ir.DataType.UINT8,
+    "I8": ir.DataType.INT8,
+    "U16": ir.DataType.UINT16,
+    "I16": ir.DataType.INT16,
+    "U32": ir.DataType.UINT32,
+    "I32": ir.DataType.INT32,
+    "U64": ir.DataType.UINT64,
+    "I64": ir.DataType.INT64,
+    "F16": ir.DataType.FLOAT16,
+    "BF16": ir.DataType.BFLOAT16,
+    "F32": ir.DataType.FLOAT,
+    "F64": ir.DataType.DOUBLE,
+}
+
+
+def _safetensors_onnx_dtype(dtype: str) -> ir.DataType:
+    try:
+        return _SAFETENSORS_TO_ONNX_DTYPE[dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported safetensors dtype '{dtype}' in weight-free export") from exc
+
+
+def _promote_initializer(
+    model_ir,
+    name: str,
+    init_value,
+    source_dtype: ir.DataType,
+) -> None:
+    """Promote one initializer, inserting a source-to-graph dtype cast when needed."""
+    graph = model_ir.graph
+    target_dtype = init_value.dtype
+    graph_input = ir.Value(
+        name=name,
+        shape=init_value.shape,
+        type=ir.TensorType(source_dtype),
+    )
+
+    if source_dtype == target_dtype:
+        if hasattr(init_value, "replace_all_uses_with"):
+            init_value.replace_all_uses_with(graph_input)
+        graph.inputs.append(graph_input)
+    else:
+        cast_name = f"{name}__qeff_cast_{source_dtype.name.lower()}_to_{target_dtype.name.lower()}"
+        cast_output = ir.Value(
+            name=cast_name,
+            shape=init_value.shape,
+            type=ir.TensorType(target_dtype),
+        )
+        cast_node = ir.Node(
+            domain="",
+            op_type="Cast",
+            inputs=[graph_input],
+            attributes={"to": ir.AttrInt64("to", int(target_dtype))},
+            outputs=[cast_output],
+            version=13,
+            name=cast_name,
+        )
+        consumers = init_value.consumers() if hasattr(init_value, "consumers") else ()
+        if hasattr(init_value, "replace_all_uses_with"):
+            init_value.replace_all_uses_with(cast_output)
+        graph.inputs.append(graph_input)
+        if consumers:
+            graph.insert_before(min(consumers, key=graph.index), cast_node)
+        else:
+            graph.append(cast_node)
+
+    del graph.initializers[name]
+
+
+def _check_stored_shape(name: str, graph_shape, checkpoint_key: str, stored_shape: List[int]) -> None:
+    """Fail the export when a graph weight input cannot bind to its stored tensor."""
+    try:
+        dims = [int(dim) for dim in graph_shape]
+    except (TypeError, ValueError):
+        return
+    if dims != stored_shape:
+        raise ValueError(
+            f"Weight input '{name}' expects shape {dims}, but checkpoint tensor '{checkpoint_key}' has shape "
+            f"{stored_shape}. Weight-free export requires the graph to consume weights in their stored layout; "
+            "express any layout change as graph ops instead of rewriting the checkpoint."
+        )
 
 
 def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name: str, qeff_model) -> WeightSpec:
@@ -304,6 +485,8 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
     parameter_names = {name for name, _ in qeff_model.model.named_parameters(remove_duplicate=False)}
     buffer_names = {name for name, _ in qeff_model.model.named_buffers(remove_duplicate=False)}
     model_names = parameter_names | buffer_names
+    for model_name in list(model_names):
+        model_names.update(_moe_weight_aliases(model_name))
     tied_weight_map = {entry.alias: entry.canonical for entry in _collect_tied_weights(qeff_model.model)}
     # named_parameters()/named_buffers() dedup tied tensors by identity, so a tied alias
     # (e.g. lm_head.weight when tie_word_embeddings=True) is absent from model_names even
@@ -348,15 +531,17 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             pass  # no manifest → active_transform stays None, fallback to legacy aliases
 
     promoted_inputs: List[WeightSpecInput] = []
+    stored_tensor_info: Dict[str, Dict[str, tuple[List[int], str]]] = {}
 
     for name, init_value in list(model_ir.graph.initializers.items()):
-        if name not in model_names:
-            continue
-
         onnx_name = tied_weight_map.get(name, name)
         checkpoint_key = find_checkpoint_key(onnx_name, checkpoint_index, backbone, active_transform)
         if checkpoint_key is None:
-            if _is_computed_initializer(onnx_name) or _is_non_persistent_buffer(qeff_model.model, name):
+            if (
+                name not in model_names
+                or _is_computed_initializer(onnx_name)
+                or _is_non_persistent_buffer(qeff_model.model, name)
+            ):
                 continue
             raise ValueError(
                 f"Could not resolve model initializer '{name}' to a safetensors checkpoint key "
@@ -365,14 +550,17 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
             )
 
         checkpoint_file = checkpoint_index[checkpoint_key]
-        model_ir.graph.inputs.append(
-            ir.Value(
-                name=name,
-                shape=init_value.shape,
-                type=ir.TensorType(init_value.dtype),
-            )
-        )
-        del model_ir.graph.initializers[name]
+        if checkpoint_file not in stored_tensor_info:
+            stored_tensor_info[checkpoint_file] = _safetensors_tensor_info(checkpoint_file)
+        try:
+            stored_shape, stored_dtype = stored_tensor_info[checkpoint_file][checkpoint_key]
+        except KeyError as exc:
+            raise ValueError(
+                f"Checkpoint file '{checkpoint_file}' does not contain tensor '{checkpoint_key}' referenced by "
+                f"ONNX initializer '{name}'."
+            ) from exc
+        _check_stored_shape(name, init_value.shape, checkpoint_key, stored_shape)
+        _promote_initializer(model_ir, name, init_value, _safetensors_onnx_dtype(stored_dtype))
         promoted_inputs.append(
             WeightSpecInput(
                 name=name,
@@ -383,7 +571,6 @@ def promote_initializers_and_build_spec(onnx_program, model_ref: str, model_name
     return WeightSpec(
         model_name=model_name,
         model_id=model_ref,
-        external_data_root=str(root) if root is not None else None,
         files=relative_checkpoint_files,
         inputs=promoted_inputs,
     )
