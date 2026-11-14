@@ -29,6 +29,7 @@ from QEfficient.base.onnx_transforms import (
     LocalizeFunctionReduceSumAxesTransform,
     OnnxTransformPipeline,
     PruneFakeInitializersTransform,
+    ReductionCastCleanupTransform,
     RenameFunctionOutputsTransform,
     SplitTensorsTransform,
 )
@@ -1045,6 +1046,8 @@ class QEFFBaseModel(ABC):
             transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]
             if dynamo:
                 transform_names.append(DynamoSemanticNodeNameTransform.__name__)
+            if ReductionCastCleanupTransform.__name__ not in transform_names:
+                transform_names.append(ReductionCastCleanupTransform.__name__)
             model.metadata_props.append(
                 onnx.StringStringEntryProto(key="qeff_transforms", value=",".join(transform_names))
             )
