@@ -200,6 +200,7 @@
     {
       "model_name": "Qwen/Qwen2.5-VL-3B-Instruct",
       "known_dummy_runtime_parity_issue": "Greedy token parity is fp16-marginal on device: the random-init one-layer model has near-degenerate decode logits, so fp16 rounding on QAIC can flip the argmax relative to the HF fp32 reference.",
+      "known_bf16_compile_issue": "AI200 qaic-compile rejects bfloat16 vision I/O for Qwen2.5-VL with Data type not supported.",
       "model_type": "qwen2_5_vl",
       "supports_blocking": true,
       "batch_size": 1,
@@ -669,6 +670,7 @@
     },
     {
       "model_name": "moonshotai/Kimi-K2.5",
+      "known_bf16_compile_issue": "Kimi-K2.5's BF16 dummy model is initialized in FP32, so DeepSeek attention reaches an FP32/BF16 matmul during legacy ONNX export.",
       "model_type": "kimi_k25",
       "batch_size": 1,
       "prompt_len": 32,

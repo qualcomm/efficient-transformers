@@ -12,7 +12,6 @@ Weight-free + Compute-Context-Length (CCL) compile/generate tests.
 from __future__ import annotations
 
 import inspect
-import io
 import json
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,13 +19,12 @@ from urllib.parse import urlsplit
 import numpy as np
 import onnx
 import pytest
-import requests
 import torch
-from PIL import Image
 from transformers import AutoConfig, AutoProcessor
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
 from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
+from tests.utils.image_utils import load_test_image
 
 from ._helpers import (
     BATCH_SIZE,
@@ -69,10 +67,7 @@ def _get_configured_image_size(model_config):
 
 
 def _prepare_qwen_inputs(qeff_model, processor, image_url, prompt, model_config, image_height, image_width):
-    image_response = requests.get(image_url[0], timeout=30)
-    image_response.raise_for_status()
-    image = Image.open(io.BytesIO(image_response.content)).convert("RGB")
-    image = image.resize((image_width, image_height), Image.Resampling.BICUBIC)
+    image = load_test_image(image_url[0], size=(image_width, image_height))
     conversation = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt[0]}]}]
     prompt_text = processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
     qeff_inputs = processor(images=image, text=prompt_text, return_tensors="pt")
