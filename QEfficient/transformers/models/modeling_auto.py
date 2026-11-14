@@ -5658,8 +5658,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         is_deepseek_v4 = getattr(self.model.config, "model_type", None) == "deepseek_v4"
         if is_deepseek_v4:
             if mxint8_kv_cache:
-                raise ValueError("DeepSeek V4 retained-state caches must remain in float16; mxint8 is not supported.")
-            _add_onnx_retained_state_custom_io(custom_io, onnx_path, dtype="float16")
+                raise ValueError(
+                    "DeepSeek V4 retained-state caches must remain floating-point; mxint8 is not supported."
+                )
+            _add_onnx_retained_state_custom_io(custom_io, onnx_path, dtype=kv_cache_dtype)
         elif not cache_compressed:
             if hasattr(self.model, "get_custom_io") and not kv_cache_prefix and not use_onnx_subfunctions:
                 custom_io = self.model.get_custom_io(

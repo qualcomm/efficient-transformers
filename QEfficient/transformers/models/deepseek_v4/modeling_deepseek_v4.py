@@ -1186,6 +1186,54 @@ def qeff_apply_rotary_pos_emb(
     return torch.cat((nope, rotated), dim=x.dim() - 1)
 
 
+class QEffDeepseekV4RotaryEmbedding(DeepseekV4RotaryEmbedding):
+    def __init__(
+        self,
+        config: DeepseekV4Config,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__(config)
+        if device is not None:
+            self.to(device)
+        self.__qeff_init__(dtype)
+
+    def __qeff_init__(self, dtype: torch.dtype | None = None) -> None:
+        seq_len = getattr(self.config, "max_seq_len_cached", None)
+        if seq_len is None:
+            seq_len = self.original_max_seq_len
+        seq_len = int(seq_len)
+        if seq_len <= 0:
+            raise ValueError("DeepSeek V4 RoPE cache length must be positive.")
+
+        position_ids = torch.arange(
+            -1,
+            seq_len,
+            device=self.main_inv_freq.device,
+            dtype=torch.long,
+        ).unsqueeze(0)
+        reference = torch.empty((), device=self.main_inv_freq.device, dtype=dtype or torch.get_default_dtype())
+        self.max_seq_len_cached = seq_len
+        for layer_type in self.layer_types:
+            cos, sin = super().forward(reference, position_ids, layer_type=layer_type)
+            self.register_buffer(f"{layer_type}_cos_cached", cos.squeeze(0).contiguous(), persistent=False)
+            self.register_buffer(f"{layer_type}_sin_cached", sin.squeeze(0).contiguous(), persistent=False)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_ids: torch.Tensor,
+        layer_type: str | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if layer_type not in self.layer_types:
+            raise ValueError(f"Unsupported DeepSeek V4 RoPE layer type: {layer_type}.")
+        cache_indices = position_ids + 1
+        cos = getattr(self, f"{layer_type}_cos_cached")[cache_indices]
+        sin = getattr(self, f"{layer_type}_sin_cached")[cache_indices]
+        return cos.to(device=x.device, dtype=x.dtype), sin.to(device=x.device, dtype=x.dtype)
+
+
 class QEffDeepseekV4Attention(DeepseekV4Attention):
     """DeepSeek V4 sliding/HCA/CSA attention using fixed-capacity QEff cache state."""
 
@@ -1292,7 +1340,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         if lead > 0:
             pooled_kv = torch.cat((kv_state[:, :ratio, :head_dim], kv_state[:, ratio:, head_dim:]), dim=1)
             pooled_score = torch.cat((score_state[:, :ratio, :head_dim], score_state[:, ratio:, head_dim:]), dim=1)
-            compressed = (pooled_kv * pooled_score.softmax(dim=1).to(pooled_kv.dtype)).sum(dim=1, keepdim=True)
+            compressed = (pooled_kv * pooled_score.float().softmax(dim=1).to(pooled_kv.dtype)).sum(dim=1, keepdim=True)
             compressed = norm(compressed.to(hidden_states.dtype))
             block_start = (pos0 // ratio) * ratio
             compressed_positions = torch.full(
@@ -1321,7 +1369,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             pooled_kv = torch.cat((block_kv[..., :head_dim], block_kv[..., head_dim:]), dim=2)
             pooled_score = torch.cat((block_score[..., :head_dim], block_score[..., head_dim:]), dim=2)
             compressed = norm(
-                (pooled_kv * pooled_score.softmax(dim=2).to(pooled_kv.dtype)).sum(dim=2).to(hidden_states.dtype)
+                (pooled_kv * pooled_score.float().softmax(dim=2).to(pooled_kv.dtype)).sum(dim=2).to(hidden_states.dtype)
             )
             block_starts = pos0 + lead + torch.arange(full_blocks, device=hidden_states.device) * ratio
             compressed_positions = block_starts.view(1, -1).expand(batch_size, -1)
@@ -1630,9 +1678,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 lead_score_state = self._csa_prefill_scatter(
                     torch.zeros_like(compressor_state), lead_slots, score_all[:, :lead].to(compressor_state.dtype)
                 )
-                compressed = (compressor_state * lead_score_state.softmax(dim=1).to(compressor_state.dtype)).sum(
-                    dim=1, keepdim=True
-                )
+                compressed = (
+                    compressor_state * lead_score_state.float().softmax(dim=1).to(compressor_state.dtype)
+                ).sum(dim=1, keepdim=True)
                 compressed = self.compressor.kv_norm(compressed.to(hidden_states.dtype))
                 compressed_positions = torch.full(
                     (batch_size, 1), start // ratio * ratio, dtype=position_ids.dtype, device=position_ids.device
@@ -1660,7 +1708,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                     block_slots, self.compressor.position_bias
                 )
                 compressed = self.compressor.kv_norm(
-                    (block_kv * block_score.softmax(dim=2).to(block_kv.dtype)).sum(dim=2).to(hidden_states.dtype)
+                    (block_kv * block_score.float().softmax(dim=2).to(block_kv.dtype))
+                    .sum(dim=2)
+                    .to(hidden_states.dtype)
                 )
                 block_starts = start + lead + torch.arange(full_blocks, device=hidden_states.device) * ratio
                 compressed_positions = block_starts.view(1, -1).expand(batch_size, -1)
@@ -1689,27 +1739,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 -3.0e4,
             )
             sinks = self.sinks.view(1, 1, self.num_heads, 1).float()
-            stable_max = torch.maximum(local_scores.max(dim=-1, keepdim=True).values, sinks)
-            local_probs = torch.exp(local_scores - stable_max)
-            local_probs = local_probs / (local_probs.sum(dim=-1, keepdim=True) + torch.exp(sinks - stable_max))
-            local_output = torch.einsum("bsht,btd->bshd", local_probs, local_states.float()).to(local_states.dtype)
-            local_output = self._csa_prefill_rotate(
-                local_output, cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
-            )
-
             causal_threshold = torch.div(position_chunk[:, :1] + 1, ratio, rounding_mode="floor")
-            running_max = torch.full(
-                (batch_size, chunk_length, self.num_heads), -3.0e4, dtype=torch.float32, device=hidden_states.device
-            )
-            running_sum = torch.zeros_like(running_max)
-            running_output = torch.zeros(
-                batch_size,
-                chunk_length,
-                self.num_heads,
-                self.head_dim,
-                dtype=torch.float32,
-                device=hidden_states.device,
-            )
+            running_max = torch.maximum(local_scores.amax(dim=-1), sinks.squeeze(-1))
+            local_exp = torch.exp(local_scores - running_max.unsqueeze(-1))
+            running_sum = local_exp.sum(dim=-1) + torch.exp(sinks.squeeze(-1) - running_max)
+            running_output = torch.einsum("bsht,btd->bshd", local_exp, local_states.float())
             slot_ids = torch.arange(compressed_kv_cache.shape[2], device=hidden_states.device)
             for compressed_start in range(0, compressed_kv_cache.shape[2], compressed_block_size):
                 compressed_end = min(compressed_start + compressed_block_size, compressed_kv_cache.shape[2])
@@ -1728,18 +1762,17 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 tile_max = compressed_scores.amax(dim=-1)
                 next_max = torch.maximum(running_max, tile_max)
                 previous_scale = torch.exp(running_max - next_max)
-                tile_scale = torch.exp(tile_max - next_max)
                 exp_scores = torch.exp(compressed_scores - next_max.unsqueeze(-1))
                 running_output = running_output * previous_scale.unsqueeze(-1) + torch.einsum(
                     "bshk,bkd->bshd", exp_scores, gathered.float()
-                ) * tile_scale.unsqueeze(-1)
-                running_sum = running_sum * previous_scale + exp_scores.sum(dim=-1) * tile_scale
+                )
+                running_sum = running_sum * previous_scale + exp_scores.sum(dim=-1)
                 running_max = next_max
-            compressed_output = (running_output / running_sum.unsqueeze(-1).clamp(min=1.0e-9)).to(hidden_states.dtype)
-            compressed_output = self._csa_prefill_rotate(
-                compressed_output, cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
+            attention_output = (running_output / running_sum.unsqueeze(-1).clamp(min=1.0e-9)).to(hidden_states.dtype)
+            attention_output = self._csa_prefill_rotate(
+                attention_output, cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
             )
-            chunk_outputs.append(local_output + compressed_output)
+            chunk_outputs.append(attention_output)
 
         cache_layer.sliding_window_kv = local_kv_cache
         cache_layer.actual_compressed_kv = compressed_kv_cache
@@ -1794,7 +1827,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         combined_logits = torch.cat(logit_parts, dim=-1)
         combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
-        probabilities = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
+        probabilities = F.softmax(combined_logits.float(), dim=-1)
         probability_parts = probabilities.split(tuple(logits.shape[-1] for logits in logit_parts), dim=-1)
         attn_weights = probability_parts[0]
         attn_weights = F.dropout(
@@ -2130,7 +2163,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        cos, sin = position_embeddings[self.rope_layer_type]
+        if isinstance(position_embeddings, dict):
+            cos, sin = position_embeddings[self.rope_layer_type]
+        else:
+            cos, sin = position_embeddings
 
         q_residual = self.q_a_norm(self.q_a_proj(hidden_states)).to(hidden_states.dtype)
         q = self.q_b_proj(q_residual).view(*hidden_shape).transpose(1, 2)
@@ -2184,7 +2220,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             compressed = self.compressor.kv_norm(
                 torch.einsum(
                     "bhrd->bhd",
-                    compressor_kv_buffer * weighted_gate.softmax(dim=2, dtype=torch.float32).to(layer.dtype),
+                    compressor_kv_buffer * weighted_gate.float().softmax(dim=2).to(layer.dtype),
                 )
             ).to(layer.dtype)
             entry_positions = torch.div(position_ids, layer.compression_size, rounding_mode="floor")
@@ -2259,7 +2295,8 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                     )
                     compressed = norm(
                         torch.einsum(
-                            "bpnd->bpd", pooled_kv * pooled_gate.softmax(dim=2, dtype=torch.float32).to(pooled_kv.dtype)
+                            "bpnd->bpd",
+                            pooled_kv * pooled_gate.float().softmax(dim=2).to(pooled_kv.dtype),
                         )
                     ).to(pooled_kv.dtype)
                     compressed = compressed.reshape(hidden_states.shape[0], head_dim)
@@ -2300,7 +2337,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 new_kv[:, ratio:] = current_kv[..., head_dim:]
                 new_gate[:, ratio:] = current_gate[..., head_dim:]
                 compressed = norm(
-                    torch.einsum("brd->bd", new_kv * new_gate.softmax(dim=1, dtype=torch.float32).to(new_kv.dtype))
+                    torch.einsum("brd->bd", new_kv * new_gate.float().softmax(dim=1).to(new_kv.dtype))
                 ).to(new_kv.dtype)
                 rope_positions = entry_positions * ratio
                 comp_cos, comp_sin = rotary(
@@ -2752,28 +2789,24 @@ class QEffDeepseekV4MLP(DeepseekV4MLP):
 
 
 class QEffDeepseekV4RMSNorm(CustomRMSNormAIC):
-    """DeepSeek V4 FP32 normalization around the QEff RMSNorm custom operation."""
+    """DeepSeek V4 RMSNorm with Hugging Face-compatible dtype rounding."""
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
+        unit_weight = torch.ones_like(self.weight, dtype=torch.float32)
         normalized = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(
-            hidden_states.float(),
-            self.weight.float(),
-            self.variance_epsilon,
+            hidden_states.float(), unit_weight, self.variance_epsilon
         )
-        return normalized.to(input_dtype)
+        return self.weight * normalized.to(input_dtype)
 
 
 class QEffDeepseekV4UnweightedRMSNorm(DeepseekV4UnweightedRMSNorm):
-    """DeepSeek V4 unweighted FP32 normalization using the QEff RMSNorm custom operation."""
+    """DeepSeek V4 unweighted RMSNorm with Hugging Face-compatible dtype rounding."""
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
-        unit_weight = hidden_states.new_ones(hidden_states.shape[-1], dtype=torch.float32)
-        normalized = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(
-            hidden_states.float(), unit_weight, self.eps
-        )
-        return normalized.to(input_dtype)
+        variance = hidden_states.float().square().mean(-1, keepdim=True)
+        return hidden_states * torch.rsqrt(variance + self.eps).to(input_dtype)
 
 
 def _deepseek_v4_clamped_swiglu_mlp(
@@ -2910,7 +2943,7 @@ class QEffDeepseekV4HyperConnection(DeepseekV4HyperConnection):
         pre = torch.sigmoid(pre_w * pre_scale + pre_b) + self.hc_eps
         post = 2 * torch.sigmoid(post_w * post_scale + post_b)
         comb_logits = comb_w.view(*comb_w.shape[:-1], hc, hc) * comb_scale + comb_b.view(hc, hc)
-        comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
+        comb = torch.softmax(comb_logits.float(), dim=-1) + self.hc_eps
         comb = comb / (torch.einsum("bsij->bsj", comb).unsqueeze(-2) + self.hc_eps)
         for _ in range(self.hc_sinkhorn_iters - 1):
             comb = comb / (torch.einsum("bsij->bsi", comb).unsqueeze(-1) + self.hc_eps)
@@ -2951,6 +2984,24 @@ class QEffDeepseekV4DecoderLayer(DeepseekV4DecoderLayer):
 
 
 class QEffDeepseekV4Model(DeepseekV4Model):
+    def __qeff_init__(self) -> None:
+        rotary_device = self.embed_tokens.weight.device
+        if rotary_device.type == "meta":
+            rotary_device = torch.device("cpu")
+        rotary_emb = QEffDeepseekV4RotaryEmbedding(
+            self.config,
+            device=rotary_device,
+            dtype=self.embed_tokens.weight.dtype,
+        )
+        for layer_type in rotary_emb.layer_types:
+            self.register_buffer(
+                f"{layer_type}_cos_cached", getattr(rotary_emb, f"{layer_type}_cos_cached"), persistent=False
+            )
+            self.register_buffer(
+                f"{layer_type}_sin_cached", getattr(rotary_emb, f"{layer_type}_sin_cached"), persistent=False
+            )
+        self.rotary_emb = nn.Identity()
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -2984,14 +3035,28 @@ class QEffDeepseekV4Model(DeepseekV4Model):
         _, valid = _sliding_window_context_indices(position_ids, self.config.sliding_window, position_ids.device)
         causal_mask = ~valid.unsqueeze(1)
         hidden_states = inputs_embeds.unsqueeze(2).expand(-1, -1, self.config.hc_mult, -1).contiguous()
+        rope_indices = position_ids + 1
         position_embeddings = {
-            "main": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="main"),
-            "compress": self.rotary_emb(inputs_embeds, position_ids=position_ids, layer_type="compress"),
+            layer_type: (
+                getattr(self, f"{layer_type}_cos_cached")[rope_indices].to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype
+                ),
+                getattr(self, f"{layer_type}_sin_cached")[rope_indices].to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype
+                ),
+            )
+            for layer_type in ("main", "compress")
         }
+        prefill_cache = any(
+            bool(getattr(self.config, flag, False))
+            for flag in ("qeff_swa_prefill_only", "qeff_csa_prefill_only", "qeff_hca_prefill_only")
+        )
         for layer in self.layers:
             hidden_states = layer(
                 hidden_states,
-                position_embeddings=position_embeddings,
+                position_embeddings=(
+                    position_embeddings if prefill_cache else position_embeddings[layer.self_attn.rope_layer_type]
+                ),
                 position_ids=position_ids,
                 attention_mask=causal_mask,
                 input_ids=input_ids,
