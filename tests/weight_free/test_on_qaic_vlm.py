@@ -934,7 +934,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_checkpoint"
     image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
-    skip_vision = model_type == "qwen2_5_vl"
     qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
     generation_len = VLM_GENERATION_LEN
 
@@ -957,7 +956,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         None,
         model_config,
         image_size,
-        skip_vision=skip_vision,
     )
     with torch.inference_mode():
         hf_output = hf_model.generate(
@@ -993,7 +991,6 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         qeff_model.model,
         model_config,
         image_size,
-        skip_vision=skip_vision,
     )
 
     compile_kwargs = {
@@ -1004,24 +1001,22 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }
-    if not skip_vision:
-        compile_kwargs.update(
-            _get_vlm_compile_kwargs(
-                qeff_model.model,
-                model_config,
-                image_size,
-                heights=image_size[1],
-                widths=image_size[0],
-                num_frames=1,
-            )
+    compile_kwargs.update(
+        _get_vlm_compile_kwargs(
+            qeff_model.model,
+            model_config,
+            image_size,
+            heights=image_size[1],
+            widths=image_size[0],
+            num_frames=1,
         )
-    if skip_vision:
-        compile_kwargs["skip_vision"] = True
+    )
     # Only Qwen3-VL head-blocking uses this split path: vision and prefill run
     # on one device while the decode QPC uses four-device user tiling.
-    head_blocked_single_qpc_vlm_with_vision = (
-        blocking_key in VLM_HEAD_BLOCKING_KEYS and not skip_vision and model_type in {"qwen3_vl", "qwen3_vl_moe"}
-    )
+    head_blocked_single_qpc_vlm_with_vision = blocking_key in VLM_HEAD_BLOCKING_KEYS and model_type in {
+        "qwen3_vl",
+        "qwen3_vl_moe",
+    }
     # Qwen3-VL head blocking needs a one-device vision QPC; Qwen3.5 needs
     # split prefill/decode QPCs. Gemma4 uses regular combined-QPC parity.
     separate_qpcs = model_type in {"qwen3_5", "qwen3_5_moe"}
@@ -1087,18 +1082,16 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
             "lang_decode_qpc_path": decode_qpc["lang_decode_qpc_path"],
         }
     elif separate_qpcs:
-        vision_qpc = None
-        if not skip_vision:
-            vision_compile_kwargs = dict(compile_kwargs)
-            vision_qpc = qeff_model.compile(
-                compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_vision"),
-                **vision_compile_kwargs,
-                aic_enable_depth_first=False,
-                split_model_io=True,
-                prefill_seq_len=model_config["prompt_len"],
-                skip_lang=True,
-                skip_vision=False,
-            )
+        vision_compile_kwargs = dict(compile_kwargs)
+        vision_qpc = qeff_model.compile(
+            compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_vision"),
+            **vision_compile_kwargs,
+            aic_enable_depth_first=False,
+            split_model_io=True,
+            prefill_seq_len=model_config["prompt_len"],
+            skip_lang=True,
+            skip_vision=False,
+        )
         prefill_qpc = qeff_model.compile(
             compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_prefill"),
             **compile_kwargs,
@@ -1144,7 +1137,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         assert qpc_paths.get("lang_decode_qpc_path")
     else:
         assert qpc_paths.get("lang_qpc_path") or qpc_paths.get("lang_decode_qpc_path")
-    assert skip_vision or qpc_paths.get("vision_qpc_path")
+    assert qpc_paths.get("vision_qpc_path")
     assert language_onnx.is_file()
     _assert_weight_spec(language_onnx)
     _assert_vlm_weight_free_graph(
