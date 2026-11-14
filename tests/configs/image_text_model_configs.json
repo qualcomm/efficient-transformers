@@ -670,6 +670,7 @@
     },
     {
       "model_name": "moonshotai/Kimi-K2.5",
+      "known_bf16_compile_issue": "Kimi-K2.5's BF16 dummy model is initialized in FP32, so DeepSeek attention reaches an FP32/BF16 matmul during legacy ONNX export.",
       "model_type": "kimi_k25",
       "batch_size": 1,
       "prompt_len": 32,
