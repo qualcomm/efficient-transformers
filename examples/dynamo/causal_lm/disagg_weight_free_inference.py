@@ -40,6 +40,15 @@ def main() -> None:
     parser.add_argument("--num-devices", type=int, default=1)
     parser.add_argument("--num-hidden-layers", type=int, default=-1)
     parser.add_argument("--expert-parallel-chunk-size", type=int, default=16)
+    parser.add_argument(
+        "--prefill-blocking-mode",
+        choices=["none", "prefill_q", "prefill_kv", "prefill_qkv"],
+        default="none",
+        help="Apply an offline blocking mode to the prefill QPC only.",
+    )
+    parser.add_argument("--prefill-num-kv-blocks", type=int, default=2)
+    parser.add_argument("--prefill-num-q-blocks", type=int, default=2)
+    parser.add_argument("--prefill-headpar-split", type=int, default=1)
     parser.add_argument("--continuous-batching", action="store_true")
     parser.add_argument("--split-retained-state-io", action="store_true")
     args = parser.parse_args()
@@ -76,12 +85,25 @@ def main() -> None:
         prefill_seq_len=1,
         **common,
     )
+    prefill_qaic_config = {"moe_config": {"expert_parallel_chunk_size": args.expert_parallel_chunk_size}}
+    if args.prefill_blocking_mode != "none":
+        prefill_qaic_config["blocking_mode"] = args.prefill_blocking_mode
+        if args.prefill_blocking_mode in {"prefill_kv", "prefill_qkv"}:
+            prefill_qaic_config.update(
+                {
+                    "num_kv_blocks": args.prefill_num_kv_blocks,
+                    "headpar_split": args.prefill_headpar_split,
+                }
+            )
+        if args.prefill_blocking_mode in {"prefill_q", "prefill_qkv"}:
+            prefill_qaic_config["num_q_blocks"] = args.prefill_num_q_blocks
+
     prefill_qpc = model.compile(
         compile_dir=str(args.output_dir / "prefill"),
         prefill_seq_len=args.prefill_seq_len,
         prefill_only=True,
         enable_chunking=True,
-        qaic_config={"moe_config": {"expert_parallel_chunk_size": args.expert_parallel_chunk_size}},
+        qaic_config=prefill_qaic_config,
         **common,
     )
 

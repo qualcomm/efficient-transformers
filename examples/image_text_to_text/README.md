@@ -76,6 +76,24 @@ python continuous_batching_vlm.py \
     --full-batch-size 4 \
 ```
 
+### Weight-Free Offline Prefill Blocking
+Run the full cached Qwen3-VL 2B, Qwen3.5-35B-A3B, and Gemma 4 E2B checkpoints
+serially through the `prefill_q`, `prefill_kv`, and `prefill_qkv` modes:
+
+```bash
+HF_HUB_CACHE=/home/huggingface_hub \
+HF_HUB_ENABLE_HF_TRANSFER=1 \
+python blocking_vlm_inference.py --model all --mode all \
+  --output-root /home/sabhis/blocking/qeff_artifacts/full_model_prefill_serial_RUN_ID
+```
+
+The runner writes a `result.json` and `run.log` per model/mode, captures generated
+token IDs in `generated_tokens.json`, and records export and compiler timings by
+vision/prefill/decode subfunction. Failed cases do not prevent later serial cases
+from running. Each case has an isolated `QEFF_HOME` and `TMPDIR`; choose a new,
+unused output root for every retry. The script requires the full checkpoints to
+already be present in the Hugging Face cache and does not fetch missing files.
+
 ## Supported Models
 
 **QEff Auto Class:** `QEFFAutoModelForImageTextToText`
