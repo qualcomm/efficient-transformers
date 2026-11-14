@@ -1041,8 +1041,6 @@ def test_vlm_offline_prefill_hf_qaic_parity(model_type, blocking_key, weight_fre
         _language_layer_types(qeff_model),
         VLM_PREFILL_BLOCKING_GENERATION_LEN,
     )[0]
-    if model_type == "qwen3_5_moe" and not weight_free and np.all(qaic_tokens == 0):
-        pytest.xfail("Legacy Qwen3.5-MoE offline-prefill QAIC logits are NaN, producing all-zero tokens.")
     assert np.array_equal(hf_tokens[:VLM_PREFILL_BLOCKING_GENERATION_LEN], qaic_tokens), (
         f"{'Weight-free' if weight_free else 'Legacy'} {blocking_key} HF/QAIC parity failed for {model_type}: "
         f"HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"

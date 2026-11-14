@@ -933,8 +933,8 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
         #     query = l2norm(query, dim=-1, eps=1e-6)
         #     key = l2norm(key, dim=-1, eps=1e-6)
         if use_qk_l2norm_in_kernel:
-            query = query * torch.rsqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6)
-            key = key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6)
+            query = query * torch.reciprocal(torch.sqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6))
+            key = key * torch.reciprocal(torch.sqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6))
         query, key, value, beta, g = [
             x.transpose(1, 2).contiguous().to(self.torch_dtype) for x in (query, key, value, beta, g)
         ]
