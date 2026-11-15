@@ -531,7 +531,12 @@ class ModelConfig:
     }
 
     EXTERNAL_MODELS = {
+        "IFM/K2-Horizon-0.9B": {},
+        "IFM/K2-Horizon-3.7B": {},
+        "IFM/K2-Horizon-7B": {},
+        "IFM/K2-Horizon-32B": {},
         "hpcai-tech/grok-1": {
+            "skip_hf_reference": True,
             "pytorch_hf_tokens_custom_case": [
                 0,
                 0,
@@ -584,7 +589,7 @@ class ModelConfig:
                 391,
                 391,
             ],
-        }
+        },
     }
 
     SWIFTKV_MODELS = {
