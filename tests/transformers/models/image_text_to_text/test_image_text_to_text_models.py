@@ -6,6 +6,7 @@
 # ----------------------------------------------------------------------------
 
 import copy
+import hashlib
 import json
 import os
 from types import SimpleNamespace
@@ -74,6 +75,21 @@ def test_load_test_image_url_fallback_uses_default_size():
     assert image.size == DEFAULT_TEST_IMAGE_SIZE
 
 
+def test_vlm_golden_key_distinguishes_processed_images():
+    common_kwargs = {
+        "torch_dtype": torch.float32,
+        "prompt_text": "Describe the image.",
+        "image_url": "https://example.invalid/test-image.png",
+        "generation_len": 10,
+        "config_fp": "testconfig",
+    }
+
+    fallback_key = vlm_golden_variant_key(image_fingerprint="fallback-image", **common_kwargs)
+    remote_key = vlm_golden_variant_key(image_fingerprint="remote-image", **common_kwargs)
+
+    assert fallback_key != remote_key
+
+
 @pytest.mark.parametrize(
     ("wrapper_cls", "nested_model"),
     [
@@ -117,11 +133,18 @@ def _assert_runtime_token_parity(reference_tokens, qpc_tokens, parity_issue=None
     pytest.fail("Tokens don't match for pytorch HF output and QPC output")
 
 
+def _image_fingerprint(image) -> str:
+    """Return a stable content identity for the image supplied to HF and QAIC."""
+    image_identity = f"{image.mode}:{image.size}".encode() + image.tobytes()
+    return hashlib.sha256(image_identity).hexdigest()[:16]
+
+
 def _resolve_vlm_hf_golden(
     model_name: str,
     config: AutoConfig,
     query: str,
     img_url: str,
+    image_fingerprint: str,
     torch_dtype: torch.dtype,
     max_gen_len: int,
     compile_only: bool,
@@ -129,11 +152,11 @@ def _resolve_vlm_hf_golden(
 ):
     """Resolve the HF PyTorch reference tokens for one VLM variant from the committed golden.
 
-    The HF leg is a pure function of the model + effective config + fixed image/prompt pair
-    (from ``image_text_model_configs.json``), independent of ``kv_offload``/``qaic_config``
-    (those only steer the QEff/on-device leg), so it is generated once per variant and reused
-    across every other knob. ``compile_only`` runs never reach the token comparison, so the
-    (expensive) HF generate call is skipped for them entirely rather than golden-cached.
+    The HF leg is a pure function of the model + effective config + processed image/prompt pair,
+    independent of ``kv_offload``/``qaic_config`` (those only steer the QEff/on-device leg), so
+    it is generated once per variant and reused across every other knob. ``compile_only`` runs
+    never reach the token comparison, so the (expensive) HF generate call is skipped rather than
+    golden-cached.
     """
     if compile_only:
         return None
@@ -141,6 +164,7 @@ def _resolve_vlm_hf_golden(
         torch_dtype=torch_dtype,
         prompt_text=query,
         image_url=img_url,
+        image_fingerprint=image_fingerprint,
         generation_len=max_gen_len,
         config_fp=config_to_dict_fingerprint(config),
     )
@@ -151,6 +175,7 @@ def _resolve_vlm_hf_golden(
         params={
             "prompt": query,
             "image_url": img_url,
+            "image_fingerprint": image_fingerprint,
             "dtype": str(torch_dtype),
             "generation_len": max_gen_len,
         },
@@ -345,6 +370,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             config=config,
             query=query,
             img_url=img_url,
+            image_fingerprint=_image_fingerprint(image),
             torch_dtype=torch_dtype,
             max_gen_len=max_gen_len,
             compile_only=compile_only,
@@ -374,6 +400,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             config=config,
             query=query,
             img_url=img_url,
+            image_fingerprint=_image_fingerprint(image),
             torch_dtype=torch_dtype,
             max_gen_len=max_gen_len,
             compile_only=compile_only,
@@ -452,6 +479,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100(
             config=config,
             query=query,
             img_url=img_url,
+            image_fingerprint=_image_fingerprint(image),
             torch_dtype=torch_dtype,
             max_gen_len=max_gen_len,
             compile_only=compile_only,
