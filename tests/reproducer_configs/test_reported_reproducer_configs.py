@@ -91,6 +91,7 @@ TINY_GPT_OSS_MXFP4 = "tiny-random/gpt-oss-mxfp4"
 TINY_GEMMA3 = "tiny-random/gemma-3"
 TINY_QWEN2_5_VL = "optimum-intel-internal-testing/tiny-random-qwen2.5-vl"
 TINY_INTERNVL = "optimum-intel-internal-testing/tiny-random-internvl2"
+TINY_QWEN3 = "tiny-random/qwen3"
 TINY_QWEN3_MOE = "tiny-random/qwen3-moe"
 TINY_QWEN3_5_MOE = "tiny-random/qwen3.5-moe"
 TINY_QWEN3_VL_MOE = "tiny-random/qwen3-vl-moe"
@@ -99,7 +100,7 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 56
+EXPECTED_SCENARIO_COUNT = 57
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
         "retain_full_kv",
@@ -1103,6 +1104,15 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
         summary="full Mixtral export RAM spike requires memory measurement",
         skip_reason="full-model memory regression requires dedicated memory measurement job",
     ),
+    RegressionScenario(
+        name="qwen3-embedding-export",
+        stage="export",
+        source_model_card="Qwen/Qwen3-Embedding-0.6B",
+        tiny_model_id=TINY_QWEN3,
+        official_model_id="Qwen/Qwen3-Embedding-0.6B",
+        summary="decoder embedding export failed in transformers sdpa_mask with IndexError (issue #1445)",
+        model_api="embedding",
+    ),
 )
 
 
@@ -1464,9 +1474,12 @@ def _run_model_export_test(scenario: RegressionScenario, tmp_path: Path) -> None
         _record_result(scenario, "PASSED", "replicate_kv_heads export completed")
         return
 
-    qeff_model = (
-        _load_vlm_model(scenario) if scenario.model_api == "image_text_to_text" else _load_causal_model(scenario)
-    )
+    if scenario.model_api == "image_text_to_text":
+        qeff_model = _load_vlm_model(scenario)
+    elif scenario.model_api == "embedding":
+        qeff_model = _load_embedding_model(scenario)
+    else:
+        qeff_model = _load_causal_model(scenario)
     onnx_path = qeff_model.export(export_dir=tmp_path / scenario.name, **scenario.export_kwargs)
     paths = [Path(path) for path in onnx_path] if isinstance(onnx_path, list) else [Path(onnx_path)]
     assert all(path.is_file() for path in paths), f"ONNX export did not create files: {paths}"
