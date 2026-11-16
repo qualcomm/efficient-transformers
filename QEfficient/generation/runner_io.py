@@ -20,6 +20,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import onnx
+import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from QEfficient.generation.generation_helpers import (
@@ -44,6 +45,97 @@ from QEfficient.utils import get_padding_shape_from_config
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
+
+_CUSTOM_IO_DTYPES = {
+    "bfloat16": np.dtype(np.uint16),
+    "float16": np.dtype(np.float16),
+    "float32": np.dtype(np.float32),
+    "int8": np.dtype(np.int8),
+    "mxint8": np.dtype(np.int8),
+}
+
+
+def _onnx_input_dtype(graph_input: onnx.ValueInfoProto) -> np.dtype:
+    """Return a numpy storage dtype for an ONNX graph input."""
+    element_type = graph_input.type.tensor_type.elem_type
+    if element_type == onnx.TensorProto.BFLOAT16:
+        return np.dtype(np.uint16)
+    try:
+        return np.dtype(onnx.helper.tensor_dtype_to_np_dtype(element_type))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"Unsupported ONNX input dtype for {graph_input.name!r}: {element_type}") from error
+
+
+def _runner_input_dtype(runner_metadata: RunnerMetadata, name: str) -> tuple[str | None, np.dtype]:
+    """Resolve runner input storage dtype, preferring custom-IO precision."""
+    precision = runner_metadata.custom_io_precisions.get(name)
+    if precision is not None:
+        precision = precision.lower()
+        dtype = _CUSTOM_IO_DTYPES.get(precision)
+        if dtype is None:
+            raise ValueError(f"Unsupported custom-IO precision {precision!r} for input {name!r}.")
+        return precision, dtype
+
+    graph_input = next((item for item in runner_metadata.graph.input if item.name == name), None)
+    if graph_input is None:
+        raise ValueError(f"Input {name!r} is not present in the exported ONNX graph.")
+    if graph_input.type.tensor_type.elem_type == onnx.TensorProto.BFLOAT16:
+        return "bfloat16", _onnx_input_dtype(graph_input)
+    if graph_input.type.tensor_type.elem_type == onnx.TensorProto.INT8:
+        return "int8", _onnx_input_dtype(graph_input)
+    return None, _onnx_input_dtype(graph_input)
+
+
+def _as_bfloat16_storage(value: np.ndarray, name: str) -> np.ndarray:
+    """Encode numeric values as two-byte BF16 payloads without FP16 rounding."""
+    if value.dtype == np.uint16:
+        return np.ascontiguousarray(value)
+    if value.dtype.kind not in "fiu":
+        raise ValueError(f"Input {name!r} cannot be encoded as bfloat16 from dtype {value.dtype}.")
+    return (
+        torch.as_tensor(value).to(torch.bfloat16).view(torch.int16).cpu().numpy().view(np.uint16).copy()
+    )
+
+
+def _as_int8_storage(value: np.ndarray, name: str, precision: str) -> np.ndarray:
+    """Convert integer-compatible inputs to INT8/MXINT8 without silent truncation."""
+    if value.dtype.kind == "f" and not np.all(np.isfinite(value)):
+        raise ValueError(f"Input {name!r} contains non-finite values incompatible with {precision}.")
+    if value.dtype.kind == "f" and not np.all(value == np.trunc(value)):
+        raise ValueError(f"Input {name!r} contains non-integral values incompatible with {precision}.")
+    if value.dtype.kind not in "fiu":
+        raise ValueError(f"Input {name!r} cannot be converted to {precision} from dtype {value.dtype}.")
+    if value.size and (value.min() < np.iinfo(np.int8).min or value.max() > np.iinfo(np.int8).max):
+        raise ValueError(f"Input {name!r} contains values outside the INT8 range required by {precision}.")
+    return np.ascontiguousarray(value.astype(np.int8, copy=False))
+
+
+def _normalize_runner_input(runner_metadata: RunnerMetadata, name: str, value) -> np.ndarray:
+    """Convert one processor input to graph/custom-IO storage dtype for runner replay."""
+    value = np.asarray(value)
+    precision, expected_dtype = _runner_input_dtype(runner_metadata, name)
+    if precision == "bfloat16":
+        converted = _as_bfloat16_storage(value, name)
+    elif precision in {"int8", "mxint8"}:
+        converted = _as_int8_storage(value, name, precision)
+    else:
+        if value.dtype.kind not in "fiu":
+            raise ValueError(f"Input {name!r} has incompatible processor dtype {value.dtype}.")
+        try:
+            converted = np.ascontiguousarray(value.astype(expected_dtype, casting="same_kind", copy=False))
+        except TypeError as error:
+            expected_name = precision or str(expected_dtype)
+            raise ValueError(
+                f"Input {name!r} with dtype {value.dtype} is incompatible with expected {expected_name}."
+            ) from error
+
+    expected_size = runner_metadata.custom_io_item_sizes.get(name, expected_dtype.itemsize)
+    if converted.itemsize != expected_size:
+        raise ValueError(
+            f"Input {name!r} has element size {converted.itemsize}, expected {expected_size} from "
+            f"{'custom-IO' if precision else 'ONNX'} metadata."
+        )
+    return converted
 
 __all__ = [
     "load_prefill_specialization",
@@ -86,7 +178,9 @@ def write_runner_io_bundle(
         raise ValueError(f"Inputs are not present in the exported ONNX graph: {sorted(unexpected_inputs)}")
 
     io_entries = []
-    numpy_inputs = {name: np.asarray(value) for name, value in host_inputs.items()}
+    numpy_inputs = {
+        name: _normalize_runner_input(runner_metadata, name, value) for name, value in host_inputs.items()
+    }
     for name, value in numpy_inputs.items():
         value.tofile(data_dir / f"{name}.raw")
         io_entries.append(
