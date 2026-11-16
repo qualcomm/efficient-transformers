@@ -4250,7 +4250,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             # checkpoint weights are ever materialized here. The real weights
             # are supplied later at export time via pretrained_model_name_or_path.
             model = _build_meta_model(cls._hf_auto_class, pretrained_model_name_or_path, kwargs)
-        elif "DFlash2DraftModel" in _peek_architectures(pretrained_model_name_or_path, kwargs):
+        elif cls is QEFFAutoModelForCausalLM and "DFlash2DraftModel" in _peek_architectures(
+            pretrained_model_name_or_path, kwargs
+        ):
             from QEfficient.transformers.models.dflash2_draft.modeling_dflash2_draft import DFlash2ForCausalLM
 
             model = DFlash2ForCausalLM.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
