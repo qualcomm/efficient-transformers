@@ -177,7 +177,7 @@ else:
         print("=" * 80 + "\n")
 
     ### IMAGE + TEXT ###
-    image_url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/astronaut.jpg"
+    image_url = "https://picsum.photos/id/237/536/354"
     with requests.get(image_url, timeout=(5, 30)) as response:
         response.raise_for_status()
         image = Image.open(BytesIO(response.content)).convert("RGB")
