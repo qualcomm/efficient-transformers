@@ -221,15 +221,45 @@ def _retained_input_names(graph: onnx.GraphProto) -> set[str]:
 
 
 def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
-    """Return inputs used only by Shape nodes, including captured subgraph uses."""
+    """Return inputs whose downstream paths only preserve values until Shape nodes."""
     input_names = {graph_input.name for graph_input in graph.input}
-    consumers = {name: [] for name in input_names}
+    shape_preserving_ops = {"Cast", "Identity"}
 
-    def visit_graph(current_graph: onnx.GraphProto, shadowed_names: set[str]) -> None:
+    def visit_value(
+        current_graph: onnx.GraphProto,
+        value_name: str,
+        shadowed_names: set[str],
+        visiting: set[Tuple[int, str]],
+    ) -> Tuple[bool, bool]:
+        if value_name in shadowed_names:
+            return False, True
+        if any(output.name == value_name for output in current_graph.output):
+            return True, False
+
+        value_key = (id(current_graph), value_name)
+        if value_key in visiting:
+            return True, False
+        visiting.add(value_key)
+        has_use = False
+        all_paths_end_at_shape = True
+
         for node in current_graph.node:
-            for input_name in node.input:
-                if input_name in consumers and input_name not in shadowed_names:
-                    consumers[input_name].append(node.op_type)
+            if value_name in node.input:
+                has_use = True
+                if node.op_type == "Shape":
+                    pass
+                elif node.op_type in shape_preserving_ops and len(node.input) == 1:
+                    output_names = [output_name for output_name in node.output if output_name]
+                    if not output_names:
+                        all_paths_end_at_shape = False
+                    for output_name in output_names:
+                        output_has_use, output_paths_end_at_shape = visit_value(
+                            current_graph, output_name, shadowed_names, visiting
+                        )
+                        if not output_has_use or not output_paths_end_at_shape:
+                            all_paths_end_at_shape = False
+                else:
+                    all_paths_end_at_shape = False
 
             for attribute in node.attribute:
                 if attribute.type == onnx.AttributeProto.GRAPH:
@@ -243,16 +273,24 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
                     local_names = {value.name for value in nested_graph.input}
                     local_names.update(initializer.name for initializer in nested_graph.initializer)
                     local_names.update(output for nested_node in nested_graph.node for output in nested_node.output)
-                    visit_graph(nested_graph, shadowed_names | local_names)
+                    if value_name not in local_names:
+                        nested_has_use, nested_paths_end_at_shape = visit_value(
+                            nested_graph, value_name, shadowed_names | local_names, visiting
+                        )
+                        if nested_has_use:
+                            has_use = True
+                            if not nested_paths_end_at_shape:
+                                all_paths_end_at_shape = False
 
-    visit_graph(graph, set())
-    return {
-        input_name
-        for input_name, input_consumers in consumers.items()
-        if input_consumers and all(op_type == "Shape" for op_type in input_consumers)
-    }
+        visiting.remove(value_key)
+        return has_use, has_use and all_paths_end_at_shape
 
-
+    shape_only_inputs = set()
+    for input_name in input_names:
+        has_use, paths_end_at_shape = visit_value(graph, input_name, set(), set())
+        if has_use and paths_end_at_shape:
+            shape_only_inputs.add(input_name)
+    return shape_only_inputs
 def _runtime_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[str]:
     retained_inputs = _retained_input_names(graph)
     shape_only_inputs = _shape_only_input_names(graph)
