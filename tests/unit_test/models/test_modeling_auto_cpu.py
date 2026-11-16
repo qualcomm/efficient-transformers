@@ -1505,6 +1505,7 @@ class TestArtifactsGenerationAPIs:
 
     def test_dual_qpc_vlm_artifacts_delegates_without_runtime(self, tmp_path):
         model = SimpleNamespace()
+        processor = MagicMock()
         expected = tmp_path / "io"
         with patch(
             "QEfficient.transformers.models.modeling_auto.write_dual_qpc_vlm_runner_bundle",
@@ -1512,14 +1513,25 @@ class TestArtifactsGenerationAPIs:
         ) as writer:
             result = _QEffAutoModelForImageTextToTextDualQPC.generate(
                 model,
-                processor=MagicMock(),
+                processor=processor,
                 images=["image"],
                 prompts=["prompt"],
                 skip_lang=True,
+                image_height=448,
+                image_width=896,
                 artifacts=True,
             )
         assert result == expected
-        writer.assert_called_once()
+        writer.assert_called_once_with(
+            model=model,
+            processor=processor,
+            images=["image"],
+            prompts=["prompt"],
+            skip_vision=False,
+            skip_lang=True,
+            image_height=448,
+            image_width=896,
+        )
 
     def test_dual_qpc_export_passes_declared_vision_specialization_to_dummy_inputs(self):
         vision_specialization = {

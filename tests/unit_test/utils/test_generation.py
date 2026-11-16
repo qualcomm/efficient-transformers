@@ -2021,9 +2021,12 @@ def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
 
     from QEfficient.generation.runner_io import write_single_qpc_vlm_runner_bundle
 
+    handler_kwargs = {}
+
     class FakeVisionHandler:
         def __init__(self, *args, **kwargs):
-            del args, kwargs
+            del args
+            handler_kwargs.update(kwargs)
 
         def prepare_processor_inputs(self, image, prompt, prefill_seq_len):
             del image, prompt
@@ -2059,8 +2062,16 @@ def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
 
     with patch("QEfficient.generation.embedding_handler.VisionHandler", FakeVisionHandler):
         io_dir = write_single_qpc_vlm_runner_bundle(
-            model=qeff_model, processor=MagicMock(), images=["image"], prompts=["prompt"]
+            model=qeff_model,
+            processor=MagicMock(),
+            images=["image"],
+            prompts=["prompt"],
+            image_height=448,
+            image_width=896,
         )
+
+    assert handler_kwargs["image_height"] == 448
+    assert handler_kwargs["image_width"] == 896
 
     entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
     input_dims = {entry["map-to"]: entry["dims"] for entry in entries if entry["io-direction"] == "in"}
@@ -2070,3 +2081,96 @@ def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
     assert input_dims["pixel_values"] == [2, 3]
     assert np.fromfile(io_dir / "data/input_ids.raw", dtype=np.int64).tolist() == [1, 2, 0, 0, 1, 2, 0, 0]
     assert np.fromfile(io_dir / "data/pixel_values.raw", dtype=np.float32).tolist() == [11.0, 12.0, 13.0] * 2
+
+
+@pytest.mark.cpu_only
+def test_vlm_runner_bundle_rejects_incomplete_image_geometry(tmp_path):
+    from QEfficient.generation.runner_io import write_single_qpc_vlm_runner_bundle
+
+    qeff_model = SimpleNamespace(
+        qpc_path=None,
+        compile_artifacts_path=tmp_path,
+        onnx_path=tmp_path / "unused.onnx",
+    )
+
+    with pytest.raises(ValueError, match="provided together"):
+        write_single_qpc_vlm_runner_bundle(
+            model=qeff_model,
+            processor=MagicMock(),
+            images=["image"],
+            prompts=["prompt"],
+            image_height=448,
+        )
+
+
+@pytest.mark.cpu_only
+def test_dual_qpc_language_artifact_processes_images_before_placeholders(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_dual_qpc_vlm_runner_bundle
+
+    handler_kwargs = {}
+    processed = []
+
+    class FakeVisionHandler:
+        def __init__(self, *args, **kwargs):
+            del args
+            handler_kwargs.update(kwargs)
+
+        def prepare_processor_inputs(self, image, prompt, prefill_seq_len):
+            processed.append((image, prompt, prefill_seq_len))
+            return (
+                {"pixel_values": np.array([[1.0]], dtype=np.float32)},
+                {
+                    "input_ids": np.array([[1, 2]], dtype=np.int64),
+                    "position_ids": np.array([[0, 1]], dtype=np.int64),
+                },
+                1,
+            )
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 2])
+    position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1, 2])
+    vision_embeds = helper.make_tensor_value_info("vision_embeds", TensorProto.FLOAT, [1, 2, 3])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 3])
+    onnx_path = tmp_path / "lang.onnx"
+    onnx.save(
+        helper.make_model(
+            helper.make_graph([], "dual_qpc_lang", [input_ids, position_ids, vision_embeds], [logits])
+        ),
+        onnx_path,
+    )
+    compile_dir = tmp_path / "lang-qpc"
+    compile_dir.mkdir()
+    (compile_dir / "specializations.json").write_text(
+        json.dumps({"specializations": [{"batch_size": 1, "seq_len": 2, "ctx_len": 8}]})
+    )
+    lang_model = SimpleNamespace(
+        qpc_path=None,
+        compile_artifacts_path=compile_dir,
+        onnx_path=onnx_path,
+        model=SimpleNamespace(config=SimpleNamespace()),
+    )
+    model = SimpleNamespace(lang_model=lang_model, vision_model=SimpleNamespace())
+
+    with patch("QEfficient.generation.embedding_handler.VisionHandler", FakeVisionHandler):
+        io_dir = write_dual_qpc_vlm_runner_bundle(
+            model=model,
+            processor=MagicMock(),
+            images=["real-image"],
+            prompts=["describe it"],
+            skip_vision=True,
+            skip_lang=False,
+            image_height=448,
+            image_width=896,
+        )
+
+    assert processed == [("real-image", "describe it", 2)]
+    assert handler_kwargs["image_height"] == 448
+    assert handler_kwargs["image_width"] == 896
+    inputs = {
+        entry["map-to"]
+        for entry in json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+        if entry["io-direction"] == "in"
+    }
+    assert {"input_ids", "position_ids", "vision_embeds"} <= inputs
