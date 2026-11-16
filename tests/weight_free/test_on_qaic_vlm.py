@@ -207,7 +207,21 @@ def _prepare_vlm_test_inputs(
     qeff_model,
     model_config,
     image_size=(536, 354),
+    skip_vision=False,
 ):
+    if skip_vision:
+        hf_inputs = processor(text=model_config["text_prompt"], return_tensors="pt")
+        qeff_inputs = {
+            key: value.clone() if isinstance(value, torch.Tensor) else value for key, value in hf_inputs.items()
+        }
+        if qeff_model is not None:
+            qeff_inputs = qeff_model.prepare_inputs_for_generation(
+                inputs=qeff_inputs,
+                prefill_seq_len=model_config["prompt_len"],
+                batch_size=model_config["batch_size"],
+            )
+        return hf_inputs, qeff_inputs
+
     image_width, image_height = image_size
     image = Image.new("RGB", image_size, color=(32, 96, 160))
     conversation = [
