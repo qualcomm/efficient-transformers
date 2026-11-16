@@ -291,10 +291,14 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
         if has_use and paths_end_at_shape:
             shape_only_inputs.add(input_name)
     return shape_only_inputs
+
+
 def _runtime_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[str]:
+    initializer_names = {initializer.name for initializer in graph.initializer}
     retained_inputs = _retained_input_names(graph)
     shape_only_inputs = _shape_only_input_names(graph)
-    initializer_names = {initializer.name for initializer in graph.initializer}
+
+    weight_free_inputs = _weight_free_input_names(onnx_path)
     return {
         graph_input.name
         for graph_input in graph.input
