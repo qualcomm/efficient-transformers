@@ -432,9 +432,15 @@ def _assert_proxy_only_onnx_transform_policy(
         assert always_on_transforms.issubset(transform_names)
 
 
-def _assert_dual_qpc_vlm_proxy_transform_policy(qeff_model, enable_proxy: bool) -> None:
-    _assert_proxy_only_onnx_transform_policy(qeff_model.vision_model, enable_proxy=enable_proxy)
-    _assert_proxy_only_onnx_transform_policy(qeff_model.lang_model, enable_proxy=enable_proxy)
+def _assert_dual_qpc_vlm_proxy_transform_policy(
+    qeff_model, enable_proxy: bool, proxy_component: str = "language"
+) -> None:
+    _assert_proxy_only_onnx_transform_policy(
+        qeff_model.vision_model, enable_proxy=enable_proxy and proxy_component == "vision"
+    )
+    _assert_proxy_only_onnx_transform_policy(
+        qeff_model.lang_model, enable_proxy=enable_proxy and proxy_component == "language"
+    )
 
 
 def _skip_on_model_fetch_error(exc: Exception, model_id: str) -> None:
@@ -1979,7 +1985,7 @@ def test_proxy_compile_artifacts_generate_disagg_mdp_config_for_tiny_model(tmp_p
 def test_proxy_layer_config_only_reduces_vlm_language_layers():
     from QEfficient.proxy.modeling_utils import apply_proxy_layer_config
 
-    # Proxy layer reduction is language-only; vision layers must remain untouched.
+    # Default proxy layer reduction remains language-only; vision layers stay untouched.
     config = Qwen3VLMoeConfig(
         text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
         vision_config=Qwen3VLMoeVisionConfig(depth=8),
@@ -1996,6 +2002,79 @@ def test_proxy_layer_config_only_reduces_vlm_language_layers():
     assert explicit_config.text_config.num_hidden_layers == 3
     assert explicit_config.vision_config.depth == 16
     assert config.vision_config.depth == 8
+
+
+def test_vision_proxy_layer_config_normalizes_layer_indexed_metadata():
+    from QEfficient.proxy.modeling_utils import apply_vision_proxy_layer_config
+
+    config = SimpleNamespace(
+        vision_config=SimpleNamespace(
+            depth=8,
+            num_hidden_layers=8,
+            vt_num_hidden_layers=8,
+            deepstack_visual_indexes=(2, 5, 7),
+            fullatt_block_indexes=(3, 7),
+            intermediate_layers_indices=[1, 4, 7],
+            num_global_layers=4,
+        )
+    )
+
+    assert apply_vision_proxy_layer_config(config) == 2
+    assert config.vision_config.depth == 2
+    assert config.vision_config.num_hidden_layers == 2
+    assert config.vision_config.vt_num_hidden_layers == 2
+    assert config.vision_config.deepstack_visual_indexes == (0, 1)
+    assert config.vision_config.fullatt_block_indexes == (1,)
+    assert config.vision_config.intermediate_layers_indices == [0, 1]
+    assert config.vision_config.num_global_layers == 2
+
+    explicit_config = SimpleNamespace(vision_config=SimpleNamespace(depth=8, deepstack_visual_indexes=[4, 7]))
+    assert apply_vision_proxy_layer_config(explicit_config, num_hidden_layers=3) == 3
+    assert explicit_config.vision_config.depth == 3
+    assert explicit_config.vision_config.deepstack_visual_indexes == [1, 2]
+
+
+def test_prepare_proxy_config_uses_image_text_component_selector():
+    from QEfficient.proxy.modeling_utils import prepare_proxy_config
+
+    vision_kwargs = {
+        "config": Qwen3VLMoeConfig(
+            text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+            vision_config=Qwen3VLMoeVisionConfig(depth=8),
+        ),
+        "proxy_component": "vision",
+    }
+    prepare_proxy_config("unused-local-config", vision_kwargs)
+    assert vision_kwargs["config"].text_config.num_hidden_layers == 16
+    assert vision_kwargs["config"].vision_config.depth == 2
+    assert "proxy_component" not in vision_kwargs
+
+    language_kwargs = {
+        "config": Qwen3VLMoeConfig(
+            text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+            vision_config=Qwen3VLMoeVisionConfig(depth=8),
+        ),
+        "proxy_component": "language",
+    }
+    prepare_proxy_config("unused-local-config", language_kwargs)
+    assert language_kwargs["config"].text_config.num_hidden_layers == 2
+    assert language_kwargs["config"].vision_config.depth == 8
+
+
+def test_dual_qpc_proxy_kwargs_are_component_aware():
+    from QEfficient.transformers.models.modeling_auto import _proxy_kwargs_for_component
+
+    language_kwargs = _proxy_kwargs_for_component({"enable_proxy": True}, "language")
+    vision_kwargs = _proxy_kwargs_for_component({"enable_proxy": True}, "vision")
+    assert language_kwargs["enable_proxy"] is True
+    assert language_kwargs["proxy_component"] == "language"
+    assert "enable_proxy" not in vision_kwargs
+    assert vision_kwargs["proxy_component"] == "vision"
+
+    language_kwargs = _proxy_kwargs_for_component({"enable_proxy": True, "proxy_component": "vision"}, "language")
+    vision_kwargs = _proxy_kwargs_for_component({"enable_proxy": True, "proxy_component": "vision"}, "vision")
+    assert "enable_proxy" not in language_kwargs
+    assert vision_kwargs["enable_proxy"] is True
 
 
 def test_proxy_module_transform_leaves_vision_embedding_unchanged():

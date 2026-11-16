@@ -340,11 +340,25 @@ def _function_call_counts(onnx_model, function_names: set[str]) -> Counter:
 
 
 def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
-    """Return language-layer classes that need repeated proxy subfunction calls."""
+    """Return component-layer classes that need repeated proxy subfunction calls."""
+    model = qeff_model.model
+    proxy_component = getattr(qeff_model, "_proxy_component", "language")
+
+    if proxy_component == "vision":
+        get_vision_encoder = getattr(model, "get_qeff_vision_encoder", None)
+        if callable(get_vision_encoder):
+            try:
+                model = get_vision_encoder()
+            except Exception as exc:
+                logger.warning(
+                    f"get_qeff_vision_encoder failed for {model.__class__.__name__}: "
+                    f"{type(exc).__name__}: {exc}. Falling back to model-level subfunction validation."
+                )
+        return set(get_decoder_layer_classes_for_export(model))
+
     if qeff_model.__class__.__name__ == "QEffVisionEncoderForTextImageToTextModel":
         return set()
 
-    model = qeff_model.model
     get_language_decoder = getattr(model, "get_qeff_language_decoder", None)
     if callable(get_language_decoder):
         try:
@@ -363,10 +377,11 @@ def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
 
 
 def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
-    """Ensure proxy decoder subfunctions are repeated enough to be useful performance proxies."""
+    """Ensure proxy component subfunctions are repeated enough to be useful performance proxies."""
     if not getattr(qeff_model, "_enable_proxy", False):
         return
 
+    proxy_component = getattr(qeff_model, "_proxy_component", "language")
     decoder_layer_classes = _proxy_subfunction_validation_classes(qeff_model)
     if not decoder_layer_classes:
         return
@@ -380,8 +395,8 @@ def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
     }
     if not function_names:
         raise RuntimeError(
-            "Proxy ONNX subfunction validation failed: no decoder-layer subfunctions were found "
-            f"for expected classes {sorted(target_classnames)}."
+            "Proxy ONNX subfunction validation failed: no proxy-component subfunctions were found "
+            f"for {proxy_component} classes {sorted(target_classnames)}."
         )
 
     call_counts = _function_call_counts(onnx_model, function_names)
@@ -390,7 +405,7 @@ def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
     }
     if single_call_functions:
         raise RuntimeError(
-            "Proxy ONNX subfunction validation failed: each decoder-layer subfunction must be invoked more "
+            "Proxy ONNX subfunction validation failed: each proxy-component subfunction must be invoked more "
             "than once for a faithful compiler performance proxy. "
             f"Observed call counts: {single_call_functions}."
         )
