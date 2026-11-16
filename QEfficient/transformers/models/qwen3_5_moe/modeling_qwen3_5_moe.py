@@ -910,6 +910,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
         initial_state=None,
         output_final_state=False,
         use_qk_l2norm_in_kernel=False,
+        use_reciprocal_for_qk_norm=False,
         mask_causal=None,
         mask_strict=None,
         ones_lower=None,
@@ -933,8 +934,14 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
         #     query = l2norm(query, dim=-1, eps=1e-6)
         #     key = l2norm(key, dim=-1, eps=1e-6)
         if use_qk_l2norm_in_kernel:
-            query = query * torch.reciprocal(torch.sqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6))
-            key = key * torch.reciprocal(torch.sqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6))
+            query_squared_norm = (query * query).sum(dim=-1, keepdim=True) + 1e-6
+            key_squared_norm = (key * key).sum(dim=-1, keepdim=True) + 1e-6
+            if use_reciprocal_for_qk_norm:
+                query = query * torch.reciprocal(torch.sqrt(query_squared_norm))
+                key = key * torch.reciprocal(torch.sqrt(key_squared_norm))
+            else:
+                query = query / torch.sqrt(query_squared_norm)
+                key = key / torch.sqrt(key_squared_norm)
         query, key, value, beta, g = [
             x.transpose(1, 2).contiguous().to(self.torch_dtype) for x in (query, key, value, beta, g)
         ]
@@ -1299,6 +1306,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                     initial_state=recurrent_state,
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
+                    use_reciprocal_for_qk_norm=batch_index is None and not batch_fold,
                     mask_causal=self._mask_causal,
                     mask_strict=self._mask_strict,
                     ones_lower=self._ones_lower,
