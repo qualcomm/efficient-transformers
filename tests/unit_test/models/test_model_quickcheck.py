@@ -8357,6 +8357,20 @@ def test_qaic_input_dumper_rejects_dtype_shape_elem_and_byte_mismatches(tmp_path
             output_names=["logits"],
         )
 
+    specialized_session = make_dumper("specialized_shape_base").session
+    specialized_session.allowed_shapes = [[(8, [1, 1]), (4, [1, 1, 8])]]
+    specialized_shape_dumper = QAICInputDumper(
+        session=specialized_session,
+        qpc_path=tmp_path / "specialized_shape_qpc",
+        root=tmp_path / "specialized_shape_dumps",
+        component_name="text",
+    )
+    specialized_shape_dumper.record_invocation(
+        kind="prefill",
+        inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+        output_names=["logits"],
+    )
+
     shape_dumper = make_dumper("shape_dumps")
     descriptor_path = shape_dumper.session_dir / "aic_batch_io.json"
     descriptor = json.loads(descriptor_path.read_text())

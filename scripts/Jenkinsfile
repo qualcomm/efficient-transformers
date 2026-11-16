@@ -492,7 +492,7 @@ pipeline {
                                 export TOKENIZERS_PARALLELISM=false && export QEFF_HOME=/efficient-transformers/Non_cli_qaic_multimodal &&
                                 rm -f tests/tests_log6.xml &&
                                 if [ -r /opt/qti-aic/versions/apps.xml ]; then echo 'QAIC Apps SDK version:'; cat /opt/qti-aic/versions/apps.xml; fi;
-                                python -m pytest tests -m '(not reproducer) and (multimodal) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
+                                python -m pytest tests -m '(not reproducer) and (multimodal) and (not weight_free) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
                                 test_status=\\$?;
                                 deactivate;
                                 if [ \"\\$test_status\" -ne 0 ]; then exit \"\\$test_status\"; fi"
@@ -508,7 +508,7 @@ pipeline {
                                 mkdir -p /efficient-transformers/Qeff_logs && export QEFF_LOG_PATH=/efficient-transformers/Qeff_logs &&
                                 export TOKENIZERS_PARALLELISM=false && export QEFF_HOME=/efficient-transformers/Non_cli_qaic_multimodal &&
                                 export QEFF_PER_PR_COMPILE_WARM_ONLY=1 &&
-                                python -m pytest tests -m '(not reproducer) and (multimodal) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_COMPILE_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6_warm.xml --durations=10;
+                                python -m pytest tests -m '(not reproducer) and (multimodal) and (not weight_free) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_COMPILE_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6_warm.xml --durations=10;
                                 test_status=\\$?;
                                 if [ \"\\$test_status\" -ne 0 ]; then
                                   if [ -f tests/tests_log6_warm.xml ]; then
@@ -531,7 +531,7 @@ pipeline {
                                 export QEFF_PER_PR_SHARED_HOME=1 &&
                                 rm -f tests/tests_log6.xml &&
                                 if [ -r /opt/qti-aic/versions/apps.xml ]; then echo 'QAIC Apps SDK version:'; cat /opt/qti-aic/versions/apps.xml; fi;
-                                python -m pytest tests -m '(not reproducer) and (multimodal) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_EXEC_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
+                                python -m pytest tests -m '(not reproducer) and (multimodal) and (not weight_free) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_EXEC_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
                                 test_status=\\$?;
                                 deactivate;
                                 if [ \"\\$test_status\" -ne 0 ]; then exit \"\\$test_status\"; fi"
