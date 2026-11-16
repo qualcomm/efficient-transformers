@@ -2213,12 +2213,12 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         """
         if artifacts:
             compiler_options["artifacts"] = True
+        reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         if skip_lang and skip_vision:
             raise ValueError("Expected at least one of 'skip_lang' or 'skip_vision' to be False")
         vision_devices, vision_cores = self._resolve_vision_resources(
             num_devices, num_cores, vision_num_devices, vision_num_cores
         )
-        reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         if self.dflash_tlm and dflash_block_size is None and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             dflash_block_size = getattr(self.model.model.language_model, "dflash_chunk_size", 16)
         if self.dflash_tlm and not skip_lang and (type(dflash_block_size) is not int or dflash_block_size < 2):
