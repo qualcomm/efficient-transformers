@@ -5502,11 +5502,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             self.model.config.qeff_csa_prefill_only = prefill_only is True
             self.model.config.qeff_hca_prefill_only = prefill_only is True
 
-        if hasattr(self, "_weight_free") and self._weight_free and prefill_only is True:
-            raise NotImplementedError(
-                "weight_free=True is not supported with disaggregated compile (prefill_only=True or prefill_seq_len=1)."
-            )
-
         _decode_ks = (
             sorted(set(num_speculative_tokens))
             if isinstance(num_speculative_tokens, (list, tuple))
