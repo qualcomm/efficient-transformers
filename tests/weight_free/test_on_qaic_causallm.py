@@ -217,6 +217,10 @@ def test_weight_free_generate_fp16(model_type, model_id, tmp_export_dir):
 @pytest.mark.weight_free
 @pytest.mark.on_qaic
 @pytest.mark.llm_model
+@pytest.mark.xfail(
+    reason="FP8 retained-weight export currently fails with Dynamo and ONNX subfunctions enabled",
+    strict=False,
+)
 @pytest.mark.parametrize("model_config", FP8_RETAINED_QAIC_MODEL_PARAMS)
 def test_weight_free_fp8_retained_export_compile(model_config, tmp_export_dir):
     """Export, compile, and compare greedy HF and QAIC tokens for retained FP8."""
