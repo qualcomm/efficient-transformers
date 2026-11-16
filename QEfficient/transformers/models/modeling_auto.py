@@ -3121,8 +3121,10 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
 
         from transformers import AutoConfig
 
-        config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
-        kwargs["config"] = config
+        config = kwargs.get("config")
+        if config is None:
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+            kwargs["config"] = config
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs, proxy_component=proxy_component)
             config = kwargs["config"]
@@ -3130,7 +3132,7 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
         config.vision_config.use_flash_attn = "false"
         _resolve_torch_dtype(kwargs)
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
-        model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, config, *args, **kwargs)
+        model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
         kwargs["proxy_component"] = proxy_component

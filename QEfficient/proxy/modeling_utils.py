@@ -29,6 +29,7 @@ _LAYER_INDEXED_SEQUENCE_ATTRIBUTES = {
 }
 _LAYER_INDEXED_SCALAR_ATTRIBUTES = {"vision_feature_layer"}
 _LAYER_COUNT_SCALAR_ATTRIBUTES = {"num_global_layers"}
+_LAYER_TYPE_SEQUENCE_ATTRIBUTES = {"fullatt_block_indexes"}
 _CONFIG_LOAD_KWARGS = (
     "cache_dir",
     "force_download",
@@ -83,18 +84,29 @@ def _map_layer_index(layer_idx: int, original_num_layers: int, proxy_num_layers:
     return min(proxy_num_layers - 1, round(layer_idx * (proxy_num_layers - 1) / (original_num_layers - 1)))
 
 
-def _normalize_index_sequence(attribute: str, value, original_num_layers: int, proxy_num_layers: int):
-    if attribute in {"cross_attention_layers", "cross_attn_layers", "fullatt_block_indexes"}:
-        mapped_values = [proxy_num_layers - 1] if value and proxy_num_layers > 0 else []
-    else:
-        mapped_values = []
-        for layer_idx in value:
-            mapped_idx = _map_layer_index(int(layer_idx), original_num_layers, proxy_num_layers)
-            if mapped_idx < proxy_num_layers and mapped_idx not in mapped_values:
-                mapped_values.append(mapped_idx)
-        if value and not mapped_values and proxy_num_layers > 0:
-            mapped_values = [proxy_num_layers - 1]
+def _normalize_index_sequence(value, original_num_layers: int, proxy_num_layers: int):
+    mapped_values = []
+    for layer_idx in value:
+        mapped_idx = _map_layer_index(int(layer_idx), original_num_layers, proxy_num_layers)
+        if mapped_idx < proxy_num_layers and mapped_idx not in mapped_values:
+            mapped_values.append(mapped_idx)
+    if value and not mapped_values and proxy_num_layers > 0:
+        mapped_values = [proxy_num_layers - 1]
     return _restore_sequence_type(value, mapped_values)
+
+
+def _normalize_layer_type_sequence(value, original_num_layers: int, proxy_num_layers: int):
+    original_values = {int(layer_idx) for layer_idx in value if 0 <= int(layer_idx) < original_num_layers}
+    if not original_values:
+        return _restore_sequence_type(value, [])
+    if len(original_values) >= original_num_layers:
+        return _restore_sequence_type(value, list(range(proxy_num_layers)))
+    if proxy_num_layers == 1:
+        return _restore_sequence_type(value, [0])
+    mapped_values = _normalize_index_sequence(value, original_num_layers, proxy_num_layers)
+    if len(mapped_values) >= proxy_num_layers:
+        return _restore_sequence_type(value, [proxy_num_layers - 1])
+    return mapped_values
 
 
 def _normalize_layer_indexed_metadata(config, original_num_layers: int, proxy_num_layers: int) -> None:
@@ -107,11 +119,13 @@ def _normalize_layer_indexed_metadata(config, original_num_layers: int, proxy_nu
         is_probable_layer_sequence = _is_int_sequence(value) and (
             "layer" in attribute_lower or "index" in attribute_lower or "indices" in attribute_lower
         )
-        if _is_int_sequence(value) and (is_known_sequence or is_probable_layer_sequence):
+        if _is_int_sequence(value) and attribute in _LAYER_TYPE_SEQUENCE_ATTRIBUTES:
+            setattr(config, attribute, _normalize_layer_type_sequence(value, original_num_layers, proxy_num_layers))
+        elif _is_int_sequence(value) and (is_known_sequence or is_probable_layer_sequence):
             setattr(
                 config,
                 attribute,
-                _normalize_index_sequence(attribute, value, original_num_layers, proxy_num_layers),
+                _normalize_index_sequence(value, original_num_layers, proxy_num_layers),
             )
         elif attribute in _LAYER_INDEXED_SCALAR_ATTRIBUTES and isinstance(value, int) and value >= 0:
             setattr(config, attribute, _map_layer_index(value, original_num_layers, proxy_num_layers))

@@ -32,6 +32,8 @@ from QEfficient.proxy.modeling_utils import (
     _get_language_config,
     _get_layer_signature,
     _get_signature_horizon,
+    _get_vision_config,
+    _get_vision_num_layers,
 )
 from QEfficient.transformers.cache_utils import InvalidIndexProvider
 from QEfficient.utils.cache import QEFF_HOME
@@ -356,15 +358,21 @@ def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
     if model_config is None:
         return None
 
-    language_config = _get_language_config(model_config)
-    num_hidden_layers = getattr(language_config, "num_hidden_layers", None)
+    proxy_component = getattr(qeff_model, "_proxy_component", "language")
+    if proxy_component == "vision":
+        component_config = _get_vision_config(model_config)
+        num_hidden_layers = _get_vision_num_layers(component_config)
+    else:
+        component_config = _get_language_config(model_config)
+        num_hidden_layers = getattr(component_config, "num_hidden_layers", None)
+
     if not isinstance(num_hidden_layers, int) or num_hidden_layers < 1:
         return None
 
-    signature_horizon = _get_signature_horizon(language_config, num_hidden_layers)
-    required_signatures = {_get_layer_signature(language_config, layer_idx) for layer_idx in range(signature_horizon)}
+    signature_horizon = _get_signature_horizon(component_config, num_hidden_layers)
+    required_signatures = {_get_layer_signature(component_config, layer_idx) for layer_idx in range(signature_horizon)}
     observed_signatures = [
-        _get_layer_signature(language_config, layer_idx) for layer_idx in range(len(decoder_call_nodes))
+        _get_layer_signature(component_config, layer_idx) for layer_idx in range(len(decoder_call_nodes))
     ]
     function_signatures = {}
     for node, signature in zip(decoder_call_nodes, observed_signatures):
@@ -408,6 +416,13 @@ def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
 
     submodule_classes = get_decoder_layer_classes_for_export(model)
     return {cls for cls in submodule_classes if "vision" not in cls.__name__.lower()}
+
+
+def _subfunction_target_classes(qeff_model) -> set[type[nn.Module]]:
+    """Return module classes to export as ONNX subfunctions."""
+    if getattr(qeff_model, "_enable_proxy", False):
+        return _proxy_subfunction_validation_classes(qeff_model)
+    return set(get_decoder_layer_classes_for_export(qeff_model.model))
 
 
 def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
@@ -791,7 +806,7 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
         qeff_model._onnx_transforms.append(LocalizeFunctionReduceSumAxesTransform)
 
     # TODO: Handle this in the modelling class QEFFTransformersBase, remove from here.
-    decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
+    decoder_layer_classes = _subfunction_target_classes(qeff_model)
     if decoder_layer_classes:
         if dynamo:
             # Pass resolved classnames to RenameRepeatedSubgraphTransform; single resolution point to avoid double-call.
