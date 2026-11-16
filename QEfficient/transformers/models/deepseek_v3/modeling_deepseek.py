@@ -850,8 +850,17 @@ def _deepseek_act_fn(experts: nn.Module) -> Callable:
 def _deepseek_route_tokens(module: nn.Module, hidden_states: torch.Tensor):
     router_output = module.gate(hidden_states)
     if isinstance(router_output, tuple):
-        topk_indices, topk_weights = router_output
-        return topk_indices, topk_weights, None
+        if len(router_output) == 2:
+            topk_indices, topk_weights = router_output
+            return topk_indices, topk_weights, None
+        if len(router_output) == 3:
+            first, topk_weights, third = router_output
+            if torch.is_floating_point(third):
+                topk_indices, router_logits = first, third
+            else:
+                router_logits, topk_indices = first, third
+            return topk_indices, topk_weights, router_logits
+        raise ValueError(f"Expected DeepSeek router to return 2 or 3 tensors, got {len(router_output)}")
     topk_indices, topk_weights = module.route_tokens_to_experts(router_output)
     return topk_indices, topk_weights, router_output
 

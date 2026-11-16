@@ -9,8 +9,8 @@ from collections import Counter
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from QEfficient import QEFFAutoModelForCausalLM
@@ -29,22 +29,22 @@ from QEfficient.transformers.moe import MoEFlavour, QEffMoEBlockMixin, build_can
 
 MODEL_KWARGS = {"attn_implementation": "eager"}
 
-GLM4_MOE_CFG = dict(
-    max_position_embeddings=1024,
-    num_hidden_layers=2,
-    num_attention_heads=4,
-    hidden_size=64,
-    intermediate_size=128,
-    moe_intermediate_size=32,
-    vocab_size=127,
-    num_key_value_heads=2,
-    n_routed_experts=4,
-    num_experts_per_tok=2,
-    first_k_dense_replace=0,
-    n_group=1,
-    topk_group=1,
-    head_dim=16,
-)
+GLM4_MOE_CFG = {
+    "max_position_embeddings": 1024,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "moe_intermediate_size": 32,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+    "n_routed_experts": 4,
+    "num_experts_per_tok": 2,
+    "first_k_dense_replace": 0,
+    "n_group": 1,
+    "topk_group": 1,
+    "head_dim": 16,
+}
 
 
 MOE_BLOCK_SEQ_LEN = 8
@@ -54,15 +54,15 @@ MOE_BLOCK_EXPERT_INTERMEDIATE_SIZE = 16
 MOE_BLOCK_NUM_EXPERTS = 4
 MOE_BLOCK_TOP_K = 2
 
-MOE_BLOCK_BASE_CFG = dict(
-    max_position_embeddings=64,
-    num_hidden_layers=1,
-    num_attention_heads=2,
-    hidden_size=MOE_BLOCK_HIDDEN_SIZE,
-    intermediate_size=MOE_BLOCK_INTERMEDIATE_SIZE,
-    vocab_size=127,
-    num_key_value_heads=2,
-)
+MOE_BLOCK_BASE_CFG = {
+    "max_position_embeddings": 64,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "hidden_size": MOE_BLOCK_HIDDEN_SIZE,
+    "intermediate_size": MOE_BLOCK_INTERMEDIATE_SIZE,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+}
 
 
 def _first_module_by_class_name(model: nn.Module, class_name: str) -> nn.Module:
@@ -627,24 +627,25 @@ def test_glm4_moe_kv_blocking_transform_and_prefill_export(tmp_path):
 # ── Qwen3MOE ──────────────────────────────────────────────────────────────────
 
 
-QWEN3_MOE_CFG = dict(
-    max_position_embeddings=256,
-    num_hidden_layers=2,
-    num_attention_heads=4,
-    hidden_size=128,
-    intermediate_size=512,
-    vocab_size=127,
-    num_key_value_heads=2,
-)
-GPTOSS_CFG = dict(
-    max_position_embeddings=256,
-    num_hidden_layers=2,
-    num_attention_heads=2,
-    hidden_size=32,
-    intermediate_size=32,
-    vocab_size=127,
-    num_key_value_heads=2,
-)
+QWEN3_MOE_CFG = {
+    "max_position_embeddings": 256,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "hidden_size": 128,
+    "intermediate_size": 512,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+}
+GPTOSS_CFG = {
+    "max_position_embeddings": 256,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "hidden_size": 32,
+    "intermediate_size": 32,
+    "vocab_size": 127,
+    "num_key_value_heads": 2,
+    "num_local_experts": 4,
+}
 
 
 # ── Qwen3MOE ──────────────────────────────────────────────────────────────────
@@ -905,7 +906,64 @@ def test_gptoss_blocked_forward_parity():
     assert (orig - looped).abs().max().item() < 1e-3, "GPT-OSS HF vs simple-loop parity failed"
 
 
-@pytest.mark.parametrize("flavour", ("decode_bmm", "simple_loop", "expert_parallel"))
+@pytest.mark.parametrize("flavour", ("simple_loop", "decode_bmm", "expert_parallel"))
+def test_gptoss_moe_block_all_flavours_forward_parity(flavour):
+    """SIMPLE_LOOP, DECODE_BMM, EXPERT_PARALLEL must all match HF GptOssMLP output."""
+    torch.manual_seed(37)
+    config = AutoConfig.for_model("gpt_oss", **GPTOSS_CFG)
+    model = AutoModelForCausalLM.from_config(config, **MODEL_KWARGS)
+
+    seq_len = 1 if flavour == "decode_bmm" else MOE_BLOCK_SEQ_LEN
+    x = torch.randn(1, seq_len, config.hidden_size)
+
+    hf_block = next(m for m in model.modules() if m.__class__.__name__ == "GptOssMLP")
+    with torch.no_grad():
+        expected, _ = hf_block(x)
+
+    qeff_block = _make_qeff_moe_block(hf_block, flavour, {})
+    with torch.no_grad():
+        actual, _ = qeff_block(x)
+    actual = _match_expected_shape(actual, expected)
+
+    torch.testing.assert_close(actual, expected, atol=1e-3, rtol=1e-3, msg=f"gpt_oss {flavour} parity failed")
+
+
+@pytest.mark.parametrize("flavour", ("simple_loop", "expert_parallel"))
+def test_gptoss_expert_intermediate_block_size_parity(flavour):
+    """expert_intermediate_block_size tiling must produce the same output as no tiling."""
+    from QEfficient.transformers.moe import MoEFlavour
+
+    torch.manual_seed(41)
+    config = AutoConfig.for_model("gpt_oss", **GPTOSS_CFG)
+    model = AutoModelForCausalLM.from_config(config, **MODEL_KWARGS)
+
+    hf_block = next(m for m in model.modules() if m.__class__.__name__ == "GptOssMLP")
+    x = torch.randn(1, MOE_BLOCK_SEQ_LEN, config.hidden_size)
+
+    # Reference: standard path, no intermediate blocking
+    qeff_ref = _make_qeff_moe_block(hf_block, flavour, {})
+    with torch.no_grad():
+        expected, _ = qeff_ref(x)
+
+    # Tiled path: set expert_intermediate_block_size after weights transform
+    qeff_tiled = _make_qeff_moe_block(hf_block, flavour, {})
+    qeff_tiled.expert_intermediate_block_size = 4
+    if flavour == "expert_parallel":
+        assert qeff_tiled._moe_flavour is MoEFlavour.EXPERT_PARALLEL
+    with torch.no_grad():
+        actual, _ = qeff_tiled(x)
+    actual = _match_expected_shape(actual, expected)
+
+    torch.testing.assert_close(
+        actual,
+        expected,
+        atol=1e-3,
+        rtol=1e-3,
+        msg=f"gpt_oss {flavour} expert_intermediate_block_size parity failed",
+    )
+
+
+@pytest.mark.parametrize("flavour", ("simple_loop", "expert_parallel"))
 def test_gemma4_text_moe_block_forward_parity(flavour):
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
     from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm, Gemma4TextExperts, Gemma4TextRouter

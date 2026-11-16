@@ -26,6 +26,7 @@ from PIL import Image
 from transformers import AutoConfig, AutoProcessor
 
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 
 from ._helpers import (
     BATCH_SIZE,
@@ -141,7 +142,7 @@ def test_weight_free_ccl_compile_and_generate(model_type, model_id, tmp_export_d
         "img_size": model_config["img_size"],
         "prefill_seq_len": model_config.get("prompt_len", CCL_PREFILL_SEQ_LEN),
         "ctx_len": model_config.get("ctx_len", CCL_CTX_LEN),
-        "num_cores": 16,
+        "num_cores": DEFAULT_AIC_NUM_CORES,
         "batch_size": BATCH_SIZE,
         "use_onnx_subfunctions": True,
     }

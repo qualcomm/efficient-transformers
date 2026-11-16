@@ -15,6 +15,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageText
 
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from tests.two_phase import model_export_compile_lock, resolve_two_phase_cleanup
 
 MODEL_NAME = "tiny-random/qwen3-vl-moe"
@@ -321,7 +322,7 @@ def _run_disagg_blocked(
                 ctx_len=CTX_LEN,
                 height=IMAGE_SIZE[1],
                 width=IMAGE_SIZE[0],
-                num_cores=16,
+                num_cores=DEFAULT_AIC_NUM_CORES,
                 num_devices=1,
                 retain_full_kv=True,
                 split_model_io=True,
@@ -344,7 +345,7 @@ def _run_disagg_blocked(
                 ctx_len=CTX_LEN,
                 height=IMAGE_SIZE[1],
                 width=IMAGE_SIZE[0],
-                num_cores=16,
+                num_cores=DEFAULT_AIC_NUM_CORES,
                 num_devices=1,
                 split_model_io=True,
                 mos=1,
@@ -461,7 +462,7 @@ def test_qwen3_vl_moe_disagg_prefill_mdp_intersection_compile_only(blocking_mode
                 ctx_len=CTX_LEN,
                 height=IMAGE_SIZE[1],
                 width=IMAGE_SIZE[0],
-                num_cores=16,
+                num_cores=DEFAULT_AIC_NUM_CORES,
                 num_devices=PREFILL_MDP_NUM_DEVICES,
                 mdp_num_partitions=PREFILL_MDP_NUM_PARTITIONS,
                 mdp_strategy="intersection",

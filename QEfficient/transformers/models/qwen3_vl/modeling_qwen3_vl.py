@@ -40,6 +40,7 @@ from QEfficient.blocking.attention_blocking import (
 from QEfficient.transformers.cache_utils import QEffDynamicCache
 from QEfficient.transformers.modeling_attn_mask_utils import _create_causal_mask
 from QEfficient.transformers.spd.dflash import compute_dflash_target_hidden_states
+from QEfficient.transformers.spd.spd_transform_forward import filter_hidden_states
 from QEfficient.utils import constants
 from QEfficient.utils._utils import IOInfo, get_padding_shape_from_config
 from QEfficient.utils.constants import MIN_MASKED_ATTENTION_VALUE
@@ -158,18 +159,8 @@ class QEffQwen3VLTextRotaryEmbedding(Qwen3VLTextRotaryEmbedding):
 class QEffQwen3VLVisionModel(Qwen3VLVisionModel):
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         merge_size = self.spatial_merge_size
-
-        # max_hw = max(grid_thw.shape)
-        # freq_table = self.rotary_pos_emb(max_hw)  # (max_hw, dim // 2)
-        # device = freq_table.device
-        # bs, num_frames, height, width = grid_thw.shape
-        # grid_thw = (torch.tensor(grid_thw.shape, dtype=torch.int64)).unsqueeze(0)
-
-        # total_tokens = int(torch.prod(grid_thw, dim=1).sum().item())
-        # pos_ids = torch.empty((total_tokens, 2), dtype=torch.long, device=device)
-
         bs, num_frames, height, width = grid_thw.shape
-        inv_freq = self.rotary_pos_emb.inv_freq
+        inv_freq = self.rotary_pos_emb.inv_freq.to(device=grid_thw.device)
         device = inv_freq.device
 
         merged_h, merged_w = height // merge_size, width // merge_size
@@ -750,6 +741,7 @@ class QEffQwen3VLDecoderWrapper(nn.Module):
         slot_id: torch.LongTensor | None = None,
         batch_index: torch.LongTensor | None = None,
         comp_ctx_lengths: list[int] | None = None,
+        num_logits_to_keep: torch.LongTensor | None = None,
     ):
         inputs_embeds = self.model.get_input_embeddings()(input_ids)
         _B, _N, C = inputs_embeds.shape
@@ -791,10 +783,14 @@ class QEffQwen3VLDecoderWrapper(nn.Module):
 
         if getattr(self.language_model, "target_layer_ids", None):
             target_hidden = outputs.hidden_states
-            logits = self.model.lm_head(outputs.last_hidden_state).float()
-            predicted_token_ids = logits.argmax(dim=-1).to(torch.int32)
+            hidden_states = outputs.last_hidden_state
+            if num_logits_to_keep is not None:
+                hidden_states = filter_hidden_states(hidden_states, position_ids[0], num_logits_to_keep)
+            logits = self.model.lm_head(hidden_states).float()
+            output_logits = (getattr(self, "qaic_config", None) or {}).get("speculative_model_type") == "target"
+            predictions = logits if output_logits else logits.argmax(dim=-1).to(torch.int32)
             return (
-                predicted_token_ids,
+                predictions,
                 vision_embeds,
                 deepstack_features,
                 image_idx,
@@ -1042,6 +1038,9 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
     ):
         comp_ctx_lengths_prefill = compiler_options.pop("comp_ctx_lengths_prefill", None)
         comp_ctx_lengths_decode = compiler_options.pop("comp_ctx_lengths_decode", None)
+        dflash_block_size = None
+        if getattr(self.model.language_model, "target_layer_ids", None):
+            dflash_block_size = compiler_options.pop("dflash_block_size", None)
         # Preserve the legacy shape when callers do not request a separate vision batch.
         vision_batch_size = batch_size if vision_batch_size is None else vision_batch_size
         if height is None or width is None:
@@ -1137,6 +1136,8 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 if full_batch_size:
                     lang_prefill["full_batch_exec_size"] = full_batch_size
 
+                if dflash_block_size is not None:
+                    lang_prefill["num_logits_to_keep"] = 1
                 lang.append(lang_prefill)
 
             for i in range(len(comp_ctx_lengths_decode or [])):
@@ -1155,6 +1156,9 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 else:
                     lang_decode["batch_size"] = kv_cache_batch_size
 
+                if dflash_block_size is not None:
+                    lang_decode["num_logits_to_keep"] = dflash_block_size
+                    lang_decode["seq_len"] = dflash_block_size
                 lang.append(lang_decode)
         else:
             lang_prefill = {
@@ -1203,6 +1207,10 @@ class QEffQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 lang_decode["total_num_kv_blocks"] = kv_cache_batch_size * num_kv_blocks
                 lang_decode["kv_block_size"] = -(-ctx_len // num_kv_blocks)
 
+            if dflash_block_size is not None:
+                lang_prefill["num_logits_to_keep"] = 1
+                lang_decode["num_logits_to_keep"] = dflash_block_size
+                lang_decode["seq_len"] = dflash_block_size
             lang = [lang_prefill, lang_decode]
 
         specializations = {}

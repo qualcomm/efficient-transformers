@@ -18,6 +18,7 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
 )
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLAttention,
     Qwen2_5_VLConfig,
@@ -228,6 +229,35 @@ class QEffQwen2_5_VLVisionBlock(Qwen2_5_VLVisionBlock):
         return hidden_states
 
 
+class QEffQwen2_5_VisionPatchEmbed(Qwen2_5_VisionPatchEmbed):
+    def __qeff_init__(self):
+        if self.proj.bias is None:
+            proj = self.proj
+            qeff_proj = nn.Conv3d(
+                proj.in_channels,
+                proj.out_channels,
+                proj.kernel_size,
+                stride=proj.stride,
+                padding=proj.padding,
+                dilation=proj.dilation,
+                groups=proj.groups,
+                bias=True,
+                padding_mode=proj.padding_mode,
+                device="meta",
+                dtype=proj.weight.dtype,
+            )
+            qeff_proj.weight = proj.weight
+            del qeff_proj.bias
+            bias_device = proj.weight.device if proj.weight.device.type != "meta" else torch.device("cpu")
+            qeff_proj.register_buffer(
+                "bias",
+                torch.zeros(proj.out_channels, dtype=proj.weight.dtype, device=bias_device),
+                persistent=False,
+            )
+            qeff_proj.train(proj.training)
+            self.proj = qeff_proj
+
+
 class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPretrainedModel):
     def __qeff_init__(self):
         self.attention_mask_builder = QEffQwen2_5_VLAttentionMask()
@@ -256,10 +286,20 @@ class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPret
         )
         wpos_ids = wpos_ids.permute(0, 2, 1, 3)
         wpos_ids = wpos_ids.flatten()
-        pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-        pos_ids = pos_ids.repeat(bs, 1)  # check size of t
-        rotary_pos_emb = pos_ids.to(dtype=inv_freq.dtype).unsqueeze(-1) * inv_freq.view(1, 1, -1)
-        return rotary_pos_emb.flatten(1)
+
+        pos_ids = []
+        pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+        pos_ids = torch.cat(pos_ids, dim=0)
+
+        x_expanded = pos_ids.unsqueeze(0)
+        x_expanded = x_expanded.expand(bs, -1, -1)
+        pos_ids = x_expanded.reshape(-1, pos_ids.size(1))
+
+        max_grid_size = max(grid_thw.shape)
+        position_ids = torch.arange(max_grid_size, device=device, dtype=inv_freq.dtype)
+        rotary_pos_emb_full = torch.outer(position_ids, inv_freq)
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
+        return rotary_pos_emb
 
     def get_window_index(self, grid_thw):
         window_index: list = []

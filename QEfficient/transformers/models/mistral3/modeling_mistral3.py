@@ -67,6 +67,18 @@ def qeff_generate_block_attention_mask(patch_embeds_list, tensor):
     return causal_mask
 
 
+def qeff_position_ids_in_meshgrid(patch_embeds_list):
+    position_ids = []
+    for patch in patch_embeds_list:
+        hpos_ids, wpos_ids = torch.meshgrid(
+            torch.arange(patch.shape[-2], device=patch.device),
+            torch.arange(patch.shape[-1], device=patch.device),
+            indexing="ij",
+        )
+        position_ids.append(torch.stack([hpos_ids.flatten(), wpos_ids.flatten()], dim=-1))
+    return torch.cat(position_ids, dim=0)
+
+
 class QEffPixtralVisionModel(PixtralVisionModel):
     def forward(
         self,
@@ -95,9 +107,7 @@ class QEffPixtralVisionModel(PixtralVisionModel):
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        position_ids = position_ids_in_meshgrid(
-            patch_embeds_list, max_width=self.config.image_size // self.config.patch_size
-        )
+        position_ids = qeff_position_ids_in_meshgrid(patch_embeds_list)
         position_embeddings = self.patch_positional_embedding(patch_embeds, position_ids)
 
         attention_mask = qeff_generate_block_attention_mask(

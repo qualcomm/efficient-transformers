@@ -203,14 +203,17 @@ class FP8DeQuantLinearToLinearTransform(ModuleMutatorTransform):
 
     @classmethod
     def mutate(cls, original_module, parent_module):
-        #  -- de-quantizing the weights --
-        dequant_weights = original_module.weight.to(torch.float32) * original_module.weight_scale
+        scale = original_module.weight_scale
+        compute_dtype = scale.dtype
+        if scale.ndim == 1:
+            scale = scale.unsqueeze(-1)
+        dequant_weights = original_module.weight.to(compute_dtype) * scale
         dequant_linear_layer = nn.Linear(
             original_module.in_features, original_module.out_features, bias=original_module.bias is not None
         )
         dequant_linear_layer.weight = torch.nn.Parameter(dequant_weights)
         if original_module.bias is not None:
-            dequant_linear_layer.bias = torch.nn.Parameter(original_module.bias.float())
+            dequant_linear_layer.bias = torch.nn.Parameter(original_module.bias.to(compute_dtype))
         return dequant_linear_layer
 
 
@@ -248,7 +251,7 @@ class FP8BlockWiseDequantLinearToLinearTransform(ModuleMutatorTransform):
 
     @classmethod
     def mutate(cls, original_module, parent_module):
-        #  -- de-quantizing the weights --
+        compute_dtype = original_module.weight_scale_inv.dtype
         dequant_weights = blockwise_dequantize(
             original_module.weight, original_module.weight_scale_inv, original_module.weight_block_size
         )
@@ -257,7 +260,7 @@ class FP8BlockWiseDequantLinearToLinearTransform(ModuleMutatorTransform):
         )
         dequant_linear_layer.weight = torch.nn.Parameter(dequant_weights)
         if original_module.bias is not None:
-            dequant_linear_layer.bias = torch.nn.Parameter(original_module.bias.float())
+            dequant_linear_layer.bias = torch.nn.Parameter(original_module.bias.to(compute_dtype))
         return dequant_linear_layer
 
 

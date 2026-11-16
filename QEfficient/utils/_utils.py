@@ -12,7 +12,7 @@ import os
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import requests
 import torch
@@ -49,7 +49,7 @@ _RETAINED_STATE_SUFFIX = "_RetainedState"
 _INTERNAL_RETAINED_STATE_SUFFIX = "_InternalRetainedState"
 
 
-def validate_kv_cache_prefix(kv_cache_prefix: Optional[str]) -> Optional[str]:
+def validate_kv_cache_prefix(kv_cache_prefix: str | None) -> str | None:
     """
     Validate the optional KV-cache buffer-name prefix.
 
@@ -80,7 +80,7 @@ def _infix_kv_prefix(name: str, kv_cache_prefix: str) -> str:
     return f"{stem}_{kv_cache_prefix}{_RETAINED_STATE_SUFFIX}"
 
 
-def apply_kv_cache_prefix(output_names, kv_cache_prefix: Optional[str]):
+def apply_kv_cache_prefix(output_names, kv_cache_prefix: str | None):
     """
     Insert an infix token into LLM KV-cache retained-state output names.
 
@@ -194,12 +194,12 @@ def login_and_download_hf_lm(model_name, *args, **kwargs):
 
 
 def hf_download(
-    repo_id: Optional[str] = None,
-    cache_dir: Optional[str] = None,
-    hf_token: Optional[str] = None,
-    allow_patterns: Optional[List[str]] = None,
-    ignore_patterns: Optional[List[str]] = None,
-    max_retries: Optional[int] = Constants.MAX_RETRIES,
+    repo_id: str | None = None,
+    cache_dir: str | None = None,
+    hf_token: str | None = None,
+    allow_patterns: list[str] | None = None,
+    ignore_patterns: list[str] | None = None,
+    max_retries: int | None = Constants.MAX_RETRIES,
 ):
     # Setup cache_dir
     if cache_dir is not None:
@@ -273,7 +273,7 @@ def get_onnx_dir_name(model_name, has_fbs):
         return f"onnx_{model_name_safe}_without_fbs"
 
 
-def onnx_exists(model_name: str, full_batch_size: int) -> Tuple[bool, str, str]:
+def onnx_exists(model_name: str, full_batch_size: int) -> tuple[bool, str, str]:
     """
     Checks if qpc files already exists, removes the directory if files have been manipulated.
     ---------
@@ -313,11 +313,11 @@ def onnx_exists(model_name: str, full_batch_size: int) -> Tuple[bool, str, str]:
 
 def load_hf_tokenizer(
     pretrained_model_name_or_path: str,
-    cache_dir: Optional[str] = None,
-    hf_token: Optional[str] = None,
+    cache_dir: str | None = None,
+    hf_token: str | None = None,
     padding_side: str = "right",
     **kwargs,
-) -> Union[PreTrainedTokenizerFast, PreTrainedTokenizer]:
+) -> PreTrainedTokenizerFast | PreTrainedTokenizer:
     # FIXME: Fix kwargs to take token, cache_dir and pass via kwargs only on line 129
     logger.info("Loading Tokenizer")
     if hf_token is not None:
@@ -342,10 +342,10 @@ def load_hf_tokenizer(
 
 def load_hf_processor(
     pretrained_model_name_or_path: str,
-    cache_dir: Optional[str] = None,
-    hf_token: Optional[str] = None,
+    cache_dir: str | None = None,
+    hf_token: str | None = None,
     **kwargs,
-) -> Union[PreTrainedTokenizerFast, PreTrainedTokenizer]:
+) -> PreTrainedTokenizerFast | PreTrainedTokenizer:
     logger.info("Loading Processor")
     if hf_token is not None:
         login(hf_token)
@@ -375,8 +375,8 @@ def get_qpc_dir_path(
     mxint8,
     device_group,
     full_batch_size,
-    num_speculative_tokens: Optional[int] = None,
-    enable_qnn: Optional[bool] = False,
+    num_speculative_tokens: int | None = None,
+    enable_qnn: bool | None = False,
 ):
     # Create a unique directory name for the QPC model based on all parameters
     qpc_base_dir_name = (
@@ -406,7 +406,7 @@ def check_and_assign_cache_dir(local_model_dir, cache_dir):
     return cache_dir if cache_dir else None
 
 
-def padding_check_and_fix(tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]) -> None:
+def padding_check_and_fix(tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast) -> None:
     """
     Checks and fixes tokenizer padding side and pad_token_id viability.
     --------
@@ -467,12 +467,12 @@ def get_sliding_window_shapes(config, batch_size, seq_len):
         n_heads = config.n_heads
         d_head = config.d_model // config.n_heads
     elif hasattr(config, "new_decoder_architecture"):  # Check for Falcon
-        new_decoder_architecture = getattr(config, "new_decoder_architecture")
+        new_decoder_architecture = config.new_decoder_architecture
         if new_decoder_architecture:  # multi_query is ignored when new_decoder_architecture is True
             n_heads = config.num_attention_heads
         else:
             if hasattr(config, "multi_query"):
-                multi_query_value = getattr(config, "multi_query")
+                multi_query_value = config.multi_query
                 if multi_query_value:
                     n_heads = 1  # MQA , multi query is true
                 else:
@@ -496,7 +496,7 @@ def get_sliding_window_shapes(config, batch_size, seq_len):
     chunked_cache_shape = [
         batch_size,
         n_heads,
-        seq_len if seq_len < chunk_seq_len else chunk_seq_len,
+        min(chunk_seq_len, seq_len),
         d_head,
     ]
 
@@ -535,12 +535,12 @@ def get_padding_shape_from_config(config, batch_size, seq_len):
         n_heads = config.n_heads
         d_head = config.d_model // config.n_heads
     elif hasattr(config, "new_decoder_architecture"):  # Check for Falcon
-        new_decoder_architecture = getattr(config, "new_decoder_architecture")
+        new_decoder_architecture = config.new_decoder_architecture
         if new_decoder_architecture:  # multi_query is ignored when new_decoder_architecture is True
             n_heads = config.num_attention_heads
         else:
             if hasattr(config, "multi_query"):
-                multi_query_value = getattr(config, "multi_query")
+                multi_query_value = config.multi_query
                 if multi_query_value:
                     n_heads = 1  # MQA , multi query is true
                 else:
@@ -552,7 +552,7 @@ def get_padding_shape_from_config(config, batch_size, seq_len):
     if hasattr(config, "architectures") and config.architectures is not None:  # Check for Starcoder1 - 3D layout
         if "GPTBigCodeForCausalLM" in config.architectures:
             if hasattr(config, "multi_query"):
-                multi_query_value = getattr(config, "multi_query")
+                multi_query_value = config.multi_query
                 if multi_query_value:
                     n_heads = 1  # MQA , multi query is true
                 else:
@@ -630,7 +630,7 @@ def get_padding_shape_vlm(config, ctx_len, batch_size=1):
     return padding_shape
 
 
-def create_model_params(qeff_model, **kwargs) -> Dict:
+def create_model_params(qeff_model, **kwargs) -> dict:
     """
     Constructs a dictionary of model parameters.
 
@@ -651,7 +651,7 @@ def create_model_params(qeff_model, **kwargs) -> Dict:
     return model_params
 
 
-def execute_command(process: str, command: str, output_file_path: Optional[str] = None):
+def execute_command(process: str, command: str, output_file_path: str | None = None):
     """
     Executes the give command using subprocess.
 
@@ -687,7 +687,7 @@ def execute_command(process: str, command: str, output_file_path: Optional[str] 
                 print(f"Failed to create {stderr_path}: {e}")
 
 
-def load_yaml(file_path: str) -> Dict[Any, Any]:
+def load_yaml(file_path: str) -> dict[Any, Any]:
     """
     Opens the given YAML file, load and return the Dict.
 
@@ -707,7 +707,7 @@ def load_yaml(file_path: str) -> Dict[Any, Any]:
     return config_data
 
 
-def load_json(file_path: str) -> Dict[Any, Any]:
+def load_json(file_path: str) -> dict[Any, Any]:
     """
     Opens the given JSON file, load and return the JSON object.
 
@@ -783,7 +783,7 @@ def make_serializable(obj):
 class IOInfo:
     name: str
     datatype: torch.dtype
-    shape: Tuple[Union[int, str], ...]
+    shape: tuple[int | str, ...]
 
     def __repr__(self):
         return f"input_name:{self.name}\tdatatype:{self.datatype}\tshape:{self.shape}"
@@ -823,7 +823,7 @@ def dump_qconfig(func):
     return wrapper
 
 
-def get_qaic_sdk_version(qaic_sdk_xml_path: str) -> Optional[str]:
+def get_qaic_sdk_version(qaic_sdk_xml_path: str) -> str | None:
     """
     Extracts the QAIC SDK version from the given SDK XML file.
 
@@ -888,7 +888,7 @@ def create_and_dump_qconfigs(
                 "specializations": make_serializable(specializations),
                 "mdp_ts_num_devices": mdp_ts_num_devices,
                 "num_speculative_tokens": num_speculative_tokens,
-                **compiler_options,
+                **make_serializable(compiler_options),
             },
             "aic_sdk_config": {
                 "qaic_apps_version": get_qaic_sdk_version(Constants.SDK_APPS_XML),
@@ -900,7 +900,7 @@ def create_and_dump_qconfigs(
     if enable_qnn:
         qnn_sdk_path = os.getenv(QnnConstants.QNN_SDK_PATH_ENV_VAR_NAME)
         if not qnn_sdk_path:
-            raise EnvironmentError(
+            raise OSError(
                 f"QNN_SDK_PATH {qnn_sdk_path} is not set. Please set {QnnConstants.QNN_SDK_PATH_ENV_VAR_NAME}"
             )
         qnn_sdk_yaml_path = os.path.join(qnn_sdk_path, QnnConstants.QNN_SDK_YAML)
@@ -936,7 +936,7 @@ def custom_format_warning(msg, category, *args, **kwargs):
     return f"{YELLOW}[Warning]: {msg}{RESET}\n"
 
 
-def _infer_specialization_name(spec: Dict, index: int, module_name: Optional[str] = None) -> str:
+def _infer_specialization_name(spec: dict, index: int, module_name: str | None = None) -> str:
     """
     Infer a human-readable name for a specialization entry.
 
@@ -1000,7 +1000,7 @@ def _infer_specialization_name(spec: Dict, index: int, module_name: Optional[str
     return "Prefill"
 
 
-def to_named_specializations(specializations: List[Dict], module_name: Optional[str] = None) -> List[Dict]:
+def to_named_specializations(specializations: list[dict], module_name: str | None = None) -> list[dict]:
     """
     Convert flat specialization dicts to the nested ``{name, symbols}`` format
     expected by the backend compiler.
@@ -1038,7 +1038,7 @@ def to_named_specializations(specializations: List[Dict], module_name: Optional[
     # Deduplicate names: if two entries share the same inferred name (e.g. both
     # have seq_len=1 in a raw-dict override path), append a positional suffix so
     # the compiler never sees duplicate graph names.
-    seen: Dict[str, int] = {}
+    seen: dict[str, int] = {}
     for entry in result:
         name = entry["name"]
         if name in seen:
@@ -1052,7 +1052,7 @@ def to_named_specializations(specializations: List[Dict], module_name: Optional[
     return result
 
 
-def get_attr_or_key(obj: Any, names: Tuple[str, ...], default: Any = None) -> Any:
+def get_attr_or_key(obj: Any, names: tuple[str, ...], default: Any = None) -> Any:
     if obj is None:
         return default
     for name in names:

@@ -25,13 +25,14 @@ Expert-parallel export packs the same data as:
     down : [num_parallelized_experts, num_pipeline_stages, I, H]
 """
 
-from typing import Any, Callable, Iterable, Optional
+from collections.abc import Callable, Iterable
+from typing import Any
 
 import torch
 from torch import nn
 
 
-def _as_frozen_parameter(tensor: Optional[torch.Tensor]) -> Optional[nn.Parameter]:
+def _as_frozen_parameter(tensor: torch.Tensor | None) -> nn.Parameter | None:
     if tensor is None:
         return None
     if isinstance(tensor, nn.Parameter):
@@ -48,9 +49,9 @@ class MoEWeights(nn.Module):
         gate: torch.Tensor,
         up: torch.Tensor,
         down: torch.Tensor,
-        gate_bias: Optional[torch.Tensor] = None,
-        up_bias: Optional[torch.Tensor] = None,
-        down_bias: Optional[torch.Tensor] = None,
+        gate_bias: torch.Tensor | None = None,
+        up_bias: torch.Tensor | None = None,
+        down_bias: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.gate = _as_frozen_parameter(gate)
@@ -79,7 +80,7 @@ class MoEWeights(nn.Module):
         return self.gate_bias is not None
 
 
-def _maybe_clone(t: Optional[torch.Tensor], clone: bool) -> Optional[torch.Tensor]:
+def _maybe_clone(t: torch.Tensor | None, clone: bool) -> torch.Tensor | None:
     if t is None:
         return None
     return t.detach().clone() if clone else t.detach()
@@ -88,7 +89,7 @@ def _maybe_clone(t: Optional[torch.Tensor], clone: bool) -> Optional[torch.Tenso
 def _validate_matching_optional_shape(
     *,
     name: str,
-    tensor: Optional[torch.Tensor],
+    tensor: torch.Tensor | None,
     expected: tuple[int, ...],
 ) -> None:
     if tensor is not None and tuple(tensor.shape) != expected:
@@ -133,8 +134,8 @@ def validate_canonical_moe_weights(weights: MoEWeights) -> None:
 def validate_expert_parallel_moe_weights(
     weights: MoEWeights,
     *,
-    num_parallelized_experts: Optional[int] = None,
-    num_pipeline_stages: Optional[int] = None,
+    num_parallelized_experts: int | None = None,
+    num_pipeline_stages: int | None = None,
 ) -> None:
     """Validate expert-parallel packed MoE weight layout."""
     if weights.gate.ndim != 4:
@@ -178,11 +179,11 @@ def validate_expert_parallel_moe_weights(
 
 
 def _pack_expert_parallel_tensor(
-    tensor: Optional[torch.Tensor],
+    tensor: torch.Tensor | None,
     *,
     num_pipeline_stages: int,
     num_parallelized_experts: int,
-) -> Optional[nn.Parameter]:
+) -> nn.Parameter | None:
     if tensor is None:
         return None
     packed = (
@@ -195,7 +196,7 @@ def _pack_expert_parallel_tensor(
     return nn.Parameter(packed, requires_grad=False)
 
 
-def _unpack_expert_parallel_tensor(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+def _unpack_expert_parallel_tensor(tensor: torch.Tensor | None) -> torch.Tensor | None:
     if tensor is None:
         return None
     return tensor.transpose(0, 1).contiguous().view(tensor.shape[0] * tensor.shape[1], *tensor.shape[2:])
@@ -282,11 +283,11 @@ def unpack_moe_weights_from_expert_parallel(weights: MoEWeights) -> MoEWeights:
 def build_canonical_expert_weights(
     *,
     down: torch.Tensor,
-    gate_up: Optional[torch.Tensor] = None,
-    gate: Optional[torch.Tensor] = None,
-    up: Optional[torch.Tensor] = None,
-    gate_up_bias: Optional[torch.Tensor] = None,
-    down_bias: Optional[torch.Tensor] = None,
+    gate_up: torch.Tensor | None = None,
+    gate: torch.Tensor | None = None,
+    up: torch.Tensor | None = None,
+    gate_up_bias: torch.Tensor | None = None,
+    down_bias: torch.Tensor | None = None,
     fused: bool = True,
     fused_split_dim: int = 1,
     interleaved: bool = False,
@@ -350,8 +351,8 @@ def build_canonical_expert_weights(
         gate=_maybe_clone(gate.contiguous() if clone else gate, clone),
         up=_maybe_clone(up.contiguous() if clone else up, clone),
         down=_maybe_clone(down.contiguous() if clone else down, clone),
-        gate_bias=_maybe_clone(gate_bias, clone),
-        up_bias=_maybe_clone(up_bias, clone),
+        gate_bias=_maybe_clone(gate_bias.contiguous() if (clone and gate_bias is not None) else gate_bias, clone),
+        up_bias=_maybe_clone(up_bias.contiguous() if (clone and up_bias is not None) else up_bias, clone),
         down_bias=_maybe_clone(down_bias, clone),
     )
 
