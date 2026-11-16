@@ -228,11 +228,8 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
     def visit_value(
         current_graph: onnx.GraphProto,
         value_name: str,
-        shadowed_names: set[str],
         visiting: set[Tuple[int, str]],
     ) -> Tuple[bool, bool]:
-        if value_name in shadowed_names:
-            return False, True
         if any(output.name == value_name for output in current_graph.output):
             return True, False
 
@@ -253,9 +250,7 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
                     if not output_names:
                         all_paths_end_at_shape = False
                     for output_name in output_names:
-                        output_has_use, output_paths_end_at_shape = visit_value(
-                            current_graph, output_name, shadowed_names, visiting
-                        )
+                        output_has_use, output_paths_end_at_shape = visit_value(current_graph, output_name, visiting)
                         if not output_has_use or not output_paths_end_at_shape:
                             all_paths_end_at_shape = False
                 else:
@@ -274,9 +269,7 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
                     local_names.update(initializer.name for initializer in nested_graph.initializer)
                     local_names.update(output for nested_node in nested_graph.node for output in nested_node.output)
                     if value_name not in local_names:
-                        nested_has_use, nested_paths_end_at_shape = visit_value(
-                            nested_graph, value_name, shadowed_names | local_names, visiting
-                        )
+                        nested_has_use, nested_paths_end_at_shape = visit_value(nested_graph, value_name, visiting)
                         if nested_has_use:
                             has_use = True
                             if not nested_paths_end_at_shape:
@@ -287,7 +280,7 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
 
     shape_only_inputs = set()
     for input_name in input_names:
-        has_use, paths_end_at_shape = visit_value(graph, input_name, set(), set())
+        has_use, paths_end_at_shape = visit_value(graph, input_name, set())
         if has_use and paths_end_at_shape:
             shape_only_inputs.add(input_name)
     return shape_only_inputs

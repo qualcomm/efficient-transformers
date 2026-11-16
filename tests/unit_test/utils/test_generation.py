@@ -1963,6 +1963,56 @@ def test_shape_only_classification_respects_captured_and_shadowed_subgraph_input
 
 
 @pytest.mark.cpu_only
+def test_shape_only_classification_follows_captured_cast_inside_subgraph(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    shape_input = helper.make_tensor_value_info("shape_input", TensorProto.FLOAT, [1, 4])
+    then_shape = helper.make_tensor_value_info("then_shape", TensorProto.INT64, [2])
+    else_shape = helper.make_tensor_value_info("else_shape", TensorProto.INT64, [2])
+    then_graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["shape_input"], ["shape_input_cast"], to=TensorProto.DOUBLE),
+            helper.make_node("Shape", ["shape_input_cast"], ["then_shape"]),
+        ],
+        "then_branch",
+        [],
+        [then_shape],
+    )
+    else_graph = helper.make_graph(
+        [helper.make_node("Shape", ["shape_input"], ["else_shape"])],
+        "else_branch",
+        [],
+        [else_shape],
+    )
+    branch_shape = helper.make_tensor_value_info("branch_shape", TensorProto.INT64, [2])
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "If",
+                ["condition"],
+                ["branch_shape"],
+                then_branch=then_graph,
+                else_branch=else_graph,
+            )
+        ],
+        "nested_cast_shape_input",
+        [condition, shape_input],
+        [branch_shape],
+    )
+    onnx_path = tmp_path / "nested-cast-shape-input.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"condition"}
+    assert runner_metadata.required_host_input_names == {"condition"}
+
+
+@pytest.mark.cpu_only
 def test_runner_metadata_preserves_retained_state_without_requiring_host_input(tmp_path):
     import onnx
     from onnx import TensorProto, helper
