@@ -683,7 +683,7 @@ def test_deepseek_v4_decode_compile_uses_all_fp16_retained_states(tmp_path, monk
         "past_actual_compressed_kv.0_RetainedState": "float16",
     }
 
-    with pytest.raises(ValueError, match="must remain in float16"):
+    with pytest.raises(ValueError, match="must remain floating-point"):
         qeff_model.compile(
             onnx_path=str(onnx_path),
             prefill_seq_len=1,
