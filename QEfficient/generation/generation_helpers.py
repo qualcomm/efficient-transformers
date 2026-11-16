@@ -84,18 +84,142 @@ def _get_compile_dir(model) -> Path:
 
 
 def load_prefill_specialization(compile_dir: Union[str, Path]) -> Dict[str, int]:
-    """Return the first prefill specialization from a compile workspace."""
+    """Return the first compatible prefill specialization from a workspace.
+
+    This preserves causal artifact generation's historic first-prefill behavior.
+    Image-text callers that need a strict component selection use the selectors
+    below instead.
+    """
+    return select_prefill_specialization(compile_dir)
+
+
+def _specialization_records(compile_dir: Union[str, Path]) -> list[tuple[Optional[str], Dict[str, int]]]:
+    """Load named and legacy specialization records without exporter coupling."""
     specializations_path = Path(compile_dir) / "specializations.json"
     if not specializations_path.is_file():
         raise FileNotFoundError(f"specializations.json not found at {specializations_path}.")
     specializations = json.loads(specializations_path.read_text())["specializations"]
     if not specializations:
         raise ValueError(f"No specializations found in {specializations_path}.")
+    records = []
     for specialization in specializations:
         symbols = specialization.get("symbols", specialization)
-        if int(symbols.get("seq_len", 0)) > 1:
-            return symbols
-    return specializations[0].get("symbols", specializations[0])
+        if not isinstance(symbols, Mapping):
+            raise ValueError(f"Invalid specialization record in {specializations_path}.")
+        records.append((specialization.get("name"), _specialization_symbols(symbols)))
+    return records
+
+
+def _named_role_candidates(
+    records: Sequence[tuple[Optional[str], Dict[str, int]]], role: str
+) -> list[tuple[Optional[str], Dict[str, int]]]:
+    """Select records for a graph role, falling back to legacy shape rules."""
+    # ``to_named_specializations`` makes duplicate compiler names unique with
+    # a numeric suffix (for example, ``Vision_0`` and ``Vision_1``).
+    named = [
+        (name, symbols)
+        for name, symbols in records
+        if name and (name.lower() == role or name.lower().startswith(f"{role}_"))
+    ]
+    if named:
+        return named
+    if role == "vision":
+        # Vision exports have no language sequence dimension.  This remains
+        # format-based rather than architecture/name-based for legacy records.
+        return [(name, symbols) for name, symbols in records if "seq_len" not in symbols]
+    if role == "prefill":
+        return [(name, symbols) for name, symbols in records if int(symbols.get("seq_len", 0)) > 1]
+    if role == "decode":
+        return [(name, symbols) for name, symbols in records if int(symbols.get("seq_len", 0)) == 1]
+    raise ValueError(f"Unknown specialization role {role!r}.")
+
+
+def _input_symbol_values(
+    graph: onnx.GraphProto, inputs: Mapping[str, np.ndarray]
+) -> Dict[str, int]:
+    """Derive specialization symbol values from the active graph and tensors."""
+    values = {}
+    for graph_input in graph.input:
+        if graph_input.name not in inputs:
+            continue
+        tensor = np.asarray(inputs[graph_input.name])
+        dimensions = graph_input.type.tensor_type.shape.dim
+        if tensor.ndim != len(dimensions):
+            raise ValueError(
+                f"Input {graph_input.name!r} has rank {tensor.ndim}, expected {len(dimensions)} for specialization selection."
+            )
+        for dimension, value in zip(dimensions, tensor.shape):
+            if dimension.dim_param:
+                previous = values.setdefault(dimension.dim_param, int(value))
+                if previous != int(value):
+                    raise ValueError(
+                        f"Inputs disagree on specialization symbol {dimension.dim_param!r}: "
+                        f"{previous} and {value}."
+                    )
+    return values
+
+
+def _select_specialization(
+    compile_dir: Union[str, Path],
+    role: str,
+    *,
+    runner_metadata: Optional["RunnerMetadata"] = None,
+    inputs: Optional[Mapping[str, np.ndarray]] = None,
+    strict: bool = False,
+) -> Dict[str, int]:
+    """Select a specialization using graph symbols and observed input shapes."""
+    candidates = _named_role_candidates(_specialization_records(compile_dir), role)
+    if not candidates:
+        raise ValueError(f"No {role} specialization found in {Path(compile_dir) / 'specializations.json'}.")
+
+    observed_symbols = {}
+    if runner_metadata is not None and inputs is not None:
+        observed_symbols = _input_symbol_values(runner_metadata.graph, inputs)
+        candidates = [
+            (name, symbols)
+            for name, symbols in candidates
+            if all(symbols.get(symbol) == value for symbol, value in observed_symbols.items() if symbol in symbols)
+        ]
+
+    if not candidates:
+        raise ValueError(
+            f"No {role} specialization matches graph-derived symbols {dict(sorted(observed_symbols.items()))}."
+        )
+    if strict and len(candidates) != 1:
+        raise ValueError(
+            f"Expected exactly one {role} specialization matching "
+            f"{dict(sorted(observed_symbols.items()))}, found {len(candidates)}."
+        )
+    return candidates[0][1]
+
+
+def select_prefill_specialization(
+    compile_dir: Union[str, Path],
+    *,
+    runner_metadata: Optional["RunnerMetadata"] = None,
+    inputs: Optional[Mapping[str, np.ndarray]] = None,
+) -> Dict[str, int]:
+    """Select a language prefill record; preserve first-compatible behavior."""
+    return _select_specialization(compile_dir, "prefill", runner_metadata=runner_metadata, inputs=inputs)
+
+
+def select_decode_specialization(
+    compile_dir: Union[str, Path],
+    *,
+    runner_metadata: Optional["RunnerMetadata"] = None,
+    inputs: Optional[Mapping[str, np.ndarray]] = None,
+) -> Dict[str, int]:
+    """Select a language decode record, including explicitly named variants."""
+    return _select_specialization(compile_dir, "decode", runner_metadata=runner_metadata, inputs=inputs)
+
+
+def select_vision_specialization(
+    compile_dir: Union[str, Path], runner_metadata: "RunnerMetadata", inputs: Mapping[str, np.ndarray]
+) -> Dict[str, int]:
+    """Select exactly one vision record from graph-derived processor shapes."""
+    return _select_specialization(
+        compile_dir, "vision", runner_metadata=runner_metadata, inputs=inputs, strict=True
+    )
 
 
 def _custom_io_maps(compile_dir: Path) -> Tuple[Dict[str, str], Dict[str, int]]:
