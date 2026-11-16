@@ -183,9 +183,22 @@ def _prepare_vlm_runner_inputs(
     processor,
     images: Sequence[str],
     prompts: Sequence[str],
+    image_height: Optional[int] = None,
+    image_width: Optional[int] = None,
 ) -> Tuple[Mapping[str, int], RunnerMetadata, Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     if processor is None or not images or not prompts:
         raise ValueError("`processor`, `images`, and `prompts` are required in artifacts mode.")
+    if (image_height is None) != (image_width is None):
+        raise ValueError("`image_height` and `image_width` must be provided together in artifacts mode.")
+    if image_height is not None and (
+        isinstance(image_height, bool)
+        or isinstance(image_width, bool)
+        or not isinstance(image_height, int)
+        or not isinstance(image_width, int)
+        or image_height <= 0
+        or image_width <= 0
+    ):
+        raise ValueError("`image_height` and `image_width` must be positive integers in artifacts mode.")
 
     from QEfficient.generation.embedding_handler import VisionHandler
 
@@ -199,6 +212,8 @@ def _prepare_vlm_runner_inputs(
         vision_session=None,
         processor=processor,
         tokenizer=getattr(processor, "tokenizer", None),
+        image_height=image_height,
+        image_width=image_width,
     )
     vision_inputs, lang_inputs = _prepare_vlm_execution_inputs(handler, images, prompts, prefill_seq_len, batch_size)
     return specialization, runner_metadata, vision_inputs, lang_inputs
@@ -221,7 +236,15 @@ def _write_vlm_runner_bundle(
     )
 
 
-def write_single_qpc_vlm_runner_bundle(*, model, processor, images: List[str], prompts: List[str]) -> Path:
+def write_single_qpc_vlm_runner_bundle(
+    *,
+    model,
+    processor,
+    images: List[str],
+    prompts: List[str],
+    image_height: Optional[int] = None,
+    image_width: Optional[int] = None,
+) -> Path:
     """Prepare and write the first fused vision-language prefill invocation."""
     specialization, runner_metadata, vision_inputs, host_inputs = _prepare_vlm_runner_inputs(
         model=model,
@@ -229,6 +252,8 @@ def write_single_qpc_vlm_runner_bundle(*, model, processor, images: List[str], p
         processor=processor,
         images=images,
         prompts=prompts,
+        image_height=image_height,
+        image_width=image_width,
     )
     host_inputs.update(vision_inputs)
     _add_specialization_control_inputs(runner_metadata, host_inputs, specialization)
@@ -246,6 +271,8 @@ def write_dual_qpc_vlm_runner_bundle(
     prompts: List[str],
     skip_vision: bool,
     skip_lang: bool,
+    image_height: Optional[int] = None,
+    image_width: Optional[int] = None,
 ) -> Path:
     """Prepare one isolated vision or language invocation for a dual-QPC VLM."""
     if skip_vision == skip_lang:
@@ -262,6 +289,8 @@ def write_dual_qpc_vlm_runner_bundle(
         processor=processor,
         images=images,
         prompts=prompts,
+        image_height=image_height,
+        image_width=image_width,
     )
     if skip_lang:
         # Some processors leave model-specific vision metadata in the language group.

@@ -2661,6 +2661,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 prompts=prompts,
                 skip_vision=skip_vision,
                 skip_lang=skip_lang,
+                image_height=image_height,
+                image_width=image_width,
             )
         runtime_dump_inputs_path = resolve_runtime_dump_inputs_path(artifacts, kwargs.pop("dump_inputs_path", None))
         if not runtime_ai100:
