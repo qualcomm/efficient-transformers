@@ -39,6 +39,8 @@ from QEfficient.generation.generation_helpers import (
     build_prefill_inputs,
     load_prefill_specialization,
     prepare_tokenizer,
+    select_prefill_specialization,
+    select_vision_specialization,
     slice_prefill_inputs,
 )
 from QEfficient.utils import get_padding_shape_from_config
@@ -298,9 +300,17 @@ def _prepare_vlm_runner_inputs(
 
     compile_dir = _get_compile_dir(active_model)
     runner_metadata = RunnerMetadata.from_paths(active_model.onnx_path, compile_dir)
-    specialization = load_prefill_specialization(compile_dir)
-    prefill_seq_len = max(int(specialization.get("seq_len", 1)), 1)
-    batch_size = _execution_batch_size(specialization)
+    try:
+        language_specialization = select_prefill_specialization(compile_dir)
+    except ValueError:
+        # A standalone vision component has no language prefill record. Its
+        # paired language graph defines the processor prompt chunk contract.
+        lang_model = getattr(model, "lang_model", None)
+        if lang_model is None:
+            raise
+        language_specialization = select_prefill_specialization(_get_compile_dir(lang_model))
+    prefill_seq_len = max(int(language_specialization.get("seq_len", 1)), 1)
+    batch_size = _execution_batch_size(language_specialization)
     handler = VisionHandler(
         qeff_model=model,
         vision_session=None,
@@ -310,6 +320,14 @@ def _prepare_vlm_runner_inputs(
         image_width=image_width,
     )
     vision_inputs, lang_inputs = _prepare_vlm_execution_inputs(handler, images, prompts, prefill_seq_len, batch_size)
+    try:
+        specialization = select_vision_specialization(compile_dir, runner_metadata, vision_inputs)
+    except ValueError as error:
+        # Fused and language-only graphs have no vision records. Preserve their
+        # language prefill selection while making standalone vision strict.
+        if "No vision specialization found" not in str(error):
+            raise
+        specialization = language_specialization
     return specialization, runner_metadata, vision_inputs, lang_inputs
 
 
