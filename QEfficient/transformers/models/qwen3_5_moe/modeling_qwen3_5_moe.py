@@ -2669,6 +2669,8 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
         **kwargs,
     ):
         inputs_shapes = {}
+        vision_specialization = kwargs.pop("vision_specialization", None)
+        language_specialization = kwargs.pop("language_specialization", None)
         dummy_seq_len = int(kwargs.get("prefill_seq_len", 32))
         is_dflash = bool(getattr(self.model.language_model, "target_layer_ids", None))
         if is_dflash:
@@ -2696,16 +2698,45 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
             bs,
             dummy_seq_len,
         )
-        inputs_shapes["pixel_values"] = (11008 * bs, 1536)
-        inputs_shapes["image_grid_thw"] = (
-            bs,
-            1,
-            86,
-            128,
-        )
+        # The vision export must use an example compatible with the selected
+        # compile specialization.  The symbols below are produced by
+        # get_specializations() from the configured image geometry.  Keep the
+        # legacy example shapes for direct export callers that do not provide
+        # a specialization.
+        if vision_specialization is None:
+            vision_batch_size = bs
+            grid_height, grid_width = 11008 * bs, 1536
+            time, grid_h, grid_w = 1, 86, 128
+            vision_size = 2752
+        else:
+            required_symbols = {
+                "vision_batch_size",
+                "grid_height",
+                "grid_width",
+                "time",
+                "grid_h",
+                "grid_w",
+                "vision_size",
+            }
+            missing_symbols = required_symbols - vision_specialization.keys()
+            if missing_symbols:
+                raise ValueError(
+                    "Qwen3.5-MoE vision specialization is missing required symbols: "
+                    f"{sorted(missing_symbols)}"
+                )
+            vision_batch_size = int(vision_specialization["vision_batch_size"])
+            grid_height = int(vision_specialization["grid_height"])
+            grid_width = int(vision_specialization["grid_width"])
+            time = int(vision_specialization["time"])
+            grid_h = int(vision_specialization["grid_h"])
+            grid_w = int(vision_specialization["grid_w"])
+            vision_size = int(vision_specialization["vision_size"])
+
+        inputs_shapes["pixel_values"] = (grid_height, grid_width)
+        inputs_shapes["image_grid_thw"] = (vision_batch_size, time, grid_h, grid_w)
         inputs_shapes["vision_embeds"] = (
-            bs,
-            2752,
+            vision_batch_size,
+            vision_size,
             self.model.config.text_config.hidden_size,
         )
         inputs_shapes["image_idx"] = (1, 1)
@@ -2760,7 +2791,14 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
             lang_inputs["batch_index"] = torch.arange(bs).view(bs, 1)
 
         if comp_ctx_lengths is not None:
-            lang_inputs["comp_ctx_lengths"] = torch.randint(0, 100, (40,), dtype=torch.int64)
+            # CCL inputs are zero buffers whose length is the selected CCL
+            # specialization, not a fixed/random export-only shape.
+            ccl_length = (
+                language_specialization.get("comp_ctx_lengths") if language_specialization is not None else None
+            )
+            if ccl_length is None:
+                ccl_length = comp_ctx_lengths[0]
+            lang_inputs["comp_ctx_lengths"] = torch.zeros(int(ccl_length), dtype=torch.int64)
 
         inputs = {}
         if kv_offload:

@@ -10,6 +10,7 @@ import os
 import warnings
 from pathlib import Path
 from time import perf_counter
+from typing import Mapping, Sequence
 
 import numpy as np
 import onnx
@@ -117,6 +118,68 @@ CUSTOM_IO_DTYPE_MAP = {
     torch.float32: "float16",  # Since compiler doesn't support fp32
     "float32": "float16",  # Since compiler doesn't support fp32
 }
+
+
+def _export_tensor_inputs(inputs: Mapping[str, object]) -> dict[str, torch.Tensor]:
+    """Return direct tensor inputs; nested KV-cache inputs are flattened by export."""
+    return {name: value for name, value in inputs.items() if isinstance(value, torch.Tensor)}
+
+
+def _validate_export_contract(
+    onnx_path: str | Path,
+    inputs: Mapping[str, object],
+    dynamic_axes: Mapping[str, Mapping[int, str]],
+    specializations: Sequence[Mapping[str, object]],
+    component: str,
+) -> None:
+    """Validate direct export examples and declared symbols against an ONNX graph.
+
+    Nested cache structures intentionally are not checked here: the exporter
+    flattens them into their family-owned ONNX input names.  Direct tensors are
+    part of the stable family export contract and must retain their names and
+    ranks in the graph.
+    """
+    onnx_path = Path(onnx_path)
+    if not onnx_path.is_file():
+        raise FileNotFoundError(f"Exported {component} ONNX graph was not found at {onnx_path}.")
+
+    graph = onnx.load(str(onnx_path), load_external_data=False).graph
+    graph_inputs = {graph_input.name: graph_input for graph_input in graph.input}
+    for name, value in _export_tensor_inputs(inputs).items():
+        graph_input = graph_inputs.get(name)
+        if graph_input is None:
+            raise ValueError(f"{component} dummy input {name!r} is not present in the exported ONNX graph.")
+        graph_rank = len(graph_input.type.tensor_type.shape.dim)
+        if value.ndim != graph_rank:
+            raise ValueError(
+                f"{component} dummy input {name!r} has rank {value.ndim}, but the exported ONNX graph expects rank "
+                f"{graph_rank}."
+            )
+
+    declared_symbols = {
+        symbol
+        for specialization in specializations
+        for symbol in specialization
+        if isinstance(symbol, str)
+    }
+    required_symbols = {
+        symbol
+        for axes in dynamic_axes.values()
+        for symbol in axes.values()
+        if symbol in declared_symbols
+    }
+    graph_symbols = {
+        dimension.dim_param
+        for value_info in (*graph.input, *graph.output, *graph.value_info)
+        for dimension in value_info.type.tensor_type.shape.dim
+        if dimension.dim_param
+    }
+    missing_symbols = required_symbols - graph_symbols
+    if missing_symbols:
+        raise ValueError(
+            f"{component} ONNX graph is missing dynamic symbols declared by its specializations: "
+            f"{sorted(missing_symbols)}"
+        )
 
 
 def _should_convert_to_fp16(target_dtype: "torch.dtype", compiler_options: dict) -> bool:
@@ -1789,6 +1852,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             A list containing the paths to the generated ONNX graph files for both components.
         """
         layerwise_cache_probe = kwargs.pop("_layerwise_cache_probe", False)
+        compile_specializations = kwargs.pop("_compile_specializations", None)
         reject_legacy_moe_prefill_packed_chunk_size(kwargs)
         if layerwise:
             return self._run_layerwise_export(
@@ -1825,6 +1889,24 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             else:
                 self.__update_prefill_transform(False, retain_full_kv=kwargs.get("retain_full_kv", False))
         onnx_kwargs = {"prefill_seq_len": seq_len, "batch_size": bs, "ctx_len": ctx_len}
+        if compile_specializations is not None:
+            vision_specializations = compile_specializations.get("vision", [])
+            if vision_specializations:
+                # An ONNX graph only needs one representative example tensor,
+                # but it must be derived from a declared vision specialization
+                # rather than a model-family fixed shape.  Dynamic axes retain
+                # compatibility with the remaining declared specializations.
+                onnx_kwargs["vision_specialization"] = vision_specializations[0]
+            language_specializations = compile_specializations.get("lang", [])
+            if language_specializations:
+                onnx_kwargs["language_specialization"] = next(
+                    (
+                        specialization
+                        for specialization in language_specializations
+                        if int(specialization.get("seq_len", seq_len)) == seq_len
+                    ),
+                    language_specializations[0],
+                )
         dynamic_axes_kwargs = {
             "kv_offload": True,
             "continuous_batching": self.continuous_batching,
@@ -1885,7 +1967,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             )
         )
         if should_export and not layerwise_cache_probe:
-            self.vision_model.export(
+            vision_onnx_path = self.vision_model.export(
                 inputs["vision"],
                 output_names["vision"],
                 dynamic_axes["vision"],
@@ -1894,6 +1976,14 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 use_onnx_subfunctions=use_onnx_subfunctions,
                 dynamo=dynamo,
             )
+            if compile_specializations is not None:
+                _validate_export_contract(
+                    vision_onnx_path,
+                    inputs["vision"],
+                    dynamic_axes["vision"],
+                    compile_specializations.get("vision", []),
+                    "vision",
+                )
 
         # TODO: remove the current pt weight offload capability once CustomLoader is in place
         if offload_pt_weights is None:
@@ -1903,7 +1993,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 offload_pt_weights = True
 
         if not skip_lang:
-            self.lang_model.export(
+            lang_onnx_path = self.lang_model.export(
                 inputs["lang"],
                 output_names["lang"],
                 dynamic_axes["lang"],
@@ -1920,6 +2010,14 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
             )
+            if compile_specializations is not None:
+                _validate_export_contract(
+                    lang_onnx_path,
+                    inputs["lang"],
+                    dynamic_axes["lang"],
+                    compile_specializations.get("lang", []),
+                    "language",
+                )
         return self.onnx_path
 
     def transform(
@@ -2378,6 +2476,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                     num_cores=num_cores,
                     qaic_config=qaic_config,
                     _layerwise_cache_probe=layerwise_cache_probe,
+                    _compile_specializations=specializations,
                     kv_cache_prefix=kv_cache_prefix,
                     offload_pt_weights=offload_pt_weights,
                 )
