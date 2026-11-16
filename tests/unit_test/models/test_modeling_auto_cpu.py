@@ -54,6 +54,7 @@ from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModelForSpeechSeq2Seq,
     _QEffAutoModelForImageTextToTextDualQPC,
     _QEFFAutoModelForImageTextToTextSingleQPC,
+    _validate_export_contract,
 )
 
 # ---------------------------------------------------------------------------
@@ -1519,3 +1520,59 @@ class TestArtifactsGenerationAPIs:
             )
         assert result == expected
         writer.assert_called_once()
+
+    def test_dual_qpc_export_passes_declared_vision_specialization_to_dummy_inputs(self):
+        vision_specialization = {
+            "vision_batch_size": 1,
+            "vision_size": 392,
+            "grid_height": 1568,
+            "grid_width": 768,
+            "time": 1,
+            "grid_h": 28,
+            "grid_w": 56,
+        }
+        get_dummy_inputs = MagicMock(return_value={"vision": {}, "lang": {}})
+        model = SimpleNamespace(
+            dflash_tlm=False,
+            _weight_free=False,
+            continuous_batching=False,
+            comp_ctx_lengths_decode=None,
+            onnx_path=[],
+            model=SimpleNamespace(
+                config=SimpleNamespace(model_type="test"),
+                get_dummy_inputs=get_dummy_inputs,
+                get_onnx_dynamic_axes=MagicMock(return_value={"vision": {}, "lang": {}}),
+                get_output_names=MagicMock(return_value={"vision": [], "lang": []}),
+            ),
+            lang_model=SimpleNamespace(model=SimpleNamespace(qaic_config=None), hash_params={}),
+        )
+
+        _QEffAutoModelForImageTextToTextDualQPC.export(
+            model,
+            skip_vision=True,
+            skip_lang=True,
+            _compile_specializations={"vision": [vision_specialization], "lang": [{"seq_len": 32}]},
+        )
+
+        assert get_dummy_inputs.call_args.kwargs["vision_specialization"] == vision_specialization
+        assert get_dummy_inputs.call_args.kwargs["language_specialization"] == {"seq_len": 32}
+
+    def test_export_contract_rejects_missing_specialization_symbol(self, tmp_path):
+        import onnx
+
+        graph_input = onnx.helper.make_tensor_value_info("pixel_values", onnx.TensorProto.FLOAT, [1, 1])
+        for dim, symbol in zip(graph_input.type.tensor_type.shape.dim, ("grid_height", "grid_width")):
+            dim.ClearField("dim_value")
+            dim.dim_param = symbol
+        graph_output = onnx.helper.make_tensor_value_info("vision_embeds", onnx.TensorProto.FLOAT, [1])
+        model_path = tmp_path / "vision.onnx"
+        onnx.save(onnx.helper.make_model(onnx.helper.make_graph([], "vision", [graph_input], [graph_output])), model_path)
+
+        with pytest.raises(ValueError, match="vision_size"):
+            _validate_export_contract(
+                model_path,
+                {"pixel_values": torch.zeros((2, 3))},
+                {"pixel_values": {0: "grid_height", 1: "grid_width"}, "vision_embeds": {0: "vision_size"}},
+                [{"grid_height": 2, "grid_width": 3, "vision_size": 4}],
+                "vision",
+            )
