@@ -105,6 +105,13 @@ class VisionHandler:
         casting with `.astype(np.float16)` would instead produce IEEE float16
         values and corrupt the buffer once its raw bytes are shipped to the device.
         """
+        # Artifact generation deliberately has no live QAIC session.  In that
+        # path the runner converts tensors from custom-IO/ONNX metadata just
+        # before serialization.  Keep processor outputs intact here so family
+        # preprocessing remains usable without runtime bindings.
+        if self._vision_session is None:
+            return
+
         for k in keys:
             if k not in vision_inputs:
                 continue

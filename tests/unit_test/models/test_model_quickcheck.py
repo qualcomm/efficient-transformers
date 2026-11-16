@@ -4391,6 +4391,69 @@ def test_qwen3_5_moe_get_specializations_strips_vision_symbols_for_comp_ctx_vari
     assert all("vision_batch_size" not in spec for spec in lang_specs)
 
 
+def test_qwen3_5_moe_dummy_inputs_follow_selected_vision_specialization():
+    """Export examples must use the geometry selected for the vision QPC."""
+    from types import SimpleNamespace
+
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeForConditionalGeneration
+
+    text_config = SimpleNamespace(
+        hidden_size=16,
+        num_hidden_layers=0,
+        layer_types=[],
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+    )
+    config = SimpleNamespace(
+        torch_dtype=torch.float32,
+        text_config=text_config,
+        vision_config=SimpleNamespace(patch_size=16, temporal_patch_size=1),
+    )
+    model = QEffQwen3_5MoeForConditionalGeneration.__new__(QEffQwen3_5MoeForConditionalGeneration)
+    model.config = config
+    model.model = SimpleNamespace(config=config, language_model=SimpleNamespace(layers=[]))
+
+    specializations, _ = model.get_specializations(
+        batch_size=4,
+        vision_batch_size=1,
+        kv_cache_batch_size=4,
+        prefill_seq_len=32,
+        ctx_len=4096,
+        height=448,
+        width=896,
+        kv_offload=True,
+    )
+    vision_spec = specializations["vision"][0]
+    inputs = model.get_dummy_inputs(
+        kv_offload=True,
+        batch_size=4,
+        prefill_seq_len=32,
+        ctx_len=4096,
+        vision_specialization=vision_spec,
+        language_specialization={"comp_ctx_lengths": 64},
+        comp_ctx_lengths=[64, 128],
+    )
+
+    assert inputs["vision"]["pixel_values"].shape == (
+        vision_spec["grid_height"],
+        vision_spec["grid_width"],
+    )
+    assert inputs["vision"]["image_grid_thw"].shape == (
+        vision_spec["vision_batch_size"],
+        vision_spec["time"],
+        vision_spec["grid_h"],
+        vision_spec["grid_w"],
+    )
+    assert inputs["lang"]["vision_embeds"].shape == (
+        vision_spec["vision_batch_size"],
+        vision_spec["vision_size"],
+        text_config.hidden_size,
+    )
+    assert inputs["lang"]["comp_ctx_lengths"].shape == (64,)
+    assert torch.count_nonzero(inputs["lang"]["comp_ctx_lengths"]) == 0
+
+
 def test_qwen3_vl_moe_batch_index_boundary_reorders_inputs_and_outputs():
     from QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
         _batch_index_gather,

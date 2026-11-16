@@ -1424,6 +1424,18 @@ class TestVisionHandlerInit:
         )
         np.testing.assert_array_equal(vision_inputs["image_masks"], values.astype(np.float16))
 
+    def test_cast_vision_inputs_without_session_defers_dtype_conversion(self):
+        from QEfficient.generation.embedding_handler import VisionHandler
+
+        handler = VisionHandler(qeff_model=None, vision_session=None, processor=MagicMock(), tokenizer=None)
+        values = np.array([1.0, -2.5], dtype=np.float32)
+        vision_inputs = {"pixel_values": values.copy()}
+
+        handler._cast_vision_inputs(vision_inputs, constants.VISION_FP16_INPUTS)
+
+        assert vision_inputs["pixel_values"].dtype == np.float32
+        np.testing.assert_array_equal(vision_inputs["pixel_values"], values)
+
 
 def test_binding_is_bfloat16_uses_compiled_binding_type(monkeypatch):
     from QEfficient.generation import cloud_infer
@@ -2021,9 +2033,12 @@ def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
 
     from QEfficient.generation.runner_io import write_single_qpc_vlm_runner_bundle
 
+    handler_kwargs = {}
+
     class FakeVisionHandler:
         def __init__(self, *args, **kwargs):
-            del args, kwargs
+            del args
+            handler_kwargs.update(kwargs)
 
         def prepare_processor_inputs(self, image, prompt, prefill_seq_len):
             del image, prompt
@@ -2047,6 +2062,7 @@ def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
     onnx.save(helper.make_model(graph), onnx_path)
     compile_dir = tmp_path / "qpc-hash"
     compile_dir.mkdir()
+    (compile_dir / "custom_io.yaml").write_text("- IOName: pixel_values\n  Precision: float16\n")
     (compile_dir / "specializations.json").write_text(
         json.dumps({"specializations": [{"batch_size": 2, "seq_len": 4, "ctx_len": 8}]})
     )
@@ -2059,14 +2075,382 @@ def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
 
     with patch("QEfficient.generation.embedding_handler.VisionHandler", FakeVisionHandler):
         io_dir = write_single_qpc_vlm_runner_bundle(
-            model=qeff_model, processor=MagicMock(), images=["image"], prompts=["prompt"]
+            model=qeff_model,
+            processor=MagicMock(),
+            images=["image"],
+            prompts=["prompt"],
+            image_height=448,
+            image_width=896,
         )
 
+    assert handler_kwargs["image_height"] == 448
+    assert handler_kwargs["image_width"] == 896
+
     entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
-    input_dims = {entry["map-to"]: entry["dims"] for entry in entries if entry["io-direction"] == "in"}
+    input_entries = {entry["map-to"]: entry for entry in entries if entry["io-direction"] == "in"}
+    input_dims = {name: entry["dims"] for name, entry in input_entries.items()}
     assert input_dims["input_ids"] == [2, 4]
     assert input_dims["position_ids"] == [2, 4]
     assert input_dims["image_idx"] == [2, 1]
     assert input_dims["pixel_values"] == [2, 3]
+    assert input_entries["pixel_values"]["elem-size"] == 2
+    assert input_entries["input_ids"]["elem-size"] == 8
     assert np.fromfile(io_dir / "data/input_ids.raw", dtype=np.int64).tolist() == [1, 2, 0, 0, 1, 2, 0, 0]
-    assert np.fromfile(io_dir / "data/pixel_values.raw", dtype=np.float32).tolist() == [11.0, 12.0, 13.0] * 2
+    assert np.fromfile(io_dir / "data/pixel_values.raw", dtype=np.float16).tolist() == [11.0, 12.0, 13.0] * 2
+
+
+@pytest.mark.cpu_only
+def test_vlm_runner_bundle_rejects_incomplete_image_geometry(tmp_path):
+    from QEfficient.generation.runner_io import write_single_qpc_vlm_runner_bundle
+
+    qeff_model = SimpleNamespace(
+        qpc_path=None,
+        compile_artifacts_path=tmp_path,
+        onnx_path=tmp_path / "unused.onnx",
+    )
+
+    with pytest.raises(ValueError, match="provided together"):
+        write_single_qpc_vlm_runner_bundle(
+            model=qeff_model,
+            processor=MagicMock(),
+            images=["image"],
+            prompts=["prompt"],
+            image_height=448,
+        )
+
+
+@pytest.mark.cpu_only
+def test_dual_qpc_language_artifact_processes_images_before_placeholders(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_dual_qpc_vlm_runner_bundle
+
+    handler_kwargs = {}
+    processed = []
+
+    class FakeVisionHandler:
+        def __init__(self, *args, **kwargs):
+            del args
+            handler_kwargs.update(kwargs)
+
+        def prepare_processor_inputs(self, image, prompt, prefill_seq_len):
+            processed.append((image, prompt, prefill_seq_len))
+            return (
+                {"pixel_values": np.array([[1.0]], dtype=np.float32)},
+                {
+                    "input_ids": np.array([[1, 2]], dtype=np.int64),
+                    "position_ids": np.array([[0, 1]], dtype=np.int64),
+                },
+                1,
+            )
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 2])
+    position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1, 2])
+    vision_embeds = helper.make_tensor_value_info("vision_embeds", TensorProto.FLOAT, [1, 2, 3])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 3])
+    onnx_path = tmp_path / "lang.onnx"
+    onnx.save(
+        helper.make_model(
+            helper.make_graph([], "dual_qpc_lang", [input_ids, position_ids, vision_embeds], [logits])
+        ),
+        onnx_path,
+    )
+    compile_dir = tmp_path / "lang-qpc"
+    compile_dir.mkdir()
+    (compile_dir / "specializations.json").write_text(
+        json.dumps({"specializations": [{"batch_size": 1, "seq_len": 2, "ctx_len": 8}]})
+    )
+    lang_model = SimpleNamespace(
+        qpc_path=None,
+        compile_artifacts_path=compile_dir,
+        onnx_path=onnx_path,
+        model=SimpleNamespace(config=SimpleNamespace()),
+    )
+    model = SimpleNamespace(lang_model=lang_model, vision_model=SimpleNamespace())
+
+    with patch("QEfficient.generation.embedding_handler.VisionHandler", FakeVisionHandler):
+        io_dir = write_dual_qpc_vlm_runner_bundle(
+            model=model,
+            processor=MagicMock(),
+            images=["real-image"],
+            prompts=["describe it"],
+            skip_vision=True,
+            skip_lang=False,
+            image_height=448,
+            image_width=896,
+        )
+
+    assert processed == [("real-image", "describe it", 2)]
+    assert handler_kwargs["image_height"] == 448
+    assert handler_kwargs["image_width"] == 896
+    inputs = {
+        entry["map-to"]
+        for entry in json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+        if entry["io-direction"] == "in"
+    }
+    assert {"input_ids", "position_ids", "vision_embeds"} <= inputs
+
+
+@pytest.mark.cpu_only
+def test_specialization_selectors_use_named_and_graph_derived_symbols(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import (
+        RunnerMetadata,
+        select_decode_specialization,
+        select_prefill_specialization,
+        select_vision_specialization,
+    )
+
+    pixel_values = helper.make_tensor_value_info("pixels", TensorProto.FLOAT, ["grid_height", "grid_width"])
+    image_grid = helper.make_tensor_value_info(
+        "grid", TensorProto.INT64, ["vision_batch_size", "time", "grid_h", "grid_w"]
+    )
+    ccl = helper.make_tensor_value_info("ccl", TensorProto.INT64, ["comp_ctx_lengths"])
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "selectors", [pixel_values, image_grid, ccl], [pixel_values])), onnx_path)
+    (tmp_path / "specializations.json").write_text(
+        json.dumps(
+            {
+                "specializations": [
+                    {
+                        "name": "Vision_0",
+                        "symbols": {
+                            "vision_batch_size": "1",
+                            "grid_height": "16",
+                            "grid_width": "12",
+                            "time": "1",
+                            "grid_h": "4",
+                            "grid_w": "3",
+                        },
+                    },
+                    {
+                        "name": "Vision_1",
+                        "symbols": {
+                            "vision_batch_size": "1",
+                            "grid_height": "24",
+                            "grid_width": "12",
+                            "time": "1",
+                            "grid_h": "6",
+                            "grid_w": "3",
+                        },
+                    },
+                    {"name": "Prefill_0", "symbols": {"seq_len": "4", "comp_ctx_lengths": "32"}},
+                    {"name": "Prefill_1", "symbols": {"seq_len": "4", "comp_ctx_lengths": "64"}},
+                    {"name": "Decode_0", "symbols": {"seq_len": "2", "comp_ctx_lengths": "64"}},
+                ]
+            }
+        )
+    )
+    metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert select_vision_specialization(
+        tmp_path,
+        metadata,
+        {"pixels": np.zeros((24, 12), dtype=np.float32), "grid": np.zeros((1, 1, 6, 3), dtype=np.int64)},
+    )["grid_height"] == 24
+    assert select_prefill_specialization(
+        tmp_path, runner_metadata=metadata, inputs={"ccl": np.zeros(64, dtype=np.int64)}
+    )["comp_ctx_lengths"] == 64
+    assert select_decode_specialization(tmp_path)["seq_len"] == 2
+
+
+@pytest.mark.cpu_only
+def test_vision_specialization_selector_rejects_missing_or_ambiguous_matches(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata, select_vision_specialization
+
+    pixels = helper.make_tensor_value_info("pixels", TensorProto.FLOAT, ["grid_height", "grid_width"])
+    onnx_path = tmp_path / "vision.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "vision", [pixels], [pixels])), onnx_path)
+    metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+    (tmp_path / "specializations.json").write_text(
+        json.dumps(
+            {
+                "specializations": [
+                    {"vision_batch_size": "1", "grid_height": "16", "grid_width": "12"},
+                    {"vision_batch_size": "2", "grid_height": "16", "grid_width": "12"},
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="Expected exactly one vision specialization"):
+        select_vision_specialization(tmp_path, metadata, {"pixels": np.zeros((16, 12), dtype=np.float32)})
+    with pytest.raises(ValueError, match="No vision specialization matches"):
+        select_vision_specialization(tmp_path, metadata, {"pixels": np.zeros((32, 12), dtype=np.float32)})
+
+
+@pytest.mark.cpu_only
+def test_dual_qpc_vision_artifact_uses_strict_matching_vision_specialization(tmp_path):
+    from types import SimpleNamespace
+
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_dual_qpc_vlm_runner_bundle
+
+    class FakeVisionHandler:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def prepare_processor_inputs(self, image, prompt, prefill_seq_len):
+            del image, prompt
+            assert prefill_seq_len == 4
+            return (
+                {
+                    "pixels": np.ones((24, 12), dtype=np.float32),
+                    "grid": np.ones((1, 1, 6, 3), dtype=np.int64),
+                },
+                {"input_ids": np.ones((1, 4), dtype=np.int64)},
+                1,
+            )
+
+    pixels = helper.make_tensor_value_info("pixels", TensorProto.FLOAT, ["grid_height", "grid_width"])
+    grid = helper.make_tensor_value_info("grid", TensorProto.INT64, ["vision_batch_size", "time", "grid_h", "grid_w"])
+    features = helper.make_tensor_value_info("features", TensorProto.FLOAT, ["vision_batch_size", "vision_size", 3])
+    vision_path = tmp_path / "vision.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "vision", [pixels, grid], [features])), vision_path)
+    vision_dir = tmp_path / "vision-qpc"
+    vision_dir.mkdir()
+    (vision_dir / "specializations.json").write_text(
+        json.dumps(
+            {
+                "specializations": [
+                    {
+                        "name": "Vision",
+                        "symbols": {
+                            "vision_batch_size": "1",
+                            "grid_height": "16",
+                            "grid_width": "12",
+                            "time": "1",
+                            "grid_h": "4",
+                            "grid_w": "3",
+                            "vision_size": "4",
+                        },
+                    },
+                    {
+                        "name": "Vision",
+                        "symbols": {
+                            "vision_batch_size": "1",
+                            "grid_height": "24",
+                            "grid_width": "12",
+                            "time": "1",
+                            "grid_h": "6",
+                            "grid_w": "3",
+                            "vision_size": "6",
+                        },
+                    },
+                ]
+            }
+        )
+    )
+    language_features = helper.make_tensor_value_info(
+        "features", TensorProto.FLOAT, ["vision_batch_size", "vision_size", 3]
+    )
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 3])
+    language_path = tmp_path / "language.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "language", [language_features], [logits])), language_path)
+    language_dir = tmp_path / "language-qpc"
+    language_dir.mkdir()
+    (language_dir / "specializations.json").write_text(
+        json.dumps({"specializations": [{"name": "Prefill", "symbols": {"batch_size": "1", "seq_len": "4"}}]})
+    )
+    model = SimpleNamespace(
+        vision_model=SimpleNamespace(qpc_path=None, compile_artifacts_path=vision_dir, onnx_path=vision_path),
+        lang_model=SimpleNamespace(qpc_path=None, compile_artifacts_path=language_dir, onnx_path=language_path),
+    )
+
+    with patch("QEfficient.generation.embedding_handler.VisionHandler", FakeVisionHandler):
+        io_dir = write_dual_qpc_vlm_runner_bundle(
+            model=model,
+            processor=MagicMock(),
+            images=["image"],
+            prompts=["prompt"],
+            skip_vision=False,
+            skip_lang=True,
+        )
+
+    entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    assert next(entry for entry in entries if entry["map-to"] == "features")["dims"] == [1, 6, 3]
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    ("precision", "value", "raw_dtype", "element_size"),
+    [
+        ("bfloat16", np.array([1.0, -2.5], dtype=np.float32), np.uint16, 2),
+        ("float16", np.array([1.0, -2.5], dtype=np.float32), np.float16, 2),
+        ("float32", np.array([1.0, -2.5], dtype=np.float16), np.float32, 4),
+        ("int8", np.array([1, -2], dtype=np.int16), np.int8, 1),
+        ("mxint8", np.array([1, -2], dtype=np.int16), np.int8, 1),
+    ],
+)
+def test_runner_bundle_uses_custom_io_dtype_storage(tmp_path, precision, value, raw_dtype, element_size):
+    import onnx
+    import torch
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_runner_io_bundle
+
+    graph_input = helper.make_tensor_value_info("processor_input", TensorProto.FLOAT, [2])
+    graph_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "dtype_runner", [graph_input], [graph_output])), onnx_path)
+    (tmp_path / "custom_io.yaml").write_text(f"- IOName: processor_input\n  Precision: {precision}\n")
+
+    io_dir = write_runner_io_bundle(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path,
+        specialization={"batch_size": 1, "seq_len": 1},
+        host_inputs={"processor_input": value},
+    )
+
+    entry = next(
+        entry
+        for entry in json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+        if entry["map-to"] == "processor_input"
+    )
+    assert entry["elem-size"] == element_size
+    raw = np.fromfile(io_dir / "data/processor_input.raw", dtype=raw_dtype)
+    if precision == "bfloat16":
+        expected = torch.as_tensor(value).to(torch.bfloat16).view(torch.int16).numpy().view(np.uint16)
+        np.testing.assert_array_equal(raw, expected)
+    else:
+        np.testing.assert_array_equal(raw, value.astype(raw_dtype))
+
+
+@pytest.mark.cpu_only
+def test_runner_bundle_falls_back_to_onnx_dtype_and_rejects_incompatible_processor_values(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_runner_io_bundle
+
+    graph_input = helper.make_tensor_value_info("processor_input", TensorProto.INT8, [2])
+    graph_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "dtype_runner", [graph_input], [graph_output])), onnx_path)
+
+    with pytest.raises(ValueError, match="incompatible"):
+        write_runner_io_bundle(
+            onnx_path=onnx_path,
+            compile_dir=tmp_path,
+            specialization={"batch_size": 1, "seq_len": 1},
+            host_inputs={"processor_input": np.array([1.5, 2.0], dtype=np.float32)},
+        )
+
+    io_dir = write_runner_io_bundle(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path,
+        specialization={"batch_size": 1, "seq_len": 1},
+        host_inputs={"processor_input": np.array([1, -2], dtype=np.int16)},
+    )
+    np.testing.assert_array_equal(
+        np.fromfile(io_dir / "data/processor_input.raw", dtype=np.int8),
+        np.array([1, -2], dtype=np.int8),
+    )
