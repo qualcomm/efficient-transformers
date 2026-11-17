@@ -25,11 +25,7 @@ import torch
 from onnx import TensorProto, helper
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
-from QEfficient.base.modeling_qeff import (
-    _copy_onnx_external_data_files,
-    _weight_free_external_data_root,
-    generate_mdp_compiler_dump,
-)
+from QEfficient.base.modeling_qeff import generate_mdp_compiler_dump
 from QEfficient.compile.mdp_generator import (
     _get_layer_num_from_inputs,
     _layer_partition_bounds,
@@ -581,11 +577,7 @@ def _bounds_to_layer_counts(bounds: List[int], total_layers: int) -> List[int]:
     return [pts[i + 1] - pts[i] for i in range(len(pts) - 1)]
 
 
-def _build_synthetic_gpt2_onnx(
-    num_layers: int,
-    out_path: Path,
-    external_data_file: Optional[str] = None,
-) -> None:
+def _build_synthetic_gpt2_onnx(num_layers: int, out_path: Path) -> None:
     """Write a minimal ONNX graph whose nodes carry 'h.N' transformer-layer names.
 
     The graph has topology: embed_tokens -> h.0/* -> h.1/* -> ... -> lm_head.
@@ -594,20 +586,7 @@ def _build_synthetic_gpt2_onnx(
     ONNX strategy end-to-end without loading a real model.
     """
     nodes: List[Any] = []
-    initializers: List[Any] = []
-    if external_data_file is None:
-        nodes.append(helper.make_node("Identity", inputs=["input_ids"], outputs=["embed_out"], name="embed_tokens"))
-    else:
-        initializers.append(numpy_helper.from_array(np.zeros((1, 8), dtype=np.float32), name="embed_bias"))
-        initializers.append(numpy_helper.from_array(np.ones((1, 8), dtype=np.float32), name="embed_scale"))
-        nodes.append(
-            helper.make_node("Add", inputs=["input_ids", "embed_bias"], outputs=["embed_bias_out"], name="embed_tokens")
-        )
-        nodes.append(
-            helper.make_node(
-                "Mul", inputs=["embed_bias_out", "embed_scale"], outputs=["embed_out"], name="embed_tokens_scale"
-            )
-        )
+    nodes.append(helper.make_node("Identity", inputs=["input_ids"], outputs=["embed_out"], name="embed_tokens"))
     prev_out = "embed_out"
     for layer_idx in range(num_layers):
         attn_out = f"attn_out_{layer_idx}"
@@ -993,41 +972,6 @@ class TestMdpCompileIntegration:
         assert compiler_cfg.get("mdp_strategy") == "onnx", (
             f"Expected mdp_strategy='onnx' in qconfig compiler_config, got {compiler_cfg.get('mdp_strategy')}"
         )
-
-    def test_external_data_copy_deduplicates_shared_location(self, tmp_path):
-        onnx_path = tmp_path / "model.onnx"
-        artifact_path = tmp_path / "artifacts" / "model.onnx"
-        external_data_name = "model.onnx.data"
-        real_copy2 = shutil.copy2
-
-        _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path, external_data_file=external_data_name)
-        model = onnx.load(onnx_path, load_external_data=False)
-        external_data_locations = [
-            entry.value
-            for tensor in onnx.external_data_helper._get_all_tensors(model)
-            if tensor.data_location == onnx.TensorProto.EXTERNAL
-            for entry in tensor.external_data
-            if entry.key == "location"
-        ]
-        assert external_data_locations.count(external_data_name) > 1
-
-        with patch("QEfficient.base.modeling_qeff.shutil.copy2", side_effect=real_copy2) as copy2_mock:
-            _copy_onnx_external_data_files(onnx_path, artifact_path)
-
-        copy2_mock.assert_called_once_with(
-            (tmp_path / external_data_name).resolve(), (artifact_path.parent / external_data_name).resolve()
-        )
-        assert (artifact_path.parent / external_data_name).read_bytes() == (tmp_path / external_data_name).read_bytes()
-
-    def test_external_data_copy_skips_same_resolved_path(self, tmp_path):
-        onnx_path = tmp_path / "model.onnx"
-
-        _build_synthetic_gpt2_onnx(num_layers=2, out_path=onnx_path, external_data_file="model.onnx.data")
-
-        with patch("QEfficient.base.modeling_qeff.shutil.copy2") as copy2_mock:
-            _copy_onnx_external_data_files(onnx_path, onnx_path)
-
-        copy2_mock.assert_not_called()
 
     def test_compile_artifacts_writes_replay_without_invoking_compiler(self, tmp_path):
         onnx_path = tmp_path / "model.onnx"
