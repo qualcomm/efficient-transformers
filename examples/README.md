@@ -37,6 +37,15 @@ Language model inference.
 
 [See all dynamo examples →](dynamo/)
 
+### GLM
+GLM-5.3 attention export and validation.
+
+| Example | Description | Script |
+|---------|-------------|--------|
+| GLM-5.3 Attention Matrix | Dense MLA and DSA benchmark configurations | [glm/glm53_four_layer_decode_compile_generate.py](glm/glm53_four_layer_decode_compile_generate.py) |
+
+[See the GLM attention configuration guide →](glm/README.md)
+
 ### Image-Text-to-Text
 Vision-language models.
 

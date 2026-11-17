@@ -138,21 +138,24 @@ def vlm_golden_variant_key(
     torch_dtype,
     prompt_text: str,
     image_url: str,
+    image_fingerprint: str,
     generation_len: int,
     config_fp: str,
 ) -> str:
     """Deterministic variant key for one VLM golden.
 
     Mirrors ``golden_variant_key``: the HF token stream for a VLM is a pure function of the
-    model + effective config plus the fixed image/prompt pair from
-    ``image_text_model_configs.json``, dtype, and the generation length. It does not depend on
-    ``kv_offload`` or ``qaic_config`` (those only steer the QEff / on-device leg), so one golden
-    is reused across every variant of those knobs for the same model.
+    model + effective config plus the processed image/prompt pair, dtype, and the generation
+    length. The URL alone is insufficient because unavailable external images are replaced by a
+    checked-in fallback image. It does not depend on ``kv_offload`` or ``qaic_config`` (those
+    only steer the QEff / on-device leg), so one golden is reused across every variant of those
+    knobs for the same model.
     """
     payload = {
         "dtype": _dtype_str(torch_dtype),
         "prompt": prompt_text,
         "image_url": image_url,
+        "image_fingerprint": image_fingerprint,
         "generation_len": generation_len,
         "config_fp": config_fp,
     }
