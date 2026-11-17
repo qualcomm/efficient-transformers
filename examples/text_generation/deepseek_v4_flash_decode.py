@@ -1,0 +1,609 @@
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
+"""Export, compile, and run DeepSeek-V4-Flash in one-token decode mode."""
+
+import argparse
+import json
+import os
+from collections import defaultdict
+from pathlib import Path
+
+import onnx
+import torch
+from transformers import AutoConfig, AutoTokenizer
+
+DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
+DEFAULT_HF_CACHE = "/home/huggingface_hub"
+DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
+PREFILL_PROMPT = "Hello, how are you?"
+GATE_PREFIX_OUTPUTS = (
+    "mlp/gate/MatMul_output_0",
+    "mlp/gate/score_fn/Softplus_output_0",
+    "mlp/gate/score_fn/Sqrt_output_0",
+    "mlp/gate/Add_output_0",
+)
+GATE_SUFFIX_OUTPUTS = (
+    "mlp/gate/Reshape_output_0",
+    "mlp/gate/GatherElements_output_0",
+    "mlp/gate/Einsum_output_0",
+    "mlp/gate/Unsqueeze_output_0",
+    "mlp/gate/Div_output_0",
+    "mlp/gate/Mul_output_0",
+)
+TARGETED_LAYER_OUTPUTS = ("attn_hc/MatMul_output_0",)
+TARGETED_ROUTED_EXPERT_OUTPUT = "mlp/experts/MatMul_2_output_0"
+TARGETED_SHARED_EXPERT_OUTPUT = "mlp/shared_experts/down_proj/MatMul_output_0"
+TARGETED_ATTENTION_OUTPUTS = (
+    "self_attn/kv_proj_1/MatMul_output_0",
+    "self_attn/gate_proj/MatMul_output_0",
+    "self_attn/kv_proj_2/MatMul_output_0",
+    "self_attn/gate_proj_1/MatMul_output_0",
+    "self_attn/q_b_proj_1/MatMul_output_0",
+    "self_attn/scorer/weights_proj/MatMul_output_0",
+)
+TARGETED_HEAD_OUTPUTS = (
+    "/model/hc_head/MatMul_output_0",
+    "/lm_head/MatMul_output_0",
+)
+HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
+MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+
+
+def parse_device_group(value: str) -> list[int]:
+    return [int(device_id) for device_id in value.strip("[]").split(",") if device_id.strip()]
+
+
+def generate_npi_file(onnx_path: Path, artifact_root: Path, num_hidden_layers: int) -> Path:
+    """Generate the DeepSeek-V4-Flash FP32 node list from the exported graph.
+
+    Reduced parity models can promote the large expert down projections and LM head. Extending those promotions to
+    the 43-layer model exceeds AI100's 3.625 GiB per-core VA limit, so full-model NPI keeps the attention projections
+    and HC head that fit alongside the existing router, ffn_hc, and layernorm promotions.
+    """
+    model = onnx.load(onnx_path, load_external_data=False)
+    graph_outputs = [output for node in model.graph.node for output in node.output]
+    graph_output_set = set(graph_outputs)
+
+    if not any(output.startswith("/model/layers.") for output in graph_outputs):
+        return generate_dynamo_npi_file(model, artifact_root, num_hidden_layers)
+
+    fp32_outputs = []
+
+    for layer_idx in range(num_hidden_layers):
+        layer_prefix = f"/model/layers.{layer_idx}/"
+        required_outputs = [layer_prefix + output for output in GATE_PREFIX_OUTPUTS]
+        optional_topk = layer_prefix + "mlp/gate/TopK_output_0"
+        if optional_topk in graph_output_set:
+            required_outputs.append(optional_topk)
+
+        ffn_prefix = layer_prefix + "ffn_hc/"
+        ffn_outputs = [output for output in graph_outputs if output.startswith(ffn_prefix)]
+        if not ffn_outputs:
+            raise ValueError(f"No ffn_hc outputs found for layer {layer_idx} in {onnx_path}.")
+        required_outputs.extend(ffn_outputs)
+
+        required_outputs.append(layer_prefix + "Cast_4_output_0")
+        post_layernorm_prefix = layer_prefix + "post_attention_layernorm/"
+        post_layernorm_outputs = [output for output in graph_outputs if output.startswith(post_layernorm_prefix)]
+        if not post_layernorm_outputs:
+            raise ValueError(f"No post-attention layernorm outputs found for layer {layer_idx} in {onnx_path}.")
+        required_outputs.extend(post_layernorm_outputs)
+        required_outputs.append(layer_prefix + "Cast_5_output_0")
+        required_outputs.extend(layer_prefix + output for output in GATE_SUFFIX_OUTPUTS)
+
+        optional_gate_add = layer_prefix + "mlp/gate/Add_1_output_0"
+        if optional_gate_add in graph_output_set:
+            required_outputs.append(optional_gate_add)
+
+        required_outputs.extend(layer_prefix + output for output in TARGETED_LAYER_OUTPUTS)
+        if num_hidden_layers <= 4:
+            required_outputs.extend(
+                layer_prefix + output for output in (TARGETED_ROUTED_EXPERT_OUTPUT, TARGETED_SHARED_EXPERT_OUTPUT)
+            )
+        required_outputs.extend(
+            layer_prefix + output for output in TARGETED_ATTENTION_OUTPUTS if layer_prefix + output in graph_output_set
+        )
+
+        missing_outputs = [output for output in required_outputs if output not in graph_output_set]
+        if missing_outputs:
+            raise ValueError(f"Cannot generate NPI for layer {layer_idx}; missing ONNX outputs: {missing_outputs}")
+        fp32_outputs.extend(required_outputs)
+
+    targeted_heads = TARGETED_HEAD_OUTPUTS if num_hidden_layers <= 4 else TARGETED_HEAD_OUTPUTS[:1]
+    missing_heads = [output for output in targeted_heads if output not in graph_output_set]
+    if missing_heads:
+        raise ValueError(f"Cannot generate NPI; missing ONNX head outputs: {missing_heads}")
+    fp32_outputs.extend(targeted_heads)
+
+    npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
+    npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
+    npi_path.write_text(npi_contents, encoding="utf-8")
+    return npi_path
+
+
+def generate_dynamo_npi_file(model: onnx.ModelProto, artifact_root: Path, num_hidden_layers: int) -> Path:
+    """Generate the NPI file for Dynamo ONNX exports.
+
+    Dynamo does not preserve module paths in intermediate tensor names. It does retain qualified initializer names,
+    so identify the module-owned graph regions from those initializers instead of relying on tensor name prefixes.
+    """
+    parameter_consumers: dict[str, list[int]] = defaultdict(list)
+    tensor_consumers: dict[str, list[int]] = defaultdict(list)
+    for node_idx, node in enumerate(model.graph.node):
+        for node_input in node.input:
+            tensor_consumers[node_input].append(node_idx)
+    parameter_names = {initializer.name for initializer in model.graph.initializer}
+    parameter_names.update(graph_input.name for graph_input in model.graph.input)
+    for parameter_name in parameter_names:
+        parameter_consumers[parameter_name] = tensor_consumers[parameter_name]
+
+    def require_consumer(parameter_name: str) -> int:
+        consumer_indices = parameter_consumers[parameter_name]
+        if not consumer_indices:
+            raise ValueError(f"Cannot generate Dynamo NPI; missing consumer for parameter {parameter_name}.")
+        return min(consumer_indices)
+
+    def add_outputs(output_indices: list[int], start_idx: int, stop_idx: int) -> None:
+        if start_idx >= stop_idx:
+            raise ValueError(f"Cannot generate Dynamo NPI; invalid node range [{start_idx}, {stop_idx}).")
+        for node in model.graph.node[start_idx:stop_idx]:
+            output_indices.extend(node.output)
+
+    def add_linear_outputs(output_indices: list[int], parameter_name: str) -> None:
+        for consumer_idx in parameter_consumers[parameter_name]:
+            consumer = model.graph.node[consumer_idx]
+            if consumer.op_type in {"Gemm", "MatMul"}:
+                output_indices.extend(consumer.output)
+                continue
+
+            for parameter_output in consumer.output:
+                for next_idx in tensor_consumers[parameter_output]:
+                    next_node = model.graph.node[next_idx]
+                    if next_node.op_type in {"Gemm", "MatMul"}:
+                        output_indices.extend(next_node.output)
+
+    fp32_outputs = []
+    for layer_idx in range(num_hidden_layers):
+        layer_prefix = f"model.layers.{layer_idx}"
+        ffn_parameters = [
+            f"{layer_prefix}.ffn_hc.fn",
+            f"{layer_prefix}.ffn_hc.base",
+            f"{layer_prefix}.ffn_hc.scale",
+        ]
+        ffn_start = min(require_consumer(parameter_name) for parameter_name in ffn_parameters)
+        post_layernorm_parameter = f"{layer_prefix}.post_attention_layernorm.weight"
+        post_layernorm_idx = require_consumer(post_layernorm_parameter)
+        add_outputs(fp32_outputs, ffn_start, post_layernorm_idx)
+        fp32_outputs.extend(model.graph.node[post_layernorm_idx].output)
+
+        gate_parameter = f"{layer_prefix}.mlp.gate.weight"
+        gate_start = require_consumer(gate_parameter)
+        expert_parameters = (
+            f"{layer_prefix}.mlp.experts.gate_proj",
+            f"{layer_prefix}.mlp.experts.up_proj",
+            f"{layer_prefix}.mlp.experts.down_proj",
+            f"{layer_prefix}.mlp.shared_experts.gate_proj.weight",
+            f"{layer_prefix}.mlp.shared_experts.up_proj.weight",
+            f"{layer_prefix}.mlp.shared_experts.down_proj.weight",
+        )
+        expert_start = min(
+            require_consumer(parameter_name)
+            for parameter_name in expert_parameters
+            if parameter_consumers[parameter_name]
+        )
+        add_outputs(fp32_outputs, gate_start, expert_start)
+
+        add_linear_outputs(fp32_outputs, f"{layer_prefix}.attn_hc.fn")
+        if num_hidden_layers <= 4:
+            add_linear_outputs(fp32_outputs, f"{layer_prefix}.mlp.experts.down_proj")
+            add_linear_outputs(fp32_outputs, f"{layer_prefix}.mlp.shared_experts.down_proj.weight")
+
+        attention_parameters = (
+            f"{layer_prefix}.self_attn.kv_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.kv_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.kv_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.gate_proj.weight",
+            f"{layer_prefix}.self_attn.q_b_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.q_b_proj.weight",
+            f"{layer_prefix}.self_attn.compressor.indexer.scorer.weights_proj.weight",
+        )
+        for parameter_name in attention_parameters:
+            if parameter_consumers[parameter_name]:
+                add_linear_outputs(fp32_outputs, parameter_name)
+
+    add_linear_outputs(fp32_outputs, "model.hc_head.hc_fn")
+    if num_hidden_layers <= 4:
+        add_linear_outputs(fp32_outputs, "lm_head.weight")
+
+    if not fp32_outputs:
+        raise ValueError(f"Cannot generate Dynamo NPI; no FP32 outputs were found in {model.graph.name}.")
+
+    fp32_outputs = list(dict.fromkeys(fp32_outputs))
+    npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
+    npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
+    npi_path.write_text(npi_contents, encoding="utf-8")
+    return npi_path
+
+
+def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
+    parser.add_argument("--hf-cache", type=Path, default=Path(DEFAULT_HF_CACHE))
+    parser.add_argument("--artifact-root", type=Path, default=Path(DEFAULT_ARTIFACT_ROOT))
+    parser.add_argument(
+        "--model-dtype",
+        choices=tuple(MODEL_DTYPES),
+        default="float16",
+        help="Model and ONNX export dtype.",
+    )
+    parser.add_argument("--ctx-len", type=int, default=512)
+    parser.add_argument("--prefill-seq-len", type=int, default=128)
+    parser.add_argument(
+        "--prefill-only",
+        action="store_true",
+        help="Export and compile the blocked CSA/HCA prefill graph instead of the one-token decode graph.",
+    )
+    parser.add_argument(
+        "--use-onnx-subfunctions",
+        action="store_true",
+        help="Export repeated decoder blocks as ONNX subfunctions.",
+    )
+    parser.add_argument(
+        "--mdp-num-partitions",
+        "--pp-size",
+        dest="mdp_num_partitions",
+        type=int,
+        default=1,
+        help="Pipeline-parallel MDP partitions for prefill; values above one enable disaggregated ONNX MDP.",
+    )
+    parser.add_argument(
+        "--mdp-strategy",
+        choices=("onnx", "intersection"),
+        default="onnx",
+        help="Partition-assignment strategy used when pipeline parallelism is enabled.",
+    )
+    parser.add_argument("--generation-len", type=int, default=250)
+    parser.add_argument("--num-hidden-layers", type=int, default=43)
+    parser.add_argument("--num-cores", "--compile-num-cores", dest="num_cores", type=int, default=12)
+    parser.add_argument("--device-group", type=parse_device_group, default=[i for i in range(4)])
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--attn-dp", type=int, default=None, help="Folded decode attention data-parallel rows.")
+    parser.add_argument("--indexer-cp", type=int, default=1, help="CSA indexer compressed-cache context parallelism.")
+    parser.add_argument(
+        "--csa-prefill-attn-gather-sub-qc",
+        type=int,
+        default=None,
+        help="CSA prefill compressed-attention query subchunk size.",
+    )
+    parser.add_argument(
+        "--csa-prefill-indexer-kv-block-size",
+        type=int,
+        default=None,
+        help="CSA prefill indexer score tile size.",
+    )
+    parser.add_argument(
+        "--csa-prefill-indexer-topk-per-block",
+        type=int,
+        default=None,
+        help="CSA prefill candidates retained from each indexer score tile.",
+    )
+    parser.add_argument(
+        "--num-kv-blocks",
+        type=int,
+        default=1,
+        help="CSA indexer CP-local blocks; values above one currently trigger a QAIC compiler crash.",
+    )
+    parser.add_argument(
+        "--hca-compressed-kv-cp",
+        type=int,
+        default=1,
+        help="HCA compressed-KV context-parallel degree.",
+    )
+    parser.add_argument(
+        "--hca-attn-blocks",
+        type=int,
+        default=None,
+        help="HCA dense compressed-attention tiles; defaults to the hardware attention-core count.",
+    )
+    parser.add_argument("--hw-version", choices=tuple(HW_CORES_PER_DEVICE), default="ai100")
+    parser.add_argument(
+        "--ffn-blocking-mode",
+        choices=("default", "token", "weight", "token_weight"),
+        default="default",
+        help="Routed-expert FFN blocking mode. The default preserves the unblocked graph.",
+    )
+    parser.add_argument(
+        "--ffn-token-block-size",
+        type=int,
+        default=None,
+        help="Token tile size for token or token_weight FFN blocking.",
+    )
+    parser.add_argument(
+        "--ffn-weight-block-size",
+        type=int,
+        default=None,
+        help="Intermediate-dimension tile size for weight or token_weight FFN blocking.",
+    )
+    parser.add_argument("--prefill-prompt", default=PREFILL_PROMPT)
+    parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--automation", action="store_true")
+    parser.add_argument("--export-only", action="store_true")
+    parser.add_argument("--compile-only", action="store_true")
+    if defaults:
+        parser.set_defaults(**defaults)
+    return parser.parse_args()
+
+
+def build_ffn_blocking_config(args: argparse.Namespace) -> dict[str, int | str | None]:
+    """Build the compile-time routed-expert FFN blocking configuration."""
+    return {
+        "ffn_blocking_mode": args.ffn_blocking_mode,
+        "ffn_token_block_size": args.ffn_token_block_size,
+        "ffn_weight_block_size": args.ffn_weight_block_size,
+    }
+
+
+def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
+    """Apply the benchmark's shared folded decode controls to QEff cache layouts."""
+    attention_dp = args.attn_dp or len(args.device_group)
+    indexer_cp = args.indexer_cp
+    num_kv_blocks = args.num_kv_blocks
+    attention_cores = HW_CORES_PER_DEVICE[args.hw_version]
+    hca_compressed_kv_cp = args.hca_compressed_kv_cp
+    hca_attn_blocks = args.hca_attn_blocks or attention_cores
+    if attention_dp < 1:
+        raise ValueError("attn_dp must be at least 1.")
+    if indexer_cp < 1:
+        raise ValueError("indexer_cp must be at least 1.")
+    if num_kv_blocks < 1:
+        raise ValueError("num_kv_blocks must be at least 1.")
+    if hca_compressed_kv_cp < 1:
+        raise ValueError("hca_compressed_kv_cp must be at least 1.")
+    if hca_attn_blocks < 1:
+        raise ValueError("hca_attn_blocks must be at least 1.")
+    if args.batch_size % attention_dp:
+        raise ValueError("batch_size must be divisible by attn_dp.")
+
+    csa_capacity = None
+    hca_capacity = None
+    for layer_type in config.layer_types:
+        if layer_type == "compressed_sparse_attention":
+            csa_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
+            if csa_capacity % indexer_cp:
+                raise ValueError("CSA compressed-cache capacity must be divisible by indexer_cp.")
+            csa_slots_per_cp = csa_capacity // indexer_cp
+            if csa_slots_per_cp % num_kv_blocks:
+                raise ValueError("CSA CP-way slot count must be divisible by num_kv_blocks.")
+            if (csa_slots_per_cp // num_kv_blocks) % attention_cores:
+                raise ValueError("CSA KV-block width must be divisible by the hardware attention-core count.")
+        if layer_type == "heavily_compressed_attention":
+            hca_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
+            if hca_capacity % hca_compressed_kv_cp:
+                raise ValueError("HCA compressed-cache capacity must be divisible by hca_compressed_kv_cp.")
+            if (hca_capacity // hca_compressed_kv_cp) % hca_attn_blocks:
+                raise ValueError("HCA CP-way slot count must be divisible by hca_attn_blocks.")
+    config.qeff_csa_attention_dp = attention_dp
+    config.qeff_csa_indexer_cp = indexer_cp
+    config.qeff_csa_num_kv_blocks = num_kv_blocks
+    config.qeff_csa_indexer_attention_cores = attention_cores
+    config.qeff_csa_folded_row_cache = True
+    csa_prefill_attn_gather_sub_qc = getattr(args, "csa_prefill_attn_gather_sub_qc", None)
+    if csa_prefill_attn_gather_sub_qc is not None:
+        config.qeff_csa_prefill_attn_gather_sub_qc = csa_prefill_attn_gather_sub_qc
+    csa_prefill_indexer_kv_block_size = getattr(args, "csa_prefill_indexer_kv_block_size", None)
+    if csa_prefill_indexer_kv_block_size is not None:
+        config.qeff_csa_prefill_indexer_kv_block_size = csa_prefill_indexer_kv_block_size
+    csa_prefill_indexer_topk_per_block = getattr(args, "csa_prefill_indexer_topk_per_block", None)
+    if csa_prefill_indexer_topk_per_block is not None:
+        config.qeff_csa_prefill_indexer_topk_per_block = csa_prefill_indexer_topk_per_block
+    config.qeff_hca_attention_dp = attention_dp
+    config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
+    config.qeff_hca_attn_blocks = hca_attn_blocks
+    config.qeff_hca_folded_row_cache = True
+    print(
+        "Folded decode layout: "
+        f"batch_size={args.batch_size}, attn_dp={attention_dp}, indexer_cp={indexer_cp}, "
+        f"num_kv_blocks={num_kv_blocks}, "
+        f"hw_version={args.hw_version}, hca_compressed_kv_cp={hca_compressed_kv_cp}, "
+        f"hca_attn_blocks={hca_attn_blocks}, csa_capacity={csa_capacity}, hca_capacity={hca_capacity}"
+    )
+
+
+def main(defaults: dict[str, object] | None = None) -> None:
+    args = parse_args(defaults)
+    if args.ctx_len < 2:
+        raise ValueError("ctx_len must be at least 2.")
+    if not 1 <= args.prefill_seq_len <= args.ctx_len:
+        raise ValueError("prefill_seq_len must be in [1, ctx_len].")
+    if not 1 <= args.generation_len < args.ctx_len:
+        raise ValueError("generation_len must be in [1, ctx_len).")
+    if args.num_hidden_layers < 1:
+        raise ValueError("num_hidden_layers must be at least 1.")
+    if not args.device_group:
+        raise ValueError("device_group must contain at least one QAIC device ID.")
+    if not args.prefill_only and args.batch_size % len(args.device_group):
+        raise ValueError("DeepSeek V4 Flash decode requires batch_size to be divisible by the device-group size.")
+    if args.mdp_num_partitions < 1:
+        raise ValueError("mdp_num_partitions must be at least 1.")
+    if args.mdp_num_partitions > 1:
+        if not args.prefill_only:
+            raise ValueError("Pipeline-parallel MDP is supported only for prefill-only compilation.")
+        if len(args.device_group) % args.mdp_num_partitions:
+            raise ValueError("device_group size must be divisible by mdp_num_partitions.")
+        if args.export_only:
+            raise ValueError("Pipeline-parallel MDP export requires compilation; do not use --export-only.")
+    os.environ["HF_HUB_CACHE"] = str(args.hf_cache)
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    os.environ.setdefault("QEFF_HOME", str(args.artifact_root))
+    os.environ.setdefault("QEFF_CHECKPOINT_HOME", str(args.artifact_root / "checkpoints"))
+
+    from QEfficient import QEFFAutoModelForCausalLM
+
+    export_root = args.artifact_root / "onnx"
+    compile_root = args.artifact_root / "compile"
+    export_root.mkdir(parents=True, exist_ok=True)
+    compile_root.mkdir(parents=True, exist_ok=True)
+
+    print(f"Loading {args.model_id} tokenizer and config")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_id,
+        cache_dir=args.hf_cache,
+        local_files_only=args.local_files_only,
+    )
+    config = AutoConfig.from_pretrained(
+        args.model_id,
+        cache_dir=args.hf_cache,
+        local_files_only=args.local_files_only,
+    )
+    if args.num_hidden_layers > config.num_hidden_layers:
+        raise ValueError(f"num_hidden_layers cannot exceed the checkpoint's {config.num_hidden_layers} layers.")
+    config.num_hidden_layers = args.num_hidden_layers
+    config.layer_types = config.layer_types[: args.num_hidden_layers]
+    config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
+    config.qeff_swa_prefill_only = args.prefill_only
+    config.qeff_csa_prefill_only = args.prefill_only
+    config.qeff_hca_prefill_only = args.prefill_only
+    batch_size = args.batch_size
+    configure_qeff_parallel_layout(config, args)
+    qaic_config = build_ffn_blocking_config(args)
+    print(
+        "FFN blocking: "
+        f"mode={args.ffn_blocking_mode}, token_block_size={args.ffn_token_block_size}, "
+        f"weight_block_size={args.ffn_weight_block_size}"
+    )
+
+    print("Building the QEfficient model in weight-free mode")
+    qeff_model = QEFFAutoModelForCausalLM.from_pretrained(
+        args.model_id,
+        cache_dir=args.hf_cache,
+        config=config,
+        local_files_only=args.local_files_only,
+        weight_free=True,
+    )
+    model_dtype = MODEL_DTYPES[args.model_dtype]
+    qeff_model.model.to(dtype=model_dtype)
+    qeff_model.model.config.torch_dtype = model_dtype
+    qeff_model.model.eval()
+    pipeline_parallel = args.mdp_num_partitions > 1
+    transform_kwargs = {
+        "ctx_len": args.ctx_len,
+        "seq_len": args.prefill_seq_len if args.prefill_only else 1,
+        "bs": batch_size,
+        "num_devices": len(args.device_group),
+        "qaic_config": qaic_config,
+        "prefill_only": args.prefill_only,
+        "num_cores": args.num_cores,
+    }
+    if pipeline_parallel:
+        transform_kwargs.update(
+            seq_len=args.prefill_seq_len,
+            prefill_seq_len=args.prefill_seq_len,
+            mdp_num_partitions=args.mdp_num_partitions,
+        )
+    qeff_model.transform(**transform_kwargs)
+
+    graph_kind = "blocked DeepSeek V4 prefill" if args.prefill_only else "one-token decode"
+    print(f"Exporting the {graph_kind} graph through qeff_model.export()")
+    export_kwargs = {}
+    if pipeline_parallel:
+        export_kwargs = {
+            "enable_chunking": True,
+            "retain_full_kv": True,
+            "split_model_io": True,
+            "mdp_num_partitions": args.mdp_num_partitions,
+            "mdp_strategy": args.mdp_strategy,
+        }
+    onnx_path = Path(
+        qeff_model.export(
+            export_dir=str(export_root),
+            prefill_only=args.prefill_only,
+            prefill_seq_len=args.prefill_seq_len,
+            use_onnx_subfunctions=args.use_onnx_subfunctions,
+            dynamo=True,
+            export_batch_size=batch_size,
+            cache_ctx_len=args.ctx_len,
+            qaic_config=qaic_config,
+            **export_kwargs,
+        )
+    )
+    print(f"ONNX_PATH={onnx_path}")
+
+    # npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
+    # print(f"NPI_PATH={npi_path}")
+
+    if args.export_only:
+        return
+
+    print(
+        f"Compiling {graph_kind} specialization: seq_len={args.prefill_seq_len if args.prefill_only else 1}, ctx_len={args.ctx_len}"
+    )
+    compile_kwargs = {
+        "onnx_path": str(onnx_path),
+        "compile_dir": str(compile_root),
+        "prefill_seq_len": args.prefill_seq_len if args.prefill_only else 1,
+        "ctx_len": args.ctx_len,
+        "batch_size": batch_size,
+        "num_cores": args.num_cores,
+        "num_devices": len(args.device_group),
+        "aic_hw_version": args.hw_version,
+        "prefill_only": args.prefill_only,
+        "use_onnx_subfunctions": args.use_onnx_subfunctions,
+        "mxint8_kv_cache": False,
+        "mxfp6_matmul": True,
+        "user_tiled": True,
+        "qaic_config": qaic_config,
+        "dynamo": True,
+    }
+    if pipeline_parallel:
+        compile_kwargs.update(
+            enable_chunking=True,
+            retain_full_kv=True,
+            split_model_io=True,
+            mdp_num_partitions=args.mdp_num_partitions,
+            mdp_strategy=args.mdp_strategy,
+        )
+        print(
+            "Pipeline-parallel prefill: "
+            f"partitions={args.mdp_num_partitions}, devices_per_partition="
+            f"{len(args.device_group) // args.mdp_num_partitions}, mdp_strategy={args.mdp_strategy}"
+        )
+    qpc_path = Path(qeff_model.compile(**compile_kwargs))
+    print(f"QPC_PATH={qpc_path}")
+    print(f"SPECIALIZATIONS_PATH={qpc_path.parent / 'specializations.json'}")
+    print(f"CUSTOM_IO_PATH={qpc_path.parent / 'custom_io.yaml'}")
+
+    if args.compile_only or args.prefill_only:
+        return
+
+    print("Running qeff_model.generate()")
+    exec_info = qeff_model.generate(
+        tokenizer=tokenizer,
+        prompts=[args.prefill_prompt] * batch_size,
+        device_ids=args.device_group,
+        generation_len=args.generation_len,
+        automation=args.automation,
+        stream=False,
+    )
+
+    result_path = args.artifact_root / "generation_result.json"
+    result = {
+        "model_id": args.model_id,
+        "prefill_prompt": args.prefill_prompt,
+        "onnx_path": str(onnx_path),
+        # "npi_path": str(npi_path),
+        "qpc_path": str(qpc_path),
+        "generated_texts": exec_info.generated_texts,
+        "generated_ids": [ids.tolist() if hasattr(ids, "tolist") else ids for ids in exec_info.generated_ids],
+    }
+    result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(f"RESULT_PATH={result_path}")
+    print(f"GENERATED_TEXT={exec_info.generated_texts}")
+
+
+if __name__ == "__main__":
+    main()
