@@ -43,7 +43,7 @@ class MdpStrategy(str, Enum):
 
 def _is_decoder_layer_callsite(node_name: str) -> bool:
     """Return True for decoder layer callsite names that must never be dropped."""
-    return "/language_model/layers." in node_name
+    return "/language_model/layers." in node_name or "/model/layers." in node_name
 
 
 def _drop_mdp_nodes_inplace(mdp_json: Dict[str, Any], nodes_to_drop: Set[str]) -> int:
@@ -531,6 +531,24 @@ def generate_disagg_mdp_partition_config(
     current_layer_partition = 0
     seen_first_layer = False
     emitted_external_value_layers: Set[int] = set()
+    node_layer_by_name: Dict[str, int] = {}
+    consumer_layers_by_value: Dict[str, Set[int]] = {}
+    for node in reversed(model.graph.node):
+        if not node.name:
+            continue
+        layer_num = _get_layer_num(node.name)
+        if layer_num is None:
+            layer_num = _get_layer_num_from_inputs(list(node.input))
+        if layer_num is None:
+            downstream_layers = {layer for value in node.output for layer in consumer_layers_by_value.get(value, ())}
+            if downstream_layers:
+                layer_num = min(downstream_layers)
+        if layer_num is None:
+            continue
+        node_layer_by_name[node.name] = layer_num
+        for node_input in node.input:
+            if node_input:
+                consumer_layers_by_value.setdefault(node_input, set()).add(layer_num)
 
     for node in model.graph.node:
         if not node.name:
@@ -538,11 +556,7 @@ def generate_disagg_mdp_partition_config(
         if node.name in folded_nodes:
             continue
 
-        layer_num = _get_layer_num(node.name)
-        if layer_num is None:
-            # GPT-OSS/Dynamo repeated-subgraph callsites have generic names,
-            # while their model-layer parameter inputs retain ``layers.N``.
-            layer_num = _get_layer_num_from_inputs(list(node.input))
+        layer_num = node_layer_by_name.get(node.name)
         if layer_num is not None:
             seen_first_layer = True
             partition_idx = bisect.bisect_right(partition_bounds, layer_num)

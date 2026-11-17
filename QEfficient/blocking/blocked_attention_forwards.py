@@ -52,6 +52,8 @@ def _expand_attention_mask_to_context(attention_mask: torch.Tensor, ctx_len: int
     expanded_mask = attention_mask.index_select(-1, source_indices)
     unavailable_keys = key_indices >= attention_mask.shape[-1]
     return expanded_mask | unavailable_keys.view(1, 1, 1, -1)
+
+
 def _is_export_or_trace() -> bool:
     return torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
@@ -1062,8 +1064,13 @@ def blocked_kv_attention_forward_headpar_offline(
 
         causal_mask = abs_kv_pos > q_pos
 
-        causal_mask = causal_mask.to(attn_weights_block.dtype)
-        attn_weights_block = attn_weights_block * (1 - causal_mask) + HEADPAR_MASKED_ATTENTION_VALUE * causal_mask
+        masked_tensor = torch.full_like(
+            attn_weights_block,
+            HEADPAR_MASKED_ATTENTION_VALUE,
+            dtype=attn_weights_block.dtype,
+            device=attn_weights_block.device,
+        )
+        attn_weights_block = torch.where(causal_mask, masked_tensor, attn_weights_block)
 
         max_block = attn_weights_block.max(dim=-1).values
         exp_block = torch.exp(attn_weights_block - max_block.unsqueeze(-1))
@@ -1187,7 +1194,6 @@ def blocked_qkv_attention_forward_prefill_headpar_offline(
             + torch.arange(T_h_nom, device=query.device)[None, :]
         ).repeat(num_kv_heads, 1)  # [num_kv_heads*split, T_h_nom]
         is_export = _is_export_or_trace()
-        masked_tensor = torch.tensor(MIN_MASKED_ATTENTION_VALUE, dtype=query.dtype, device=query.device)
 
         accs = []
         for r_start, r_end in r_ranges:

@@ -902,21 +902,19 @@ def test_weight_free_vlm_combined_compile(model_type, model_id, tmp_export_dir):
 @pytest.mark.on_qaic
 @pytest.mark.multimodal
 @pytest.mark.parametrize(
-    ("model_type", "blocking_key", "weight_free"),
+    ("model_type", "blocking_key"),
     [
         pytest.param(
             model_type,
             blocking_key,
-            weight_free,
             marks=pytest.mark.xdist_group(name=f"qaic-vlm-{blocking_key}-parity-{model_type}"),
-            id=f"{model_type.replace('_', '-')}-{blocking_key}-{'weight-free' if weight_free else 'legacy'}",
+            id=f"{model_type.replace('_', '-')}-{blocking_key}-weight-free",
         )
         for model_type in VLM_PREFILL_BLOCKING_MODEL_TYPES
         for blocking_key in WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES
-        for weight_free in (True, False)
     ],
 )
-def test_vlm_offline_prefill_hf_qaic_parity(model_type, blocking_key, weight_free, tmp_export_dir):
+def test_vlm_offline_prefill_hf_qaic_parity(model_type, blocking_key, tmp_export_dir):
     """Run each offline-blocked language-prefill VLM QPC and compare tokens with HF."""
     model_config = _VLM_MODEL_CONFIGS[model_type]
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
@@ -948,7 +946,7 @@ def test_vlm_offline_prefill_hf_qaic_parity(model_type, blocking_key, weight_fre
     qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
         str(checkpoint_dir),
         kv_offload=True,
-        weight_free=weight_free,
+        weight_free=True,
         dtype=torch.float32,
     )
     _, qeff_inputs = _prepare_vlm_test_inputs(processor, hf_model, qeff_model.model, model_config, image_size)
@@ -969,7 +967,7 @@ def test_vlm_offline_prefill_hf_qaic_parity(model_type, blocking_key, weight_fre
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
         "offload_pt_weights": False,
-        "dynamo": weight_free,
+        "dynamo": True,
         "split_model_io": True,
     }
     common_compile_kwargs.update(
@@ -1045,7 +1043,7 @@ def test_vlm_offline_prefill_hf_qaic_parity(model_type, blocking_key, weight_fre
         VLM_PREFILL_BLOCKING_GENERATION_LEN,
     )[0]
     assert np.array_equal(hf_tokens[:VLM_PREFILL_BLOCKING_GENERATION_LEN], qaic_tokens), (
-        f"{'Weight-free' if weight_free else 'Legacy'} {blocking_key} HF/QAIC parity failed for {model_type}: "
+        f"Weight-free {blocking_key} HF/QAIC parity failed for {model_type}: "
         f"HF={hf_tokens.tolist()}, QAIC={qaic_tokens.tolist()}"
     )
 

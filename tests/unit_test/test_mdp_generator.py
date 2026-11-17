@@ -21,6 +21,7 @@ from QEfficient.compile.mdp_generator import (
     _repair_scoped_alias_partitioning,
     generate_disagg_mdp_config,
     generate_disagg_mdp_intersection_config,
+    generate_disagg_mdp_partition_config,
     precheck_and_autofix_mdp_partition_order,
 )
 
@@ -140,6 +141,24 @@ def test_intersection_preserves_scoped_and_unscoped_nodes_selected_by_compiler(t
         "/language_model/Gather_10",
     ]
     assert mdp_json["partitions"][1]["nodeList"] == ["/language_model/layers.1/hidden", "/Gather_10"]
+
+
+@pytest.mark.cpu_only
+def test_precheck_preserves_model_scoped_decoder_layer_callsite(tmp_path):
+    decoder_callsite = "/model/layers.0/QEffGptOssDecoderLayer"
+    producer = "/model/embed_tokens/Gather"
+    onnx_path = _save_dependency_graph(
+        tmp_path / "model_scoped_decoder.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["hidden"], name=producer),
+            helper.make_node("Identity", ["hidden"], ["output"], name=decoder_callsite),
+        ],
+    )
+    mdp_json = _mdp([decoder_callsite], [producer])
+
+    precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json)
+
+    assert decoder_callsite in mdp_json["partitions"][0]["nodeList"]
 
 
 @pytest.mark.cpu_only
@@ -661,3 +680,24 @@ def test_intersection_repair_skips_moves_crossing_transitive_dependencies(tmp_pa
 
     assert repaired == 0
     assert [partition["nodeList"] for partition in mdp_json["partitions"]] == original_node_lists
+
+
+@pytest.mark.cpu_only
+def test_mdp_partition_assigns_generic_producer_to_first_consumer_layer(tmp_path):
+    decoder_layer_0 = "/model/layers.0/QEffGptOssDecoderLayer"
+    decoder_layer_1 = "/model/layers.1/QEffGptOssDecoderLayer"
+    producer = "Identity_100"
+    onnx_path = _save_dependency_graph(
+        tmp_path / "generic_layer_producer.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["later_output"], name=decoder_layer_1),
+            helper.make_node("Identity", ["input"], ["layer0_input"], name=producer),
+            helper.make_node("Identity", ["layer0_input"], ["output"], name=decoder_layer_0),
+        ],
+    )
+
+    mdp_json = generate_disagg_mdp_partition_config(str(onnx_path), 2, 2, 2, 4)
+
+    assert mdp_json["partitions"][0]["nodeList"] == [producer, decoder_layer_0]
+    assert mdp_json["partitions"][1]["nodeList"] == [decoder_layer_1]
+    assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json) == 0
