@@ -16,10 +16,6 @@ import torch
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 
-from examples.text_generation.minimax_m3_paged_dp_decode_only_configurable_pages import (
-    _build_qaic_config,
-    build_block_table,
-)
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.minimax_m3_vl import (
     MiniMaxM3SparseForConditionalGeneration,
@@ -28,6 +24,8 @@ from QEfficient.transformers.models.minimax_m3_vl import (
     MiniMaxM3VLVisionConfig,
 )
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM, QEFFAutoModelForImageTextToText
+from QEfficient.utils.config_utils import _build_minimax_qaic_config
+from QEfficient.utils.generate_inputs import build_block_table
 
 
 def _tiny_minimax_m3_text_config(dtype=torch.float32, microbench=False) -> MiniMaxM3VLTextConfig:
@@ -152,7 +150,7 @@ def _tiny_minimax_m3_paged_dp_cp_config():
         tree_reduce=True,
         static_export_dims=False,
     )
-    qaic_config = _build_qaic_config(args, 8, 4, 4)
+    qaic_config = _build_minimax_qaic_config(args, 8, 4, 4)
     for key in ("moe_config", "indexer_num_blocks", "msa_num_kv_blocks", "skip_kv", "non_dynamic_cache"):
         qaic_config.pop(key)
     return qaic_config
@@ -519,8 +517,8 @@ def test_minimax_m3_prefill_hf_pytorch_vs_aic(tmp_path):
 @pytest.mark.llm_model
 def test_deepseek_v4_folded_decode_4_device_qeff_pytorch_vs_aic(tmp_path):
     """Compare a tiny four-layer folded DeepSeek V4 decode between QEff PyTorch and AIC."""
-    from examples.text_generation.deepseek_v4_flash_decode import (
-        build_ffn_blocking_config,
+    from QEfficient.utils.config_utils import (
+        build_deepseekv4_ffn_blocking_config,
         configure_qeff_parallel_layout,
     )
 
@@ -570,7 +568,7 @@ def test_deepseek_v4_folded_decode_4_device_qeff_pytorch_vs_aic(tmp_path):
             device_group=[0, 1, 2, 3],
         ),
     )
-    qaic_config = build_ffn_blocking_config(
+    qaic_config = build_deepseekv4_ffn_blocking_config(
         SimpleNamespace(ffn_blocking_mode="token", ffn_token_block_size=4, ffn_weight_block_size=None)
     )
 
