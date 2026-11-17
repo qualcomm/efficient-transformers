@@ -34,6 +34,19 @@ FP8_DTYPE = torch.float8_e4m3fn
 # Scale dtypes supported for FP8 dequantization.
 _SUPPORTED_SCALE_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
+_DEEPSEEK_V4_FP8_UNSCALED_MODULES = (
+    "self_attn.compressor.kv_proj",
+    "self_attn.compressor.gate_proj",
+    "self_attn.compressor.indexer.kv_proj",
+    "self_attn.compressor.indexer.gate_proj",
+)
+
+
+def _get_model_specific_fp8_exclusions(model: torch.nn.Module) -> tuple[str, ...]:
+    if getattr(getattr(model, "config", None), "model_type", None) == "deepseek_v4":
+        return _DEEPSEEK_V4_FP8_UNSCALED_MODULES
+    return ()
+
 
 class QEffExtendedQuantizationMethod(str, Enum):
     FP8 = "fp8"
@@ -264,6 +277,45 @@ class FP8BlockWiseDequantLinear(torch.nn.Module):
         return out
 
 
+class FP8BlockWiseDequantGroupedLinear(FP8BlockWiseDequantLinear):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        weight_block_size: List[int],
+        n_groups: int,
+        bias: bool = False,
+    ):
+        super().__init__(in_features, out_features, weight_block_size, bias)
+        self.n_groups = n_groups
+
+    @classmethod
+    def for_fp8_layer_with_blocksize(cls, in_features, out_features, weight_block_size, fmt, n_groups, bias):
+        fp8_dequant_layer = cls(in_features, out_features, weight_block_size, n_groups, bias)
+        assert fmt == "e4m3", "e5m2 is not supposed yet!!"
+        assert (in_features % weight_block_size[0]) == 0 and (out_features % weight_block_size[1]) == 0, (
+            "weight shape is not divisible by block sizes in either rows or columns or both dimensions, "
+            f"got in_features: {in_features}, out_features: {out_features}, weight_block_size: {weight_block_size}!!"
+        )
+        fp8_dequant_layer.register_buffer(
+            "weight_scale_inv",
+            torch.empty(
+                (out_features // weight_block_size[0], in_features // weight_block_size[1]), dtype=torch.float32
+            ),
+        )
+        return fp8_dequant_layer
+
+    def forward(self, x):
+        with torch.no_grad():
+            dequantized_weights = blockwise_dequantize(self.weight, self.weight_scale_inv, self.weight_block_size)
+            input_shape = x.shape[:-2]
+            hidden_dim = x.shape[-1]
+            weights = dequantized_weights.view(self.n_groups, -1, hidden_dim).transpose(1, 2)
+            grouped_input = x.reshape(-1, self.n_groups, hidden_dim).transpose(0, 1)
+            output = torch.bmm(grouped_input.float(), weights).transpose(0, 1)
+            return output.reshape(*input_shape, self.n_groups, -1)
+
+
 class FP8BlockWiseDequantQwen3VLMoeTextExperts(torch.nn.Module):
     """MoE expert block with 2-D blocked FP8 weight quantization for Qwen3-VL-MoE."""
 
@@ -346,6 +398,7 @@ class QEffFP8Config(QuantizationConfigMixin):
         kv_cache_scheme: str = None,
         run_compressed: bool = False,
         fmt: str = None,
+        scale_fmt: str = None,
         weight_block_size: List[int] = None,
         scale_dtype: torch.dtype = torch.bfloat16,
     ):
@@ -371,6 +424,7 @@ class QEffFP8Config(QuantizationConfigMixin):
 
         self.quant_method = QEffExtendedQuantizationMethod.FP8
         self.fmt = fmt
+        self.scale_fmt = scale_fmt
         self.weight_block_size = weight_block_size
 
 
@@ -392,15 +446,38 @@ def _replace_with_fp8_dequant_linear_and_experts(
         if isinstance(child_module, torch.nn.Linear) and name not in (modules_to_not_convert or []):
             current_key_name_str = ".".join(current_key_name)
             if not any(key in current_key_name_str for key in (modules_to_not_convert or [])):
-                model._modules[name] = FP8BlockWiseDequantLinear.for_fp8_layer_with_blocksize(
-                    child_module.in_features,
-                    child_module.out_features,
-                    quantization_config.weight_block_size,
-                    quantization_config.fmt,
-                    child_module.bias is not None,
-                    scale_dtype,
-                )
-                has_been_replaced = True
+                weight_block_size = quantization_config.weight_block_size
+                if (
+                    child_module.in_features % weight_block_size[0] == 0
+                    and child_module.out_features % weight_block_size[1] == 0
+                ):
+                    if hasattr(child_module, "n_groups"):
+                        model._modules[name] = FP8BlockWiseDequantGroupedLinear.for_fp8_layer_with_blocksize(
+                            child_module.in_features,
+                            child_module.out_features,
+                            weight_block_size,
+                            quantization_config.fmt,
+                            child_module.n_groups,
+                            child_module.bias is not None,
+                        )
+                    else:
+                        model._modules[name] = FP8BlockWiseDequantLinear.for_fp8_layer_with_blocksize(
+                            child_module.in_features,
+                            child_module.out_features,
+                            weight_block_size,
+                            quantization_config.fmt,
+                            child_module.bias is not None,
+                        )
+                    has_been_replaced = True
+                else:
+                    logger.debug(
+                        "Skipping FP8 blockwise replacement for %s with shape (%s, %s): "
+                        "not divisible by block size %s.",
+                        current_key_name_str,
+                        child_module.out_features,
+                        child_module.in_features,
+                        weight_block_size,
+                    )
 
         if isinstance(child_module, Qwen3VLMoeTextExperts) and name not in (modules_to_not_convert or []):
             current_key_name_str = ".".join(current_key_name)
@@ -499,6 +576,51 @@ class QEffFP8Quantizer(CompressedTensorsHfQuantizer):
                 f"pass `pre_quantized=True` while knowing what you are doing."
             )
 
+    def update_weight_conversions(self, weight_conversions):
+        """Dequantize DeepSeek FP8 experts before their checkpoint conversion merges them.
+
+        DeepSeek-V4 stores routed experts as separate packed FP4 ``w1``, ``w2``, and
+        ``w3`` tensors with per-block ``.scale`` tensors. Its Transformers conversion
+        mapping merges those tensors into ``gate_up_proj`` and ``down_proj``. The
+        scales must therefore be renamed and applied before that merge, otherwise the
+        packed weights are assigned directly to the merged parameters.
+        """
+        from transformers.core_model_loading import WeightConverter, WeightRenaming
+        from transformers.integrations.finegrained_fp8 import Fp8Dequantize
+
+        scale_rename = WeightRenaming(source_patterns=r"^(.+)\.scale$", target_patterns=r"\1.weight_scale_inv")
+        updated_conversions = [scale_rename]
+
+        for conversion in weight_conversions:
+            if not isinstance(conversion, WeightConverter):
+                updated_conversions.append(conversion)
+                continue
+
+            expert_weight_sources = [
+                pattern
+                for pattern in conversion.source_patterns
+                if ".experts.*." in pattern and pattern.endswith(".weight")
+            ]
+            if not expert_weight_sources:
+                updated_conversions.append(conversion)
+                continue
+
+            scale_sources = [pattern[: -len(".weight")] + ".weight_scale_inv$" for pattern in expert_weight_sources]
+            other_sources = [pattern for pattern in conversion.source_patterns if pattern not in expert_weight_sources]
+            updated_conversions.append(
+                WeightConverter(
+                    source_patterns=[
+                        *(pattern + "$" for pattern in expert_weight_sources),
+                        *scale_sources,
+                        *other_sources,
+                    ],
+                    target_patterns=conversion._original_target_patterns,
+                    operations=[Fp8Dequantize(self), *conversion.operations],
+                )
+            )
+
+        return updated_conversions
+
     def validate_environment(self, *args, **kwargs):
         return True
 
@@ -520,6 +642,7 @@ class QEffFP8Quantizer(CompressedTensorsHfQuantizer):
     def _process_model_before_weight_loading(self, model, **kwargs):
         if not self.modules_to_not_convert or "lm_head" not in self.modules_to_not_convert:
             self.modules_to_not_convert.extend(get_keys_to_not_convert(model))
+        self.modules_to_not_convert.extend(_get_model_specific_fp8_exclusions(model))
 
         logger.warning(
             f"activations quantization strategy = {self.quantization_config.activation_scheme}, will be ignored and the layers will be run with de-quantized weights"

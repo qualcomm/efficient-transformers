@@ -27,6 +27,7 @@ from QEfficient.base.onnx_transforms import PruneFakeInitializersTransform
 from QEfficient.utils import constants
 from QEfficient.utils.torch_patches import (
     dynamo_invoke_subgraph_fallback_env,
+    isolate_invoke_subgraph_cache,
     layerwise_safe_onnx_export_patches,
     preserve_subfunction_source_lines,
 )
@@ -85,7 +86,7 @@ def export_via_dynamo(
     export_kwargs = build_dynamo_export_kwargs(export_kwargs)
     export_kwargs["custom_translation_table"].update(_build_blocked_translation_table(qeff_model.model))
 
-    with dynamo_invoke_subgraph_fallback_env(), preserve_subfunction_source_lines():
+    with dynamo_invoke_subgraph_fallback_env(), isolate_invoke_subgraph_cache(), preserve_subfunction_source_lines():
         onnx_program = torch.onnx.export(
             qeff_model.model,
             args=(),
