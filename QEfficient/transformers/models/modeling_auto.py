@@ -1057,7 +1057,8 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
 
     _hf_auto_class = AutoModelForSequenceClassification
     _pytorch_transforms = [CustomOpsTransform, TextClassificationTransform]
-    _onnx_transforms = [FP16ClipTransform]
+    # FP16Clip inlines external weights; without Split the saved protobuf exceeds 2GB for large classifiers.
+    _onnx_transforms = [FP16ClipTransform, SplitTensorsTransform]
 
     def __init__(self, model: nn.Module, **kwargs):
         """
@@ -1072,7 +1073,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
         """
         _disable_unsupported_weight_free(kwargs, self.__class__.__name__)
         super().__init__(model, **kwargs)
-        self.model.config.use_cache = True
+        self.model.config.use_cache = False
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
 
     @classmethod

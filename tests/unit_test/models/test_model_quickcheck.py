@@ -2656,6 +2656,41 @@ def test_seq_classification_cpu_parity_and_export(tmp_path):
 
 
 @pytest.mark.llm_model
+@pytest.mark.parametrize(
+    "hf_auto_class,qeff_auto_class,output_name",
+    [
+        (AutoModel, QEFFAutoModel, "last_hidden_state"),
+        (AutoModelForSequenceClassification, QEFFAutoModelForSequenceClassification, "logits"),
+    ],
+    ids=["embedding", "seq_classification"],
+)
+def test_qwen3_embedding_and_reranker_cpu_parity_and_export(tmp_path, hf_auto_class, qeff_auto_class, output_name):
+    config = _tiny_qwen3_config()
+    config.pad_token_id = 0
+    config.num_labels = 1
+    model_hf = hf_auto_class.from_config(config, **MODEL_KWARGS)
+    model_hf.eval()
+
+    # Right-padded batch at a seq_len other than the export example's, so the causal mask must stay dynamic.
+    inputs = {
+        "input_ids": torch.tensor([[5, 9, 13, 17, 21, 25, 29, 33], [7, 11, 15, 19, 23, 0, 0, 0]]),
+        "attention_mask": torch.tensor([[1, 1, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 0, 0, 0]]),
+    }
+    hf_outputs = getattr(model_hf(**inputs), output_name).detach().numpy()
+
+    qeff_model = qeff_auto_class(model_hf)
+    qeff_outputs = getattr(qeff_model.model(**inputs), output_name).detach().numpy()
+    onnx_path = _exported_onnx_path(qeff_model.export(tmp_path))
+    ort_outputs = _run_embedding_ort(onnx_path, inputs)
+    # Weights must be spilled to external data, or a >2GB decoder export exceeds the protobuf limit.
+    initializers = onnx.load(onnx_path, load_external_data=False).graph.initializer
+
+    assert np.allclose(hf_outputs, qeff_outputs, atol=1e-5)
+    assert np.allclose(hf_outputs, ort_outputs, atol=1e-5)
+    assert any(init.data_location == onnx.TensorProto.EXTERNAL for init in initializers)
+
+
+@pytest.mark.llm_model
 def test_whisper_export_smoke(tmp_path):
     model_hf = AutoModelForSpeechSeq2Seq.from_pretrained(
         TINY_WHISPER_MODEL_ID,
@@ -3740,7 +3775,7 @@ def test_proxy_toggle_onnx_transform_policy_for_sequence_classification():
         _skip_on_model_fetch_error(exc, model_id)
 
     _assert_proxy_only_onnx_transform_policy(
-        qeff_default, enable_proxy=False, always_on_transforms={"FP16ClipTransform"}
+        qeff_default, enable_proxy=False, always_on_transforms={"FP16ClipTransform", "SplitTensorsTransform"}
     )
     _assert_proxy_only_onnx_transform_policy(qeff_proxy, enable_proxy=True)
 
