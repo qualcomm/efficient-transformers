@@ -208,7 +208,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
     parser.add_argument("--user-tiled", action="store_true")
-    parser.add_argument("--cache-io-dtype", choices=("float16", "mxint8"), default="float16")
+    parser.add_argument("--cache-io-dtype", choices=("float16", "bfloat16", "mxint8"), default="float16")
     parser.add_argument(
         "--ffn-blocking-mode",
         choices=("default", "token"),
@@ -432,6 +432,7 @@ def compile_weight_free_decode_only(
     use_onnx_subfunctions: bool = False,
     mdp_num_partitions: int = 1,
     enable_opstats: bool = False,
+    model_dtype: str = "float32",
 ):
     """Compile the validated single-token GLM weight-free specialization."""
     custom_io = {}
@@ -448,10 +449,8 @@ def compile_weight_free_decode_only(
         "onnx_path": str(onnx_path),
         "compile_dir": str(compile_dir),
         "specializations": [{"_graph_name": "Decode", "batch_size": batch_size, "seq_len": 1, "ctx_len": ctx_len}],
-        "custom_io": custom_io,
         "prefill_only": False,
         "retained_state": True,
-        "convert_to_fp16": True,
         "mdp_ts_num_devices": num_devices,
         "aic_num_cores": num_cores,
         "mxint8_kv_cache": cache_io_dtype == "mxint8",
@@ -459,6 +458,9 @@ def compile_weight_free_decode_only(
         "user_tiled": user_tiled,
         "use_onnx_subfunctions": use_onnx_subfunctions,
     }
+    if model_dtype != "bfloat16":
+        compile_kwargs["convert_to_fp16"] = True
+    compile_kwargs["custom_io"] = custom_io
     if mdp_num_partitions > 1:
         compile_kwargs["mdp_num_partitions"] = mdp_num_partitions
     if enable_opstats:
@@ -825,6 +827,7 @@ def main() -> None:
             args.use_onnx_subfunctions,
             args.mdp_num_partitions,
             args.opstats,
+            model_dtype=args.dtype,
         )
     else:
         qpc_path = qeff_model.compile(
