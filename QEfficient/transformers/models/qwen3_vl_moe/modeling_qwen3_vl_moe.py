@@ -1094,7 +1094,9 @@ class QEffQwen3VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneration)
             bs = max(2, bs)
         elif bs > 1:
             bs = 2
-        fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
+        fbs: int = int(
+            kwargs.get("kv_cache_batch_size") or kwargs.get("full_batch_size") or constants.ONNX_EXPORT_EXAMPLE_FBS
+        )
         if continuous_batching and kwargs.get("batch_fold", False):
             bs = fbs
 

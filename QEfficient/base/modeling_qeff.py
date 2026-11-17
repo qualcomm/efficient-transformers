@@ -207,6 +207,33 @@ def _weight_free_external_data_root(weight_spec_path: Optional[Union[str, Path]]
     return huggingface_hub_cache_dir()
 
 
+def _weight_free_external_files_available(weight_spec_path: Optional[Union[str, Path]]) -> bool:
+    """Return whether a weight-free sidecar still resolves every checkpoint shard."""
+    if weight_spec_path is None:
+        return False
+
+    weight_spec_path = Path(weight_spec_path)
+    if not weight_spec_path.is_file():
+        return False
+
+    spec = load_weight_spec(weight_spec_path)
+    if not spec.files:
+        return True
+
+    root = _weight_free_external_data_root(weight_spec_path)
+    if root is not None and not root.exists():
+        return False
+
+    for external_file in spec.files:
+        path = Path(external_file.path).expanduser()
+        if path.is_absolute():
+            if not path.is_file():
+                return False
+        elif root is None or not (root / path).is_file():
+            return False
+    return True
+
+
 def _compiler_env_with_external_data_root(weight_spec_path: Optional[Union[str, Path]]) -> Optional[Dict[str, str]]:
     """Return a compiler environment containing AIC_EXTERNAL_DATA_ROOT for weight-free models."""
     compiler_env = os.environ.copy()
@@ -851,10 +878,15 @@ class QEFFBaseModel(ABC):
 
         # Return early if ONNX already exists (restore complete export output state).
         if onnx_path.is_file():
-            self.onnx_path = onnx_path
-            self.weight_spec_path = str(_weight_spec_path) if _weight_spec_path.is_file() else None
-            self._export_cache_hit = True
-            return onnx_path
+            if not self._weight_free or _weight_free_external_files_available(_weight_spec_path):
+                self.onnx_path = onnx_path
+                self.weight_spec_path = str(_weight_spec_path) if _weight_spec_path.is_file() else None
+                self._export_cache_hit = True
+                return onnx_path
+            logger.warning(
+                "Ignoring stale weight-free ONNX cache at %s because its checkpoint shards are unavailable.",
+                onnx_path,
+            )
 
         export_dir.mkdir(parents=True, exist_ok=True)
 

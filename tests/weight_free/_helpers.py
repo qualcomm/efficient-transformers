@@ -166,6 +166,7 @@ WEIGHT_FREE_BLOCKING_MODE_CASES = {
         "num_q_blocks": 2,
     },
     "kv_headpar": {"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "headpar_split": 2},
+    "kv_batch_fold": {"blocking_mode": "kv_batch_fold", "num_kv_blocks": 2},
 }
 
 WEIGHT_FREE_PREFILL_BLOCKING_MODE_CASES = {
@@ -193,6 +194,8 @@ WEIGHT_FREE_BLOCKING_CAUSAL_LM_MODEL_IDS = {
 
 
 def _is_weight_free_blocking_qaic_case_supported(model_type: str, blocking_key: str) -> bool:
+    if blocking_key == "kv_batch_fold":
+        return False
     return not (model_type == "mixtral" and blocking_key == "h")
 
 
@@ -586,6 +589,7 @@ def assert_blocked_kv_ops_for_mode(
         "hqkv": {"CtxGatherBlockedKV"},
         "bhqkv": {"CtxGatherBlockedKV"},
         "kv_headpar": {"CtxGatherBlockedKV"},
+        "kv_batch_fold": {"CtxGatherBlockedKVBatch"},
         "prefill_online": {"CtxGatherBlockedKV"},
     }
     expected_ops = marker_modes.get(blocking_key, set())

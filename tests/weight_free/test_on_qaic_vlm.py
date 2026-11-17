@@ -15,10 +15,10 @@ dynamo=True internally) and use_onnx_subfunctions=True.
 Covers VLM export, multi-specialization compilation, and HF/QAIC parity.
 
 The decode-blocking matrix covers every model in
-``VLM_DECODE_BLOCKING_MODEL_TYPES`` with every key in
-``VLM_DECODE_BLOCKING_KEYS``; By default, collection selects one seeded pseudo-random
-mode per model (six cases total), stable across runs and xdist workers. To run
-that sample on QAIC:
+``VLM_DECODE_BLOCKING_MODEL_TYPES`` with the keys returned by
+``_vlm_decode_blocking_keys``; By default, collection selects one seeded
+pseudo-random mode per model (six cases total), stable across runs and xdist
+workers. To run that sample on QAIC:
 
     HF_HUB_ENABLE_HF_TRANSFER=1 pytest -s -vv -rs \
       tests/weight_free/test_on_qaic_vlm.py::test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics
@@ -86,7 +86,8 @@ VLM_IMAGE_WIDTH = 536
 VLM_NUM_CORES = constants.DEFAULT_AIC_NUM_CORES
 VLM_HEAD_BLOCKING_NUM_DEVICES = 4
 VLM_PROMPT = "Describe this image."
-VLM_DECODE_BLOCKING_KEYS = ("h", "q", "kv", "qkv", "hqkv", "bhqkv", "kv_headpar")
+VLM_DECODE_BLOCKING_KEYS = ("h", "q", "kv", "qkv", "hqkv", "bhqkv", "kv_headpar", "kv_batch_fold")
+VLM_KV_BATCH_FOLD_MODEL_TYPES = {"qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"}
 VLM_DECODE_BLOCKING_MODEL_TYPES = (
     "qwen2_5_vl",
     "qwen3_vl",
@@ -100,6 +101,12 @@ VLM_DECODE_BLOCKING_CASES_PER_MODEL = 1
 # a multi-device, user-tiled compile.  The VLM matrix currently only includes
 # "h" from this set; hqkv/bhqkv should keep the ordinary one-device path.
 VLM_HEAD_BLOCKING_KEYS = {"h", "hq", "hkv"}
+
+
+def _vlm_decode_blocking_keys(model_type: str) -> tuple[str, ...]:
+    if model_type in VLM_KV_BATCH_FOLD_MODEL_TYPES:
+        return VLM_DECODE_BLOCKING_KEYS
+    return tuple(blocking_key for blocking_key in VLM_DECODE_BLOCKING_KEYS if blocking_key != "kv_batch_fold")
 
 
 def _vlm_blocking_compile_options(model_type: str, blocking_key: str) -> dict:
@@ -236,7 +243,7 @@ VLM_DECODE_BLOCKING_QAIC_CASES = [
         id=f"{model_type.replace('_', '-')}-{blocking_key}",
     )
     for model_type in VLM_DECODE_BLOCKING_MODEL_TYPES
-    for blocking_key in VLM_DECODE_BLOCKING_KEYS
+    for blocking_key in _vlm_decode_blocking_keys(model_type)
 ]
 
 
@@ -244,8 +251,8 @@ _VLM_DECODE_BLOCKING_SAMPLED_CASE_IDS = {
     f"{model_type.replace('_', '-')}-{blocking_key}"
     for model_type in VLM_DECODE_BLOCKING_MODEL_TYPES
     for blocking_key in random.Random(f"42:{model_type}").sample(
-        VLM_DECODE_BLOCKING_KEYS,
-        k=min(VLM_DECODE_BLOCKING_CASES_PER_MODEL, len(VLM_DECODE_BLOCKING_KEYS)),
+        _vlm_decode_blocking_keys(model_type),
+        k=min(VLM_DECODE_BLOCKING_CASES_PER_MODEL, len(_vlm_decode_blocking_keys(model_type))),
     )
 }
 _VLM_DECODE_BLOCKING_SAMPLED_CASES = [
@@ -655,6 +662,31 @@ def _pad_sequence_input(name: str, value: np.ndarray, target_len: int, pad_token
     return np.pad(value, pad_width, constant_values=constant_values)
 
 
+def _tile_decode_position_ids(position_ids: np.ndarray, batch_size: int) -> np.ndarray:
+    if position_ids.ndim == 3:
+        return np.repeat(position_ids[:, :1, :], batch_size, axis=1)
+    if position_ids.ndim == 2:
+        return np.repeat(position_ids[:1, :], batch_size, axis=0)
+    raise ValueError(f"Unsupported decode position_ids rank for batch-folded decode: {position_ids.ndim}")
+
+
+def _tile_retained_state(value: np.ndarray, batch_size: int, physical_slots: np.ndarray) -> np.ndarray:
+    source_row = value[:1]
+    tiled = np.tile(source_row, (batch_size,) + (1,) * (value.ndim - 1))
+    physical = np.empty_like(tiled)
+    physical[physical_slots] = tiled
+    return physical
+
+
+def _next_token_ids(logits: np.ndarray) -> np.ndarray:
+    logits = np.asarray(logits)
+    if logits.ndim == 1:
+        return np.asarray([np.argmax(logits)], dtype=np.int64)
+    if logits.ndim == 2:
+        return np.argmax(logits, axis=-1).astype(np.int64).reshape(-1)
+    return np.argmax(logits, axis=-1).astype(np.int64).reshape(logits.shape[0], -1)[:, -1]
+
+
 def _run_vlm_three_qpc(
     qeff_model,
     qeff_inputs,
@@ -761,6 +793,8 @@ def _run_vlm_three_qpc(
             prefill_session.set_buffers(vision_outputs)
         static_prefill_inputs = set(vision_outputs).intersection(prefill_session.input_names)
         chunk_inputs = {name: value for name, value in lang_inputs.items() if name not in static_prefill_inputs}
+        if "batch_index" in prefill_session.input_names:
+            chunk_inputs["batch_index"] = np.array([[0]], dtype=np.int64)
         for chunk_idx in range(padded_len // prefill_seq_len):
             start = chunk_idx * prefill_seq_len
             end = start + prefill_seq_len
@@ -784,16 +818,39 @@ def _run_vlm_three_qpc(
         decode_session = QAICInferenceSession(
             qpc_paths["lang_decode_qpc_path"], device_ids=runtime_device_ids[:decode_num_devices]
         )
-        generated_tokens = [np.argmax(prefill_outputs["logits"], axis=-1)[:, -1]]
+        batch_fold_decode = "batch_index" in decode_session.input_names
+        generated_tokens = [_next_token_ids(prefill_outputs["logits"])]
+        decode_batch_size = int(decode_session.bindings[decode_session.binding_index_map["input_ids"]].dims[0])
+        if batch_fold_decode:
+            batch_index = np.random.default_rng(1234).permutation(decode_batch_size).reshape(-1, 1).astype(np.int64)
+            physical_slots = batch_index[:, 0]
+            first_token = int(generated_tokens[-1].reshape(-1)[0])
+            generated_tokens[0] = np.full(decode_batch_size, first_token, dtype=generated_tokens[0].dtype)
+            input_ids = np.full((decode_batch_size, 1), first_token, dtype=input_ids.dtype)
+            position_ids = _tile_decode_position_ids(
+                np.max(inputs["position_ids"], axis=-1, keepdims=True) + 1,
+                decode_batch_size,
+            )
+        else:
+            batch_index = None
+            physical_slots = None
+            input_ids = generated_tokens[-1].reshape(1, 1)
+            position_ids = np.max(inputs["position_ids"], axis=-1, keepdims=True) + 1
         decode_inputs = {
-            "input_ids": generated_tokens[-1].reshape(1, 1),
-            "position_ids": np.max(inputs["position_ids"], axis=-1, keepdims=True) + 1,
+            "input_ids": input_ids,
+            "position_ids": position_ids,
         }
+        if batch_fold_decode:
+            decode_inputs["batch_index"] = batch_index
         for sequence_name in ("mm_token_type_ids", "token_type_ids"):
             if sequence_name in decode_session.input_names:
                 binding = decode_session.bindings[decode_session.binding_index_map[sequence_name]]
                 decode_inputs[sequence_name] = np.zeros(tuple(binding.dims), dtype=np.int64)
         _update_retained_states(decode_inputs, prefill_outputs, layer_types)
+        if batch_fold_decode:
+            for name, value in list(decode_inputs.items()):
+                if name.startswith(("past_key.", "past_value.", "conv_state.", "recurrent_state.")):
+                    decode_inputs[name] = _tile_retained_state(value, decode_batch_size, physical_slots)
         _update_retained_vision_inputs(decode_inputs, prefill_outputs)
 
         decode_start = perf_counter()
@@ -823,8 +880,12 @@ def _run_vlm_three_qpc(
 
         for _ in range(generation_len - 1):
             decode_outputs = decode_session.run(decode_inputs)
-            generated_tokens.append(np.argmax(decode_outputs["logits"], axis=-1)[:, -1])
-            decode_inputs["input_ids"] = generated_tokens[-1].reshape(1, 1)
+            generated_tokens.append(_next_token_ids(decode_outputs["logits"]))
+            if batch_fold_decode:
+                decode_inputs["input_ids"] = generated_tokens[-1].reshape(decode_batch_size, 1)
+                decode_inputs["batch_index"] = batch_index
+            else:
+                decode_inputs["input_ids"] = generated_tokens[-1].reshape(1, 1)
             decode_inputs["position_ids"] = decode_inputs["position_ids"] + 1
             if "mm_token_type_ids" in decode_inputs:
                 decode_inputs["mm_token_type_ids"] = np.zeros_like(decode_inputs["mm_token_type_ids"])
@@ -1358,7 +1419,9 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_checkpoint"
     image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
+    skip_vision = model_type == "qwen2_5_vl"
     qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
+    batch_fold_decode = blocking_key == "kv_batch_fold"
     generation_len = VLM_GENERATION_LEN
 
     try:
@@ -1380,6 +1443,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         None,
         model_config,
         image_size,
+        skip_vision=skip_vision,
     )
     with torch.inference_mode():
         hf_output = hf_model.generate(
@@ -1393,6 +1457,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
         str(checkpoint_dir),
         kv_offload=True,
+        continuous_batching=batch_fold_decode,
         weight_free=True,
         dtype=torch.float32,
         qaic_config=qaic_config,
@@ -1415,6 +1480,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         qeff_model.model,
         model_config,
         image_size,
+        skip_vision=skip_vision,
     )
 
     compile_kwargs = {
@@ -1425,32 +1491,46 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         "mxfp6_matmul": False,
         "use_onnx_subfunctions": True,
     }
-    compile_kwargs.update(
-        _get_vlm_compile_kwargs(
-            qeff_model.model,
-            model_config,
-            image_size,
-            heights=image_size[1],
-            widths=image_size[0],
-            num_frames=1,
+    batch_fold_size = model_config.get("full_batch_size", model_config["batch_size"])
+    if not skip_vision:
+        compile_kwargs.update(
+            _get_vlm_compile_kwargs(
+                qeff_model.model,
+                model_config,
+                image_size,
+                heights=image_size[1],
+                widths=image_size[0],
+                num_frames=1,
+            )
         )
-    )
+    else:
+        compile_kwargs["skip_vision"] = True
     # Only Qwen3-VL head-blocking uses this split path: vision and prefill run
     # on one device while the decode QPC uses four-device user tiling.
-    head_blocked_single_qpc_vlm_with_vision = blocking_key in VLM_HEAD_BLOCKING_KEYS and model_type in {
-        "qwen3_vl",
-        "qwen3_vl_moe",
-    }
-    # Qwen3-VL head blocking needs a one-device vision QPC; Qwen3.5 needs
-    # split prefill/decode QPCs. Gemma4 uses regular combined-QPC parity.
-    separate_qpcs = model_type in {"qwen3_5", "qwen3_5_moe"}
+    fresh_wrapper_split_qpc_vlm_with_vision = (
+        blocking_key in VLM_HEAD_BLOCKING_KEYS and not skip_vision and model_type in {"qwen3_vl", "qwen3_vl_moe"}
+    ) or (batch_fold_decode and not skip_vision and model_type == "qwen3_vl_moe")
+    if batch_fold_decode:
+        decode_compile_kwargs = {
+            **compile_kwargs,
+            "batch_size": batch_fold_size,
+            "full_batch_size": batch_fold_size,
+            "kv_cache_batch_size": batch_fold_size,
+        }
+    else:
+        decode_compile_kwargs = dict(compile_kwargs)
+    # Qwen3-VL head blocking needs a one-device vision QPC; Qwen3.5 and
+    # batch-folded decode need split prefill/decode QPCs. Gemma4 uses regular
+    # combined-QPC parity.
+    separate_qpcs = model_type in {"qwen3_5", "qwen3_5_moe"} or batch_fold_decode
     prefill_qaic_config = {}
     runtime_compile_options = _vlm_blocking_compile_options(model_type, blocking_key)
-    decode_compile_kwargs = dict(compile_kwargs)
     decode_compile_kwargs.update(runtime_compile_options)
-    if head_blocked_single_qpc_vlm_with_vision:
+    if fresh_wrapper_split_qpc_vlm_with_vision:
         vision_compile_kwargs = dict(compile_kwargs)
         vision_compile_kwargs.update(num_devices=1, user_tiled=False)
+        if batch_fold_decode:
+            vision_compile_kwargs.update(full_batch_size=batch_fold_size, kv_cache_batch_size=batch_fold_size)
         vision_qpc = qeff_model.compile(
             compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_vision"),
             **vision_compile_kwargs,
@@ -1463,12 +1543,14 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         prefill_qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
             str(checkpoint_dir),
             kv_offload=True,
+            continuous_batching=batch_fold_decode,
             weight_free=True,
             dtype=torch.float32,
         )
         prefill_qpc = prefill_qeff_model.compile(
             compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_prefill"),
             **compile_kwargs,
+            **({"full_batch_size": 1, "kv_cache_batch_size": 1} if batch_fold_decode else {}),
             retain_full_kv=True,
             split_model_io=True,
             aic_enable_depth_first=False,
@@ -1480,12 +1562,13 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         decode_qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
             str(checkpoint_dir),
             kv_offload=True,
+            continuous_batching=batch_fold_decode,
             weight_free=True,
             dtype=torch.float32,
             qaic_config=qaic_config,
         )
         # Keep the vision QPC on one device, but export/compile language QPCs
-        # from fresh wrappers.  Re-exporting qwen3-vl-moe language after a
+        # from fresh wrappers. Re-exporting qwen3-vl-moe language after a
         # vision-only compile on the same wrapper can recurse inside torch.export
         # when ONNX subfunctions are enabled.
         decode_qpc = decode_qeff_model.compile(
@@ -1506,19 +1589,24 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
             "lang_decode_qpc_path": decode_qpc["lang_decode_qpc_path"],
         }
     elif separate_qpcs:
-        vision_compile_kwargs = dict(compile_kwargs)
-        vision_qpc = qeff_model.compile(
-            compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_vision"),
-            **vision_compile_kwargs,
-            aic_enable_depth_first=False,
-            split_model_io=True,
-            prefill_seq_len=model_config["prompt_len"],
-            skip_lang=True,
-            skip_vision=False,
-        )
+        vision_qpc = None
+        if not skip_vision:
+            vision_compile_kwargs = dict(compile_kwargs)
+            if batch_fold_decode:
+                vision_compile_kwargs.update(full_batch_size=batch_fold_size, kv_cache_batch_size=batch_fold_size)
+            vision_qpc = qeff_model.compile(
+                compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_vision"),
+                **vision_compile_kwargs,
+                aic_enable_depth_first=False,
+                split_model_io=True,
+                prefill_seq_len=model_config["prompt_len"],
+                skip_lang=True,
+                skip_vision=False,
+            )
         prefill_qpc = qeff_model.compile(
             compile_dir=str(tmp_export_dir / f"{model_type}_{blocking_key}_decode_blocking_prefill"),
             **compile_kwargs,
+            **({"full_batch_size": 1, "kv_cache_batch_size": 1} if batch_fold_decode else {}),
             retain_full_kv=True,
             split_model_io=True,
             aic_enable_depth_first=False,
@@ -1561,7 +1649,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
         assert qpc_paths.get("lang_decode_qpc_path")
     else:
         assert qpc_paths.get("lang_qpc_path") or qpc_paths.get("lang_decode_qpc_path")
-    assert qpc_paths.get("vision_qpc_path")
+    assert skip_vision or qpc_paths.get("vision_qpc_path")
     assert language_onnx.is_file()
     _assert_weight_spec(language_onnx)
     _assert_vlm_weight_free_graph(
@@ -1569,7 +1657,7 @@ def test_weight_free_vlm_decode_blocked_hw_hf_parity_and_artifact_metrics(
     )
     assert_blocked_kv_ops_for_mode(language_onnx, qeff_model.lang_model, blocking_key)
 
-    if separate_qpcs or head_blocked_single_qpc_vlm_with_vision:
+    if separate_qpcs or fresh_wrapper_split_qpc_vlm_with_vision:
         qaic_tokens = _run_vlm_three_qpc(
             qeff_model,
             qeff_inputs,

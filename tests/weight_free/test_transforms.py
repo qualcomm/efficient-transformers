@@ -44,6 +44,7 @@ from QEfficient.base.checkpoint_transforms import (
     detect_group_transform,
     execute_checkpoint_plan,
 )
+from QEfficient.base.modeling_qeff import _weight_free_external_files_available
 from QEfficient.base.onnx_transforms import (
     PreserveNestedCacheRetainedStateTransform,
     PruneFakeInitializersTransform,
@@ -69,10 +70,12 @@ from QEfficient.exporter.weight_free.export import (
     _resolve_weight_free_target_dtype,
 )
 from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_free_ort_inputs
+from QEfficient.exporter.weight_free.weight_spec import ExternalDataFile, WeightSpec, save_weight_spec
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.transformers.moe.weights import MoEWeights
 from QEfficient.utils import resolve_retained_state_output, runtime_requirements
+from QEfficient.utils.checkpoint_utils import checkpoint_root
 from QEfficient.utils.export_utils import (
     _generate_export_hash,
     convert_dynamic_axes_to_dynamic_shapes,
@@ -250,6 +253,56 @@ def _load_prepared_tensors(root):
     return loaded
 
 
+def test_weight_free_cache_validation_rejects_missing_external_root(tmp_path):
+    weight_spec_path = tmp_path / "weight_spec.json"
+    external_root = tmp_path / "deleted_weight_free_checkpoints"
+    save_weight_spec(
+        weight_spec_path,
+        WeightSpec(
+            model_name="TinyModel",
+            model_id=str(external_root / "prepared"),
+            external_data_root=str(external_root),
+            files=[ExternalDataFile(path="prepared/model.safetensors", format="safetensors")],
+        ),
+    )
+
+    assert not _weight_free_external_files_available(weight_spec_path)
+
+
+def test_weight_free_cache_validation_accepts_existing_external_shards(tmp_path):
+    weight_spec_path = tmp_path / "weight_spec.json"
+    external_root = tmp_path / "weight_free_checkpoints"
+    shard_path = external_root / "prepared" / "model.safetensors"
+    shard_path.parent.mkdir(parents=True)
+    shard_path.write_bytes(b"weights")
+    save_weight_spec(
+        weight_spec_path,
+        WeightSpec(
+            model_name="TinyModel",
+            model_id=str(external_root / "prepared"),
+            external_data_root=str(external_root),
+            files=[ExternalDataFile(path="prepared/model.safetensors", format="safetensors")],
+        ),
+    )
+
+    assert _weight_free_external_files_available(weight_spec_path)
+
+
+def test_checkpoint_root_symlinked_shards(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    blob = hub / "models--org--m" / "blobs" / "abc"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"x")
+    local = tmp_path / "mymodel"
+    local.mkdir()
+    shard = local / "model.safetensors"
+    shard.symlink_to(blob)
+
+    root = checkpoint_root(str(local), [str(shard)])
+
+    assert root == tmp_path
+    assert shard.relative_to(root) == Path("mymodel/model.safetensors")
 # ---------------------------------------------------------------------------
 # Test checkpoint layout transforms
 # ---------------------------------------------------------------------------

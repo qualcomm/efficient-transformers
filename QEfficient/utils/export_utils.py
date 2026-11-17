@@ -200,9 +200,10 @@ def convert_dynamic_axes_to_dynamic_shapes(
             elif dim_name == "batch_size":
                 dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
             elif dim_name == "full_batch_size":
+                observed_full_batch_size = observed_dim_values.get(dim_name, set())
                 dim_registry[dim_name] = Dim(
                     "full_batch_size",
-                    min=batch_min + 1,
+                    min=min(observed_full_batch_size or {batch_min + 1}),
                     max=DYNAMO_DIM_MAX_BATCH_SIZE,
                 )
             elif "seq_len" in dim_name:
@@ -444,7 +445,7 @@ def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
             language_classes = get_decoder_layer_classes_for_export(language_decoder)
             if language_classes:
                 return set(language_classes)
-        except Exception as exc:
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning(
                 f"get_qeff_language_decoder failed for {model.__class__.__name__}: "
                 f"{type(exc).__name__}: {exc}. Falling back to model-level subfunction validation."

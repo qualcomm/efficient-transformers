@@ -227,7 +227,7 @@ def test_reuse_exported_subfunctions_keeps_non_equivalent_regions_separate():
 
 
 def test_reuse_exported_subfunctions_preserves_program_on_planning_failure(monkeypatch):
-    import QEfficient.utils.export_subfunctions as export_subfunctions
+    from QEfficient.utils import export_subfunctions
 
     exported_program, _, _ = _make_exported_region_program()
     original_graph = str(exported_program.graph_module.graph)
@@ -243,8 +243,68 @@ def test_reuse_exported_subfunctions_preserves_program_on_planning_failure(monke
     assert str(exported_program.graph_module.graph) == original_graph
 
 
+def _make_symbolic_stride_program(stride_matches_batch_dim):
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    shape_env = ShapeEnv()
+    batch_dim = shape_env.create_unbacked_symint()
+    fake_mode = torch._subclasses.fake_tensor.FakeTensorMode(shape_env=shape_env)
+    stride = (batch_dim if stride_matches_batch_dim else 2, 1, 1)
+    with fake_mode:
+        fake_value = torch.empty_strided((4, batch_dim, 1), stride, device="meta")
+
+    graph = torch.fx.Graph()
+    value = graph.placeholder("value")
+    value.meta["val"] = fake_value
+    stride_read = graph.call_function(torch.ops.aten.sym_stride.int, (value, 0))
+    stride_read.meta["val"] = fake_value.stride(0)
+    graph.output(stride_read)
+    graph_module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    exported_program = SimpleNamespace(
+        graph_module=graph_module,
+        validate=lambda: graph_module.graph.lint(),
+    )
+    return exported_program
+
+
+def test_reuse_exported_subfunctions_rewrites_symbolic_stride_size_alias():
+    from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
+
+    exported_program = _make_symbolic_stride_program(stride_matches_batch_dim=True)
+
+    reuse_exported_subfunctions(exported_program)
+
+    stride_targets = [
+        node.target
+        for node in exported_program.graph_module.graph.nodes
+        if node.op == "call_function" and node.target is torch.ops.aten.sym_stride.int
+    ]
+    size_reads = [
+        node
+        for node in exported_program.graph_module.graph.nodes
+        if node.op == "call_function" and node.target is torch.ops.aten.sym_size.int
+    ]
+    assert not stride_targets
+    assert len(size_reads) == 1
+    assert size_reads[0].args[1] == 1
+    assert exported_program.graph_module(torch.empty((4, 7, 1))) == 7
+
+
+def test_reuse_exported_subfunctions_keeps_unmatched_symbolic_stride():
+    from QEfficient.utils.export_subfunctions import reuse_exported_subfunctions
+
+    exported_program = _make_symbolic_stride_program(stride_matches_batch_dim=False)
+
+    reuse_exported_subfunctions(exported_program)
+
+    assert any(
+        node.op == "call_function" and node.target is torch.ops.aten.sym_stride.int
+        for node in exported_program.graph_module.graph.nodes
+    )
+
+
 def test_preserve_mixed_export_subfunctions_restores_private_hooks():
-    import QEfficient.utils.torch_patches as torch_patches
+    from QEfficient.utils import torch_patches
 
     utils = importlib.import_module("torch._higher_order_ops.utils")
     original_hop_compile = utils._hop_compile_and_call
@@ -964,6 +1024,87 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert list(model.graph.node[0].input) == [state_input, "indices", "updates"]
         assert list(model.graph.node[0].output) == [retained_state]
 
+    def test_retained_state_uses_folded_layout_after_batch_fold_scatter(self):
+        fn = helper.make_function(
+            domain="",
+            fname="repeated_subgraph0",
+            inputs=["past_key.0", "past_value.0", "shape"],
+            outputs=["hidden", "key_public", "value_public"],
+            nodes=[
+                helper.make_node(
+                    "CtxChunkScatterBatch",
+                    inputs=["past_key.0", "position_ids", "key_update"],
+                    outputs=["key_folded"],
+                    domain="com.qti.aisw.onnx",
+                ),
+                helper.make_node(
+                    "CtxChunkScatterBatch",
+                    inputs=["past_value.0", "position_ids", "value_update"],
+                    outputs=["value_folded"],
+                    domain="com.qti.aisw.onnx",
+                ),
+                helper.make_node("Identity", inputs=["key_folded"], outputs=["key_identity"]),
+                helper.make_node("Reshape", inputs=["key_identity", "shape"], outputs=["key_public"]),
+                helper.make_node("Reshape", inputs=["value_folded", "shape"], outputs=["value_public"]),
+                helper.make_node("Identity", inputs=["key_folded"], outputs=["key_debug"]),
+                helper.make_node("Identity", inputs=["past_key.0"], outputs=["hidden"]),
+            ],
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("com.qti.aisw.onnx", 1)],
+        )
+        fn.value_info.extend(
+            [
+                helper.make_tensor_value_info("key_folded", TensorProto.FLOAT, [1, 8, 16, 8]),
+                helper.make_tensor_value_info("value_folded", TensorProto.FLOAT, [1, 8, 16, 8]),
+                helper.make_tensor_value_info("key_public", TensorProto.FLOAT, [2, 4, 16, 8]),
+                helper.make_tensor_value_info("value_public", TensorProto.FLOAT, [2, 4, 16, 8]),
+            ]
+        )
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    "repeated_subgraph0",
+                    inputs=["past_key.0", "past_value.0", "shape"],
+                    outputs=["hidden_out", "key_out", "value_out"],
+                    domain="",
+                )
+            ],
+            "test_graph",
+            [
+                helper.make_tensor_value_info("past_key.0", TensorProto.FLOAT, [2, 4, 16, 8]),
+                helper.make_tensor_value_info("past_value.0", TensorProto.FLOAT, [2, 4, 16, 8]),
+                helper.make_tensor_value_info("shape", TensorProto.INT64, [4]),
+            ],
+            [
+                helper.make_tensor_value_info("past_key.0_RetainedState", TensorProto.FLOAT, [1, 8, 16, 8]),
+                helper.make_tensor_value_info("past_value.0_RetainedState", TensorProto.FLOAT, [1, 8, 16, 8]),
+            ],
+            value_info=[
+                helper.make_tensor_value_info("key_out", TensorProto.FLOAT, [2, 4, 16, 8]),
+                helper.make_tensor_value_info("value_out", TensorProto.FLOAT, [2, 4, 16, 8]),
+            ],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.functions.append(fn)
+
+        changed = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        assert changed
+        transformed_fn = model.functions[0]
+        assert list(transformed_fn.output) == ["hidden", "key_public", "value_public"]
+        identities = {
+            node.output[0]: node.input[0]
+            for node in model.graph.node
+            if node.op_type == "Identity" and node.output and node.input
+        }
+        assert identities["past_key.0_RetainedState"] == "key_out"
+        assert identities["past_value.0_RetainedState"] == "value_out"
+        retained_output_shapes = {
+            output.name: [dimension.dim_value for dimension in output.type.tensor_type.shape.dim]
+            for output in model.graph.output
+        }
+        assert retained_output_shapes["past_key.0_RetainedState"] == [2, 4, 16, 8]
+        assert retained_output_shapes["past_value.0_RetainedState"] == [2, 4, 16, 8]
+
     def test_ignores_scatter_update_dependency_when_resolving_cache_state(self):
         retained_state = "past_compressed_kv_cache.0_RetainedState"
         function = helper.make_function(
@@ -1047,8 +1188,6 @@ class TestPreserveNestedCacheRetainedStateTransform:
 # ---------------------------------------------------------------------------
 # TestRenameRepeatedSubgraphTransform
 # ---------------------------------------------------------------------------
-
-
 class TestRenameRepeatedSubgraphTransform:
     def test_renames_repeated_subgraph_functions(self):
         model = _make_minimal_onnx_with_repeated_subgraphs(num_layers=2)

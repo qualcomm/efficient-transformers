@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from transformers.cache_utils import Cache
@@ -475,7 +475,7 @@ def generic_blocked_attention_interface(
         layer_keys = getattr(layer, "keys", None)
         if layer_keys is not None:
             cache_shape = torch._shape_as_tensor(layer_keys)
-            layer_local_zero = (cache_shape[0] - cache_shape[0]).to(dtype=position_ids.dtype)
+            layer_local_zero = cache_shape[0] - cache_shape[0]
             position_ids = position_ids + layer_local_zero
 
     cache_kwargs = {"position_ids": position_ids, "batch_index": batch_index}
