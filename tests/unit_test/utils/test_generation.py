@@ -1855,16 +1855,16 @@ def test_cross_qpc_output_shapes_follow_language_input_contract(tmp_path):
     import onnx
     from onnx import TensorProto, helper
 
-    from QEfficient.generation.generation_helpers import _cross_qpc_output_shapes
+    from QEfficient.generation.generation_helpers import RunnerMetadata, _cross_qpc_output_shapes
 
     vision_output = helper.make_tensor_value_info(
-        "vision_embeds", TensorProto.FLOAT, ["opaque_batch", "opaque_tokens", "opaque_width"]
+        "bridge_features", TensorProto.FLOAT, ["vision_batch_size", "vision_size", 8]
     )
     vision_path = tmp_path / "vision.onnx"
     onnx.save(helper.make_model(helper.make_graph([], "vision", [], [vision_output])), vision_path)
 
     language_input = helper.make_tensor_value_info(
-        "vision_embeds", TensorProto.FLOAT, ["vision_batch_size", "vision_size", 8]
+        "bridge_features", TensorProto.FLOAT, ["vision_batch_size", "vision_size", 8]
     )
     language_path = tmp_path / "language.onnx"
     onnx.save(helper.make_model(helper.make_graph([], "language", [language_input], [language_input])), language_path)
@@ -1873,8 +1873,8 @@ def test_cross_qpc_output_shapes_follow_language_input_contract(tmp_path):
         lang_model=SimpleNamespace(onnx_path=language_path),
     )
 
-    assert _cross_qpc_output_shapes(model, {"batch_size": 1, "vision_size": 187}) == {"vision_embeds": [1, 187, 8]}
-
+    vision_compile_dir = tmp_path / "vision-qpc"
+    vision_compile_dir.mkdir()
     lang_compile_dir = tmp_path / "lang-qpc"
     lang_compile_dir.mkdir()
     (lang_compile_dir / "specializations.json").write_text(
@@ -1895,12 +1895,12 @@ def test_cross_qpc_output_shapes_follow_language_input_contract(tmp_path):
             }
         )
     )
+    vision_metadata = RunnerMetadata.from_paths(vision_path, vision_compile_dir)
+    language_metadata = RunnerMetadata.from_paths(language_path, lang_compile_dir)
     model.lang_model.compile_artifacts_path = lang_compile_dir
-    assert _cross_qpc_output_shapes(model, {"batch_size": 1, "img_size": 336}) == {"vision_embeds": [1, 187, 8]}
-
-    model.lang_model.onnx_path = None
-    model.model = SimpleNamespace(config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=8)))
-    assert _cross_qpc_output_shapes(model, {"batch_size": 1, "vision_size": 187}) == {"vision_embeds": [1, 187, 8]}
+    assert _cross_qpc_output_shapes(
+        model, {"batch_size": 1, "vision_size": 187}, vision_metadata, language_metadata
+    ) == {"bridge_features": [1, 187, 8]}
 
 
 @pytest.mark.cpu_only
@@ -2167,7 +2167,15 @@ def test_dual_qpc_language_artifact_processes_images_before_placeholders(tmp_pat
         onnx_path=onnx_path,
         model=SimpleNamespace(config=SimpleNamespace()),
     )
-    model = SimpleNamespace(lang_model=lang_model, vision_model=SimpleNamespace())
+    vision_output = helper.make_tensor_value_info("vision_embeds", TensorProto.FLOAT, [1, 2, 3])
+    vision_path = tmp_path / "vision.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "dual_qpc_vision", [], [vision_output])), vision_path)
+    vision_compile_dir = tmp_path / "vision-qpc"
+    vision_compile_dir.mkdir()
+    model = SimpleNamespace(
+        lang_model=lang_model,
+        vision_model=SimpleNamespace(qpc_path=None, compile_artifacts_path=vision_compile_dir, onnx_path=vision_path),
+    )
 
     with patch("QEfficient.generation.embedding_handler.VisionHandler", FakeVisionHandler):
         io_dir = write_dual_qpc_vlm_runner_bundle(
@@ -2377,6 +2385,60 @@ def test_dual_qpc_vision_artifact_uses_strict_matching_vision_specialization(tmp
 
     entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
     assert next(entry for entry in entries if entry["map-to"] == "features")["dims"] == [1, 6, 3]
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (np.zeros((2, 4, 1), dtype=np.int64), "rank"),
+        (np.zeros((1, 4), dtype=np.int64), "concrete ONNX"),
+        (np.zeros((2, 3), dtype=np.int64), "specialization symbol"),
+    ],
+)
+def test_runner_bundle_rejects_invalid_rank_and_dimensions(tmp_path, value, error):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_runner_io_bundle
+
+    tokens = helper.make_tensor_value_info("tokens", TensorProto.INT64, [2, "seq_len"])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, 1])
+    onnx_path = tmp_path / "validation.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "validation", [tokens], [output])), onnx_path)
+
+    with pytest.raises(ValueError, match=error):
+        write_runner_io_bundle(
+            onnx_path=onnx_path,
+            compile_dir=tmp_path,
+            specialization={"batch_size": 2, "seq_len": 4},
+            host_inputs={"tokens": value},
+        )
+
+
+@pytest.mark.cpu_only
+def test_cross_qpc_contract_rejects_incompatible_custom_io_storage(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata, cross_qpc_tensors
+
+    feature = helper.make_tensor_value_info("bridge_features", TensorProto.FLOAT, [1, 2, 3])
+    vision_path = tmp_path / "vision.onnx"
+    language_path = tmp_path / "language.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "vision", [], [feature])), vision_path)
+    onnx.save(helper.make_model(helper.make_graph([], "language", [feature], [feature])), language_path)
+    vision_dir = tmp_path / "vision"
+    language_dir = tmp_path / "language"
+    vision_dir.mkdir()
+    language_dir.mkdir()
+    (vision_dir / "custom_io.yaml").write_text("- IOName: bridge_features\n  Precision: float16\n")
+    (language_dir / "custom_io.yaml").write_text("- IOName: bridge_features\n  Precision: bfloat16\n")
+
+    with pytest.raises(ValueError, match="incompatible vision storage"):
+        cross_qpc_tensors(
+            RunnerMetadata.from_paths(vision_path, vision_dir), RunnerMetadata.from_paths(language_path, language_dir)
+        )
 
 
 @pytest.mark.cpu_only

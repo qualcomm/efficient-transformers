@@ -28,6 +28,7 @@ from QEfficient.generation.generation_helpers import (
     _add_cross_qpc_placeholders,
     _add_specialization_control_inputs,
     _apply_input_shapes,
+    _cross_qpc_symbols,
     _cross_qpc_output_shapes,
     _execution_batch_size,
     _filter_graph_inputs,
@@ -37,11 +38,13 @@ from QEfficient.generation.generation_helpers import (
     _proxy_logits_width,
     _resolve_output_shape,
     build_prefill_inputs,
+    cross_qpc_tensors,
     load_prefill_specialization,
     prepare_tokenizer,
     select_prefill_specialization,
     select_vision_specialization,
     slice_prefill_inputs,
+    validate_runner_input_shapes,
 )
 from QEfficient.utils import get_padding_shape_from_config
 from QEfficient.utils.logging_utils import QEFFLogger
@@ -183,6 +186,7 @@ def write_runner_io_bundle(
     numpy_inputs = {
         name: _normalize_runner_input(runner_metadata, name, value) for name, value in host_inputs.items()
     }
+    validate_runner_input_shapes(runner_metadata, numpy_inputs, specialization)
     for name, value in numpy_inputs.items():
         value.tofile(data_dir / f"{name}.raw")
         io_entries.append(
@@ -404,16 +408,25 @@ def write_dual_qpc_vlm_runner_bundle(
         image_height=image_height,
         image_width=image_width,
     )
+    paired_model = model.lang_model if skip_lang else model.vision_model
+    paired_metadata = RunnerMetadata.from_paths(paired_model.onnx_path, _get_compile_dir(paired_model))
+    vision_metadata = runner_metadata if skip_lang else paired_metadata
+    language_metadata = paired_metadata if skip_lang else runner_metadata
+    cross_qpc = cross_qpc_tensors(vision_metadata, language_metadata)
     if skip_lang:
         # Some processors leave model-specific vision metadata in the language group.
         # The active ONNX graph is the source of truth for the replay invocation.
         host_inputs = _filter_graph_inputs(runner_metadata, vision_inputs, lang_inputs)
-        output_shape_overrides = _cross_qpc_output_shapes(model, specialization, vision_metadata=runner_metadata)
+        output_shape_overrides = _cross_qpc_output_shapes(
+            model, specialization, vision_metadata=vision_metadata, language_metadata=language_metadata
+        )
     else:
         host_inputs = lang_inputs
         _add_specialization_control_inputs(runner_metadata, host_inputs, specialization)
         host_inputs = _filter_graph_inputs(runner_metadata, host_inputs)
-        _add_cross_qpc_placeholders(runner_metadata, host_inputs, specialization)
+        _add_cross_qpc_placeholders(
+            runner_metadata, host_inputs, cross_qpc, _cross_qpc_symbols(model, specialization)
+        )
         output_shape_overrides = None
 
     return _write_vlm_runner_bundle(

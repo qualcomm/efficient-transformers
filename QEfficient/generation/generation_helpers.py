@@ -450,11 +450,119 @@ def _filter_graph_inputs(
     }
 
 
-def _add_cross_qpc_placeholders(
-    runner_metadata: RunnerMetadata, host_inputs: Dict[str, np.ndarray], specialization: Mapping[str, int]
+def _resolve_tensor_shape(value_info: onnx.ValueInfoProto, symbols: Mapping[str, int]) -> List[int]:
+    """Resolve concrete and declared symbolic dimensions for one ONNX tensor."""
+    shape = []
+    for axis, dimension in enumerate(value_info.type.tensor_type.shape.dim):
+        if dimension.HasField("dim_value") and dimension.dim_value > 0:
+            shape.append(int(dimension.dim_value))
+        elif dimension.dim_param in symbols:
+            shape.append(int(symbols[dimension.dim_param]))
+        else:
+            raise RuntimeError(
+                f"Cannot resolve dimension {axis} ({dimension.dim_param!r}) of tensor {value_info.name!r}."
+            )
+    return shape
+
+
+def validate_runner_input_shapes(
+    runner_metadata: RunnerMetadata, host_inputs: Mapping[str, np.ndarray], specialization: Mapping[str, int]
 ) -> None:
-    graph = runner_metadata.graph
+    """Validate runner inputs against ONNX rank, dimensions, and specialization symbols."""
     symbols = _specialization_symbols(specialization)
+    observed_symbols = {}
+    graph_inputs = {graph_input.name: graph_input for graph_input in runner_metadata.graph.input}
+    for name, value in host_inputs.items():
+        graph_input = graph_inputs[name]
+        tensor = np.asarray(value)
+        dimensions = graph_input.type.tensor_type.shape.dim
+        if tensor.ndim != len(dimensions):
+            raise ValueError(f"Input {name!r} has rank {tensor.ndim}, expected {len(dimensions)}.")
+        for axis, (dimension, actual) in enumerate(zip(dimensions, tensor.shape)):
+            if dimension.HasField("dim_value") and dimension.dim_value > 0:
+                if int(actual) != int(dimension.dim_value):
+                    raise ValueError(
+                        f"Input {name!r} dimension {axis} is {actual}, expected concrete ONNX value {dimension.dim_value}."
+                    )
+                continue
+            symbol = dimension.dim_param
+            if symbol in symbols and int(actual) != symbols[symbol]:
+                raise ValueError(
+                    f"Input {name!r} dimension {axis} is {actual}, expected specialization "
+                    f"symbol {symbol}={symbols[symbol]}."
+                )
+            if symbol:
+                previous = observed_symbols.setdefault(symbol, int(actual))
+                if previous != int(actual):
+                    raise ValueError(
+                        f"Input {name!r} dimension {axis} is {actual}, inconsistent with "
+                        f"symbol {symbol}={previous} in another runner input."
+                    )
+
+
+@dataclass(frozen=True)
+class CrossQpcTensor:
+    """A graph-derived tensor contract exchanged from vision QPC to language QPC."""
+
+    name: str
+    vision_output: onnx.ValueInfoProto
+    language_input: onnx.ValueInfoProto
+
+
+def _cross_qpc_storage_metadata(runner_metadata: RunnerMetadata, value_info: onnx.ValueInfoProto) -> tuple[str, int]:
+    """Return the compiler storage contract for a cross-QPC ONNX tensor."""
+    precision = runner_metadata.custom_io_precisions.get(value_info.name)
+    if precision is not None:
+        normalized = precision.lower()
+        item_size = runner_metadata.custom_io_item_sizes.get(value_info.name)
+        if item_size is None:
+            raise ValueError(f"Unsupported custom-IO precision {precision!r} for cross-QPC tensor {value_info.name!r}.")
+        return normalized, item_size
+    element_type = value_info.type.tensor_type.elem_type
+    if element_type == onnx.TensorProto.BFLOAT16:
+        return "bfloat16", 2
+    try:
+        dtype = np.dtype(onnx.helper.tensor_dtype_to_np_dtype(element_type))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"Unsupported ONNX dtype for cross-QPC tensor {value_info.name!r}.") from error
+    return str(dtype), dtype.itemsize
+
+
+def cross_qpc_tensors(vision_metadata: RunnerMetadata, language_metadata: RunnerMetadata) -> Dict[str, CrossQpcTensor]:
+    """Return the normalized vision-output/language-input contract by ONNX name."""
+    vision_outputs = {output.name: output for output in vision_metadata.graph.output}
+    language_inputs = {graph_input.name: graph_input for graph_input in language_metadata.graph.input}
+    contracts = {}
+    for name, vision_output in vision_outputs.items():
+        if name not in language_inputs:
+            continue
+        language_input = language_inputs[name]
+        vision_storage = _cross_qpc_storage_metadata(vision_metadata, vision_output)
+        language_storage = _cross_qpc_storage_metadata(language_metadata, language_input)
+        if vision_storage != language_storage:
+            raise ValueError(
+                f"Cross-QPC tensor {name!r} has incompatible vision storage {vision_storage} "
+                f"and language storage {language_storage}."
+            )
+        contracts[name] = CrossQpcTensor(name, vision_output, language_input)
+    return contracts
+
+
+def _cross_qpc_symbols(model, vision_specialization: Mapping[str, int]) -> Dict[str, int]:
+    symbols = _specialization_symbols(vision_specialization)
+    for name, value in _component_prefill_symbols(getattr(model, "lang_model", None)).items():
+        symbols.setdefault(name, value)
+    if "batch_size" in symbols:
+        symbols.setdefault("vision_batch_size", symbols["batch_size"])
+    return symbols
+
+
+def _add_cross_qpc_placeholders(
+    runner_metadata: RunnerMetadata,
+    host_inputs: Dict[str, np.ndarray],
+    contracts: Mapping[str, CrossQpcTensor],
+    symbols: Mapping[str, int],
+) -> None:
     custom_precisions = runner_metadata.custom_io_precisions
     precision_dtypes = {
         "bfloat16": np.uint16,
@@ -463,70 +571,37 @@ def _add_cross_qpc_placeholders(
         "int8": np.int8,
         "mxint8": np.int8,
     }
-    for graph_input in graph.input:
-        if graph_input.name in host_inputs or graph_input.name.startswith("past_"):
+    for name, contract in contracts.items():
+        if name in host_inputs:
             continue
-        if not any(token in graph_input.name for token in ("vision_embeds", "deepstack_features")):
-            continue
-        shape = []
-        for dimension in graph_input.type.tensor_type.shape.dim:
-            if dimension.HasField("dim_value") and dimension.dim_value > 0:
-                shape.append(int(dimension.dim_value))
-            elif dimension.dim_param in symbols:
-                shape.append(symbols[dimension.dim_param])
-            else:
-                raise RuntimeError(
-                    f"Cannot resolve placeholder dimension {dimension.dim_param!r} for {graph_input.name!r}."
-                )
-        precision = custom_precisions.get(graph_input.name)
+        graph_input = contract.language_input
+        shape = _resolve_tensor_shape(graph_input, symbols)
+        precision = custom_precisions.get(name)
         dtype = precision_dtypes.get(
             precision, onnx.helper.tensor_dtype_to_np_dtype(graph_input.type.tensor_type.elem_type)
         )
-        host_inputs[graph_input.name] = np.zeros(shape, dtype=dtype)
+        host_inputs[name] = np.zeros(shape, dtype=dtype)
         logger.warning(
-            f"Wrote a zero placeholder for {graph_input.name!r}; replace it with the vision QPC output before replay."
+            f"Wrote a zero placeholder for {name!r}; replace it with the vision QPC output before replay."
         )
 
 
 def _cross_qpc_output_shapes(
-    model, specialization: Mapping[str, int], vision_metadata: Optional[RunnerMetadata] = None
+    model,
+    specialization: Mapping[str, int],
+    vision_metadata: RunnerMetadata,
+    language_metadata: RunnerMetadata,
 ) -> Dict[str, List[int]]:
-    """Resolve vision outputs from the paired language input contract when available."""
-    vision_outputs = (
-        vision_metadata.output_names
-        if vision_metadata is not None
-        else {
-            output.name
-            for output in onnx.load(str(model.vision_model.onnx_path), load_external_data=False).graph.output
-        }
-    )
-    symbols = _specialization_symbols(specialization)
-    language_symbols = _component_prefill_symbols(getattr(model, "lang_model", None))
-    for name, value in language_symbols.items():
-        symbols.setdefault(name, value)
-    if "batch_size" in symbols:
-        symbols.setdefault("vision_batch_size", symbols["batch_size"])
-
-    language_onnx_path = getattr(model.lang_model, "onnx_path", None)
-    if language_onnx_path and Path(language_onnx_path).is_file():
-        language_inputs = onnx.load(str(language_onnx_path), load_external_data=False).graph.input
-        return {
-            graph_input.name: _resolve_output_shape(graph_input, symbols, fallback_batch_size=None)
-            for graph_input in language_inputs
-            if graph_input.name in vision_outputs
-        }
-
-    config = model.model.config
-    text_config = getattr(config, "text_config", None) or getattr(config, "language_config", None) or config
-    hidden_size = int(text_config.hidden_size)
+    """Resolve and validate vision output shapes from the language input contract."""
+    symbols = _cross_qpc_symbols(model, specialization)
     output_shapes = {}
-    if "vision_embeds" in vision_outputs:
-        output_shapes["vision_embeds"] = [symbols["batch_size"], symbols["vision_size"], hidden_size]
-    if "deepstack_features" in vision_outputs:
-        output_shapes["deepstack_features"] = [
-            symbols["num_feature_layers"],
-            symbols["batch_size"],
-            symbols["vision_size"],
-            hidden_size,
-        ]
+    for name, contract in cross_qpc_tensors(vision_metadata, language_metadata).items():
+        vision_shape = _resolve_tensor_shape(contract.vision_output, symbols)
+        language_shape = _resolve_tensor_shape(contract.language_input, symbols)
+        if vision_shape != language_shape:
+            raise ValueError(
+                f"Cross-QPC tensor {name!r} has incompatible vision output shape {vision_shape} "
+                f"and language input shape {language_shape}."
+            )
+        output_shapes[name] = vision_shape
     return output_shapes
