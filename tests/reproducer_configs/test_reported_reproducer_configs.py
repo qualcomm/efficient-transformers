@@ -99,7 +99,7 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 56
+EXPECTED_SCENARIO_COUNT = 57
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
         "retain_full_kv",
@@ -1068,6 +1068,18 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
             "mdp_num_partitions": 2,
             "mdp_strategy": "onnx",
         },
+    ),
+    RegressionScenario(
+        name="dynamo-mixed-layer-subfunction-export",
+        stage="export",
+        source_model_card="openai/gpt-oss-20b",
+        tiny_model_id=TINY_GPT_OSS,
+        summary="dynamo subfunction export of alternating sliding/full attention layers must reuse equivalent layers",
+        load_kwargs={
+            "num_hidden_layers": 4,
+            "layer_types": ["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+        },
+        export_kwargs={"dynamo": True, "use_onnx_subfunctions": True},
     ),
     RegressionScenario(
         name="qwen-numpy-fix",

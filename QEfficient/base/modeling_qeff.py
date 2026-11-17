@@ -24,10 +24,12 @@ from QEfficient.base.checkpoint_transforms import BaseCheckpointTransform
 from QEfficient.base.onnx_transforms import (
     BaseOnnxTransform,
     CustomOpTransform,
+    DynamoSemanticNodeNameTransform,
     FP16ClipTransform,
     LocalizeFunctionReduceSumAxesTransform,
     OnnxTransformPipeline,
     PruneFakeInitializersTransform,
+    ReductionCastCleanupTransform,
     RenameFunctionOutputsTransform,
     SplitTensorsTransform,
 )
@@ -48,6 +50,8 @@ from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolv
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.pytorch_transforms import (
     BlockingAttentionTransform,
+    DeepseekV4PrefillMoETransform,
+    FFNBlockingTransform,
     GatedDeltaConfigTransform,
     OptimizedMoETransform,
     ReplicateKVHeadTransform,
@@ -63,6 +67,7 @@ from QEfficient.utils import (
     hash_dict_params,
     load_json,
     require_value,
+    resolve_torch_dtype,
     to_named_specializations,
 )
 from QEfficient.utils.checkpoint_utils import checkpoint_root, huggingface_hub_cache_dir
@@ -187,8 +192,9 @@ def _weight_free_external_data_root(weight_spec_path: Optional[Union[str, Path]]
         return None
 
     spec = load_weight_spec(weight_spec_path)
-    if spec.external_data_root:
-        return Path(spec.external_data_root).expanduser()
+    external_data_root = getattr(spec, "external_data_root", None)
+    if external_data_root:
+        return Path(external_data_root).expanduser()
 
     model_id_path = Path(spec.model_id).expanduser()
     if model_id_path.exists():
@@ -309,6 +315,35 @@ def _restore_retained_state_output_names(model: onnx.ModelProto, output_names: L
             continue
         if current_name.isdigit() or "_InternalRetainedState" in current_name or "_RetainedState" in current_name:
             _rename_graph_value(model.graph, current_name, expected_name)
+
+
+def _normalize_retained_state_inputs(model: onnx.ModelProto) -> None:
+    """Pair retained-state outputs with plain cache graph inputs."""
+    retained_state_suffixes = ("_InternalRetainedState", "_RetainedState")
+    input_names = {value.name for value in model.graph.input}
+    for value in model.graph.input:
+        suffix = next((suffix for suffix in retained_state_suffixes if value.name.endswith(suffix)), None)
+        if suffix is None:
+            continue
+        old_name = value.name
+        new_name = old_name[: -len(suffix)]
+        if new_name in input_names:
+            continue
+        value.name = new_name
+        for node in model.graph.node:
+            node.input[:] = [new_name if name == old_name else name for name in node.input]
+        input_names.remove(old_name)
+        input_names.add(new_name)
+
+    node_outputs = {name for node in model.graph.node for name in node.output}
+    for output in model.graph.output:
+        if not output.name.endswith(("_RetainedState", "_InternalRetainedState")) or output.name in node_outputs:
+            continue
+        suffix = "_InternalRetainedState" if output.name.endswith("_InternalRetainedState") else "_RetainedState"
+        input_name = output.name[: -len(suffix)]
+        if input_name in input_names:
+            model.graph.node.append(onnx.helper.make_node("Identity", [input_name], [output.name]))
+            node_outputs.add(output.name)
 
 
 def _restore_output_names_exact(model: onnx.ModelProto, output_names: List[str]) -> None:
@@ -481,6 +516,13 @@ class QEFFBaseModel(ABC):
         # Flag for checking if weights are offloaded
         self._is_weights_offloaded: bool = False
         self._weight_free: bool = kwargs.get("weight_free", False)
+        self._use_original_checkpoint: bool = kwargs.get("use_original_checkpoint", False)
+        if self._use_original_checkpoint and not self._weight_free:
+            raise ValueError("use_original_checkpoint=True requires weight_free=True")
+        for module in self.model.modules():
+            module._qeff_use_original_checkpoint = self._use_original_checkpoint
+        # Preserve an explicit caller dtype before config normalization can fall back to stale config fields.
+        self._requested_torch_dtype = kwargs.get("torch_dtype", kwargs.get("dtype", None))
         # Flag for checking if model has been transformed yet
         self.is_transformed: bool = False
 
@@ -509,30 +551,35 @@ class QEFFBaseModel(ABC):
         to all nested configs (llm_config, vision_config, etc.) that may exist in
         multimodal models.
         """
-        top_level_dtype = getattr(self.config, "torch_dtype", torch.float32)
-
+        top_level_dtype = self._requested_torch_dtype
         if top_level_dtype is None:
-            top_level_dtype = torch.float32
-        elif isinstance(top_level_dtype, str):
-            top_level_dtype = getattr(torch, top_level_dtype, torch.float32)
+            top_level_dtype = getattr(self.config, "torch_dtype", None)
+        if top_level_dtype is None:
+            top_level_dtype = getattr(self.config, "dtype", None)
+        top_level_dtype = resolve_torch_dtype(top_level_dtype, default=torch.float32)
 
+        # Keep both dtype attributes aligned because HF config loading and weight-free export read different fields.
         self.config.torch_dtype = top_level_dtype
+        self.config.dtype = top_level_dtype
 
         # Normalize llm_config if it exists
         if hasattr(self.config, "llm_config"):
             self.config.llm_config.torch_dtype = top_level_dtype
+            self.config.llm_config.dtype = top_level_dtype
             if hasattr(self.config.llm_config, "use_bfloat16"):
                 self.config.llm_config.use_bfloat16 = top_level_dtype == torch.bfloat16
 
         # Normalize vision_config if it exists
         if hasattr(self.config, "vision_config"):
             self.config.vision_config.torch_dtype = top_level_dtype
+            self.config.vision_config.dtype = top_level_dtype
             if hasattr(self.config.vision_config, "use_bfloat16"):
                 self.config.vision_config.use_bfloat16 = top_level_dtype == torch.bfloat16
 
         # Normalize text_config if it exists (for models like Qwen2.5-VL)
         if hasattr(self.config, "text_config"):
             self.config.text_config.torch_dtype = top_level_dtype
+            self.config.text_config.dtype = top_level_dtype
 
         logger.info(f"Normalized all config torch_dtype to: {top_level_dtype}")
 
@@ -868,6 +915,19 @@ class QEFFBaseModel(ABC):
                                 f"k_pe.{i}",
                             ]
                         )
+                elif param == "indexer_key_cache":
+                    if hasattr(self.model, "get_indexer_cache_layers"):
+                        indexer_layers = self.model.get_indexer_cache_layers(self.model.config)
+                    else:
+                        indexer_layers = range(len(example_inputs["indexer_key_cache"]))
+                    input_names.extend(f"indexer_key.{i}" for i in indexer_layers)
+                elif param == "index_keys" and getattr(self.model.config, "model_type", None) == "minimax_m3_vl":
+                    if hasattr(self.model, "get_onnx_index_key_names"):
+                        input_names.extend(self.model.get_onnx_index_key_names())
+                    elif isinstance(example_inputs["index_keys"], (list, tuple)):
+                        input_names.extend(f"index_key.{i}" for i in range(len(example_inputs["index_keys"])))
+                    else:
+                        input_names.append(param)
                 else:
                     input_names.append(param)
 
@@ -885,6 +945,7 @@ class QEFFBaseModel(ABC):
             if self._weight_free:
                 from QEfficient.exporter.onnx_exporter import export_via_weightfree
 
+                export_start_time = time.perf_counter()
                 export_result = export_via_weightfree(
                     self,
                     onnx_path,
@@ -895,6 +956,8 @@ class QEFFBaseModel(ABC):
                     export_kwargs,
                     onnx_transform_kwargs,
                 )
+                export_end_time = time.perf_counter()
+                print(f"Weight-free ONNX export overall time {export_end_time - export_start_time:.2f} seconds.")
             elif dynamo:
                 from QEfficient.exporter.onnx_exporter import export_via_dynamo
 
@@ -931,12 +994,21 @@ class QEFFBaseModel(ABC):
             active_transforms = [
                 transform for transform in self._onnx_transforms if transform not in excluded_transforms
             ]
+            # Dynamo exports can emit first-class Qualcomm custom-op nodes, but
+            # their ONNXScript function bodies are added by the post-export
+            # transform.  Keep this registration independent of the model
+            # wrapper's default transform list so weight-free `.compile()`
+            # exports receive the same compiler-facing ONNX ABI as legacy
+            # exports.
+            if dynamo and CustomOpTransform not in active_transforms:
+                active_transforms.append(CustomOpTransform)
             needs_external_tensor_data = any(
                 transform in active_transforms for transform in (FP16ClipTransform, SplitTensorsTransform)
             )
             transform_kwargs = {
                 "onnx_base_dir": str(export_dir) if needs_external_tensor_data else None,
                 "model_name": self.model_name,
+                "model_type": getattr(self.model.config, "model_type", None),
                 "dynamic_axes": None if dynamo else dynamic_axes,
                 "onnx_export_opset": constants.get_onnx_export_opset(dynamo),
             }
@@ -946,6 +1018,19 @@ class QEFFBaseModel(ABC):
 
             onnx_transforms = OnnxTransformPipeline(transforms=active_transforms)
             model, transformed = onnx_transforms.apply(model, **transform_kwargs)
+
+            if getattr(self.model.config, "model_type", None) in {
+                "minimax_m3_vl",
+                "minimax_m3_vl_text",
+                "deepseek_v4",
+            }:
+                _normalize_retained_state_inputs(model)
+
+            # Dynamo records module paths in node metadata but uses generic node
+            # names. The compiler and MDP tooling consume node names, so expose
+            # that metadata after all graph rewrites have completed.
+            if dynamo:
+                transformed |= DynamoSemanticNodeNameTransform.apply(model)
 
             # Nested Dynamo subfunctions use internal retained-state names inside
             # their function bodies, but the top-level graph must expose the
@@ -959,6 +1044,10 @@ class QEFFBaseModel(ABC):
                 _restore_retained_state_output_names(model, output_names)
 
             transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]
+            if dynamo:
+                transform_names.append(DynamoSemanticNodeNameTransform.__name__)
+            if ReductionCastCleanupTransform.__name__ not in transform_names:
+                transform_names.append(ReductionCastCleanupTransform.__name__)
             model.metadata_props.append(
                 onnx.StringStringEntryProto(key="qeff_transforms", value=",".join(transform_names))
             )
@@ -1040,6 +1129,12 @@ class QEFFBaseModel(ABC):
             bs = require_value(get_attr_or_key(specializations[0], ("batch_size", "batch")), "batch size")
             seq_len = get_attr_or_key(specializations[0], ("cl", "seq_len", "sequence_length"))
             ctx_len = get_attr_or_key(specializations[0], ("ctx_len", "context_length"))
+            try:
+                export_seq_len = int(seq_len)
+            except (TypeError, ValueError):
+                export_seq_len = None
+            if export_seq_len == 1 and prefill_only is not True:
+                kwargs["prefill_seq_len"] = 1
         else:
             bs = None
             seq_len = None
@@ -1239,6 +1334,19 @@ class QEFFBaseModel(ABC):
                     for layer_offset in range(len(example_inputs["compressed_kvs"])):
                         layer_idx = idx + layer_offset
                         input_names.extend([f"compressed_kv.{layer_idx}", f"k_pe.{layer_idx}"])
+                elif param == "indexer_key_cache":
+                    if hasattr(self.model, "get_indexer_cache_layers"):
+                        indexer_layers = self.model.get_indexer_cache_layers(self.model.config)
+                    else:
+                        indexer_layers = range(len(example_inputs["indexer_key_cache"]))
+                    input_names.extend(f"indexer_key.{i}" for i in indexer_layers)
+                elif param == "index_keys" and getattr(self.model.config, "model_type", None) == "minimax_m3_vl":
+                    if hasattr(self.model, "get_onnx_index_key_names"):
+                        input_names.extend(self.model.get_onnx_index_key_names())
+                    elif isinstance(example_inputs["index_keys"], (list, tuple)):
+                        input_names.extend(f"index_key.{i}" for i in range(len(example_inputs["index_keys"])))
+                    else:
+                        input_names.append(param)
                 else:
                     input_names.append(param)
         dynamic_axes = {k: v for k, v in dynamic_axes.items() if k in input_names}
@@ -1314,15 +1422,20 @@ class QEFFBaseModel(ABC):
             num_devices,
             qaic_config,
         )
-        self._apply_attention_blocking_from_qaic(
-            ctx_len=ctx_len,
-            seq_len=seq_len,
-            bs=bs,
-            num_devices=num_devices,
-            qaic_config=qaic_config,
-            model_config=model_config,
-            **compiler_options,
-        )
+        if model_config:
+            blocking_config = build_transformer_blocking_config_for_transform(
+                model_config,
+                ctx_len=ctx_len,
+                seq_len=seq_len,
+                bs=bs,
+                num_devices=num_devices,
+                qaic_config=qaic_config,
+                **compiler_options,
+            )
+        else:
+            # Without a model config, this is not a model that is possible to block.
+            blocking_config = None
+
         gated_delta_config = build_gated_delta_config_for_transform(seq_len=seq_len, qaic_config=qaic_config)
         self.model, gated_delta_transformed = GatedDeltaConfigTransform.apply(
             self.model, gated_delta_config=gated_delta_config
@@ -1331,7 +1444,15 @@ class QEFFBaseModel(ABC):
             self.hash_params["gated_delta_kwargs"] = gated_delta_config
         else:
             self.hash_params.pop("gated_delta_kwargs", None)
+        self.model, _ = FFNBlockingTransform.apply(self.model, qaic_config=qaic_config)
         if qaic_config is not None:
+            mode = qaic_config.get("ffn_blocking_mode", "default")
+            token_block_size = qaic_config.get("ffn_token_block_size")
+            weight_block_size = qaic_config.get("ffn_weight_block_size")
+            for module in self.model.modules():
+                configure = getattr(module, "configure_ffn_blocking", None)
+                if callable(configure):
+                    configure(mode, token_block_size, weight_block_size)
             self.hash_params["qaic_config"] = qaic_config
         else:
             self.hash_params.pop("qaic_config", None)
@@ -1339,10 +1460,35 @@ class QEFFBaseModel(ABC):
 
         # Apply the transformations that are dependent on compilation parameters
         moe_batch_size = compiler_options.pop("moe_batch_size", bs)
-
         num_cores = compiler_options.get("num_cores", compiler_options.get("aic_num_cores"))
         if num_cores is None:
             num_cores = constants.DEFAULT_AIC_NUM_CORES
+        is_glm_moe_dsa = getattr(model_config, "model_type", None) == "glm_moe_dsa"
+        if blocking_config is not None or is_glm_moe_dsa:
+            self.model, _ = BlockingAttentionTransform.apply(
+                self.model,
+                attn_blocking_config=blocking_config,
+                qaic_config=qaic_config,
+                batch_size=bs,
+                seq_len=seq_len or 1,
+                context_length=ctx_len or seq_len,
+                num_devices=num_devices,
+                num_cores=num_cores,
+                prefill_only=bool(compiler_options.get("prefill_only", False)),
+            )
+        if blocking_config is not None:
+            self.hash_params["blocking_kwargs"] = blocking_config
+        else:
+            self.hash_params.pop("blocking_kwargs", None)
+        if is_glm_moe_dsa:
+            self.hash_params["glm_attention_layers"] = [
+                module.glm_attention_config.to_hash_dict()
+                for module in self.model.modules()
+                if hasattr(module, "glm_attention_config")
+            ]
+        if qaic_config is not None:
+            self.hash_params["qaic_config"] = qaic_config
+        self.hash_params["num_replicate_kv_heads"] = effective_num_replicate_kv_heads
         prefill_seq_len = compiler_options.get("prefill_seq_len", seq_len)
         mdp_num_partitions = compiler_options.get("mdp_num_partitions", 1)
         if mdp_num_partitions is None:
@@ -1354,6 +1500,16 @@ class QEFFBaseModel(ABC):
         if mdp_num_partitions > 1:
             moe_num_devices = moe_num_devices // mdp_num_partitions
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
+        self.model, _ = DeepseekV4PrefillMoETransform.apply(
+            self.model,
+            prefill_only=bool(compiler_options.get("prefill_only", False)),
+            batch_size=moe_batch_size,
+            num_devices=moe_num_devices,
+            num_cores=num_cores,
+            qaic_config=qaic_config,
+            prefill_seq_len=prefill_seq_len,
+            hash_params=self.hash_params,
+        )
         self.model, _ = OptimizedMoETransform.apply(
             self.model,
             prefill_only=bool(compiler_options.get("prefill_only", False)),
@@ -1399,6 +1555,7 @@ class QEFFBaseModel(ABC):
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
             self.hash_params.pop("blocking_kwargs", None)
+        self.model, _ = FFNBlockingTransform.apply(self.model, qaic_config=qaic_config)
         if qaic_config is not None:
             self.hash_params["qaic_config"] = qaic_config
         return blocking_config
@@ -1783,6 +1940,7 @@ class QEFFBaseModel(ABC):
             logger.info(f"Compiler artifacts written to {compile_dir}")
             return compile_dir
 
+        compile_start_time = time.perf_counter()
         try:
             subprocess.run(command, capture_output=True, check=True, env=compiler_env)
         except subprocess.CalledProcessError as e:
@@ -1794,10 +1952,12 @@ class QEFFBaseModel(ABC):
                         f"Compiler command: {e.cmd}",
                         f"Compiler exitcode: {e.returncode}",
                         "Compiler stderr:",
-                        e.stderr.decode(),
+                        (e.stderr or b"").decode(),
                     ]
                 )
             )
+        compile_time = time.perf_counter() - compile_start_time
+        print(f"qaic-compile completed in {compile_time:.2f} seconds")
         # Dump JSON file with hashed parameters
         hashed_compile_params_path = compile_dir / "hashed_compile_params.json"
         create_json(hashed_compile_params_path, compile_hash_params)
