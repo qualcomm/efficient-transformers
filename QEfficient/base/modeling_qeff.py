@@ -552,7 +552,7 @@ class QEFFBaseModel(ABC):
         multimodal models.
         """
         top_level_dtype = self._requested_torch_dtype
-        if top_level_dtype is None:
+        if top_level_dtype in {None, "auto"}:
             top_level_dtype = getattr(self.config, "torch_dtype", None)
         if top_level_dtype is None:
             top_level_dtype = getattr(self.config, "dtype", None)
