@@ -639,6 +639,7 @@ class QEffGemma3EncoderWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model.model
+        self.config = model.config
         self.model.vision_model = self.model.vision_tower
 
     def get_submodules_for_export(self) -> Type[nn.Module]:

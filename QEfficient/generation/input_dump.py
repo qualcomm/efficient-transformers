@@ -381,9 +381,17 @@ class QAICInputDumper:
             )
         expected_dims = self._binding_dims(name)
         actual_dims = self._array_dims(array)
-        if not self._dims_match(expected_dims, actual_dims):
+        binding_index = self.session.binding_index_map[name]
+        allowed_dims = [
+            shape_spec[binding_index][1]
+            for shape_spec in getattr(self.session, "allowed_shapes", ())
+            if binding_index < len(shape_spec)
+        ]
+        if not self._dims_match(expected_dims, actual_dims) and not any(
+            self._dims_match(dims, actual_dims) for dims in allowed_dims
+        ):
             raise InputDumpValidationError(
-                f"Input {name!r} has shape {actual_dims}, expected {expected_dims} for the QPC binding"
+                f"Input {name!r} has shape {actual_dims}, expected {expected_dims} or an allowed QPC specialization"
             )
         return array
 

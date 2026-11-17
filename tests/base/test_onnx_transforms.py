@@ -10,12 +10,87 @@ import onnx
 import pytest
 
 from QEfficient.base.onnx_transforms import (
+    DynamoSemanticNodeNameTransform,
     FP16ClipTransform,
     LocalizeFunctionReduceSumAxesTransform,
     OnnxTransformPipeline,
     RenameWsubNodesTransform,
     SplitTensorsTransform,
 )
+from QEfficient.transformers.models.minimax_m3_vl.onnx_transforms import MiniMaxM3StaticPrefillLoopTransform
+
+
+def _add_name_scopes(node, scopes):
+    metadata = node.metadata_props.add()
+    metadata.key = "pkg.torch.onnx.name_scopes"
+    metadata.value = repr(scopes)
+
+
+def test_dynamo_semantic_node_name_transform_uses_module_metadata():
+    graph_node = onnx.helper.make_node("MatMul", ["x", "weight"], ["y"], name="node_linear")
+    _add_name_scopes(
+        graph_node,
+        ["", "model", "model.layers.12", "model.layers.12.self_attn.q_proj", "linear"],
+    )
+    function_node = onnx.helper.make_node("MatMul", ["hidden", "weight"], ["output"], name="node_linear")
+    _add_name_scopes(
+        function_node,
+        ["", "model", "model.layers.12", "model.layers.12.self_attn.q_proj", "linear"],
+    )
+    function = onnx.helper.make_function(
+        "test",
+        "DecoderLayer",
+        ["hidden", "weight"],
+        ["output"],
+        [function_node],
+        [onnx.helper.make_opsetid("", 17)],
+    )
+    graph = onnx.helper.make_graph(
+        [graph_node],
+        "test",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, 4])],
+        [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1, 4])],
+        initializer=[onnx.helper.make_tensor("weight", onnx.TensorProto.FLOAT, [4, 4], [1.0] * 16)],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[onnx.helper.make_opsetid("", 17), onnx.helper.make_opsetid("test", 1)],
+    )
+
+    assert DynamoSemanticNodeNameTransform.apply(model)
+    assert model.graph.node[0].name == "/model/layers.12/self_attn/q_proj/linear__node_linear"
+    assert model.functions[0].node[0].name == "/DecoderLayer/self_attn/q_proj/linear__node_linear"
+    assert list(model.graph.node[0].input) == ["x", "weight"]
+    assert list(model.graph.node[0].output) == ["y"]
+    assert not DynamoSemanticNodeNameTransform.apply(model)
+
+
+def test_dynamo_semantic_node_name_transform_names_local_function_calls():
+    call_node = onnx.helper.make_node("DecoderLayer", ["x"], ["y"], domain="test", name="node_invoke_subgraph")
+    _add_name_scopes(call_node, ["", "model", "model.layers.12", "invoke_subgraph"])
+    function = onnx.helper.make_function(
+        "test",
+        "DecoderLayer",
+        ["x"],
+        ["y"],
+        [onnx.helper.make_node("Identity", ["x"], ["y"], name="node_identity")],
+        [onnx.helper.make_opsetid("", 17)],
+    )
+    graph = onnx.helper.make_graph(
+        [call_node],
+        "test",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])],
+        [onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1])],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[onnx.helper.make_opsetid("", 17), onnx.helper.make_opsetid("test", 1)],
+    )
+
+    assert DynamoSemanticNodeNameTransform.apply(model)
+    assert model.graph.node[0].name == "/model/layers.12/DecoderLayer__node_invoke_subgraph"
 
 
 def test_fp16clip_transform():
@@ -177,6 +252,103 @@ def _constant_value_by_output(nodes, output_name):
         value_attr = next(attr for attr in node.attribute if attr.name == "value")
         return onnx.numpy_helper.to_array(value_attr.t)
     raise AssertionError(f"Constant node producing {output_name!r} not found")
+
+
+def _make_minimax_prefill_loop_model(function_name="QEffMiniMaxM3VLDecoderLayer_0"):
+    body = onnx.helper.make_graph(
+        [
+            _make_constant_node("one", 1),
+            onnx.helper.make_node("Add", ["loop_counter", "one"], ["next_counter"]),
+            onnx.helper.make_node("Identity", ["loop_state"], ["slice_scatter_output"]),
+            onnx.helper.make_node("Identity", ["cond_in"], ["dynamic_body_cond"]),
+        ],
+        "while_loop_body",
+        [
+            onnx.helper.make_tensor_value_info("iteration", onnx.TensorProto.INT64, []),
+            onnx.helper.make_tensor_value_info("cond_in", onnx.TensorProto.BOOL, []),
+            onnx.helper.make_tensor_value_info("loop_counter", onnx.TensorProto.INT64, []),
+            onnx.helper.make_tensor_value_info("loop_state", onnx.TensorProto.FLOAT, [1]),
+        ],
+        [
+            onnx.helper.make_tensor_value_info("dynamic_body_cond", onnx.TensorProto.BOOL, []),
+            onnx.helper.make_tensor_value_info("next_counter", onnx.TensorProto.INT64, []),
+            onnx.helper.make_tensor_value_info("slice_scatter_output", onnx.TensorProto.FLOAT, [1]),
+        ],
+    )
+    loop_node = onnx.helper.make_node(
+        "Loop",
+        ["", "dynamic_cond", "counter", "state"],
+        ["final_counter", "result"],
+        name="node_while_loop",
+        body=body,
+    )
+    function = onnx.helper.make_function(
+        "qeff.test",
+        function_name,
+        ["dynamic_cond", "counter", "state"],
+        ["result"],
+        [loop_node],
+        [onnx.helper.make_opsetid("", 18)],
+    )
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node(
+                function_name,
+                ["dynamic_cond", "counter", "state"],
+                ["result"],
+                domain="qeff.test",
+            )
+        ],
+        "g",
+        [
+            onnx.helper.make_tensor_value_info("dynamic_cond", onnx.TensorProto.BOOL, []),
+            onnx.helper.make_tensor_value_info("counter", onnx.TensorProto.INT64, []),
+            onnx.helper.make_tensor_value_info("state", onnx.TensorProto.FLOAT, [1]),
+        ],
+        [onnx.helper.make_tensor_value_info("result", onnx.TensorProto.FLOAT, [1])],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        functions=[function],
+        opset_imports=[onnx.helper.make_opsetid("", 18), onnx.helper.make_opsetid("qeff.test", 1)],
+    )
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return model
+
+
+def test_minimax_static_prefill_loop_transform_sets_fixed_controls_and_is_idempotent():
+    model = _make_minimax_prefill_loop_model()
+    pipeline = OnnxTransformPipeline(transforms=[MiniMaxM3StaticPrefillLoopTransform])
+
+    transformed_model, transformed = pipeline.apply(model, minimax_m3_prefill_loop_trip_count=4)
+
+    assert transformed
+    function = transformed_model.functions[0]
+    loop_node = next(node for node in function.node if node.op_type == "Loop")
+    assert int(_constant_value_by_output(function.node, loop_node.input[0])) == 4
+    assert bool(_constant_value_by_output(function.node, loop_node.input[1]))
+    body = next(attr.g for attr in loop_node.attribute if attr.name == "body")
+    assert body.output[0].name.startswith(MiniMaxM3StaticPrefillLoopTransform._VALUE_PREFIX)
+    assert bool(onnx.numpy_helper.to_array(next(init for init in body.initializer if init.name == body.output[0].name)))
+    onnx.checker.check_model(transformed_model)
+
+    node_count = len(function.node)
+    _, transformed_again = pipeline.apply(transformed_model, minimax_m3_prefill_loop_trip_count=4)
+
+    assert not transformed_again
+    assert len(function.node) == node_count
+
+
+def test_minimax_static_prefill_loop_transform_does_not_rewrite_other_functions():
+    model = _make_minimax_prefill_loop_model(function_name="OtherDecoderLayer")
+
+    with pytest.raises(ValueError, match="Could not find"):
+        MiniMaxM3StaticPrefillLoopTransform.apply(model, minimax_m3_prefill_loop_trip_count=4)
+
+    loop_node = next(node for node in model.functions[0].node if node.op_type == "Loop")
+    assert loop_node.input[0] == ""
+    assert loop_node.input[1] == "dynamic_cond"
 
 
 class TestLocalizeFunctionReduceSumAxesTransform:
