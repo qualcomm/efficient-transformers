@@ -21,6 +21,7 @@ from QEfficient.compile.mdp_generator import (
     _repair_scoped_alias_partitioning,
     generate_disagg_mdp_config,
     generate_disagg_mdp_intersection_config,
+    generate_disagg_mdp_partition_config,
     precheck_and_autofix_mdp_partition_order,
 )
 
@@ -235,6 +236,40 @@ def test_intersection_skips_relocation_that_would_follow_consumer(tmp_path):
 @pytest.mark.mdp
 class TestMdpLayerPartitionBounds:
     """Balanced layer allocation used by the ONNX MDP strategy."""
+
+    def test_deepseek_v4_retained_states_are_assigned_by_layer(self, tmp_path):
+        cache_names = [
+            "past_compressor_gate_buffer.0",
+            "past_sliding_window_kv.0",
+            "past_compressor_gate_buffer.5",
+            "past_sliding_window_kv.5",
+        ]
+        graph = helper.make_graph(
+            [
+                helper.make_node(
+                    "Identity",
+                    ["input"],
+                    [f"hidden_{layer_num}"],
+                    name=f"/model/layers.{layer_num}/Identity",
+                )
+                for layer_num in range(6)
+            ],
+            "deepseek_v4_mdp_graph",
+            inputs=[helper.make_tensor_value_info(name, TensorProto.FLOAT, [1]) for name in ["input", *cache_names]],
+            outputs=[helper.make_tensor_value_info("hidden_5", TensorProto.FLOAT, [1])],
+        )
+        onnx_path = tmp_path / "deepseek_v4_mdp.onnx"
+        onnx.save(helper.make_model(graph), onnx_path)
+
+        mdp_json = generate_disagg_mdp_partition_config(
+            onnx_path=str(onnx_path),
+            num_devices=2,
+            num_partitions=2,
+            num_layers=6,
+        )
+
+        assert all(name in mdp_json["partitions"][0]["nodeList"] for name in cache_names[:2])
+        assert all(name in mdp_json["partitions"][1]["nodeList"] for name in cache_names[2:])
 
     def test_generic_decoder_callsite_uses_model_layer_input(self):
         assert (

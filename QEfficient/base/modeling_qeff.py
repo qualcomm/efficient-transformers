@@ -1018,6 +1018,16 @@ class QEFFBaseModel(ABC):
 
             onnx_transforms = OnnxTransformPipeline(transforms=active_transforms)
             model, transformed = onnx_transforms.apply(model, **transform_kwargs)
+            export_transforms = []
+            get_export_transforms = getattr(self.model, "get_onnx_transforms_for_export", None)
+            if self._weight_free and getattr(self, "_use_onnx_subfunctions", False) and callable(get_export_transforms):
+                for transform in get_export_transforms():
+                    if transform.apply(model, weight_spec_path=export_result.weight_spec_path):
+                        export_transforms.append(transform.__name__)
+
+            restore_dynamic_cache_axes = getattr(self.model, "restore_onnx_dynamic_cache_axes", None)
+            if dynamo and callable(restore_dynamic_cache_axes):
+                restore_dynamic_cache_axes(model, dynamic_axes)
 
             if getattr(self.model.config, "model_type", None) in {
                 "minimax_m3_vl",

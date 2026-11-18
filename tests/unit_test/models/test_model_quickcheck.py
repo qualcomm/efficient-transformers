@@ -83,6 +83,8 @@ from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, Bloc
 from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Attention,
     QEffDeepseekV4Cache,
+    QEffDeepseekV4HashRouter,
+    QEffDeepseekV4TopKRouter,
     QEffDeepseekV4UnweightedRMSNorm,
 )
 from QEfficient.transformers.models.minimax_m3_vl import (
@@ -151,6 +153,58 @@ def test_deepseek_v4_unweighted_rms_norm_uses_custom_op_mapping():
     assert transformed
     assert type(transformed_norm) is QEffDeepseekV4UnweightedRMSNorm
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("router_class", [QEffDeepseekV4TopKRouter, QEffDeepseekV4HashRouter])
+def test_deepseek_v4_fp16_router_scores_and_weights_stay_finite(router_class):
+    config = _tiny_deepseek_v4_config()
+    router = router_class(config).to(torch.float16).eval()
+    with torch.no_grad():
+        router.weight.zero_()
+        router.weight[:, 0] = -17.34375
+        if isinstance(router, QEffDeepseekV4TopKRouter):
+            router.e_score_correction_bias.zero_()
+        else:
+            router.tid2eid[0] = torch.arange(config.num_experts_per_tok)
+
+    hidden_states = torch.zeros(1, 1, config.hidden_size, dtype=torch.float16)
+    hidden_states[..., 0] = 1
+    if isinstance(router, QEffDeepseekV4HashRouter):
+        _, weights, _ = router(hidden_states, torch.zeros(1, 1, dtype=torch.long))
+    else:
+        _, weights, _ = router(hidden_states)
+
+    assert torch.isfinite(weights).all()
+    torch.testing.assert_close(
+        weights.float().sum(dim=-1),
+        torch.full((1,), config.routed_scaling_factor),
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefill_only", "attention_dp"),
+    [(True, 1), (False, 1), (False, 2)],
+)
+def test_deepseek_v4_csa_cache_initialization_and_reset_restore_score_sentinels(prefill_only, attention_dp):
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["compressed_sparse_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    config.qeff_csa_prefill_only = prefill_only
+    config.qeff_csa_attention_dp = attention_dp
+    batch_size = attention_dp
+    states = QEffDeepseekV4Cache.get_dummy_cache(config, batch_size=batch_size, ctx_len=8, dtype=torch.float16)
+
+    for score_state in (states[0][3], states[0][6]):
+        assert torch.isneginf(score_state).all()
+
+    cache = QEffDeepseekV4Cache.from_legacy_cache(config, states, torch.zeros(batch_size, 1, dtype=torch.long))
+    cache.layers[0].compressor_score_state.zero_()
+    cache.layers[0].indexer_score_state.zero_()
+    cache.layers[0].reset()
+
+    assert torch.isneginf(cache.layers[0].compressor_score_state).all()
+    assert torch.isneginf(cache.layers[0].indexer_score_state).all()
 
 
 @pytest.mark.parametrize(

@@ -58,6 +58,24 @@ def _is_export_capture() -> bool:
     return torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
 
+def _nonnegative_integer_floor_div(position: torch.Tensor, divisor: int) -> torch.Tensor:
+    """Divide nonnegative position/index tensors using integer floor division."""
+    if divisor < 1:
+        raise ValueError(f"divisor must be positive, got {divisor}")
+    position_int32 = position.to(torch.int32)
+    if torch.onnx.is_in_onnx_export():
+        divisor_tensor = torch.full((), divisor, dtype=torch.int32, device=position.device)
+        quotient = torch.onnx.ops.symbolic(
+            "Div",
+            (position_int32, divisor_tensor),
+            dtype=torch.int32,
+            shape=position.shape,
+        )
+    else:
+        quotient = torch.div(position_int32, divisor, rounding_mode="floor")
+    return quotient.to(position.dtype)
+
+
 def _sliding_window_context_indices(
     position_ids: torch.Tensor,
     sliding_window: int,
@@ -983,7 +1001,7 @@ class QEffCSACacheLayer(CacheLayerMixin):
             self.local_kv_cache = ctx_scatter(self.local_kv_cache, scatter_positions, key_states)
         self.cumulative_length += key_states.shape[2]
 
-        entry_positions = torch.div(position_ids, self.compression_size, rounding_mode="floor")
+        entry_positions = _nonnegative_integer_floor_div(position_ids, self.compression_size)
         buffer_positions = torch.remainder(entry_positions, 2) * self.compression_size + torch.remainder(
             position_ids, self.compression_size
         )
@@ -1112,6 +1130,8 @@ class QEffCSACacheLayer(CacheLayerMixin):
             "indexer_kv_cache",
         ):
             getattr(self, name).zero_()
+        self.compressor_score_state.fill_(float("-inf"))
+        self.indexer_score_state.fill_(float("-inf"))
         self.cumulative_length = 0
         self.compressor_entry_count = 0
         self.indexer_entry_count = 0
@@ -1375,7 +1395,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             compressed_positions = block_starts.view(1, -1).expand(batch_size, -1)
             cos, sin = rotary_emb(compressed, position_ids=compressed_positions, layer_type="compress")
             compressed = self._csa_prefill_rotate(compressed.unsqueeze(1), cos, sin).squeeze(1)
-            cache_positions = torch.div(block_starts, ratio, rounding_mode="floor").view(1, -1).expand(batch_size, -1)
+            cache_positions = _nonnegative_integer_floor_div(block_starts, ratio).view(1, -1).expand(batch_size, -1)
             kv_cache = self._csa_prefill_scatter(kv_cache, cache_positions, compressed)
             last_slots = torch.arange(ratio, device=hidden_states.device).view(1, -1).expand(batch_size, -1)
             last_kv = block_kv[:, -1].to(kv_state.dtype)
@@ -1722,7 +1742,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 )
                 compressed_kv_cache = ctx_scatter(
                     compressed_kv_cache,
-                    torch.div(block_starts, ratio, rounding_mode="floor").view(1, -1).expand(batch_size, -1),
+                    _nonnegative_integer_floor_div(block_starts, ratio).view(1, -1).expand(batch_size, -1),
                     compressed.unsqueeze(1),
                 )
                 last_slots = torch.arange(ratio, device=hidden_states.device).view(1, -1).expand(batch_size, -1)
@@ -1739,7 +1759,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 -3.0e4,
             )
             sinks = self.sinks.view(1, 1, self.num_heads, 1).float()
-            causal_threshold = torch.div(position_chunk[:, :1] + 1, ratio, rounding_mode="floor")
+            causal_threshold = _nonnegative_integer_floor_div(position_chunk[:, :1] + 1, ratio)
             running_max = torch.maximum(local_scores.amax(dim=-1), sinks.squeeze(-1))
             local_exp = torch.exp(local_scores - running_max.unsqueeze(-1))
             running_sum = local_exp.sum(dim=-1) + torch.exp(sinks.squeeze(-1) - running_max)
@@ -2223,7 +2243,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                     compressor_kv_buffer * weighted_gate.float().softmax(dim=2).to(layer.dtype),
                 )
             ).to(layer.dtype)
-            entry_positions = torch.div(position_ids, layer.compression_size, rounding_mode="floor")
+            entry_positions = _nonnegative_integer_floor_div(position_ids, layer.compression_size)
             rope_positions = entry_positions * layer.compression_size
             comp_cos, comp_sin = self.compressor.rotary_emb(
                 compressed,
@@ -2240,15 +2260,15 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             )
             compressed_kv = layer.as_batch_major(compressed_kv)
             compressed_capacity = compressed_kv.shape[2]
-            completed_entries = torch.div(position_ids + 1, layer.compression_size, rounding_mode="floor")
+            completed_entries = _nonnegative_integer_floor_div(position_ids + 1, layer.compression_size)
             entry_indices = torch.arange(
                 compressed_capacity, device=compressed_kv.device, dtype=completed_entries.dtype
             )
             if layer.compressed_kv_cp > 1:
                 slots_per_cp = compressed_capacity // layer.compressed_kv_cp
-                entry_indices = torch.remainder(entry_indices, slots_per_cp) * layer.compressed_kv_cp + torch.div(
-                    entry_indices, slots_per_cp, rounding_mode="floor"
-                )
+                entry_indices = torch.remainder(
+                    entry_indices, slots_per_cp
+                ) * layer.compressed_kv_cp + _nonnegative_integer_floor_div(entry_indices, slots_per_cp)
             block_bias = entry_indices.view(1, 1, 1, -1) >= completed_entries.unsqueeze(1).unsqueeze(-1)
         elif (
             self.compressor is not None
@@ -2267,7 +2287,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 head_dim: int,
             ) -> torch.Tensor:
                 ratio = layer.compression_size
-                entry_positions = torch.div(position_ids, ratio, rounding_mode="floor")
+                entry_positions = _nonnegative_integer_floor_div(position_ids, ratio)
                 if layer.uses_dp_layout:
                     entry_positions_dp = layer._to_dp_layout(entry_positions).squeeze(-1).to(torch.int32)
                     slot_offsets = torch.arange(ratio, device=position_ids.device, dtype=torch.int32).view(1, 1, -1)
@@ -2376,7 +2396,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 self.compressor.indexer.rotary_emb,
                 self.compressor.indexer.head_dim,
             )
-            completed_entries = torch.div(position_ids + 1, layer.compression_size, rounding_mode="floor")
+            completed_entries = _nonnegative_integer_floor_div(position_ids + 1, layer.compression_size)
             compressed_capacity = compressed_kv.shape[2]
             entry_indices = torch.arange(
                 compressed_capacity, device=compressed_kv.device, dtype=completed_entries.dtype
@@ -2648,10 +2668,10 @@ class QEffDeepseekV4Cache(Cache):
                         torch.zeros(batch_size, config.sliding_window, config.head_dim, **common),
                         torch.zeros(batch_size, capacity, config.head_dim, **common),
                         torch.zeros(batch_size, 2 * ratio, 2 * config.head_dim, **common),
-                        torch.zeros(batch_size, 2 * ratio, 2 * config.head_dim, **common),
+                        torch.full((batch_size, 2 * ratio, 2 * config.head_dim), float("-inf"), **common),
                         torch.zeros(batch_size, capacity, config.index_head_dim, **common),
                         torch.zeros(batch_size, 2 * ratio, 2 * config.index_head_dim, **common),
-                        torch.zeros(batch_size, 2 * ratio, 2 * config.index_head_dim, **common),
+                        torch.full((batch_size, 2 * ratio, 2 * config.index_head_dim), float("-inf"), **common),
                     )
                 )
                 continue
@@ -2678,10 +2698,14 @@ class QEffDeepseekV4Cache(Cache):
                         ),
                         torch.zeros(batch_local, attention_dp, capacity, config.head_dim, **common),
                         torch.zeros(batch_local, attention_dp, banked, 2 * config.head_dim, **common),
-                        torch.zeros(batch_local, attention_dp, banked, 2 * config.head_dim, **common),
+                        torch.full((batch_local, attention_dp, banked, 2 * config.head_dim), float("-inf"), **common),
                         torch.zeros(batch_local, attention_dp, capacity, config.index_head_dim, **common),
                         torch.zeros(batch_local, attention_dp, banked, 2 * config.index_head_dim, **common),
-                        torch.zeros(batch_local, attention_dp, banked, 2 * config.index_head_dim, **common),
+                        torch.full(
+                            (batch_local, attention_dp, banked, 2 * config.index_head_dim),
+                            float("-inf"),
+                            **common,
+                        ),
                     )
                 )
                 continue
@@ -2692,10 +2716,10 @@ class QEffDeepseekV4Cache(Cache):
                     sliding,
                     torch.zeros(batch_size, 1, capacity, config.head_dim, **common),
                     torch.zeros(batch_size, 1, banked, 2 * config.head_dim, **common),
-                    torch.zeros(batch_size, 1, banked, 2 * config.head_dim, **common),
+                    torch.full((batch_size, 1, banked, 2 * config.head_dim), float("-inf"), **common),
                     torch.zeros(batch_size, 1, capacity, config.index_head_dim, **common),
                     torch.zeros(batch_size, 1, banked, 2 * config.index_head_dim, **common),
-                    torch.zeros(batch_size, 1, banked, 2 * config.index_head_dim, **common),
+                    torch.full((batch_size, 1, banked, 2 * config.index_head_dim), float("-inf"), **common),
                 )
             )
         return tuple(layers)
@@ -2912,11 +2936,11 @@ class QEffDeepseekV4TopKRouter(DeepseekV4TopKRouter):
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
-        scores = self.score_fn(logits)
+        scores = self.score_fn(logits.float())
         indices = torch.topk(scores + self.e_score_correction_bias, self.top_k, dim=-1, sorted=False).indices
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
-        return logits, weights * self.routed_scaling_factor, indices
+        return logits, (weights * self.routed_scaling_factor).to(flat.dtype), indices
 
 
 class QEffDeepseekV4HashRouter(DeepseekV4HashRouter):
@@ -2925,11 +2949,11 @@ class QEffDeepseekV4HashRouter(DeepseekV4HashRouter):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
-        scores = self.score_fn(logits)
+        scores = self.score_fn(logits.float())
         indices = self.tid2eid[input_ids.reshape(-1)].reshape(-1, self.top_k).long()
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
-        return logits, weights * self.routed_scaling_factor, indices
+        return logits, (weights * self.routed_scaling_factor).to(flat.dtype), indices
 
 
 class QEffDeepseekV4HyperConnection(DeepseekV4HyperConnection):
