@@ -87,6 +87,105 @@ def pos_ids(batch=1, seq=8, start=0):
 class TestQEffSlidingWindowCache:
     """QEffSlidingWindowCache must correctly implement sliding-window KV caching."""
 
+    @pytest.mark.parametrize("layer_types", [None, []])
+    def test_write_only_rejects_unknown_attention_mode(self, layer_types):
+        cfg = _FakeConfig()
+        cfg.layer_types = layer_types
+        cache = QEffSlidingWindowCache(cfg, batch_size=1, max_cache_len=16, sliding_window_len=4)
+        cache.key_cache = [torch.zeros(1, 2, 4, 16)]
+        cache.value_cache = [torch.zeros(1, 2, 4, 16)]
+        cache.seen_tokens = 7
+        keys, values = make_kv_4d(seq=1)
+        with pytest.raises(ValueError, match="requires is_sliding or config.layer_types"):
+            cache.write_only(keys, values, layer_idx=0, cache_kwargs={"position_ids": pos_ids(seq=1, start=5)})
+        assert torch.count_nonzero(cache.key_cache[0]) == 0
+        assert torch.count_nonzero(cache.value_cache[0]) == 0
+        assert cache.seen_tokens == 7
+
+    def test_write_only_initial_append_preserves_legacy_compatibility(self):
+        cache = QEffSlidingWindowCache(_FakeConfig(), batch_size=1, max_cache_len=16, sliding_window_len=4)
+        keys, values = make_kv_4d(seq=4)
+        cache.write_only(keys, values, layer_idx=0)
+        torch.testing.assert_close(cache.key_cache[0], keys)
+        torch.testing.assert_close(cache.value_cache[0], values)
+        assert cache.seen_tokens == 0
+
+    @pytest.mark.parametrize(
+        "attention_type,explicit_mode",
+        [
+            (None, False),
+            (None, True),
+            ("sliding_attention", None),
+            ("sliding_attention", False),
+            ("sliding_attention", True),
+            ("full_attention", None),
+            ("full_attention", False),
+            ("full_attention", True),
+        ],
+    )
+    @pytest.mark.parametrize("continuous_batching", [False, True])
+    def test_write_only_resolves_attention_mode(self, attention_type, explicit_mode, continuous_batching):
+        cfg = _FakeConfig()
+        if attention_type is not None:
+            cfg.layer_types = [attention_type]
+        is_sliding = explicit_mode if explicit_mode is not None else attention_type == "sliding_attention"
+        cache_len = 4 if is_sliding else 16
+        cache = QEffSlidingWindowCache(cfg, batch_size=2, max_cache_len=16, sliding_window_len=4)
+        cache.key_cache = [torch.zeros(2, 2, cache_len, 16)]
+        cache.value_cache = [torch.zeros(2, 2, cache_len, 16)]
+        cache.seen_tokens = 7
+        batch_size = 1 if continuous_batching else 2
+        keys, values = make_kv_4d(batch=batch_size, seq=1)
+        kwargs = {"position_ids": pos_ids(batch=batch_size, seq=1, start=5)}
+        if explicit_mode is not None:
+            kwargs["is_sliding"] = explicit_mode
+        if continuous_batching:
+            kwargs["batch_index"] = torch.tensor([[1]])
+        cache.write_only(keys, values, layer_idx=0, cache_kwargs=kwargs)
+        expected_keys = torch.zeros_like(cache.key_cache[0])
+        expected_values = torch.zeros_like(cache.value_cache[0])
+        position = 1 if is_sliding else 5
+        if continuous_batching:
+            expected_keys[1, :, position] = keys[0, :, 0]
+            expected_values[1, :, position] = values[0, :, 0]
+        else:
+            expected_keys[:, :, position] = keys[:, :, 0]
+            expected_values[:, :, position] = values[:, :, 0]
+        torch.testing.assert_close(cache.key_cache[0], expected_keys)
+        torch.testing.assert_close(cache.value_cache[0], expected_values)
+        assert cache.seen_tokens == 7
+
+    @pytest.mark.parametrize("attention_type", ["sliding_attention", "full_attention"])
+    @pytest.mark.parametrize("write_last_position", [False, True])
+    def test_write_only_ignores_negative_positions_without_continuous_batching(
+        self, attention_type, write_last_position
+    ):
+        cfg = _FakeConfig()
+        cfg.layer_types = [attention_type]
+        cache_len = 4 if attention_type == "sliding_attention" else 16
+        cache = QEffSlidingWindowCache(cfg, batch_size=1, max_cache_len=16, sliding_window_len=4)
+        cache.key_cache = [torch.randn(1, 2, cache_len, 16)]
+        cache.value_cache = [torch.randn(1, 2, cache_len, 16)]
+        original_keys = cache.key_cache[0].clone()
+        original_values = cache.value_cache[0].clone()
+        keys, values = make_kv_4d(batch=1, seq=2)
+        position_id = cache_len - 1 if write_last_position else 5
+
+        cache.write_only(
+            keys,
+            values,
+            layer_idx=0,
+            cache_kwargs={"position_ids": torch.tensor([[position_id, -1]])},
+        )
+
+        expected_position = position_id % cache_len if attention_type == "sliding_attention" else position_id
+        expected_keys = original_keys.clone()
+        expected_values = original_values.clone()
+        expected_keys[:, :, expected_position] = keys[:, :, 0]
+        expected_values[:, :, expected_position] = values[:, :, 0]
+        torch.testing.assert_close(cache.key_cache[0], expected_keys)
+        torch.testing.assert_close(cache.value_cache[0], expected_values)
+
     def test_creation_succeeds(self):
         """Cache must be created without errors."""
         cfg = _FakeConfig()
