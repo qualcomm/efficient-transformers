@@ -22,11 +22,17 @@ from torch.export import Dim
 
 from QEfficient.base.onnx_transforms import (
     CustomOpTransform,
+    DeduplicateRepeatedSubgraphTransform,
     LocalizeFunctionReduceSumAxesTransform,
     PreserveNestedCacheRetainedStateTransform,
     RenameFunctionOutputsTransform,
     RenameRepeatedSubgraphTransform,
     RenameWsubNodesTransform,
+)
+from QEfficient.proxy.modeling_utils import (
+    _get_language_config,
+    _get_layer_signature,
+    _get_signature_horizon,
 )
 from QEfficient.transformers.cache_utils import InvalidIndexProvider
 from QEfficient.utils.cache import QEFF_HOME
@@ -68,18 +74,31 @@ def reorder_inputs_by_signature(model, example_inputs, dynamic_shapes=None):
     """
     sig_keys = list(inspect.signature(model.forward).parameters.keys())
     sig_key_set = set(sig_keys)
-    ordered_inputs, ordered_shapes = {}, {}
+    ordered_inputs = {}
     for k in sig_keys:
         if k in example_inputs:
             ordered_inputs[k] = example_inputs[k]
-        if dynamic_shapes is not None and k in dynamic_shapes:
-            ordered_shapes[k] = dynamic_shapes[k]
     reordered_inputs = {**ordered_inputs, **{k: v for k, v in example_inputs.items() if k not in sig_key_set}}
     if dynamic_shapes is not None:
         # Legacy dynamic_axes may also describe outputs. torch.export accepts
         # constraints only for actual forward inputs, so discard output-only
         # entries while preserving any valid **kwargs inputs.
         reordered_shapes = {key: dynamic_shapes.get(key, {}) for key in reordered_inputs}
+        if getattr(getattr(model, "config", None), "model_type", None) in {
+            "minimax_m3_vl",
+            "minimax_m3_vl_text",
+        }:
+
+            def _concretize(spec, value):
+                if torch.is_tensor(value) and isinstance(spec, dict):
+                    return {axis: int(value.shape[axis]) for axis in spec}
+                if isinstance(spec, (list, tuple)) and isinstance(value, (list, tuple)):
+                    return type(spec)(_concretize(s, v) for s, v in zip(spec, value))
+                if isinstance(spec, dict) and isinstance(value, dict):
+                    return {key: _concretize(item, value.get(key)) for key, item in spec.items()}
+                return spec
+
+            reordered_shapes = {key: _concretize(spec, reordered_inputs[key]) for key, spec in reordered_shapes.items()}
         return reordered_inputs, reordered_shapes
     return reordered_inputs, None
 
@@ -137,13 +156,11 @@ def convert_dynamic_axes_to_dynamic_shapes(
         torch.onnx.export(dynamic_shapes=...).
     """
     text_config = getattr(model_config, "text_config", None)
-    max_seq_len = getattr(
-        model_config,
-        "max_position_embeddings",
-        getattr(text_config, "max_position_embeddings", 1024),
-    )
+    max_seq_len = getattr(model_config, "max_position_embeddings", None)
+    if max_seq_len is None:
+        max_seq_len = getattr(text_config, "max_position_embeddings", 1024)
     model_type = getattr(model_config, "model_type", None)
-    batch_min = 1 if model_type == "gpt_oss" else 2
+    batch_min = 1 if model_type in {"gpt_oss", "minimax_m3_vl", "minimax_m3_vl_text"} else 2
 
     observed_dim_values: dict[str, set[int]] = {}
     if example_inputs is not None:
@@ -176,7 +193,11 @@ def convert_dynamic_axes_to_dynamic_shapes(
             elif dim_name == "time" and observed_dim_values.get(dim_name) == {1}:
                 dim_registry[dim_name] = Dim("time")
             elif observed_dim_values.get(dim_name) == {1}:
-                dim_registry[dim_name] = Dim.AUTO
+                dim_registry[dim_name] = Dim.STATIC if model_type == "glm_moe_dsa" else Dim.AUTO
+            elif dim_name == "batch_size" and model_type == "glm_moe_dsa":
+                # GLM DSA can fold batch across attention-DP lanes. Dynamo may
+                # specialize it to the export batch for a concrete DP layout.
+                dim_registry[dim_name] = Dim.STATIC
             elif dim_name == "batch_size":
                 dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
             elif dim_name == "full_batch_size":
@@ -189,7 +210,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 # Wav2Vec2's input sequence is raw audio samples, not transformer positions.
                 dim_registry[dim_name] = Dim("seq_len", min=2, max=WAV2VEC2_MAX_SEQ_LEN)
             elif "seq_len" in dim_name:
-                dim_registry[dim_name] = Dim("seq_len", min=1, max=max_seq_len)
+                seq_min = 1 if model_type in {"glm_moe_dsa", "minimax_m3_vl", "minimax_m3_vl_text"} else 2
+                dim_registry[dim_name] = Dim("seq_len", min=seq_min, max=max_seq_len)
             elif "comp_ctx_lengths" in dim_name:
                 dim_registry[dim_name] = Dim(
                     "comp_ctx_lengths",
@@ -208,6 +230,14 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 # way; the symbol embedded in the exported graph must match that key exactly, so it
                 # can't fall through to the generic "ctx_len" branch below.
                 dim_registry[dim_name] = Dim("decoder_ctx_len", min=2, max=max_seq_len)
+            elif "pooled_ctx_len" in dim_name:
+                dim_registry[dim_name] = Dim("pooled_ctx_len", min=2, max=max_seq_len)
+            elif dim_name.startswith("compressed_ctx_len_"):
+                dim_registry[dim_name] = Dim(dim_name, min=1, max=max_seq_len)
+            elif model_type in {"minimax_m3_vl", "minimax_m3_vl_text"} and "ctx_len" in dim_name:
+                dim_registry[dim_name] = Dim(dim_name, min=1, max=max_seq_len)
+            elif model_type == "glm_moe_dsa" and "ctx_len" in dim_name:
+                dim_registry[dim_name] = Dim.STATIC
             elif "ctx_len" in dim_name:
                 dim_registry[dim_name] = Dim("ctx_len", min=1, max=max_seq_len)
             elif "sliding_window" in dim_name:
@@ -227,6 +257,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
     recurrent_states: dict[int, Any] = {}
     compressed_kv_layers: dict[int, Any] = {}
     k_pe_layers: dict[int, Any] = {}
+    deepseek_v4_past_states: dict[int, list[Any]] = {}
+    indexer_key_layers: dict[int, Any] = {}
     # Encoder-decoder models (e.g. Whisper) carry separate self- and cross-attention
     # caches per layer instead of the plain decoder-only past_key./past_value. pair.
     past_key_self_layers: dict[int, Any] = {}
@@ -235,14 +267,26 @@ def convert_dynamic_axes_to_dynamic_shapes(
     past_value_cross_layers: dict[int, Any] = {}
 
     for input_name, axes_map in dynamic_axes.items():
+        # Dynamic axes metadata also contains retained-state outputs. They use
+        # names such as ``past_key.0_RetainedState`` but are not inputs to the
+        # torch.export pytree, so do not parse their suffix as a layer index.
+        if input_name.endswith(("_RetainedState", "_InternalRetainedState")):
+            continue
+
+        # Folded GLM cache dimensions are derived from fixed DP/CP topology
+        # values. Keep their distinct names in ONNX dynamic_axes metadata, but
+        # leave them static for torch.export, which cannot express B/DP or T/CP
+        # relationships and correctly infers these traced dimensions as static.
         resolved = {
             axis_idx: resolve_dim(dim_name, input_name)
             for axis_idx, dim_name in axes_map.items()
+            if not dim_name.startswith("glm_")
             # Whisper's decoder mask construction (cache_position.reshape(-1, 1)) only holds for
             # batch_size == 1, which is the only batch size it runs with today; keeping this axis
             # static avoids tracing through that latent bsz>1 bug during export.
-            if not (model_type == "whisper" and dim_name == "batch_size")
+            and not (model_type == "whisper" and dim_name == "batch_size")
         }
+
         if input_name.startswith("past_key_self."):
             past_key_self_layers[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("past_value_self."):
@@ -251,6 +295,11 @@ def convert_dynamic_axes_to_dynamic_shapes(
             past_key_cross_layers[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("past_value_cross."):
             past_value_cross_layers[int(input_name.split(".")[1])] = resolved
+        elif input_name.startswith("indexer_key."):
+            indexer_key_layers[int(input_name.rsplit(".", maxsplit=1)[1])] = resolved
+        elif model_type == "deepseek_v4" and input_name.startswith("past_"):
+            _, layer_idx = input_name.rsplit(".", maxsplit=1)
+            deepseek_v4_past_states.setdefault(int(layer_idx), []).append(resolved)
         elif input_name.startswith("past_key."):
             past_keys[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("past_value."):
@@ -263,6 +312,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
             compressed_kv_layers[int(input_name.split(".")[1])] = resolved
         elif input_name.startswith("k_pe."):
             k_pe_layers[int(input_name.split(".")[1])] = resolved
+        elif input_name.startswith(("indexer_key.", "index_key.")):
+            indexer_key_layers[int(input_name.split(".")[1])] = resolved
         else:
             dynamic_shapes[input_name] = resolved
 
@@ -298,8 +349,18 @@ def convert_dynamic_axes_to_dynamic_shapes(
     if compressed_kv_layers or k_pe_layers:
         max_layer = max(list(compressed_kv_layers.keys()) + list(k_pe_layers.keys()))
         dynamic_shapes["compressed_kvs"] = [
-            (compressed_kv_layers.get(i, {}), k_pe_layers.get(i, {})) for i in range(max_layer + 1)
+            [compressed_kv_layers.get(i, {}), k_pe_layers.get(i, {})] for i in range(max_layer + 1)
         ]
+
+    if indexer_key_layers:
+        index_key_name = "index_keys" if model_type == "minimax_m3_vl" else "indexer_key_cache"
+        dynamic_shapes[index_key_name] = [
+            resolved for _, resolved in sorted(indexer_key_layers.items(), key=lambda item: item[0])
+        ]
+
+    if deepseek_v4_past_states:
+        max_layer = max(deepseek_v4_past_states)
+        dynamic_shapes["past_key_values"] = [deepseek_v4_past_states.get(i, []) for i in range(max_layer + 1)]
 
     return dynamic_shapes
 
@@ -360,7 +421,10 @@ def get_decoder_layer_classes_for_export(model):
         try:
             submodule_classes = get_submodules_for_export()
             if submodule_classes:
-                return {cls for cls in submodule_classes if inspect.isclass(cls)}
+                if inspect.isclass(submodule_classes):
+                    return [submodule_classes]
+                # Preserve hook order and duplicate classes because dynamo uses this list to name repeated functions.
+                return [cls for cls in submodule_classes if inspect.isclass(cls)]
         except Exception as exc:
             logger.warning(
                 f"get_submodules_for_export failed for {model.__class__.__name__}: "
@@ -373,25 +437,54 @@ def get_decoder_layer_classes_for_export(model):
             "Auto-discovered repeated submodule classes for export: "
             + ", ".join(sorted(cls.__name__ for cls in discovered))
         )
-        return discovered
+        return sorted(discovered, key=lambda cls: cls.__name__)
     return []
 
 
-def _iter_onnx_nodes(nodes):
-    """Yield graph nodes recursively, including nodes inside nested ONNX subgraphs."""
-    for node in nodes:
-        yield node
-        for attr in node.attribute:
-            if attr.HasField("g"):
-                yield from _iter_onnx_nodes(attr.g.node)
+def _function_proto_id(function_proto) -> tuple[str, str]:
+    return function_proto.domain, function_proto.name
 
 
-def _function_call_counts(onnx_model, function_names: set[str]) -> Counter:
-    """Count call sites for the selected local function names in an ONNX model."""
-    nodes = list(_iter_onnx_nodes(onnx_model.graph.node))
-    for function_proto in onnx_model.functions:
-        nodes.extend(_iter_onnx_nodes(function_proto.node))
-    return Counter(node.op_type for node in nodes if node.op_type in function_names)
+def _node_function_id(node) -> tuple[str, str]:
+    return node.domain, node.op_type
+
+
+def _format_function_id(function_id: tuple[str, str]) -> str:
+    domain, name = function_id
+    return f"{domain}::{name}" if domain else name
+
+
+def _decoder_function_call_nodes(onnx_model, function_ids: set[tuple[str, str]]):
+    """Return top-level decoder function calls in graph execution order."""
+    return [node for node in onnx_model.graph.node if _node_function_id(node) in function_ids]
+
+
+def _function_call_counts(onnx_model, function_ids: set[tuple[str, str]]) -> Counter:
+    """Count top-level decoder function calls by exact ONNX function variant."""
+    return Counter(_node_function_id(node) for node in _decoder_function_call_nodes(onnx_model, function_ids))
+
+
+def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
+    """Return required and observed proxy signatures when model config supports them."""
+    model_config = getattr(getattr(qeff_model, "model", None), "config", None)
+    if model_config is None:
+        return None
+
+    language_config = _get_language_config(model_config)
+    num_hidden_layers = getattr(language_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int) or num_hidden_layers < 1:
+        return None
+
+    signature_horizon = _get_signature_horizon(language_config, num_hidden_layers)
+    required_signatures = {_get_layer_signature(language_config, layer_idx) for layer_idx in range(signature_horizon)}
+    observed_signatures = [
+        _get_layer_signature(language_config, layer_idx) for layer_idx in range(len(decoder_call_nodes))
+    ]
+    function_signatures = {}
+    for node, signature in zip(decoder_call_nodes, observed_signatures):
+        function_signatures.setdefault(_node_function_id(node), set()).add(signature)
+
+    return required_signatures, observed_signatures, Counter(observed_signatures), function_signatures
 
 
 def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
@@ -428,26 +521,62 @@ def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
 
     target_classnames = {cls.__name__ for cls in decoder_layer_classes}
     onnx_model = onnx.load(onnx_path, load_external_data=False)
-    function_names = {
-        function_proto.name
+    function_ids = {
+        _function_proto_id(function_proto)
         for function_proto in onnx_model.functions
         if any(classname in function_proto.name for classname in target_classnames)
     }
-    if not function_names:
+    if not function_ids:
         raise RuntimeError(
             "Proxy ONNX subfunction validation failed: no decoder-layer subfunctions were found "
             f"for expected classes {sorted(target_classnames)}."
         )
 
-    call_counts = _function_call_counts(onnx_model, function_names)
-    single_call_functions = {
-        name: call_counts.get(name, 0) for name in sorted(function_names) if call_counts.get(name, 0) <= 1
+    decoder_call_nodes = _decoder_function_call_nodes(onnx_model, function_ids)
+    call_counts = _function_call_counts(onnx_model, function_ids)
+    exact_function_variant_counts = {
+        _format_function_id(function_id): call_counts.get(function_id, 0) for function_id in sorted(function_ids)
     }
-    if single_call_functions:
+    signature_info = _logical_proxy_signature_info(qeff_model, decoder_call_nodes)
+
+    if signature_info is None:
+        single_call_functions = {name: count for name, count in exact_function_variant_counts.items() if count <= 1}
+        if single_call_functions:
+            raise RuntimeError(
+                "Proxy ONNX subfunction validation failed: each decoder-layer subfunction must be invoked "
+                "more than once for a faithful compiler performance proxy. "
+                f"Observed exact function-variant call counts: {exact_function_variant_counts}."
+            )
+        return
+
+    required_signatures, ordered_signatures, logical_signature_counts, function_signatures = signature_info
+    missing_signatures = required_signatures - set(logical_signature_counts)
+    underrepresented_signatures = {
+        signature: count for signature, count in logical_signature_counts.items() if count < 2
+    }
+    underrepresented_signatures.update({signature: 0 for signature in missing_signatures})
+    mixed_signature_functions = {
+        _format_function_id(function_id): sorted(signatures)
+        for function_id, signatures in function_signatures.items()
+        if len(signatures) > 1
+    }
+    unused_function_variants = {name: count for name, count in exact_function_variant_counts.items() if count == 0}
+
+    first_call_signature = ordered_signatures[0] if ordered_signatures else None
+    if first_call_signature is None:
+        underrepresented_signatures["<missing first decoder call>"] = 0
+    elif logical_signature_counts[first_call_signature] < 2:
+        underrepresented_signatures[first_call_signature] = logical_signature_counts[first_call_signature]
+
+    if underrepresented_signatures or mixed_signature_functions or unused_function_variants:
         raise RuntimeError(
-            "Proxy ONNX subfunction validation failed: each decoder-layer subfunction must be invoked more "
-            "than once for a faithful compiler performance proxy. "
-            f"Observed call counts: {single_call_functions}."
+            "Proxy ONNX subfunction validation failed: each required logical decoder-layer signature must be "
+            "invoked at least twice for a faithful compiler performance proxy. "
+            f"Observed exact function-variant call counts: {exact_function_variant_counts}. "
+            f"Observed logical layer-signature call counts: {logical_signature_counts}. "
+            f"Underrepresented logical signatures: {underrepresented_signatures}. "
+            f"Function variants assigned to multiple logical signatures: {mixed_signature_functions}. "
+            f"Unused exact function variants: {unused_function_variants}."
         )
 
 
@@ -658,6 +787,18 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
             "dynamo": all_args.get("dynamo", False),
         }
     )
+    if all_args.get("dynamo", False):
+        # Dynamo node names are compiler/MDP-facing artifacts. Bump this when
+        # their post-export normalization changes so cached generic-name ONNX
+        # files are not reused.
+        copy_of_hash_params["dynamo_node_name_version"] = 1
+        if (
+            hasattr(qeff_model.model, "config")
+            and getattr(qeff_model.model.config, "model_type", None) == "minimax_m3_vl"
+        ):
+            input_ids = (all_args.get("example_inputs") or {}).get("input_ids")
+            if torch.is_tensor(input_ids):
+                copy_of_hash_params["onnx_export_batch_size"] = int(input_ids.shape[0])
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
@@ -743,9 +884,11 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
 
     # Add subfunction-specific ONNX transforms based on export path
     if dynamo:
-        # Dynamo: PreserveNestedCacheRetainedStateTransform + RenameRepeatedSubgraphTransform.
+        # Dynamo repairs retained cache outputs, collapses duplicate local functions, then assigns semantic names.
         if PreserveNestedCacheRetainedStateTransform not in qeff_model._onnx_transforms:
             qeff_model._onnx_transforms.append(PreserveNestedCacheRetainedStateTransform)
+        if DeduplicateRepeatedSubgraphTransform not in qeff_model._onnx_transforms:
+            qeff_model._onnx_transforms.append(DeduplicateRepeatedSubgraphTransform)
         if RenameRepeatedSubgraphTransform not in qeff_model._onnx_transforms:
             qeff_model._onnx_transforms.append(RenameRepeatedSubgraphTransform)
     else:
@@ -764,8 +907,8 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
     decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
     if decoder_layer_classes:
         if dynamo:
-            # Pass resolved classnames to RenameRepeatedSubgraphTransform; single resolution point to avoid double-call.
-            resolved_classnames = sorted(cls.__name__ for cls in decoder_layer_classes)
+            # Dynamo needs ordered duplicate names; TorchScript only accepts unique module classes below.
+            resolved_classnames = [cls.__name__ for cls in decoder_layer_classes]
             qeff_model._subfunction_target_classnames = resolved_classnames
             onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
             onnx_transform_kwargs["target_classnames"] = resolved_classnames
@@ -775,7 +918,7 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
             kwargs["onnx_transform_kwargs"] = onnx_transform_kwargs
         else:
             # TorchScript path: pass class objects for export_modules_as_functions
-            kwargs["export_modules_as_functions"] = decoder_layer_classes
+            kwargs["export_modules_as_functions"] = set(decoder_layer_classes)
 
     return (
         args,

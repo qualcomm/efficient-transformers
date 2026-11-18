@@ -13,6 +13,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from QEfficient.generation.text_generation_inference import TextGeneration
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.test_utils import load_qeff_causal_lm_model
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../configs/causal_model_configs.json")
@@ -194,7 +195,7 @@ def test_full_simple_prefix_caching(model_name, manual_cleanup):
         ctx_len=256,
         full_batch_size=2,
         kv_cache_batch_size=4,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
     )
     prefix_caching_inference(model_name=model_name, qpc_path=qeff_model.qpc_path)
     assert os.path.isfile(os.path.join(os.path.dirname(qeff_model.qpc_path), "qconfig.json"))
@@ -218,7 +219,7 @@ def test_simple_prefix_caching(model_name, manual_cleanup):
         ctx_len=256,
         full_batch_size=2,
         kv_cache_batch_size=4,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
     )
     prefix_caching_inference(model_name=model_name, qpc_path=qeff_model.qpc_path)
     assert os.path.isfile(os.path.join(os.path.dirname(qeff_model.qpc_path), "qconfig.json"))

@@ -18,6 +18,7 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
 )
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLAttention,
     Qwen2_5_VLConfig,
@@ -226,6 +227,35 @@ class QEffQwen2_5_VLVisionBlock(Qwen2_5_VLVisionBlock):
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
+
+
+class QEffQwen2_5_VisionPatchEmbed(Qwen2_5_VisionPatchEmbed):
+    def __qeff_init__(self):
+        if self.proj.bias is None:
+            proj = self.proj
+            qeff_proj = nn.Conv3d(
+                proj.in_channels,
+                proj.out_channels,
+                proj.kernel_size,
+                stride=proj.stride,
+                padding=proj.padding,
+                dilation=proj.dilation,
+                groups=proj.groups,
+                bias=True,
+                padding_mode=proj.padding_mode,
+                device="meta",
+                dtype=proj.weight.dtype,
+            )
+            qeff_proj.weight = proj.weight
+            del qeff_proj.bias
+            bias_device = proj.weight.device if proj.weight.device.type != "meta" else torch.device("cpu")
+            qeff_proj.register_buffer(
+                "bias",
+                torch.zeros(proj.out_channels, dtype=proj.weight.dtype, device=bias_device),
+                persistent=False,
+            )
+            qeff_proj.train(proj.training)
+            self.proj = qeff_proj
 
 
 class QEffQwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VisionTransformerPretrainedModel):

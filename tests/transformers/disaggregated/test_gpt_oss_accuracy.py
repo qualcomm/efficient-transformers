@@ -21,6 +21,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import QEffGptOssDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.run_utils import ApiRunner
 
 MODEL_ID = "tiny-random/gpt-oss-bf16"
@@ -38,7 +39,7 @@ DECODE_CTX_LEN = PREFILL_CTX_LEN
 DECODE_STEPS = 8
 MOE_PREFILL_PACKED_CHUNK_SIZE = 32
 EXPECTED_MOE_PREFILL_NUM_PACKED_CHUNKS = PREFILL_SEQ_LEN // MOE_PREFILL_PACKED_CHUNK_SIZE
-NUM_CORES = 2
+NUM_CORES = DEFAULT_AIC_NUM_CORES
 
 
 def _moe_qaic_config() -> dict:

@@ -16,6 +16,7 @@ Tests verify:
 All tests run on CPU only. No actual model loading or QAIC hardware execution.
 """
 
+import copy
 import logging
 from types import SimpleNamespace
 
@@ -109,6 +110,52 @@ class TestQEFFAutoModelForImageTextToTextStructure:
         from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForImageTextToText
 
         assert hasattr(QEFFAutoModelForImageTextToText, "__new__")
+
+
+def test_qwen2_5_vl_patch_embed_exports_rank_one_conv_bias(tmp_path):
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionPatchEmbed
+
+    from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+    from QEfficient.transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+        QEffQwen2_5_VisionPatchEmbed,
+    )
+
+    patch_embed = Qwen2_5_VisionPatchEmbed(patch_size=2, temporal_patch_size=2, embed_dim=4)
+    expected_patch_embed = copy.deepcopy(patch_embed)
+    original_projection = patch_embed.proj
+    vision_model = nn.Module()
+    vision_model.patch_embed = patch_embed
+    vision_model, transformed = KVCacheTransform.apply(vision_model)
+    assert transformed
+    assert isinstance(vision_model.patch_embed, QEffQwen2_5_VisionPatchEmbed)
+    assert vision_model.patch_embed.proj is not original_projection
+    assert vision_model.patch_embed.proj.weight is original_projection.weight
+    assert QEffQwen2_5_VisionPatchEmbed.forward is Qwen2_5_VisionPatchEmbed.forward
+    assert "patch_embed.proj.bias" not in vision_model.state_dict()
+    assert "patch_embed.proj.bias" in dict(vision_model.named_buffers())
+
+    input_values = torch.randn(3, 3 * 2 * 2 * 2)
+    torch.testing.assert_close(vision_model.patch_embed(input_values), expected_patch_embed(input_values))
+
+    meta_patch_embed = Qwen2_5_VisionPatchEmbed(patch_size=2, temporal_patch_size=2, embed_dim=4).to(device="meta")
+    meta_model = nn.Module()
+    meta_model.patch_embed = meta_patch_embed
+    meta_model, transformed = KVCacheTransform.apply(meta_model)
+    assert transformed
+    meta_patch_embed = meta_model.patch_embed.eval()
+    assert meta_patch_embed.proj.bias.device.type == "cpu"
+    onnx_program = torch.onnx.export(
+        meta_patch_embed,
+        (torch.empty(3, 3 * 2 * 2 * 2, device="meta"),),
+        dynamo=True,
+        optimize=False,
+    )
+    conv_node = next(node for node in onnx_program.model.graph if node.op_type == "Conv")
+    assert conv_node.inputs[2].shape.rank() == 1
+    onnx_program.apply_weights({"proj.weight": torch.zeros(4, 3, 2, 2, 2)})
+    onnx_path = tmp_path / "qwen2_5_vl_patch_embed.onnx"
+    onnx_program.save(onnx_path)
+    assert onnx_path.is_file()
 
 
 def test_weight_free_vlm_rejects_single_qpc():
@@ -223,6 +270,7 @@ class TestInternalVLMClassesStructure:
 
         qeff_model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
         qeff_model.model = _QwenLikeVLM()
+        qeff_model.dflash_tlm = False
         qeff_model.lang_model = _Decoder()
         qeff_model.vision_model = _Vision()
         qeff_model.continuous_batching = False
@@ -342,6 +390,7 @@ class TestQEffAutoModelForImageTextToTextDualQPCStructure:
         calls = []
         qeff_model = object.__new__(_QEffAutoModelForImageTextToTextDualQPC)
         qeff_model.model = _CompileOnlyVLM()
+        qeff_model.dflash_tlm = False
         qeff_model.vision_model = _CompileOnlyModule("vision", calls)
         qeff_model.lang_model = _CompileOnlyModule("lang", calls)
         qeff_model.continuous_batching = False

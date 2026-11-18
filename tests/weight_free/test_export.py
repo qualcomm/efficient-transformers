@@ -19,6 +19,10 @@ CPU-only. No QAIC hardware required.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import numpy as np
 import onnx
 import onnxruntime
@@ -28,6 +32,7 @@ from transformers import AutoTokenizer
 
 from QEfficient.blocking.attention_blocking import BlockingMode
 from QEfficient.exporter.weight_free import load_weight_free_ort_inputs, resolve_weight_spec_path
+from QEfficient.exporter.weight_free.export import _build_qeff_quantization_config
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP
 from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModel,
@@ -35,6 +40,7 @@ from QEfficient.transformers.models.modeling_auto import (
     QEFFAutoModelForCTC,
     QEFFAutoModelForSpeechSeq2Seq,
 )
+from QEfficient.transformers.quantizers.quantizer_compressed_tensors import QEffFP8Config
 from QEfficient.utils import get_num_layers_from_config
 from QEfficient.utils.run_utils import ApiRunner
 
@@ -72,6 +78,35 @@ _BLOCKING_GATHER_EXPORT_MODE_CASES = {
     "hkv": {"blocking_mode": "hkv", "head_block_size": 2, "num_kv_blocks": 2},
     "hqkv": {"blocking_mode": "hqkv", "head_block_size": 2, "num_kv_blocks": 2, "num_q_blocks": 2},
 }
+
+
+def test_weight_free_fp8_config_accepts_checkpoint_scale_format():
+    quantization_config = _build_qeff_quantization_config(
+        QEffFP8Config,
+        {
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "quant_method": "fp8",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    )
+
+    assert quantization_config.activation_scheme == "dynamic"
+    assert quantization_config.fmt == "e4m3"
+    assert quantization_config.scale_fmt == "ue8m0"
+    assert quantization_config.weight_block_size == [128, 128]
+
+
+def test_weight_free_checkpoint_home_uses_documented_environment_variable(tmp_path):
+    environment = {**os.environ, "QEFF_CHECKPOINT_HOME": str(tmp_path), "QEFF_WF_HOME": ""}
+    output = subprocess.check_output(
+        [sys.executable, "-c", "from QEfficient.utils.cache import QEFF_CHECKPOINT_HOME; print(QEFF_CHECKPOINT_HOME)"],
+        env=environment,
+        text=True,
+    )
+
+    assert output.splitlines()[0].strip() == str(tmp_path)
 
 
 @pytest.mark.weight_free
@@ -252,6 +287,51 @@ def test_weight_free_blocking_export_gather_ops(model_type, model_id, blocking_k
     )
 
     assert_blocked_kv_ops_for_mode(onnx_path, qeff_model, blocking_key)
+
+
+@pytest.mark.weight_free
+@pytest.mark.weight_free_export
+@pytest.mark.parametrize(
+    "model_type,model_id",
+    [("gpt_oss", WEIGHT_FREE_CAUSAL_LM_MODEL_IDS["gpt_oss"])],
+    ids=["gpt_oss"],
+)
+def test_weight_free_dynamo_export_with_kv_cache_prefix(model_type, model_id, tmp_export_dir):
+    """Regression for dangling prefixed retained-state outputs in Dynamo exports.
+
+    This is a CPU-only graph-structure check.  It reproduces the weight-free
+    GPT-OSS export used by vLLM disaggregated serving without requiring QAIC.
+    """
+    try:
+        config = load_causal_lm_config(model_id)
+        config.num_hidden_layers = 2
+        qeff_model = QEFFAutoModelForCausalLM.from_pretrained(model_id, config=config, weight_free=True)
+    except Exception as exc:
+        skip_on_model_fetch_error(exc, model_id)
+
+    onnx_path = exported_onnx_path(
+        qeff_model.export(
+            tmp_export_dir,
+            dynamo=True,
+            use_onnx_subfunctions=True,
+            kv_cache_prefix="vllmKvCache",
+            offload_pt_weights=False,
+        )
+    )
+    model = onnx.load(str(onnx_path), load_external_data=False)
+
+    # A graph output must be returned by a graph node or a declared function
+    # output.  Before the fix, the prefixed retained-state outputs were present
+    # in graph.output but the decoder call nodes had no corresponding outputs.
+    graph_node_outputs = {name for node in model.graph.node for name in node.output if name}
+    function_outputs = {name for function in model.functions for name in function.output if name}
+    produced_names = graph_node_outputs | function_outputs
+    missing_outputs = [output.name for output in model.graph.output if output.name not in produced_names]
+    assert not missing_outputs, f"{model_type}: graph outputs without producers: {missing_outputs}"
+
+    kv_inputs = [value.name for value in model.graph.input if value.name.startswith(("past_key.", "past_value."))]
+    assert kv_inputs, f"Expected {model_type} KV-cache graph inputs"
+    assert all("_vllmKvCache" in name for name in kv_inputs), f"Unprefixed KV graph inputs: {kv_inputs}"
 
 
 @pytest.mark.weight_free

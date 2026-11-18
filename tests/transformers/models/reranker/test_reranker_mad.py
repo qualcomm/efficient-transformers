@@ -37,6 +37,7 @@ from QEfficient.transformers.models.qwen3_vl._reranker_utils import (
 from QEfficient.transformers.models.qwen3_vl._reranker_utils import (
     truncate_tokens_optimized as _shared_truncate_tokens_optimized,
 )
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.test_utils import load_vlm_model, set_num_layers_vlm
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../../configs/image_text_model_configs.json")
@@ -300,7 +301,7 @@ def test_qwen3_vl_reranker_mad_parity(model_name):
         prefill_seq_len=max_prompt_len,
         ctx_len=model_cfg["ctx_len"],
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         mxfp6_matmul=False,
     )
 

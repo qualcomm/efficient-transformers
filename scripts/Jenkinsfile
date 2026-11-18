@@ -298,7 +298,7 @@ pipeline {
                             . preflight_qeff/bin/activate &&
                             pip install --upgrade pip setuptools &&
                             pip install uv==0.11.16 &&
-                            uv pip install --index-strategy unsafe-first-match --extra-index-url https://download.pytorch.org/whl/cpu '.[test]' junitparser pytest-xdist librosa==0.10.2 soundfile==0.13.1 timm==1.0.14 torchvision==0.22.0+cpu einops==0.8.1 onnx_ir &&
+                            uv pip install --index-strategy unsafe-first-match --extra-index-url https://download.pytorch.org/whl/cpu '.[test]' junitparser pytest-xdist librosa==0.10.2 soundfile==0.13.1 timm==1.0.14 einops==0.8.1 onnx_ir &&
                             uv pip install --no-deps qwen-vl-utils==0.0.14"
                         '''
                     }
@@ -492,7 +492,7 @@ pipeline {
                                 export TOKENIZERS_PARALLELISM=false && export QEFF_HOME=/efficient-transformers/Non_cli_qaic_multimodal &&
                                 rm -f tests/tests_log6.xml &&
                                 if [ -r /opt/qti-aic/versions/apps.xml ]; then echo 'QAIC Apps SDK version:'; cat /opt/qti-aic/versions/apps.xml; fi;
-                                python -m pytest tests -m '(not reproducer) and (multimodal) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
+                                python -m pytest tests -m '(not reproducer) and (multimodal) and (not weight_free) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
                                 test_status=\\$?;
                                 deactivate;
                                 if [ \"\\$test_status\" -ne 0 ]; then exit \"\\$test_status\"; fi"
@@ -508,7 +508,7 @@ pipeline {
                                 mkdir -p /efficient-transformers/Qeff_logs && export QEFF_LOG_PATH=/efficient-transformers/Qeff_logs &&
                                 export TOKENIZERS_PARALLELISM=false && export QEFF_HOME=/efficient-transformers/Non_cli_qaic_multimodal &&
                                 export QEFF_PER_PR_COMPILE_WARM_ONLY=1 &&
-                                python -m pytest tests -m '(not reproducer) and (multimodal) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_COMPILE_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6_warm.xml --durations=10;
+                                python -m pytest tests -m '(not reproducer) and (multimodal) and (not weight_free) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_COMPILE_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6_warm.xml --durations=10;
                                 test_status=\\$?;
                                 if [ \"\\$test_status\" -ne 0 ]; then
                                   if [ -f tests/tests_log6_warm.xml ]; then
@@ -531,7 +531,7 @@ pipeline {
                                 export QEFF_PER_PR_SHARED_HOME=1 &&
                                 rm -f tests/tests_log6.xml &&
                                 if [ -r /opt/qti-aic/versions/apps.xml ]; then echo 'QAIC Apps SDK version:'; cat /opt/qti-aic/versions/apps.xml; fi;
-                                python -m pytest tests -m '(not reproducer) and (multimodal) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_EXEC_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
+                                python -m pytest tests -m '(not reproducer) and (multimodal) and (not weight_free) and ${IMPACT_TEST_FILTER} and ${CI_SELECTIVE_LAYER_FILTER}' --ignore tests/vllm --ignore tests/unit_test --ignore tests/nightly_pipeline --ignore tests/transformers/models/reranker/test_reranker_mad.py -n ${MM_EXEC_N} --dist worksteal -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=qaic_multimodal --junitxml=tests/tests_log6.xml --durations=10;
                                 test_status=\\$?;
                                 deactivate;
                                 if [ \"\\$test_status\" -ne 0 ]; then exit \"\\$test_status\"; fi"
@@ -670,11 +670,14 @@ pipeline {
                             sudo docker exec -e QEFF_MODEL_TIER="${MODEL_TIER}" -e TMPDIR=/efficient-transformers/.ci-tmp/weight_free_qaic -e QEFF_QAIC_DEVICE_GROUPS="${WEIGHT_FREE_QAIC_DEVICE_GROUPS}" -e QEFF_QAIC_DEVICES_PER_WORKER=4 -e WEIGHT_FREE_EXEC_N="${WEIGHT_FREE_EXEC_N}" -e IMPACT_TEST_FILTER="${IMPACT_TEST_FILTER}" -e CI_SELECTIVE_LAYER_FILTER="${CI_SELECTIVE_LAYER_FILTER}" -e CI_IMPACT_HEAD="${CI_IMPACT_HEAD}" ${BUILD_TAG} bash -c '
                             cd /efficient-transformers && . preflight_qeff/bin/activate && pip install -r examples/dynamo/causal_lm/requirements.txt &&
                             mkdir -p /efficient-transformers/weight_free_qaic && mkdir -p /efficient-transformers/Qeff_logs && export QEFF_LOG_PATH=/efficient-transformers/Qeff_logs &&
-                            export TOKENIZERS_PARALLELISM=false && export QEFF_ISOLATE_QAIC_WORKERS=1 && export QEFF_HOME=/efficient-transformers/weight_free_qaic &&
+                            export TOKENIZERS_PARALLELISM=false && export QEFF_ISOLATE_QAIC_WORKERS=1 && export QEFF_HOME=/efficient-transformers/weight_free_qaic && export QEFF_WF_HOME=/efficient-transformers/weight_free_qaic/weight_free_checkpoints &&
                             export HF_HUB_CACHE=/huggingface_hub && export HF_HUB_ENABLE_HF_TRANSFER=1 &&
+                            VLM_EP_MODELS=(qwen3_vl_moe gemma4_moe) &&
+                            export QEFF_WF_EP_VLM_MODEL="${VLM_EP_MODELS[$((RANDOM % ${#VLM_EP_MODELS[@]}))]}" &&
+                            echo "Weight-free EP VLM selected: ${QEFF_WF_EP_VLM_MODEL}" &&
                             python -m pytest tests/weight_free -m "(on_qaic) and (not disagg_dma) and (not weight_free_blocking) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n "$WEIGHT_FREE_EXEC_N" -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_qaic.xml --durations=10 &&
                             # Run blocking parity configurations serially while retaining QAIC worker isolation.
-                            python -m pytest tests/weight_free/test_on_qaic_causallm.py -m "(on_qaic) and (weight_free_blocking) and (not disagg_dma) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n 1 -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_blocking_qaic.xml --durations=10 &&
+                            python -m pytest tests/weight_free/test_on_qaic_causallm.py tests/weight_free/test_on_qaic_vlm.py -m "(on_qaic) and (weight_free_blocking) and (not disagg_dma) and $IMPACT_TEST_FILTER and $CI_SELECTIVE_LAYER_FILTER" --dist loadgroup -n 1 -p scripts.ci_impact.pytest_plugin --impact-plan=.ci-impact-plan.json --impact-stage=weight_free_qaic --junitxml=tests/tests_log_weight_free_blocking_qaic.xml --durations=10 &&
                             set -o pipefail &&
                             for disagg_suite in parity blocking; do
                               if [ "$disagg_suite" = blocking ]; then

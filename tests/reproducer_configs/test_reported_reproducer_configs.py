@@ -87,6 +87,7 @@ TINY_FALCON = "hf-internal-testing/tiny-random-FalconForCausalLM"
 TINY_MIXTRAL = "hf-internal-testing/tiny-random-MixtralForCausalLM"
 TINY_BERT = "hf-internal-testing/tiny-random-BertModel"
 TINY_GPT_OSS = "tiny-random/gpt-oss-bf16"
+TINY_GPT_OSS_MXFP4 = "tiny-random/gpt-oss-mxfp4"
 TINY_GEMMA3 = "tiny-random/gemma-3"
 TINY_QWEN2_5_VL = "optimum-intel-internal-testing/tiny-random-qwen2.5-vl"
 TINY_INTERNVL = "optimum-intel-internal-testing/tiny-random-internvl2"
@@ -98,7 +99,7 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 55
+EXPECTED_SCENARIO_COUNT = 57
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
         "retain_full_kv",
@@ -947,6 +948,19 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
         },
     ),
     RegressionScenario(
+        name="gptoss-dynamo-weight-free-kv-cache-prefix",
+        stage="export",
+        source_model_card="openai/gpt-oss-20b",
+        tiny_model_id=TINY_GPT_OSS_MXFP4,
+        summary="Dynamo weight-free GPT-OSS export must wire prefixed retained KV outputs",
+        load_kwargs={"weight_free": True},
+        export_kwargs={
+            "dynamo": True,
+            "use_onnx_subfunctions": True,
+            "kv_cache_prefix": "vllmKvCache",
+        },
+    ),
+    RegressionScenario(
         name="qwen35-moe-multires-support",
         stage="compile",
         source_model_card="Qwen/Qwen3.5-35B-A3B",
@@ -1054,6 +1068,18 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
             "mdp_num_partitions": 2,
             "mdp_strategy": "onnx",
         },
+    ),
+    RegressionScenario(
+        name="dynamo-mixed-layer-subfunction-export",
+        stage="export",
+        source_model_card="openai/gpt-oss-20b",
+        tiny_model_id=TINY_GPT_OSS,
+        summary="dynamo subfunction export of alternating sliding/full attention layers must reuse equivalent layers",
+        load_kwargs={
+            "num_hidden_layers": 4,
+            "layer_types": ["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+        },
+        export_kwargs={"dynamo": True, "use_onnx_subfunctions": True},
     ),
     RegressionScenario(
         name="qwen-numpy-fix",

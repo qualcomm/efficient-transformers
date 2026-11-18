@@ -26,11 +26,6 @@ def main():
     parser.add_argument("--num-hidden-layers", type=int, default=4, help="Num hidden layers")
     parser.add_argument("--full-batch-size", type=int, default=4, help="Full batch size for continuous batching")
     parser.add_argument("--dynamo", action="store_true", help="Export via dynamo")
-    parser.add_argument(
-        "--weight-free",
-        action="store_true",
-        help="Export without embedding weights; useful with --artifacts for a replayable compiler bundle",
-    )
     parser.add_argument("--generation-len", type=int, default=100, help="Number of tokens to generate")
     parser.add_argument("--num-cores", type=int, default=16, help="Number of cores")
     parser.add_argument(
@@ -53,10 +48,7 @@ def main():
     # Load tokenizer and model with continuous batching enabled
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = QEFFAutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        num_hidden_layers=args.num_hidden_layers,
-        continuous_batching=True,
-        weight_free=args.weight_free,
+        args.model_name, num_hidden_layers=args.num_hidden_layers, continuous_batching=True
     )
 
     # Compile the model with full_batch_size for continuous batching
@@ -72,8 +64,6 @@ def main():
     )
     if args.artifacts:
         print(f"Compiler artifacts written to: {compile_path}")
-        if args.weight_free:
-            print("Weight-free compiler bundle references checkpoint weights via AIC_EXTERNAL_DATA_ROOT.")
     else:
         print(f"Model compiled to: {compile_path}")
 

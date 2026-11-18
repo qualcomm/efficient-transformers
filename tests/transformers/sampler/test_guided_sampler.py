@@ -15,6 +15,7 @@ import torch
 from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient.utils import load_hf_tokenizer
+from QEfficient.utils.constants import DEFAULT_AIC_NUM_CORES
 from QEfficient.utils.test_utils import (
     InternProcessor,
     load_hf_vlm_model,
@@ -93,7 +94,7 @@ def check_guided_decoding_sampler(
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_speculative_tokens=spec_length,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,
@@ -103,7 +104,7 @@ def check_guided_decoding_sampler(
         ctx_len=ctx_len,
         full_batch_size=full_batch_size,
         num_devices=1,
-        num_cores=16,
+        num_cores=DEFAULT_AIC_NUM_CORES,
         num_speculative_tokens=spec_length,
         mxint8_kv_cache=True,
         mxfp6_matmul=True,

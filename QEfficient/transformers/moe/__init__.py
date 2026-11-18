@@ -33,6 +33,7 @@ from QEfficient.transformers.moe.profiles import (
     MoEProfile,
     gptoss_clamp,
     gptoss_clamped_glu_mlp,
+    minimax_m3_clamped_glu_mlp,
     silu_glu_mlp,
 )
 from QEfficient.transformers.moe.weights import (
@@ -69,6 +70,7 @@ __all__ = [
     "reduce_nsp_tree",
     "resolve_routing",
     "select_moe_flavour",
+    "minimax_m3_clamped_glu_mlp",
     "silu_glu_mlp",
     "stack_expert_linears",
     "supports_moe_flavour",

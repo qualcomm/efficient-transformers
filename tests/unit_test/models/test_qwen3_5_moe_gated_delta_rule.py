@@ -78,7 +78,7 @@ def test_torch_chunk_gated_delta_rule_qeff_output_and_state_shapes():
 
 
 def test_torch_chunk_gated_delta_rule_qeff_supports_all_solver_modes():
-    for solver in ("recursive_sns", "scaled_newton_schulz", "original", "factorized", "horner"):
+    for solver in ("forward_sub", "recursive_sns", "scaled_newton_schulz", "original", "factorized", "horner"):
         output, final_state, _, _ = _run_chunk_rule(solver)
         assert torch.isfinite(output).all(), f"non-finite output for solver={solver}"
         assert torch.isfinite(final_state).all(), f"non-finite final_state for solver={solver}"
@@ -94,6 +94,14 @@ def test_torch_chunk_gated_delta_rule_qeff_recursive_sns_matches_original_max_ab
         f"max abs deviation {max_abs_dev:.6e} exceeded threshold "
         f"{MAX_ABS_DEV_RECURSIVE_VS_ORIGINAL:.6e} for recursive_sns vs original"
     )
+
+
+def test_torch_chunk_gated_delta_rule_qeff_forward_sub_matches_original():
+    output_forward_sub, state_forward_sub, _, _ = _run_chunk_rule("forward_sub")
+    output_original, state_original, _, _ = _run_chunk_rule("original")
+
+    torch.testing.assert_close(output_forward_sub, output_original)
+    torch.testing.assert_close(state_forward_sub, state_original)
 
 
 @pytest.mark.parametrize("layer_type", [QEffQwen3_5GatedDeltaNet, QEffQwen3_5MoeGatedDeltaNet])
