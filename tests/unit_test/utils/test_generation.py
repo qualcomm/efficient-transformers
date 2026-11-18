@@ -2151,9 +2151,7 @@ def test_dual_qpc_language_artifact_processes_images_before_placeholders(tmp_pat
     logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 3])
     onnx_path = tmp_path / "lang.onnx"
     onnx.save(
-        helper.make_model(
-            helper.make_graph([], "dual_qpc_lang", [input_ids, position_ids, vision_embeds], [logits])
-        ),
+        helper.make_model(helper.make_graph([], "dual_qpc_lang", [input_ids, position_ids, vision_embeds], [logits])),
         onnx_path,
     )
     compile_dir = tmp_path / "lang-qpc"
@@ -2218,7 +2216,10 @@ def test_specialization_selectors_use_named_and_graph_derived_symbols(tmp_path):
     )
     ccl = helper.make_tensor_value_info("ccl", TensorProto.INT64, ["comp_ctx_lengths"])
     onnx_path = tmp_path / "model.onnx"
-    onnx.save(helper.make_model(helper.make_graph([], "selectors", [pixel_values, image_grid, ccl], [pixel_values])), onnx_path)
+    onnx.save(
+        helper.make_model(helper.make_graph([], "selectors", [pixel_values, image_grid, ccl], [pixel_values])),
+        onnx_path,
+    )
     (tmp_path / "specializations.json").write_text(
         json.dumps(
             {
@@ -2254,14 +2255,20 @@ def test_specialization_selectors_use_named_and_graph_derived_symbols(tmp_path):
     )
     metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
 
-    assert select_vision_specialization(
-        tmp_path,
-        metadata,
-        {"pixels": np.zeros((24, 12), dtype=np.float32), "grid": np.zeros((1, 1, 6, 3), dtype=np.int64)},
-    )["grid_height"] == 24
-    assert select_prefill_specialization(
-        tmp_path, runner_metadata=metadata, inputs={"ccl": np.zeros(64, dtype=np.int64)}
-    )["comp_ctx_lengths"] == 64
+    assert (
+        select_vision_specialization(
+            tmp_path,
+            metadata,
+            {"pixels": np.zeros((24, 12), dtype=np.float32), "grid": np.zeros((1, 1, 6, 3), dtype=np.int64)},
+        )["grid_height"]
+        == 24
+    )
+    assert (
+        select_prefill_specialization(tmp_path, runner_metadata=metadata, inputs={"ccl": np.zeros(64, dtype=np.int64)})[
+            "comp_ctx_lengths"
+        ]
+        == 64
+    )
     assert select_decode_specialization(tmp_path)["seq_len"] == 2
 
 

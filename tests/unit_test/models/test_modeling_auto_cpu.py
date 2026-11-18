@@ -1578,7 +1578,9 @@ class TestArtifactsGenerationAPIs:
             dim.dim_param = symbol
         graph_output = onnx.helper.make_tensor_value_info("vision_embeds", onnx.TensorProto.FLOAT, [1])
         model_path = tmp_path / "vision.onnx"
-        onnx.save(onnx.helper.make_model(onnx.helper.make_graph([], "vision", [graph_input], [graph_output])), model_path)
+        onnx.save(
+            onnx.helper.make_model(onnx.helper.make_graph([], "vision", [graph_input], [graph_output])), model_path
+        )
 
         with pytest.raises(ValueError, match="vision_size"):
             _validate_export_contract(

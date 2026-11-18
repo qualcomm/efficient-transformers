@@ -134,9 +134,7 @@ def _named_role_candidates(
     raise ValueError(f"Unknown specialization role {role!r}.")
 
 
-def _input_symbol_values(
-    graph: onnx.GraphProto, inputs: Mapping[str, np.ndarray]
-) -> Dict[str, int]:
+def _input_symbol_values(graph: onnx.GraphProto, inputs: Mapping[str, np.ndarray]) -> Dict[str, int]:
     """Derive specialization symbol values from the active graph and tensors."""
     values = {}
     for graph_input in graph.input:
@@ -153,8 +151,7 @@ def _input_symbol_values(
                 previous = values.setdefault(dimension.dim_param, int(value))
                 if previous != int(value):
                     raise ValueError(
-                        f"Inputs disagree on specialization symbol {dimension.dim_param!r}: "
-                        f"{previous} and {value}."
+                        f"Inputs disagree on specialization symbol {dimension.dim_param!r}: {previous} and {value}."
                     )
     return values
 
@@ -217,9 +214,7 @@ def select_vision_specialization(
     compile_dir: Union[str, Path], runner_metadata: "RunnerMetadata", inputs: Mapping[str, np.ndarray]
 ) -> Dict[str, int]:
     """Select exactly one vision record from graph-derived processor shapes."""
-    return _select_specialization(
-        compile_dir, "vision", runner_metadata=runner_metadata, inputs=inputs, strict=True
-    )
+    return _select_specialization(compile_dir, "vision", runner_metadata=runner_metadata, inputs=inputs, strict=True)
 
 
 def _custom_io_maps(compile_dir: Path) -> Tuple[Dict[str, str], Dict[str, int]]:
@@ -454,8 +449,7 @@ def _slice_vlm_prefill_inputs(
                 f"Family processor output {name!r} has rank {value.ndim}, expected {len(dimensions)} by the language graph."
             )
         slices = tuple(
-            slice(0, prefill_seq_len) if dimension.dim_param == "seq_len" else slice(None)
-            for dimension in dimensions
+            slice(0, prefill_seq_len) if dimension.dim_param == "seq_len" else slice(None) for dimension in dimensions
         )
         sliced_inputs[name] = value[slices]
     return sliced_inputs
@@ -603,9 +597,7 @@ def _add_cross_qpc_placeholders(
             precision, onnx.helper.tensor_dtype_to_np_dtype(graph_input.type.tensor_type.elem_type)
         )
         host_inputs[name] = np.zeros(shape, dtype=dtype)
-        logger.warning(
-            f"Wrote a zero placeholder for {name!r}; replace it with the vision QPC output before replay."
-        )
+        logger.warning(f"Wrote a zero placeholder for {name!r}; replace it with the vision QPC output before replay.")
 
 
 def _cross_qpc_output_shapes(

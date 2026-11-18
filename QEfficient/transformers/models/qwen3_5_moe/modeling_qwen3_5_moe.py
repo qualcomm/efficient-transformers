@@ -2721,8 +2721,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
             missing_symbols = required_symbols - vision_specialization.keys()
             if missing_symbols:
                 raise ValueError(
-                    "Qwen3.5-MoE vision specialization is missing required symbols: "
-                    f"{sorted(missing_symbols)}"
+                    f"Qwen3.5-MoE vision specialization is missing required symbols: {sorted(missing_symbols)}"
                 )
             vision_batch_size = int(vision_specialization["vision_batch_size"])
             grid_height = int(vision_specialization["grid_height"])

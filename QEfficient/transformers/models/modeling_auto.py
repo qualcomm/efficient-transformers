@@ -157,16 +157,10 @@ def _validate_export_contract(
             )
 
     declared_symbols = {
-        symbol
-        for specialization in specializations
-        for symbol in specialization
-        if isinstance(symbol, str)
+        symbol for specialization in specializations for symbol in specialization if isinstance(symbol, str)
     }
     required_symbols = {
-        symbol
-        for axes in dynamic_axes.values()
-        for symbol in axes.values()
-        if symbol in declared_symbols
+        symbol for axes in dynamic_axes.values() for symbol in axes.values() if symbol in declared_symbols
     }
     graph_symbols = {
         dimension.dim_param

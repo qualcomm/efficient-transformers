@@ -28,8 +28,8 @@ from QEfficient.generation.generation_helpers import (
     _add_cross_qpc_placeholders,
     _add_specialization_control_inputs,
     _apply_input_shapes,
-    _cross_qpc_symbols,
     _cross_qpc_output_shapes,
+    _cross_qpc_symbols,
     _execution_batch_size,
     _filter_graph_inputs,
     _first_execution_batch,
@@ -97,9 +97,7 @@ def _as_bfloat16_storage(value: np.ndarray, name: str) -> np.ndarray:
         return np.ascontiguousarray(value)
     if value.dtype.kind not in "fiu":
         raise ValueError(f"Input {name!r} cannot be encoded as bfloat16 from dtype {value.dtype}.")
-    return (
-        torch.as_tensor(value).to(torch.bfloat16).view(torch.int16).cpu().numpy().view(np.uint16).copy()
-    )
+    return torch.as_tensor(value).to(torch.bfloat16).view(torch.int16).cpu().numpy().view(np.uint16).copy()
 
 
 def _as_int8_storage(value: np.ndarray, name: str, precision: str) -> np.ndarray:
@@ -142,6 +140,7 @@ def _normalize_runner_input(runner_metadata: RunnerMetadata, name: str, value) -
         )
     return converted
 
+
 __all__ = [
     "load_prefill_specialization",
     "write_causal_lm_runner_bundle",
@@ -183,9 +182,7 @@ def write_runner_io_bundle(
         raise ValueError(f"Inputs are not present in the exported ONNX graph: {sorted(unexpected_inputs)}")
 
     io_entries = []
-    numpy_inputs = {
-        name: _normalize_runner_input(runner_metadata, name, value) for name, value in host_inputs.items()
-    }
+    numpy_inputs = {name: _normalize_runner_input(runner_metadata, name, value) for name, value in host_inputs.items()}
     validate_runner_input_shapes(runner_metadata, numpy_inputs, specialization)
     for name, value in numpy_inputs.items():
         value.tofile(data_dir / f"{name}.raw")
@@ -429,9 +426,7 @@ def write_dual_qpc_vlm_runner_bundle(
         host_inputs = lang_inputs
         _add_specialization_control_inputs(runner_metadata, host_inputs, specialization)
         host_inputs = _filter_graph_inputs(runner_metadata, host_inputs)
-        _add_cross_qpc_placeholders(
-            runner_metadata, host_inputs, cross_qpc, _cross_qpc_symbols(model, specialization)
-        )
+        _add_cross_qpc_placeholders(runner_metadata, host_inputs, cross_qpc, _cross_qpc_symbols(model, specialization))
         output_shape_overrides = None
 
     return _write_vlm_runner_bundle(
