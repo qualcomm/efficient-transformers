@@ -2843,6 +2843,128 @@ def test_causal_subfunction_export_uses_semantic_weight_and_node_names(tmp_path)
     assert "mlp/down_proj/MatMul" in function_node_names
 
 
+def test_minimax_npi_preserves_sparse_router_normalization_in_fp32(tmp_path):
+    import yaml
+    from onnx import TensorProto, helper
+
+    from QEfficient.transformers.models.minimax_m3_vl.modeling_minimax_m3_vl import (
+        _generate_minimax_npi_file,
+    )
+
+    domain = "qeff.minimax"
+    sparse_function_name = "QEffMiniMaxM3VLDecoderLayer"
+    dense_function_name = "QEffMiniMaxM3VLDecoderLayerDense"
+    sparse_nodes = [
+        helper.make_node(
+            "Cast", ["router_logits"], ["router_fp32"], name="node__to_copy_34", to=TensorProto.FLOAT
+        ),
+        helper.make_node("Sigmoid", ["router_fp32"], ["router_weights"], name="node_sigmoid"),
+        helper.make_node(
+            "GatherElements",
+            ["router_weights", "expert_indices"],
+            ["selected_weights"],
+            name="node_gather_4",
+            axis=-1,
+        ),
+        helper.make_node(
+            "Einsum",
+            ["selected_weights"],
+            ["weight_sum"],
+            name="node_einsum",
+            equation="...i->...",
+        ),
+        helper.make_node(
+            "Unsqueeze", ["weight_sum", "axes"], ["weight_sum_reshaped"], name="node_unsqueeze_51"
+        ),
+        helper.make_node(
+            "Div", ["selected_weights", "weight_sum_reshaped"], ["normalized_weights"], name="node_div_2"
+        ),
+        helper.make_node("Add", ["normalized_weights", "normalized_weights"], ["output"], name="node_add"),
+    ]
+    sparse_function = helper.make_function(
+        domain,
+        sparse_function_name,
+        ["router_logits", "expert_indices", "axes"],
+        ["output"],
+        sparse_nodes,
+        [helper.make_opsetid("", 17)],
+    )
+    dense_function = helper.make_function(
+        domain,
+        dense_function_name,
+        ["input"],
+        ["output"],
+        [helper.make_node("Sigmoid", ["input"], ["output"], name="node_sigmoid")],
+        [helper.make_opsetid("", 17)],
+    )
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                sparse_function_name,
+                ["router_logits", "expert_indices", "axes"],
+                ["sparse_0"],
+                name="/language_model/layers.0/call",
+                domain=domain,
+            ),
+            helper.make_node(
+                sparse_function_name,
+                ["sparse_0", "expert_indices", "axes"],
+                ["sparse_1"],
+                name="/language_model/layers.1/call",
+                domain=domain,
+            ),
+            helper.make_node(
+                dense_function_name,
+                ["sparse_1"],
+                ["output"],
+                name="/language_model/layers.2/call",
+                domain=domain,
+            ),
+        ],
+        "minimax_router_npi",
+        [
+            helper.make_tensor_value_info("router_logits", TensorProto.FLOAT, [1, 4]),
+            helper.make_tensor_value_info("expert_indices", TensorProto.INT64, [1, 2]),
+            helper.make_tensor_value_info("axes", TensorProto.INT64, [1]),
+        ],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])],
+    )
+    model = helper.make_model(
+        graph,
+        functions=[sparse_function, dense_function],
+        opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid(domain, 1)],
+    )
+    onnx_path = tmp_path / "minimax_router.onnx"
+    onnx.save(model, onnx_path)
+    graph_signature = [(node.op_type, tuple(node.input), tuple(node.output)) for node in model.graph.node]
+    sparse_signature = [(node.op_type, tuple(node.input), tuple(node.output)) for node in sparse_function.node]
+
+    npi_path = Path(_generate_minimax_npi_file(onnx_path))
+
+    npi_names = yaml.safe_load(npi_path.read_text())["FP32NodeInstanceNames"]
+    router_names = [name for name in npi_names if name.startswith("minimax_router_fp32_")]
+    assert router_names == [
+        "minimax_router_fp32_node__to_copy_34",
+        "minimax_router_fp32_node_sigmoid",
+        "minimax_router_fp32_node_gather_4",
+        "minimax_router_fp32_node_einsum",
+        "minimax_router_fp32_node_unsqueeze_51",
+        "minimax_router_fp32_node_div_2",
+    ]
+
+    persisted_model = onnx.load(onnx_path, load_external_data=False)
+    functions = {(function.domain, function.name): function for function in persisted_model.functions}
+    sparse_node_names = [node.name for node in functions[(domain, sparse_function_name)].node]
+    dense_node_names = [node.name for node in functions[(domain, dense_function_name)].node]
+    assert sparse_node_names[:6] == router_names
+    assert dense_node_names == ["node_sigmoid"]
+    assert [(node.op_type, tuple(node.input), tuple(node.output)) for node in persisted_model.graph.node] == graph_signature
+    assert [
+        (node.op_type, tuple(node.input), tuple(node.output))
+        for node in functions[(domain, sparse_function_name)].node
+    ] == sparse_signature
+
+
 @pytest.mark.llm_model
 def test_gemma3_vlm_export_parity_with_and_without_subfunctions(tmp_path):
     """Gemma3 VLM export keeps retained-state/output signatures stable across subfunction toggles.

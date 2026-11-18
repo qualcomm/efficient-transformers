@@ -84,6 +84,7 @@ _MINIMAX_NPI_OUTPUT_SUFFIXES = (
     "/self_attn/k_norm/CustomRMSNorm_output_0",
     "/norm/CustomRMSNorm_output_0",
 )
+_MINIMAX_ROUTER_FP32_NODE_PREFIX = "minimax_router_fp32_"
 
 
 def _dynamic_sequence_chunks(
@@ -134,12 +135,15 @@ def _dynamic_sequence_nested_chunks(
     )
 
 
-def _decoder_function_npi_names(model: onnx.ModelProto) -> list[str]:
-    """Collect RMSNorms and decoder residual merges inside MiniMax functions."""
+def _decoder_function_npi_names(model: onnx.ModelProto) -> tuple[list[str], bool]:
+    """Collect precision-sensitive outputs inside MiniMax decoder functions."""
     functions = {(function.domain, function.name): function for function in model.functions}
     npi_names = []
+    renamed_router_nodes = False
+    processed_router_functions = set()
     for function_call in model.graph.node:
-        function = functions.get((function_call.domain, function_call.op_type))
+        function_key = (function_call.domain, function_call.op_type)
+        function = functions.get(function_key)
         is_decoder_call = "/language_model/layers." in function_call.name or function_call.op_type.startswith(
             "QEffMiniMaxM3VLDecoderLayer"
         )
@@ -159,7 +163,87 @@ def _decoder_function_npi_names(model: onnx.ModelProto) -> list[str]:
             if function_node.op_type in ("Add", "CustomRMSNorm") and function_node.name
         ]
         npi_names.extend(f"{layer_scope}/{function_node.name}_output_0" for function_node in residual_adds)
-    return npi_names
+        if function_key not in processed_router_functions:
+            for function_node in _router_fp32_nodes(function.node):
+                if not function_node.name.startswith(_MINIMAX_ROUTER_FP32_NODE_PREFIX):
+                    function_node.name = f"{_MINIMAX_ROUTER_FP32_NODE_PREFIX}{function_node.name}"
+                    renamed_router_nodes = True
+                npi_names.append(function_node.name)
+            processed_router_functions.add(function_key)
+    return npi_names, renamed_router_nodes
+
+
+def _router_fp32_nodes(nodes) -> list[onnx.NodeProto]:
+    """Find the routed-MoE sigmoid and normalization chain by connectivity."""
+    producer = {output: node for node in nodes for output in node.output if output}
+    consumers = {}
+    router_nodes = []
+    for node in nodes:
+        for input_name in node.input:
+            consumers.setdefault(input_name, []).append(node)
+
+    for sigmoid in nodes:
+        if sigmoid.op_type != "Sigmoid" or not sigmoid.input or not sigmoid.output:
+            continue
+        cast = producer.get(sigmoid.input[0])
+        if cast is None or cast.op_type != "Cast" or not cast.name:
+            continue
+        sigmoid_output = sigmoid.output[0]
+        gather = next(
+            (
+                consumer
+                for consumer in consumers.get(sigmoid_output, ())
+                if consumer.op_type == "GatherElements" and consumer.name and consumer.output
+            ),
+            None,
+        )
+        if gather is None:
+            continue
+        gather_output = gather.output[0]
+        denominator = next(
+            (
+                consumer
+                for consumer in consumers.get(gather_output, ())
+                if consumer.op_type in ("Einsum", "ReduceSum") and consumer.name and consumer.output
+            ),
+            None,
+        )
+        if denominator is None:
+            continue
+
+        denominator_path = []
+        denominator_output = denominator.output[0]
+        while True:
+            path_consumers = consumers.get(denominator_output, ())
+            division = next(
+                (
+                    consumer
+                    for consumer in path_consumers
+                    if consumer.op_type == "Div"
+                    and consumer.name
+                    and consumer.output
+                    and gather_output in consumer.input
+                ),
+                None,
+            )
+            if division is not None:
+                router_nodes.extend([cast, sigmoid, gather, denominator, *denominator_path, division])
+                break
+            shape_node = next(
+                (
+                    consumer
+                    for consumer in path_consumers
+                    if consumer.op_type in ("Identity", "Reshape", "Unsqueeze")
+                    and consumer.name
+                    and consumer.output
+                ),
+                None,
+            )
+            if shape_node is None:
+                break
+            denominator_path.append(shape_node)
+            denominator_output = shape_node.output[0]
+    return router_nodes
 
 
 def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
@@ -174,7 +258,8 @@ def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
         for output_name in node.output
         if output_name and output_name.endswith(_MINIMAX_NPI_OUTPUT_SUFFIXES)
     ]
-    fp32_names.extend(_decoder_function_npi_names(model))
+    decoder_function_names, renamed_router_nodes = _decoder_function_npi_names(model)
+    fp32_names.extend(decoder_function_names)
     # Dynamo/torch.export can flatten decoder functions and replace the
     # hierarchical output names with generated names such as ``add_42`` and
     # ``rms_norm_7``.  Include graph-level residual/RMSNorm outputs, while
@@ -187,9 +272,22 @@ def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
         for output_name in node.output
         if output_name
     )
+    fp32_names.extend(
+        output_name
+        for node in _router_fp32_nodes(model.graph.node)
+        for output_name in node.output
+        if output_name
+    )
     fp32_names = list(dict.fromkeys(fp32_names))
     if not fp32_names:
         raise ValueError(f"Could not find Minimax FP32 NPI nodes in ONNX graph: {onnx_path}")
+
+    if renamed_router_nodes:
+        # Subfunctions are converted before call nodes exist, so call-qualified
+        # NPI names cannot select their internal router operations. Give only
+        # the sparse-router chain globally unique node names and persist them in
+        # the exported ONNX before compilation.
+        onnx.save(model, str(onnx_path))
 
     with npi_path.open("w") as fp:
         yaml.safe_dump({"FP32NodeInstanceNames": fp32_names}, fp, sort_keys=False)
