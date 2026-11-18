@@ -132,7 +132,14 @@ def get_dataloader(tokenizer, dataset_config, train_config, split: str = "train"
 
 def get_longest_seq_length(data: List[Dict]) -> Tuple[int, int]:
     # find out the minimum max_seq_length required during fine-tuning (saves memory!)
-    lengths = [len(d["input_ids"]) for d in data]
+    def get_input_lengths(dataset):
+        if isinstance(dataset, datasets.Dataset):
+            return [len(input_ids) for input_ids in dataset.with_format(None)["input_ids"]]
+        if isinstance(dataset, torch.utils.data.ConcatDataset):
+            return [length for child_dataset in dataset.datasets for length in get_input_lengths(child_dataset)]
+        return [len(sample["input_ids"]) for sample in dataset]
+
+    lengths = get_input_lengths(data)
     longest_seq_length = max(lengths)
     longest_seq_ix = lengths.index(longest_seq_length)
     return longest_seq_length, longest_seq_ix
