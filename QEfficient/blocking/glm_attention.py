@@ -108,6 +108,7 @@ def blocked_glm_dsa_topk(
     local_indices = torch.gather(candidate_indices, -1, local_order)
 
     if cp == 1:
+        selected_scores = local_scores.squeeze(3)
         selected_indices = local_indices.squeeze(3)
         selected_topk = local_topk
     else:
@@ -117,7 +118,7 @@ def blocked_glm_dsa_topk(
         merged_scores = local_scores.reshape(batch_local, dp, query_length, cp * local_topk)
         merged_indices = local_indices.reshape(batch_local, dp, query_length, cp * local_topk)
         merged_topk = min(final_topk, cp * local_topk)
-        _, merged_order = torch.topk(
+        selected_scores, merged_order = torch.topk(
             merged_scores,
             k=merged_topk,
             dim=-1,
@@ -126,6 +127,13 @@ def blocked_glm_dsa_topk(
         selected_indices = torch.gather(merged_indices, -1, merged_order)
         selected_topk = merged_topk
 
+    # Slots without a valid token carry -inf scores; mark them with INT32_MAX so
+    # downstream gathers never see a raw (possibly out-of-range) tied index.
+    selected_indices = torch.where(
+        selected_scores == float("-inf"),
+        torch.full_like(selected_indices, torch.iinfo(torch.int32).max),
+        selected_indices,
+    )
     return selected_indices.reshape(batch_size, query_length, selected_topk).to(torch.int32)
 
 
@@ -1132,10 +1140,13 @@ def glm_attention_strategy(
     if folded_dsa:
         compressed_kvs.update_ckv(compressed_kv, module.layer_idx, cache_kwargs)
         compressed_kvs.update_k_pe(key_rope, module.layer_idx, cache_kwargs)
+        # INT32_MAX marks Top-K slots without a valid token; keep them out of the gather.
+        sentinel_topk = topk_indices == torch.iinfo(torch.int32).max
         if attention_mask is None:
-            valid_topk = topk_indices.to(position_ids.dtype) <= position_ids.unsqueeze(-1)
+            valid_topk = (topk_indices.to(position_ids.dtype) <= position_ids.unsqueeze(-1)) & ~sentinel_topk
         else:
-            valid_topk = ~torch.gather(attention_mask[:, 0], -1, topk_indices.long())
+            safe_topk = torch.where(sentinel_topk, 0, topk_indices).long()
+            valid_topk = ~torch.gather(attention_mask[:, 0], -1, safe_topk) & ~sentinel_topk
         cache_layer = compressed_kvs.layers[module.layer_idx]
         query_latent = torch.einsum("bsd,hdk->bhsk", q_resid, module.fusedqk[0])
         if topk_indices.shape[1] > 1:
