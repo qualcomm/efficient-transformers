@@ -217,6 +217,7 @@ _WAIVED_IDENTITY_ARGNAMES = frozenset(
         "make_model",  # a model-factory callable, not a card/type
         "model_cfg",  # reranker unit-test config dict, tests config reduction not a family
         "model_class",  # nightly artifact filename, not a live model run
+        "target_model_type",  # report-formatting label only; no model is loaded or executed
     }
 )
 
