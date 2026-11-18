@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import transformers
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -210,6 +211,7 @@ def add_kimi_k25_test_hash_salt(qeff_model, *, seed: int | None = None):
         "hash_version": KIMI_K25_TEST_HASH_VERSION,
         "seed": test_seed,
         "torch_version": torch.__version__,
+        "transformers_version": transformers.__version__,
         "hf_commit_hash": _kimi_k25_commit_hash(config) if config else None,
     }
     for target in (qeff_model, getattr(qeff_model, "vision_model", None), getattr(qeff_model, "lang_model", None)):

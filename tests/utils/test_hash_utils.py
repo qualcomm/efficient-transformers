@@ -7,6 +7,8 @@
 
 import json
 import random
+from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,7 +16,8 @@ from torch.export import Dim
 
 from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.utils.constants import HASH_HEXDIGEST_STR_LEN
-from QEfficient.utils.hash_utils import hash_dict_params, json_serializable, to_hashable
+from QEfficient.utils.hash_utils import create_export_hash, hash_dict_params, json_serializable, to_hashable
+from tests.utils import load_kimi_utils
 
 
 def get_random_string(length: int) -> str:
@@ -124,3 +127,64 @@ def test_hash_dict_params():
     hash_result_custom_size = hash_dict_params(dict_items, custom_hash_size)
     assert len(hash_result_custom_size) == custom_hash_size
     assert isinstance(hash_result_custom_size, str)
+
+
+def _kimi_k25_hash_target(seed: int = 42, commit_hash: str = "commit-a"):
+    config = SimpleNamespace(
+        _qeff_kimi_k25_test_seed=seed,
+        _commit_hash=commit_hash,
+        text_config=SimpleNamespace(),
+        vision_config=SimpleNamespace(),
+    )
+    return SimpleNamespace(
+        model=SimpleNamespace(config=config),
+        hash_params={"wrapper": "root"},
+        vision_model=SimpleNamespace(hash_params={"wrapper": "vision"}),
+        lang_model=SimpleNamespace(hash_params={"wrapper": "language"}),
+    )
+
+
+def _kimi_k25_wrapper_export_hashes(seed: int = 42, commit_hash: str = "commit-a") -> dict[str, str]:
+    qeff_model = _kimi_k25_hash_target(seed=seed, commit_hash=commit_hash)
+    load_kimi_utils.add_kimi_k25_test_hash_salt(qeff_model)
+    return {
+        "vision": _export_hash(qeff_model.vision_model.hash_params),
+        "language": _export_hash(qeff_model.lang_model.hash_params),
+    }
+
+
+def _export_hash(hash_params: dict) -> str:
+    export_hash, _ = create_export_hash(
+        model_params=deepcopy(hash_params),
+        output_names=["logits"],
+        dynamic_axes={},
+        dynamic_shapes={},
+    )
+    return export_hash
+
+
+@pytest.mark.parametrize(
+    "changed_field", ["seed", "torch_version", "transformers_version", "hf_commit_hash", "hash_version"]
+)
+def test_kimi_k25_test_cache_salt_changes_vision_and_language_export_hashes(monkeypatch, changed_field):
+    monkeypatch.setattr(load_kimi_utils, "KIMI_K25_TEST_HASH_VERSION", 1)
+    monkeypatch.setattr(load_kimi_utils.torch, "__version__", "torch-base")
+    monkeypatch.setattr(load_kimi_utils.transformers, "__version__", "transformers-base")
+
+    base_hashes = _kimi_k25_wrapper_export_hashes(seed=42, commit_hash="commit-a")
+    repeated_hashes = _kimi_k25_wrapper_export_hashes(seed=42, commit_hash="commit-a")
+    assert repeated_hashes == base_hashes
+
+    seed = 43 if changed_field == "seed" else 42
+    commit_hash = "commit-b" if changed_field == "hf_commit_hash" else "commit-a"
+    if changed_field == "torch_version":
+        monkeypatch.setattr(load_kimi_utils.torch, "__version__", "torch-changed")
+    elif changed_field == "transformers_version":
+        monkeypatch.setattr(load_kimi_utils.transformers, "__version__", "transformers-changed")
+    elif changed_field == "hash_version":
+        monkeypatch.setattr(load_kimi_utils, "KIMI_K25_TEST_HASH_VERSION", 2)
+
+    changed_hashes = _kimi_k25_wrapper_export_hashes(seed=seed, commit_hash=commit_hash)
+    assert changed_hashes.keys() == base_hashes.keys()
+    for wrapper_name, base_hash in base_hashes.items():
+        assert changed_hashes[wrapper_name] != base_hash
