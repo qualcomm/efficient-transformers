@@ -984,32 +984,38 @@ class QEffGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
             "dynamic_seq_len": False,
         }
 
-    def get_glm_cache_dynamic_axes(self, continuous_batching: bool = False):
+    def get_glm_cache_dynamic_axes(
+        self,
+        continuous_batching: bool = False,
+        static_context_length: bool = False,
+    ):
         batch_symbol = "full_batch_size" if continuous_batching else "batch_size"
         compressed_axes = []
         for layer_idx, layer in enumerate(self.model.layers[: self.config.num_hidden_layers]):
             layer_config = layer.self_attn.glm_attention_config
+            context_symbol = f"glm_attn_context_local_{layer_idx}" if static_context_length else "ctx_len"
             if layer_config.attention_type == "dsa":
                 axes = {}
                 if layer_config.attn_dp == 1:
                     axes[0] = batch_symbol
                 if layer_config.attn_cp == 1:
-                    axes[2] = "ctx_len"
+                    axes[2] = context_symbol
                 compressed_axes.append(axes)
             else:
-                compressed_axes.append({0: batch_symbol, 2: "ctx_len"})
+                compressed_axes.append({0: batch_symbol, 2: context_symbol})
         indexer_axes = {}
         for layer_idx in self.get_indexer_cache_layers(self.config):
             layer_config = self.model.layers[layer_idx].self_attn.glm_attention_config
+            context_symbol = f"glm_indexer_context_local_{layer_idx}" if static_context_length else "ctx_len"
             if layer_config.indexer_prefill_parallel or layer_config.indexer_dp > 1 or layer_config.indexer_cp > 1:
                 axes = {}
                 if layer_config.indexer_dp == 1:
                     axes[0] = batch_symbol
                 if layer_config.indexer_cp == 1:
-                    axes[2] = "ctx_len"
+                    axes[2] = context_symbol
                 indexer_axes[layer_idx] = axes
             else:
-                indexer_axes[layer_idx] = {0: batch_symbol, 1: "ctx_len"}
+                indexer_axes[layer_idx] = {0: batch_symbol, 1: context_symbol}
         return compressed_axes, indexer_axes
 
     @staticmethod

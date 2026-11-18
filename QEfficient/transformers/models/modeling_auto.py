@@ -3941,6 +3941,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         )
         kwargs["enable_chunking"] = enable_chunking
         qaic_config = kwargs.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        static_glm_cache_context = kwargs.pop("static_glm_cache_context", False)
         # Weight-free export always uses the dynamo (torch.export) path.
         # Must be set here — @export_wrapper reads dynamo from kwargs before _export() body runs.
         dynamo = dynamo or self._weight_free
@@ -4188,7 +4189,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 glm_compressed_axes = glm_indexer_axes = None
                 if is_glm_moe_dsa and hasattr(self.model, "get_glm_cache_dynamic_axes"):
                     glm_compressed_axes, glm_indexer_axes = self.model.get_glm_cache_dynamic_axes(
-                        continuous_batching=self.continuous_batching
+                        continuous_batching=self.continuous_batching,
+                        static_context_length=static_glm_cache_context,
                     )
                 example_inputs = {k: v for k, v in example_inputs.items() if "past" not in k}
                 dynamic_axes = {k: v for k, v in dynamic_axes.items() if "past" not in k}

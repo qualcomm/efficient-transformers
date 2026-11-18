@@ -208,6 +208,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--use-onnx-subfunctions", action="store_true")
     parser.add_argument("--user-tiled", action="store_true")
+    parser.add_argument(
+        "--static-glm-cache-context",
+        action="store_true",
+        help="Export GLM retained cache context axes as static dimensions at the configured context length.",
+    )
     parser.add_argument("--cache-io-dtype", choices=("float16", "bfloat16", "mxint8"), default="float16")
     parser.add_argument(
         "--ffn-blocking-mode",
@@ -773,6 +778,7 @@ def main() -> None:
             prefill_only=False,
             offload_pt_weights=False,
             use_onnx_subfunctions=args.use_onnx_subfunctions,
+            static_glm_cache_context=args.static_glm_cache_context,
         )
         weight_spec_path = getattr(qeff_model, "weight_spec_path", None)
         weight_spec_path_str = str(weight_spec_path) if weight_spec_path is not None else None
