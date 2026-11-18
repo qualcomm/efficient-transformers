@@ -224,37 +224,27 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
     """Return inputs whose downstream paths only preserve values until Shape nodes."""
     input_names = {graph_input.name for graph_input in graph.input}
     shape_preserving_ops = {"Cast", "Identity"}
+    consumers: Dict[int, Dict[str, List[onnx.NodeProto]]] = {}
+    graph_outputs_by_id: Dict[int, set[str]] = {}
+    captures: Dict[int, Dict[str, List[onnx.GraphProto]]] = {}
 
-    def visit_value(
-        current_graph: onnx.GraphProto,
-        value_name: str,
-        visiting: set[Tuple[int, str]],
-    ) -> Tuple[bool, bool]:
-        if any(output.name == value_name for output in current_graph.output):
-            return True, False
-
-        value_key = (id(current_graph), value_name)
-        if value_key in visiting:
-            return True, False
-        visiting.add(value_key)
-        has_use = False
-        all_paths_end_at_shape = True
+    def index_graph(current_graph: onnx.GraphProto) -> set[str]:
+        graph_key = id(current_graph)
+        graph_consumers: Dict[str, List[onnx.NodeProto]] = {}
+        graph_outputs = {output.name for output in current_graph.output}
+        graph_captures: Dict[str, List[onnx.GraphProto]] = {}
+        local_definitions = {graph_input.name for graph_input in current_graph.input}
+        local_definitions.update(initializer.name for initializer in current_graph.initializer)
+        local_definitions.update(
+            output_name for node in current_graph.node for output_name in node.output if output_name
+        )
+        free_uses: set[str] = set()
 
         for node in current_graph.node:
-            if value_name in node.input:
-                has_use = True
-                if node.op_type == "Shape":
-                    pass
-                elif node.op_type in shape_preserving_ops and len(node.input) == 1:
-                    output_names = [output_name for output_name in node.output if output_name]
-                    if not output_names:
-                        all_paths_end_at_shape = False
-                    for output_name in output_names:
-                        output_has_use, output_paths_end_at_shape = visit_value(current_graph, output_name, visiting)
-                        if not output_has_use or not output_paths_end_at_shape:
-                            all_paths_end_at_shape = False
-                else:
-                    all_paths_end_at_shape = False
+            distinct_input_names = {input_name for input_name in node.input if input_name}
+            for input_name in distinct_input_names:
+                graph_consumers.setdefault(input_name, []).append(node)
+                free_uses.add(input_name)
 
             for attribute in node.attribute:
                 if attribute.type == onnx.AttributeProto.GRAPH:
@@ -265,18 +255,64 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
                     continue
 
                 for nested_graph in nested_graphs:
-                    local_names = {value.name for value in nested_graph.input}
-                    local_names.update(initializer.name for initializer in nested_graph.initializer)
-                    local_names.update(output for nested_node in nested_graph.node for output in nested_node.output)
-                    if value_name not in local_names:
-                        nested_has_use, nested_paths_end_at_shape = visit_value(nested_graph, value_name, visiting)
-                        if nested_has_use:
-                            has_use = True
-                            if not nested_paths_end_at_shape:
-                                all_paths_end_at_shape = False
+                    nested_free_uses = index_graph(nested_graph)
+                    for name in nested_free_uses:
+                        graph_captures.setdefault(name, []).append(nested_graph)
+                    free_uses.update(nested_free_uses)
+
+        free_uses.update(graph_outputs)
+        free_uses.difference_update(local_definitions)
+        consumers[graph_key] = graph_consumers
+        graph_outputs_by_id[graph_key] = graph_outputs
+        captures[graph_key] = graph_captures
+        return free_uses
+
+    index_graph(graph)
+    memo: Dict[Tuple[int, str], Tuple[bool, bool]] = {}
+
+    def visit_value(
+        current_graph: onnx.GraphProto,
+        value_name: str,
+        visiting: set[Tuple[int, str]],
+    ) -> Tuple[bool, bool]:
+        value_key = (id(current_graph), value_name)
+        graph_key = value_key[0]
+        if value_key in memo:
+            return memo[value_key]
+        if value_name in graph_outputs_by_id[graph_key]:
+            memo[value_key] = (True, False)
+            return memo[value_key]
+        if value_key in visiting:
+            return True, False
+        visiting.add(value_key)
+        has_use = False
+        all_paths_end_at_shape = True
+
+        for node in consumers[graph_key].get(value_name, ()):
+            has_use = True
+            if node.op_type == "Shape":
+                pass
+            elif node.op_type in shape_preserving_ops and len(node.input) == 1:
+                output_names = [output_name for output_name in node.output if output_name]
+                if not output_names:
+                    all_paths_end_at_shape = False
+                for output_name in output_names:
+                    output_has_use, output_paths_end_at_shape = visit_value(current_graph, output_name, visiting)
+                    if not output_has_use or not output_paths_end_at_shape:
+                        all_paths_end_at_shape = False
+            else:
+                all_paths_end_at_shape = False
+
+        for nested_graph in captures[graph_key].get(value_name, ()):
+            nested_has_use, nested_paths_end_at_shape = visit_value(nested_graph, value_name, visiting)
+            if nested_has_use:
+                has_use = True
+                if not nested_paths_end_at_shape:
+                    all_paths_end_at_shape = False
 
         visiting.remove(value_key)
-        return has_use, has_use and all_paths_end_at_shape
+        memo[value_key] = (has_use, has_use and all_paths_end_at_shape)
+        return memo[value_key]
 
     shape_only_inputs = set()
     for input_name in input_names:
