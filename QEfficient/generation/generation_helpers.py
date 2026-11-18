@@ -273,8 +273,14 @@ def _concat_input_batches(input_batches: Sequence[Mapping[str, np.ndarray]]) -> 
 
 
 def _prepare_vlm_execution_inputs(
-    handler, images: Sequence, prompts: Sequence[str], prefill_seq_len: int, batch_size: int
+    handler,
+    images: Sequence,
+    prompts: Sequence[str],
+    prefill_seq_len: int,
+    batch_size: int,
+    language_metadata: Optional["RunnerMetadata"] = None,
 ) -> tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """Batch family-owned VLM input groups for the active language graph contract."""
     batch_images = _first_execution_batch(images, batch_size, "images")
     batch_prompts = _first_execution_batch(prompts, batch_size, "prompts")
     vision_batches = []
@@ -282,7 +288,7 @@ def _prepare_vlm_execution_inputs(
     for image, prompt in zip(batch_images, batch_prompts):
         vision_inputs, lang_inputs, _ = handler.prepare_processor_inputs(image, prompt, prefill_seq_len)
         vision_batches.append(vision_inputs)
-        lang_batches.append(_slice_vlm_prefill_inputs(lang_inputs, prefill_seq_len))
+        lang_batches.append(_slice_vlm_prefill_inputs(lang_inputs, prefill_seq_len, language_metadata))
     return _concat_input_batches(vision_batches), _concat_input_batches(lang_batches)
 
 
@@ -426,17 +432,33 @@ def _proxy_logits_width(model) -> Optional[int]:
     raise AttributeError("Proxy model configuration does not expose its hidden size.")
 
 
-def _slice_vlm_prefill_inputs(lang_inputs: Mapping[str, np.ndarray], prefill_seq_len: int) -> Dict[str, np.ndarray]:
-    host_inputs = {}
+def _slice_vlm_prefill_inputs(
+    lang_inputs: Mapping[str, np.ndarray], prefill_seq_len: int, language_metadata: Optional[RunnerMetadata]
+) -> Dict[str, np.ndarray]:
+    """Slice only graph-declared ``seq_len`` axes from family-owned language inputs."""
+    graph_inputs = (
+        {graph_input.name: graph_input for graph_input in language_metadata.graph.input}
+        if language_metadata is not None
+        else {}
+    )
+    sliced_inputs = {}
     for name, value in lang_inputs.items():
         value = np.asarray(value)
-        if name in {"input_ids", "position_ids", "mm_token_type_ids", "token_type_ids"}:
-            host_inputs[name] = value[..., :prefill_seq_len]
-        elif name == "cross_attention_mask":
-            host_inputs[name] = value[:, :prefill_seq_len, ...]
-        elif name in {"image_idx", "batch_index"}:
-            host_inputs[name] = value
-    return host_inputs
+        graph_input = graph_inputs.get(name)
+        if graph_input is None:
+            sliced_inputs[name] = value
+            continue
+        dimensions = graph_input.type.tensor_type.shape.dim
+        if value.ndim != len(dimensions):
+            raise ValueError(
+                f"Family processor output {name!r} has rank {value.ndim}, expected {len(dimensions)} by the language graph."
+            )
+        slices = tuple(
+            slice(0, prefill_seq_len) if dimension.dim_param == "seq_len" else slice(None)
+            for dimension in dimensions
+        )
+        sliced_inputs[name] = value[slices]
+    return sliced_inputs
 
 
 def _filter_graph_inputs(

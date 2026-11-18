@@ -304,6 +304,7 @@ def _prepare_vlm_runner_inputs(
 
     compile_dir = _get_compile_dir(active_model)
     runner_metadata = RunnerMetadata.from_paths(active_model.onnx_path, compile_dir)
+    language_metadata = runner_metadata
     try:
         language_specialization = select_prefill_specialization(compile_dir)
     except ValueError:
@@ -312,7 +313,9 @@ def _prepare_vlm_runner_inputs(
         lang_model = getattr(model, "lang_model", None)
         if lang_model is None:
             raise
-        language_specialization = select_prefill_specialization(_get_compile_dir(lang_model))
+        language_compile_dir = _get_compile_dir(lang_model)
+        language_specialization = select_prefill_specialization(language_compile_dir)
+        language_metadata = RunnerMetadata.from_paths(lang_model.onnx_path, language_compile_dir)
     prefill_seq_len = max(int(language_specialization.get("seq_len", 1)), 1)
     batch_size = _execution_batch_size(language_specialization)
     handler = VisionHandler(
@@ -323,7 +326,9 @@ def _prepare_vlm_runner_inputs(
         image_height=image_height,
         image_width=image_width,
     )
-    vision_inputs, lang_inputs = _prepare_vlm_execution_inputs(handler, images, prompts, prefill_seq_len, batch_size)
+    vision_inputs, lang_inputs = _prepare_vlm_execution_inputs(
+        handler, images, prompts, prefill_seq_len, batch_size, language_metadata
+    )
     try:
         specialization = select_vision_specialization(compile_dir, runner_metadata, vision_inputs)
     except ValueError as error:

@@ -2442,6 +2442,42 @@ def test_cross_qpc_contract_rejects_incompatible_custom_io_storage(tmp_path):
 
 
 @pytest.mark.cpu_only
+def test_vlm_prefill_slicing_uses_graph_seq_len_symbols_not_input_names(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata, _slice_vlm_prefill_inputs
+
+    family_tokens = helper.make_tensor_value_info("family_tokens", TensorProto.INT64, ["batch_size", "seq_len"])
+    family_mask = helper.make_tensor_value_info(
+        "family_mask", TensorProto.INT64, ["batch_size", "seq_len", "feature_width"]
+    )
+    image_metadata = helper.make_tensor_value_info("image_metadata", TensorProto.INT64, ["batch_size", 3])
+    onnx_path = tmp_path / "family.onnx"
+    onnx.save(
+        helper.make_model(
+            helper.make_graph([], "family_language", [family_tokens, family_mask, image_metadata], [family_tokens])
+        ),
+        onnx_path,
+    )
+    metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    sliced = _slice_vlm_prefill_inputs(
+        {
+            "family_tokens": np.ones((1, 8), dtype=np.int64),
+            "family_mask": np.ones((1, 8, 2), dtype=np.int64),
+            "image_metadata": np.ones((1, 3), dtype=np.int64),
+        },
+        prefill_seq_len=4,
+        language_metadata=metadata,
+    )
+
+    assert sliced["family_tokens"].shape == (1, 4)
+    assert sliced["family_mask"].shape == (1, 4, 2)
+    assert sliced["image_metadata"].shape == (1, 3)
+
+
+@pytest.mark.cpu_only
 @pytest.mark.parametrize(
     ("precision", "value", "raw_dtype", "element_size"),
     [
