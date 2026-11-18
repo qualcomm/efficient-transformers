@@ -1076,7 +1076,7 @@
           "num_hidden_layers": 1,
           "patch_size": 16
         },
-      "vision_soft_tokens_per_image": 280 
+        "vision_soft_tokens_per_image": 280
       }
     },
     {
@@ -1112,7 +1112,7 @@
           "num_hidden_layers": 1,
           "patch_size": 16
         },
-      "vision_soft_tokens_per_image": 280 
+        "vision_soft_tokens_per_image": 280
       }
     },
     {

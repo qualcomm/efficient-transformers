@@ -316,6 +316,45 @@ class FP8BlockWiseDequantGroupedLinear(FP8BlockWiseDequantLinear):
             return output.reshape(*input_shape, self.n_groups, -1)
 
 
+class FP8BlockWiseDequantGroupedLinear(FP8BlockWiseDequantLinear):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        weight_block_size: List[int],
+        n_groups: int,
+        bias: bool = False,
+    ):
+        super().__init__(in_features, out_features, weight_block_size, bias)
+        self.n_groups = n_groups
+
+    @classmethod
+    def for_fp8_layer_with_blocksize(cls, in_features, out_features, weight_block_size, fmt, n_groups, bias):
+        fp8_dequant_layer = cls(in_features, out_features, weight_block_size, n_groups, bias)
+        assert fmt == "e4m3", "e5m2 is not supposed yet!!"
+        assert (in_features % weight_block_size[0]) == 0 and (out_features % weight_block_size[1]) == 0, (
+            "weight shape is not divisible by block sizes in either rows or columns or both dimensions, "
+            f"got in_features: {in_features}, out_features: {out_features}, weight_block_size: {weight_block_size}!!"
+        )
+        fp8_dequant_layer.register_buffer(
+            "weight_scale_inv",
+            torch.empty(
+                (out_features // weight_block_size[0], in_features // weight_block_size[1]), dtype=torch.float32
+            ),
+        )
+        return fp8_dequant_layer
+
+    def forward(self, x):
+        with torch.no_grad():
+            dequantized_weights = blockwise_dequantize(self.weight, self.weight_scale_inv, self.weight_block_size)
+            input_shape = x.shape[:-2]
+            hidden_dim = x.shape[-1]
+            weights = dequantized_weights.view(self.n_groups, -1, hidden_dim).transpose(1, 2)
+            grouped_input = x.reshape(-1, self.n_groups, hidden_dim).transpose(0, 1)
+            output = torch.bmm(grouped_input.float(), weights).transpose(0, 1)
+            return output.reshape(*input_shape, self.n_groups, -1)
+
+
 class FP8BlockWiseDequantQwen3VLMoeTextExperts(torch.nn.Module):
     """MoE expert block with 2-D blocked FP8 weight quantization for Qwen3-VL-MoE."""
 
