@@ -75,10 +75,6 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeVisionConfig,
 )
 
-from examples.text_generation.minimax_m3_paged_dp_decode_only_configurable_pages import (
-    _build_qaic_config,
-    build_block_table,
-)
 from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
 from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Attention,
@@ -102,6 +98,8 @@ from QEfficient.transformers.models.modeling_auto import (
 from QEfficient.transformers.models.pytorch_transforms import CustomOpsTransform
 from QEfficient.transformers.quantizers.auto import replace_transformers_quantizers
 from QEfficient.utils._utils import _infer_specialization_name, to_named_specializations
+from QEfficient.utils.config_utils import _build_minimax_qaic_config
+from QEfficient.utils.generate_inputs import build_block_table
 from QEfficient.utils.run_utils import ApiRunner
 
 ort.set_default_logger_severity(3)
@@ -266,12 +264,12 @@ def test_deepseek_v4_csa_dp_cp_indexer_cache_layout_decodes():
 
 
 def test_deepseek_v4_example_parallel_layout_controls():
-    from examples.text_generation.deepseek_v4_flash_decode import (
-        build_ffn_blocking_config,
+    from QEfficient.utils.config_utils import (
+        build_deepseekv4_ffn_blocking_config,
         configure_qeff_parallel_layout,
     )
 
-    assert build_ffn_blocking_config(
+    assert build_deepseekv4_ffn_blocking_config(
         Namespace(ffn_blocking_mode="default", ffn_token_block_size=None, ffn_weight_block_size=None)
     ) == {
         "ffn_blocking_mode": "default",
@@ -893,7 +891,7 @@ def _tiny_minimax_m3_paged_dp_cp_config():
         tree_reduce=True,
         static_export_dims=False,
     )
-    qaic_config = _build_qaic_config(args, 8, 4, 4)
+    qaic_config = _build_minimax_qaic_config(args, 8, 4, 4)
     qaic_config.pop("moe_config")
     qaic_config.pop("indexer_num_blocks")
     qaic_config.pop("msa_num_kv_blocks")
@@ -2468,6 +2466,63 @@ def test_causal_lm_cpu_runtime_parity_with_api_runner(model_type, model_id, tmp_
 
     assert np.array_equal(hf_tokens, kv_tokens.squeeze(0))
     assert np.array_equal(kv_tokens, ort_tokens)
+
+
+@pytest.mark.llm_model
+@pytest.mark.cpu_only
+def test_minimax_m3_prefill_qaic_config_builder():
+    args = SimpleNamespace(
+        q_head_block_chunk=2,
+        num_kv_blocks=4,
+        prefill_seq_len=128,
+        q_block_size=32,
+        q_block_chunk=64,
+        ctx_len=512,
+        msa_indexer_dp=1,
+        msa_indexer_cp=2,
+        msa_attn_dp=2,
+        msa_attn_cp=1,
+        indexer_n_head=1,
+        indexer_prefill_parallel=True,
+        num_cores=4,
+        msa_q_chunk=8,
+        expert_parallel_chunk_size=16,
+        cores_per_expert=2,
+        tree_reduce=False,
+        static_export_dims=True,
+        indexer_q_chunk=16,
+        indexer_q_size=4,
+        indexer_num_blocks=2,
+        msa_num_kv_blocks=3,
+    )
+
+    assert _build_minimax_qaic_config(args, prefill=True) == {
+        "blocking_mode": "prefill_online",
+        "head_block_size": 2,
+        "num_kv_blocks": 4,
+        "num_q_blocks": 4,
+        "n_rep_chunk": 2,
+        "ctx_len": 512,
+        "msa_indexer_dp": 1,
+        "msa_indexer_cp": 2,
+        "msa_attn_dp": 2,
+        "msa_attn_cp": 1,
+        "indexer_n_head": 1,
+        "indexer_prefill_parallel": True,
+        "num_cores_per_device": 4,
+        "msa_q_chunk": 8,
+        "moe_config": {
+            "flavour": "expert_parallel",
+            "expert_parallel_chunk_size": 16,
+            "cores_per_expert": 2,
+            "tree_reduce": False,
+        },
+        "static_export_dims": True,
+        "indexer_q_chunk": 16,
+        "indexer_q_size": 4,
+        "indexer_num_blocks": 2,
+        "msa_num_kv_blocks": 3,
+    }
 
 
 @pytest.mark.llm_model

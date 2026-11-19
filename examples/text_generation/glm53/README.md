@@ -28,7 +28,7 @@ export TRANSFORMERS_OFFLINE=1
 Export one four-layer configuration without compiling it:
 
 ```bash
-python examples/glm/glm53_four_layer_decode_compile_generate.py \
+python examples/text_generation/glm53/glm53_four_layer_decode_compile_generate.py \
   --weight-free --export-only \
   --attention-preset dsa_cp1 \
   --prompt-len 4 --generation-len 1 \
@@ -58,7 +58,7 @@ The selected preset is copied into `qaic_config` before `QEFFAutoModelForCausalL
 Run the complete preset matrix with:
 
 ```bash
-python examples/glm/glm53_four_layer_decode_compile_generate.py \
+python examples/text_generation/glm53/glm53_four_layer_decode_compile_generate.py \
   --weight-free --export-only --all-attention-configs \
   --prompt-len 4 --generation-len 1 \
   --qeff-home "$QEFF_HOME"
@@ -76,7 +76,7 @@ I/O (including their retained-state bindings) as MXINT8. The default remains `fl
 Run dense prefill-parallel export and compile with the dedicated prefill script:
 
 ```bash
-python examples/glm/glm53_four_layer_prefill_compile.py \
+python examples/text_generation/glm53/glm53_four_layer_prefill_compile.py \
   --attention-preset dense_prefill_parallel \
   --prefill-seq-len 128 \
   --ctx-len 128 \
@@ -89,7 +89,7 @@ model path. Weight-free disaggregated compile is currently blocked by the core e
 Run the folded DSA prefill path with:
 
 ```bash
-python examples/glm/glm53_four_layer_prefill_compile.py \
+python examples/text_generation/glm53/glm53_four_layer_prefill_compile.py \
   --attention-preset dsa_prefill_cp1 \
   --prefill-seq-len 512 \
   --ctx-len 65536 \
@@ -105,7 +105,7 @@ Use `--attention-qaic-json` to shallow-merge a JSON object over the selected pre
 benchmark `par` implementation but changes its KV block and split counts:
 
 ```bash
-python examples/glm/glm53_four_layer_decode_compile_generate.py \
+python examples/text_generation/glm53/glm53_four_layer_decode_compile_generate.py \
   --weight-free --export-only \
   --attention-preset dense_parallel \
   --attention-qaic-json '{"num_kv_blocks": 4, "par_num_split": 8}'
@@ -159,7 +159,7 @@ bounded by the selected context length.
 For a custom four-device folded topology:
 
 ```bash
-python examples/glm/glm53_four_layer_decode_compile_generate.py \
+python examples/text_generation/glm53/glm53_four_layer_decode_compile_generate.py \
   --weight-free --export-only \
   --attention-preset dsa_cp1 \
   --batch-size 4 --ctx-len 2176 --num-devices 4 \
@@ -174,7 +174,7 @@ Benchmark-scale TS16 requires context 262144, which should be exported as its ow
 placement evidence. Do not report the `dsa_ts16_smoke` artifact as benchmark TS16 parity.
 
 ```bash
-python examples/glm/glm53_four_layer_decode_compile_generate.py \
+python examples/text_generation/glm53/glm53_four_layer_decode_compile_generate.py \
   --weight-free --export-only \
   --attention-preset dsa_ts16_smoke \
   --ctx-len 262144 --prompt-len 4 --generation-len 1

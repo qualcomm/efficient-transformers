@@ -17,6 +17,12 @@ import onnx
 import torch
 from transformers import AutoConfig, AutoTokenizer
 
+from QEfficient.utils.config_utils import (
+    DEEPSEEKV4_HW_CORES_PER_DEVICE,
+    build_deepseekv4_ffn_blocking_config,
+    configure_qeff_parallel_layout,
+)
+
 DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
@@ -50,7 +56,7 @@ TARGETED_HEAD_OUTPUTS = (
     "/model/hc_head/MatMul_output_0",
     "/lm_head/MatMul_output_0",
 )
-HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
+HW_CORES_PER_DEVICE = DEEPSEEKV4_HW_CORES_PER_DEVICE
 MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
 
 
@@ -339,81 +345,6 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_ffn_blocking_config(args: argparse.Namespace) -> dict[str, int | str | None]:
-    """Build the compile-time routed-expert FFN blocking configuration."""
-    return {
-        "ffn_blocking_mode": args.ffn_blocking_mode,
-        "ffn_token_block_size": args.ffn_token_block_size,
-        "ffn_weight_block_size": args.ffn_weight_block_size,
-    }
-
-
-def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
-    """Apply the benchmark's shared folded decode controls to QEff cache layouts."""
-    attention_dp = args.attn_dp or len(args.device_group)
-    indexer_cp = args.indexer_cp
-    num_kv_blocks = args.num_kv_blocks
-    attention_cores = HW_CORES_PER_DEVICE[args.hw_version]
-    hca_compressed_kv_cp = args.hca_compressed_kv_cp
-    hca_attn_blocks = args.hca_attn_blocks or attention_cores
-    if attention_dp < 1:
-        raise ValueError("attn_dp must be at least 1.")
-    if indexer_cp < 1:
-        raise ValueError("indexer_cp must be at least 1.")
-    if num_kv_blocks < 1:
-        raise ValueError("num_kv_blocks must be at least 1.")
-    if hca_compressed_kv_cp < 1:
-        raise ValueError("hca_compressed_kv_cp must be at least 1.")
-    if hca_attn_blocks < 1:
-        raise ValueError("hca_attn_blocks must be at least 1.")
-    if args.batch_size % attention_dp:
-        raise ValueError("batch_size must be divisible by attn_dp.")
-
-    csa_capacity = None
-    hca_capacity = None
-    for layer_type in config.layer_types:
-        if layer_type == "compressed_sparse_attention":
-            csa_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
-            if csa_capacity % indexer_cp:
-                raise ValueError("CSA compressed-cache capacity must be divisible by indexer_cp.")
-            csa_slots_per_cp = csa_capacity // indexer_cp
-            if csa_slots_per_cp % num_kv_blocks:
-                raise ValueError("CSA CP-way slot count must be divisible by num_kv_blocks.")
-            if (csa_slots_per_cp // num_kv_blocks) % attention_cores:
-                raise ValueError("CSA KV-block width must be divisible by the hardware attention-core count.")
-        if layer_type == "heavily_compressed_attention":
-            hca_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
-            if hca_capacity % hca_compressed_kv_cp:
-                raise ValueError("HCA compressed-cache capacity must be divisible by hca_compressed_kv_cp.")
-            if (hca_capacity // hca_compressed_kv_cp) % hca_attn_blocks:
-                raise ValueError("HCA CP-way slot count must be divisible by hca_attn_blocks.")
-    config.qeff_csa_attention_dp = attention_dp
-    config.qeff_csa_indexer_cp = indexer_cp
-    config.qeff_csa_num_kv_blocks = num_kv_blocks
-    config.qeff_csa_indexer_attention_cores = attention_cores
-    config.qeff_csa_folded_row_cache = True
-    csa_prefill_attn_gather_sub_qc = getattr(args, "csa_prefill_attn_gather_sub_qc", None)
-    if csa_prefill_attn_gather_sub_qc is not None:
-        config.qeff_csa_prefill_attn_gather_sub_qc = csa_prefill_attn_gather_sub_qc
-    csa_prefill_indexer_kv_block_size = getattr(args, "csa_prefill_indexer_kv_block_size", None)
-    if csa_prefill_indexer_kv_block_size is not None:
-        config.qeff_csa_prefill_indexer_kv_block_size = csa_prefill_indexer_kv_block_size
-    csa_prefill_indexer_topk_per_block = getattr(args, "csa_prefill_indexer_topk_per_block", None)
-    if csa_prefill_indexer_topk_per_block is not None:
-        config.qeff_csa_prefill_indexer_topk_per_block = csa_prefill_indexer_topk_per_block
-    config.qeff_hca_attention_dp = attention_dp
-    config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
-    config.qeff_hca_attn_blocks = hca_attn_blocks
-    config.qeff_hca_folded_row_cache = True
-    print(
-        "Folded decode layout: "
-        f"batch_size={args.batch_size}, attn_dp={attention_dp}, indexer_cp={indexer_cp}, "
-        f"num_kv_blocks={num_kv_blocks}, "
-        f"hw_version={args.hw_version}, hca_compressed_kv_cp={hca_compressed_kv_cp}, "
-        f"hca_attn_blocks={hca_attn_blocks}, csa_capacity={csa_capacity}, hca_capacity={hca_capacity}"
-    )
-
-
 def main(defaults: dict[str, object] | None = None) -> None:
     args = parse_args(defaults)
     if args.ctx_len < 2:
@@ -470,7 +401,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
     config.qeff_hca_prefill_only = args.prefill_only
     batch_size = args.batch_size
     configure_qeff_parallel_layout(config, args)
-    qaic_config = build_ffn_blocking_config(args)
+    qaic_config = build_deepseekv4_ffn_blocking_config(args)
     print(
         "FFN blocking: "
         f"mode={args.ffn_blocking_mode}, token_block_size={args.ffn_token_block_size}, "
