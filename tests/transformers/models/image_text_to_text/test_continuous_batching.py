@@ -35,6 +35,7 @@ from QEfficient.utils.test_utils import (
 from tests.two_phase import model_export_compile_lock, resolve_two_phase_cleanup
 from tests.utils.image_utils import load_test_image
 from tests.utils.load_kimi_utils import (
+    add_kimi_k25_test_hash_salt,
     get_kimi_k25_test_config,
     is_kimi_k25,
     load_kimi_k25_model_from_config,
@@ -119,6 +120,7 @@ def check_image_text_to_text_pytorch_vs_kv_vs_ort_vs_ai100_CB(
             torch_dtype=torch.float32,
             continuous_batching=True,
         )
+        add_kimi_k25_test_hash_salt(qeff_model)
     elif config is None:
         config = AutoConfig.from_pretrained(
             model_name, trust_remote_code=True, padding=model_name not in ModelConfig.MOLMO_MODELS
@@ -428,8 +430,6 @@ def test_few_image_text_to_text_pytorch_vs_ai100_continuous_batching(model_name,
 @pytest.mark.parametrize("model_name", test_mm_models)
 @pytest.mark.parametrize("kv_offload", [True])  # TODO: Add support for kv_offload=False
 def test_dummy_image_text_to_text_pytorch_vs_ai100_continuous_batching(model_name, kv_offload, manual_cleanup):
-    if is_kimi_k25(model_name):
-        pytest.xfail("Temporary: Kimi-K2.5 dummy continuous-batching parity is unstable on QAIC in CI.")
     if model_name in ModelConfig.SKIPPED_MODELS:
         pytest.skip("Test skipped for this model due to some issues.")
     if model_name in ModelConfig.DUAL_QPC_MODELS and not kv_offload:
@@ -489,8 +489,6 @@ def test_dummy_image_text_to_text_prefix_caching_cb(model_name, kv_offload, manu
     Lives with the CB tests because ``compile()`` rejects ``kv_cache_batch_size`` unless
     continuous batching is on.
     """
-    if is_kimi_k25(model_name):
-        pytest.xfail("Temporary: Kimi-K2.5 dummy prefix-caching parity is unstable on QAIC in CI.")
     if model_name in ModelConfig.SKIPPED_MODELS:
         pytest.skip("Test skipped for this model due to some issues.")
     if model_name in ModelConfig.DUAL_QPC_MODELS and not kv_offload:
