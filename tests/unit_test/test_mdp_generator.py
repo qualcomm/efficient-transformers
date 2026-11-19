@@ -541,6 +541,41 @@ def test_precheck_alias_cleanup_respects_exact_protected_name(
 
 
 @pytest.mark.cpu_only
+def test_precheck_preserves_same_suffix_nodes_with_distinct_computations(tmp_path):
+    nodes = [
+        helper.make_node("Reshape", ["data", "shape_a"], ["scoped_reshape"], name="/language_model/Reshape_4"),
+        helper.make_node("Reshape", ["data", "shape_b"], ["top_reshape"], name="/Reshape_4"),
+        helper.make_node("Gather", ["data", "indices"], ["scoped_gather"], axis=0, name="/language_model/Gather_9"),
+        helper.make_node("Gather", ["data", "indices"], ["top_gather"], axis=1, name="/Gather_9"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "distinct_same_suffix_computations",
+        inputs=[
+            helper.make_tensor_value_info("data", TensorProto.FLOAT, [2, 2]),
+            helper.make_tensor_value_info("shape_a", TensorProto.INT64, [2]),
+            helper.make_tensor_value_info("shape_b", TensorProto.INT64, [2]),
+            helper.make_tensor_value_info("indices", TensorProto.INT64, [1]),
+        ],
+        outputs=[
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, [None, None])
+            for name in ("scoped_reshape", "top_reshape", "scoped_gather", "top_gather")
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model)
+    onnx_path = tmp_path / "distinct_same_suffix_computations.onnx"
+    onnx.save(model, onnx_path)
+    mdp_json = _mdp(["/language_model/Reshape_4", "/language_model/Gather_9"], ["/Reshape_4", "/Gather_9"])
+
+    removed = precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json)
+
+    assert removed == 0
+    assert mdp_json["partitions"][0]["nodeList"] == ["/language_model/Reshape_4", "/language_model/Gather_9"]
+    assert mdp_json["partitions"][1]["nodeList"] == ["/Reshape_4", "/Gather_9"]
+
+
+@pytest.mark.cpu_only
 def test_compiler_repair_uses_exact_top_level_name_not_scoped_peer(tmp_path):
     """Only the unscoped top-level name is relocated; its scoped peer is distinct."""
     onnx_path = _save_dependency_graph(

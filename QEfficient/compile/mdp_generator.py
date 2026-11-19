@@ -46,6 +46,20 @@ def _is_decoder_layer_callsite(node_name: str) -> bool:
     return "/language_model/layers." in node_name or "/model/layers." in node_name
 
 
+def _same_node_computation(node: onnx.NodeProto, peer: onnx.NodeProto) -> bool:
+    """Return whether two differently named ONNX nodes compute the same outputs."""
+    node_attributes = tuple(sorted((attribute.name, attribute.SerializeToString()) for attribute in node.attribute))
+    peer_attributes = tuple(sorted((attribute.name, attribute.SerializeToString()) for attribute in peer.attribute))
+    return (
+        node.op_type == peer.op_type
+        and node.domain == peer.domain
+        and getattr(node, "overload", "") == getattr(peer, "overload", "")
+        and tuple(node.input) == tuple(peer.input)
+        and node_attributes == peer_attributes
+        and tuple(bool(output) for output in node.output) == tuple(bool(output) for output in peer.output)
+    )
+
+
 def _drop_mdp_nodes_inplace(mdp_json: Dict[str, Any], nodes_to_drop: Set[str]) -> int:
     """Drop node names from partition nodeLists in-memory."""
     if not nodes_to_drop:
@@ -134,6 +148,8 @@ def _drop_alias_prone_top_level_nodes(
             continue
         language_model_peer = f"/language_model{node_name}"
         if language_model_peer not in name_to_node:
+            continue
+        if not _same_node_computation(name_to_node[node_name], name_to_node[language_model_peer]):
             continue
         top_rank = node_rank.get(node_name)
         peer_rank = node_rank.get(language_model_peer)
