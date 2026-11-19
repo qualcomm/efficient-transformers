@@ -514,6 +514,24 @@ class TestFinetuneFunctionSignatures:
 
 
 # ---------------------------------------------------------------------------
+# Tests: finetune dataset utilities
+# ---------------------------------------------------------------------------
+
+
+class TestFinetuneDatasetUtils:
+    def test_get_longest_seq_length_handles_torch_formatted_hf_datasets(self):
+        import datasets
+        import torch
+
+        from QEfficient.finetune.utils.dataset_utils import get_longest_seq_length
+
+        dataset = datasets.Dataset.from_dict({"input_ids": [[1, 2, 3], [4]], "labels": [[1, 2, 3], [4]]})
+        dataset.set_format("torch")
+
+        assert get_longest_seq_length(torch.utils.data.ConcatDataset([dataset, dataset])) == (3, 0)
+
+
+# ---------------------------------------------------------------------------
 # Tests: finetune.py - setup_seeds behavior
 # ---------------------------------------------------------------------------
 

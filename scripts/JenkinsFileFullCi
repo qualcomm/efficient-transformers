@@ -244,7 +244,7 @@ pipeline {
                     # TODO: Update torch_qaic path to py312 when migrating to Python 3.12
                     pip install /opt/qti-aic/integrations/torch_qaic/py312/torch_qaic-0.1.0-cp312-cp312-manylinux_2_34_x86_64.whl &&
                     # pip install /opt/qti-aic/integrations/torch_qaic/py310/torch_qaic-0.1.0-cp310-cp310-linux_x86_64.whl &&
-                    pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu &&
+                    pip install torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cpu &&
                     mkdir -p /efficient-transformers/cli_qaic_finetuning &&
                     export TOKENIZERS_PARALLELISM=false &&
                     export QEFF_HOME=/efficient-transformers/cli_qaic_finetuning &&

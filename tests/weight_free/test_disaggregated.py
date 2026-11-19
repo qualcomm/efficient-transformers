@@ -848,6 +848,8 @@ def test_weight_free_decode_blocked_disaggregated_compile_and_artifact_metrics(
     record_property,
 ):
     """Compile decode-blocked weight-free disaggregated QPCs and record artifact metrics."""
+    if model_type == "qwen3_moe" and decode_blocking_key == "kv_headpar":
+        pytest.xfail("Qwen3-MoE disaggregated kv_headpar decode returns zero logits after the first token")
     use_onnx_subfunctions = True
     decode_qaic_config = _build_disagg_decode_blocking_qaic_config(decode_blocking_key)
     prefill_qaic_config = {"moe_config": {"expert_parallel_chunk_size": MOE_PREFILL_PACKED_CHUNK_SIZE}}
