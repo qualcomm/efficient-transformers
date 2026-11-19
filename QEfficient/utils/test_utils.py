@@ -240,9 +240,7 @@ def load_vlm_model_from_config(config):
             trust_remote_code=True,
         )
     except ValueError:
-        model_hf = AutoModelForCausalLM.from_config(
-            config, attn_implementation="eager", trust_remote_code=True, ignore_mismatched_sizes=True
-        )
+        model_hf = AutoModelForCausalLM.from_config(config, attn_implementation="eager", trust_remote_code=True)
     torch_dtype = getattr(model_hf.config, "torch_dtype", None)
     if torch_dtype == torch.bfloat16 or torch_dtype == torch.float16:
         model_hf = model_hf.to(torch.float32)

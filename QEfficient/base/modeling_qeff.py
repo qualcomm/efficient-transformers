@@ -1465,10 +1465,15 @@ class QEFFBaseModel(ABC):
         if num_cores is None:
             num_cores = constants.DEFAULT_AIC_NUM_CORES
         is_glm_moe_dsa = getattr(model_config, "model_type", None) == "glm_moe_dsa"
-        if blocking_config is not None or is_glm_moe_dsa:
+        has_existing_blocking_config = any(
+            getattr(module, "attn_blocking_config", None) is not None for module in self.model.modules()
+        )
+        if blocking_config is not None or is_glm_moe_dsa or has_existing_blocking_config:
             self.model, _ = BlockingAttentionTransform.apply(
                 self.model,
-                attn_blocking_config=blocking_config,
+                attn_blocking_config=(
+                    blocking_config if blocking_config is not None or is_glm_moe_dsa else AttentionBlockingConfig()
+                ),
                 qaic_config=qaic_config,
                 batch_size=bs,
                 seq_len=seq_len or 1,

@@ -272,6 +272,27 @@ class TestQEFFBaseModelHashParams:
 class TestQEFFBaseModelTransformBlocking:
     """Tests for QEFFBaseModel.transform() attention blocking behavior."""
 
+    def test_transform_clears_existing_blocking_config_when_blocking_is_disabled(self):
+        from QEfficient.blocking.attention_blocking import BlockingMode
+
+        model, _ = make_tiny_llama()
+        qeff = QEFFAutoModelForCausalLM(model)
+
+        qeff.transform(
+            ctx_len=CTX_LEN,
+            seq_len=SEQ_LEN,
+            bs=1,
+            qaic_config={"blocking_mode": "kv", "num_kv_blocks": 2},
+        )
+        blocking_config = _get_any_attn_blocking_config(qeff.model)
+        assert blocking_config.mode == BlockingMode.KV
+
+        qeff.transform(ctx_len=CTX_LEN, seq_len=SEQ_LEN, bs=1)
+
+        blocking_config = _get_any_attn_blocking_config(qeff.model)
+        assert blocking_config.mode == BlockingMode.NONE
+        assert "blocking_kwargs" not in qeff.hash_params
+
     @pytest.mark.parametrize(
         "blocking_mode", ["kv", "kv_paged", "q", "qkv", "qkv_paged", "hq", "hkv", "hkv_paged", "hqkv", "hqkv_paged"]
     )

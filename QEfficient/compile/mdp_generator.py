@@ -474,6 +474,15 @@ def generate_disagg_mdp_partition_config(
     graph_input_names: Set[str] = {inp.name for inp in model.graph.input}
     initializer_names: Set[str] = {init.name for init in model.graph.initializer}
     external_names: Set[str] = graph_input_names | initializer_names
+    input_only_nodes = {
+        node.name
+        for node in model.graph.node
+        if node.name
+        and node.input
+        and _get_layer_num(node.name) is None
+        and _get_layer_num_from_inputs(list(node.input)) is None
+        and all(not input_name or input_name in external_names for input_name in node.input)
+    }
 
     output_to_node: Dict[str, str] = {}
     for node in model.graph.node:
@@ -557,7 +566,9 @@ def generate_disagg_mdp_partition_config(
             continue
 
         layer_num = node_layer_by_name.get(node.name)
-        if layer_num is not None:
+        if node.name in input_only_nodes:
+            partition_idx = 0
+        elif layer_num is not None:
             seen_first_layer = True
             partition_idx = bisect.bisect_right(partition_bounds, layer_num)
             current_layer_partition = partition_idx

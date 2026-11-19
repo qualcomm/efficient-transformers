@@ -701,3 +701,40 @@ def test_mdp_partition_assigns_generic_producer_to_first_consumer_layer(tmp_path
     assert mdp_json["partitions"][0]["nodeList"] == [producer, decoder_layer_0]
     assert mdp_json["partitions"][1]["nodeList"] == [decoder_layer_1]
     assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json) == 0
+
+
+@pytest.mark.cpu_only
+def test_mdp_partition_keeps_external_gathers_in_first_partition(tmp_path):
+    full_attention_gather = "/language_model/Gather"
+    sliding_attention_gather = "/language_model/Gather_2"
+    decoder_layer_0 = "/language_model/layers.0/QEffGemma4TextDecoderLayer"
+    decoder_layer_1 = "/language_model/layers.1/QEffGemma4TextDecoderLayer"
+    onnx_path = tmp_path / "external_gathers.onnx"
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "Gather", ["full_cache", "position_ids"], ["full_rotary"], axis=0, name=full_attention_gather
+            ),
+            helper.make_node(
+                "Gather", ["sliding_cache", "position_ids"], ["sliding_rotary"], axis=0, name=sliding_attention_gather
+            ),
+            helper.make_node("Identity", ["sliding_rotary"], ["hidden"], name=decoder_layer_0),
+            helper.make_node("Add", ["hidden", "full_rotary"], ["output"], name=decoder_layer_1),
+        ],
+        "gemma4_external_gathers",
+        inputs=[
+            helper.make_tensor_value_info("full_cache", TensorProto.FLOAT, [4, 4]),
+            helper.make_tensor_value_info("sliding_cache", TensorProto.FLOAT, [4, 4]),
+            helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1]),
+        ],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model)
+    onnx.save(model, onnx_path)
+
+    mdp_json = generate_disagg_mdp_partition_config(str(onnx_path), 2, 2, 2, 4)
+
+    assert full_attention_gather in mdp_json["partitions"][0]["nodeList"]
+    assert sliding_attention_gather in mdp_json["partitions"][0]["nodeList"]
+    assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json) == 0

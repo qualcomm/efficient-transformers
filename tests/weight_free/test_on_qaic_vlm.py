@@ -209,12 +209,17 @@ def _build_vlm_test_checkpoint(
         if model_type == "qwen3_5" and hasattr(config.text_config, "layer_types"):
             config.text_config.layer_types[-1] = "full_attention"
         if force_full_attention and hasattr(config.text_config, "layer_types"):
-            config.text_config.layer_types = ["full_attention"] * config.text_config.num_hidden_layers
+            text_config = config.text_config
+            head_dim = text_config.__dict__["head_dim"]
+            text_config.layer_types = ["full_attention"] * text_config.num_hidden_layers
+            text_config.per_layer_config = {
+                layer_idx: {"head_dim": head_dim} for layer_idx in range(text_config.num_hidden_layers)
+            }
         for nested_config in (config, getattr(config, "text_config", None), getattr(config, "vision_config", None)):
             if nested_config is not None:
                 nested_config.dtype = "float32"
                 nested_config.torch_dtype = torch.float32
-    torch.manual_seed(42)
+    torch.manual_seed(49 if model_type == "gemma4" else 42)
     model = load_vlm_model_from_config(config)
     model.save_pretrained(checkpoint_dir, safe_serialization=True)
     return model, model_config
@@ -920,20 +925,27 @@ def test_vlm_offline_prefill_hf_qaic_parity(model_type, blocking_key, tmp_export
     model_id = WEIGHT_FREE_VLM_QAIC_MODEL_IDS[model_type]
     checkpoint_dir = tmp_export_dir / f"{model_type}_{blocking_key}_parity_checkpoint"
 
-    try:
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        hf_model, model_config = _build_vlm_test_checkpoint(
-            model_type,
-            checkpoint_dir,
-            model_id,
-            force_full_attention=model_type == "gemma4",
-        )
-    except Exception as exc:  # noqa: BLE001
-        skip_on_model_fetch_error(exc, model_id)
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    hf_model, model_config = _build_vlm_test_checkpoint(
+        model_type,
+        checkpoint_dir,
+        model_id,
+        force_full_attention=model_type == "gemma4",
+    )
 
     image_size = (VLM_IMAGE_WIDTH, VLM_IMAGE_HEIGHT)
     hf_inputs, _ = _prepare_vlm_test_inputs(processor, hf_model, None, model_config, image_size)
     _assert_has_image_inputs(hf_inputs, model_type)
+    if model_type == "gemma4":
+        hf_model = hf_model.__class__.from_pretrained(
+            checkpoint_dir, dtype=torch.float16, attn_implementation="eager"
+        ).eval()
+        hf_inputs = {
+            name: value.to(dtype=torch.float16)
+            if isinstance(value, torch.Tensor) and value.is_floating_point()
+            else value
+            for name, value in hf_inputs.items()
+        }
     with torch.inference_mode():
         hf_output = hf_model.generate(
             **hf_inputs,
