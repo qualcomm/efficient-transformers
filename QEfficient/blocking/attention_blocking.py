@@ -418,8 +418,8 @@ def generic_blocked_attention_interface(
     mla_kwargs: dict[str, Any] | None = None,
     is_mla: bool = False,
     prefill_only: bool = False,
-    auxiliary_state: Optional[Any] = None,
-    skip_kv: Optional[bool] = None,
+    auxiliary_state: Any | None = None,
+    skip_kv: bool | None = None,
     **kwargs,
 ):
     model_strategy = getattr(module, "qeff_attention_strategy", None)

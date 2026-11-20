@@ -50,7 +50,6 @@ from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.utils import constants, resolve_retained_state_output
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
 from QEfficient.utils.test_utils import load_vlm_model_from_config
-from scripts.kv_batch_fold_weight_free_e2e import _tile_retained_vision_inputs
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
@@ -640,6 +639,38 @@ def _update_retained_vision_inputs(target_inputs, source_outputs):
             target_inputs[input_name] = value
     if "image_idx_output" in source_outputs:
         target_inputs["image_idx"] = source_outputs["image_idx_output"]
+
+
+def _tile_retained_vision_inputs(
+    target_inputs: dict[str, np.ndarray], decode_session, batch_size: int, physical_slots: np.ndarray
+) -> None:
+    for name in ("vision_embeds", "deepstack_features", "pixel_values", "image_idx"):
+        if name not in target_inputs or name not in decode_session.binding_index_map:
+            continue
+        value = np.asarray(target_inputs[name])
+        binding_idx = decode_session.binding_index_map[name]
+        target_shape = tuple(decode_session.bindings[binding_idx].dims)
+        if value.shape == target_shape:
+            continue
+
+        batch_axes = []
+        if value.ndim == len(target_shape):
+            batch_axes = [
+                axis
+                for axis, (source_dim, target_dim) in enumerate(zip(value.shape, target_shape))
+                if source_dim == 1
+                and target_dim == batch_size
+                and all(value.shape[other] == target_shape[other] for other in range(value.ndim) if other != axis)
+            ]
+        if len(batch_axes) == 1:
+            batch_axis = batch_axes[0]
+            tiled = np.repeat(value, batch_size, axis=batch_axis)
+            target_inputs[name] = np.take(tiled, np.argsort(physical_slots), axis=batch_axis)
+            continue
+        raise ValueError(
+            f"Cannot adapt retained vision input {name!r} from shape {value.shape} "
+            f"to folded decode binding shape {target_shape}"
+        )
 
 
 def test_tile_retained_vision_inputs_to_folded_decode_shape():

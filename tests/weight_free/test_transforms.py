@@ -303,6 +303,8 @@ def test_checkpoint_root_symlinked_shards(tmp_path, monkeypatch):
 
     assert root == tmp_path
     assert shard.relative_to(root) == Path("mymodel/model.safetensors")
+
+
 # ---------------------------------------------------------------------------
 # Test checkpoint layout transforms
 # ---------------------------------------------------------------------------
