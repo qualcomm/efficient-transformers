@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import transformers
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -32,6 +33,7 @@ NUM_VISION_LAYERS = 2
 NUM_TEXT_LAYERS = 2
 LOADED_EXPERT_IDS = (0, 1, 2, 3)
 NUM_EXPERTS_PER_TOKEN = 2
+KIMI_K25_TEST_HASH_VERSION = 1
 
 EXPERT_KEY_PATTERN = re.compile(r"^(language_model\.model\.layers\.\d+\.mlp\.experts\.)(\d+)(\..+)$")
 
@@ -164,6 +166,7 @@ def prepare_config(model_path: Path):
 def get_kimi_k25_test_config(model_name: str, model_config_dict, *, seed: int = 42):
     set_deterministic(seed)
     config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    config._qeff_kimi_k25_test_seed = seed
     config._attn_implementation = "eager"
     config.torch_dtype = torch.float32
     config.dtype = torch.float32
@@ -183,6 +186,38 @@ def get_kimi_k25_test_config(model_name: str, model_config_dict, *, seed: int = 
 
     load_kimi_k25_class(config._name_or_path)
     return config
+
+
+def _kimi_k25_commit_hash(config) -> str | None:
+    for candidate in (config, getattr(config, "text_config", None), getattr(config, "vision_config", None)):
+        if candidate is None:
+            continue
+        commit_hash = getattr(candidate, "_commit_hash", None)
+        if commit_hash:
+            return str(commit_hash)
+    return None
+
+
+def add_kimi_k25_test_hash_salt(qeff_model, *, seed: int | None = None):
+    model = getattr(qeff_model, "model", None)
+    config = getattr(model, "config", None) or getattr(qeff_model, "config", None)
+    if seed is not None:
+        test_seed = seed
+    elif config is not None:
+        test_seed = getattr(config, "_qeff_kimi_k25_test_seed", None)
+    else:
+        test_seed = None
+    salt = {
+        "hash_version": KIMI_K25_TEST_HASH_VERSION,
+        "seed": test_seed,
+        "torch_version": torch.__version__,
+        "transformers_version": transformers.__version__,
+        "hf_commit_hash": _kimi_k25_commit_hash(config) if config else None,
+    }
+    for target in (qeff_model, getattr(qeff_model, "vision_model", None), getattr(qeff_model, "lang_model", None)):
+        if target is not None and hasattr(target, "hash_params"):
+            target.hash_params["kimi_k25_test_cache_salt"] = salt
+    return qeff_model
 
 
 def _attach_fake_gptq_weight(linear: torch.nn.Linear, group_size: int = 16):
@@ -225,6 +260,7 @@ def load_kimi_k25_model_from_config(config, *, seed: int = 42):
     kimi_cls = load_kimi_k25_class(config._name_or_path)
     set_deterministic(seed)
     model = kimi_cls._from_config(config)
+    model.config._qeff_kimi_k25_test_seed = seed
     torch_dtype = getattr(model.config, "torch_dtype", None)
     if torch_dtype == torch.bfloat16 or torch_dtype == torch.float16:
         model = model.to(torch.float32)
