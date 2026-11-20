@@ -28,6 +28,11 @@ def main():
         help="Context length for generation",
     )
     parser.add_argument("--num-cores", type=int, default=16, help="Number of cores")
+    parser.add_argument(
+        "--weight-free",
+        action="store_true",
+        help="Build the model on meta tensors and load weights at compile time",
+    )
     args = parser.parse_args()
 
     print(f"Loading Whisper model: {args.model_name}")
@@ -47,10 +52,10 @@ def main():
     processor = AutoProcessor.from_pretrained(args.model_name)
 
     ## STEP 2 -- init base model
-    qeff_model = QEFFAutoModelForSpeechSeq2Seq.from_pretrained(args.model_name)
+    qeff_model = QEFFAutoModelForSpeechSeq2Seq.from_pretrained(args.model_name, weight_free=args.weight_free)
 
     ## STEP 3 -- export and compile model
-    qeff_model.compile(num_cores=args.num_cores)
+    qeff_model.compile(num_cores=args.num_cores, dynamo=args.weight_free)
 
     ## STEP 4 -- generate output for loaded input and processor
     exec_info = qeff_model.generate(

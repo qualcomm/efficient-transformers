@@ -27,6 +27,21 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--seq_len", type=int, default=480000, help="Context length for generation")
     parser.add_argument("--num-devices", type=int, default=1, help="Number of devices")
+    parser.add_argument(
+        "--weight-free",
+        action="store_true",
+        help="Build the model on meta tensors and load weights at compile time",
+    )
+    parser.add_argument(
+        "--dynamo",
+        action="store_true",
+        help="Build the model on meta tensors and load weights at compile time",
+    )
+    parser.add_argument(
+        "--use-onnx-subfunction",
+        action="store_true",
+        help="Build the model on meta tensors and load weights at compile time",
+    )
     args = parser.parse_args()
 
     print(f"Loading CTC model: {args.model_name}")
@@ -41,11 +56,18 @@ def main():
     processor = AutoProcessor.from_pretrained(args.model_name)
 
     ## STEP 2 -- Load the model
-    model = QEFFAutoModelForCTC.from_pretrained(args.model_name, torch_dtype=torch.float32)
+    model = QEFFAutoModelForCTC.from_pretrained(
+        args.model_name, torch_dtype=torch.float32, weight_free=args.weight_free
+    )
 
     ## STEP 3 -- Compile the model
     model.compile(
-        batch_size=args.batch_size, num_devices=args.num_devices, seq_len=args.seq_len, num_cores=args.num_cores
+        batch_size=args.batch_size,
+        num_devices=args.num_devices,
+        seq_len=args.seq_len,
+        num_cores=args.num_cores,
+        dynamo=True if args.weight_free else args.dynamo,
+        use_onnx_subfunctions=args.use_onnx_subfunctions,
     )
 
     ## STEP 4 -- Run the model and generate the output
