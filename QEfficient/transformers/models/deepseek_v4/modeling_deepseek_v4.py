@@ -76,6 +76,20 @@ def _nonnegative_integer_floor_div(position: torch.Tensor, divisor: int) -> torc
     return quotient.to(position.dtype)
 
 
+def _clamp_in_dtype(
+    hidden_states: torch.Tensor,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> torch.Tensor:
+    """Clamp without promoting low-precision activations to float32."""
+    if min_value is not None:
+        hidden_states = torch.maximum(hidden_states, torch.full_like(hidden_states, min_value))
+    if max_value is not None:
+        hidden_states = torch.minimum(hidden_states, torch.full_like(hidden_states, max_value))
+    return hidden_states
+
+
 def _sliding_window_context_indices(
     position_ids: torch.Tensor,
     sliding_window: int,
@@ -2779,8 +2793,8 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
             down_proj = self.down_proj[flat_indices]
             gate = torch.bmm(expert_in, gate_proj)
             up = torch.bmm(expert_in, up_proj)
-            gate = gate.float().clamp(max=self.limit).to(gate.dtype)
-            up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
+            gate = _clamp_in_dtype(gate, max_value=self.limit)
+            up = _clamp_in_dtype(up, min_value=-self.limit, max_value=self.limit)
             activated = self.act_fn(gate) * up
             expert_out = torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
         else:
@@ -2792,8 +2806,8 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
                 down_proj = self.down_proj[:, start:end, :][flat_indices]
                 gate = torch.bmm(expert_in, gate_proj)
                 up = torch.bmm(expert_in, up_proj)
-                gate = gate.float().clamp(max=self.limit).to(gate.dtype)
-                up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
+                gate = _clamp_in_dtype(gate, max_value=self.limit)
+                up = _clamp_in_dtype(up, min_value=-self.limit, max_value=self.limit)
                 activated = self.act_fn(gate) * up
                 expert_out += torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
 
@@ -2807,8 +2821,8 @@ class QEffDeepseekV4MLP(DeepseekV4MLP):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate = self.gate_proj(hidden_states)
         up = self.up_proj(hidden_states)
-        gate = gate.float().clamp(max=self.limit).to(gate.dtype)
-        up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
+        gate = _clamp_in_dtype(gate, max_value=self.limit)
+        up = _clamp_in_dtype(up, min_value=-self.limit, max_value=self.limit)
         return self.down_proj(self.act_fn(gate) * up)
 
 
@@ -2847,8 +2861,8 @@ def _deepseek_v4_clamped_swiglu_mlp(
 ) -> torch.Tensor:
     gate = x @ gate_proj
     up = x @ up_proj
-    gate = gate.float().clamp(max=limit).to(gate.dtype)
-    up = up.float().clamp(min=-limit, max=limit).to(up.dtype)
+    gate = _clamp_in_dtype(gate, max_value=limit)
+    up = _clamp_in_dtype(up, min_value=-limit, max_value=limit)
     return (act_fn(gate) * up) @ down_proj
 
 
