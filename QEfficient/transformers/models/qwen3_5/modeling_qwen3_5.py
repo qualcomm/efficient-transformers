@@ -1123,7 +1123,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_state = conv_state_all
                 recurrent_state = recurrent_state_all
 
-            if (batch_fold or dflash_commit_final is not None) and position_ids is not None:
+            if position_ids is not None:
                 text_position_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
                 zero_cumsum = torch.cumsum((text_position_ids == 0).to(torch.int32), dim=1)[:, -1:]
                 conv_reset_mask = zero_cumsum.to(dtype=torch.bool, device=conv_state.device).reshape(
@@ -1193,6 +1193,9 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_position_ids = torch.arange(
                     conv_state_all_flat.shape[1], dtype=torch.int64, device=conv_state_all_flat.device
                 )[None, :]
+                conv_position_ids = torch.where(
+                    conv_batch_index.reshape(-1, 1) < 0, torch.iinfo(torch.int32).max, conv_position_ids
+                )
                 if dflash_commit_final is not None:
                     conv_position_ids = torch.where(commit_rows, conv_position_ids, torch.iinfo(torch.int32).max)
                 updated_conv_state = ctx_scatter_cb_3d(
@@ -1303,6 +1306,9 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 recurrent_position_ids = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, :].expand(recurrent_batch_index.shape[0], -1)
+                recurrent_position_ids = torch.where(
+                    recurrent_batch_index.reshape(-1, 1) < 0, torch.iinfo(torch.int32).max, recurrent_position_ids
+                )
                 if dflash_commit_final is not None:
                     recurrent_position_ids = torch.where(
                         commit_rows, recurrent_position_ids, torch.iinfo(torch.int32).max
