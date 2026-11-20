@@ -311,6 +311,16 @@ class TestONNXTransformsModuleStructure:
         )
         assert not any(node.op_type in {"Expand", "Range"} for node in function.node)
 
+    def test_dp_scatter_uses_axis_scatter_without_coordinate_mesh(self):
+        from QEfficient.customop.ctx_scatter_gather import CtxScatterDP
+        from QEfficient.customop.onnxscript_utils import get_dynamo_onnxscript_func
+
+        function = get_dynamo_onnxscript_func(CtxScatterDP).to_function_proto()
+        scatter_node = next(node for node in function.node if node.op_type == "ScatterElements")
+
+        assert next(attr for attr in scatter_node.attribute if attr.name == "axis").i == 2
+        assert not any(node.op_type in {"Range", "ScatterND"} for node in function.node)
+
     def test_dp_context_ops_are_registered_for_onnx_transforms(self):
         from QEfficient.base.onnx_transforms import CustomOpTransform, PreserveNestedCacheRetainedStateTransform
 

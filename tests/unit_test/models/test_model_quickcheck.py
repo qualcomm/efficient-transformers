@@ -622,6 +622,26 @@ def test_deepseek_v4_hca_dp_export_uses_requested_capture_layout(monkeypatch):
     assert captured["dynamic_axes"]["past_actual_compressed_kv.0"] == {}
 
 
+def test_deepseek_v4_prefill_export_does_not_duplicate_cache_inputs(monkeypatch):
+    config = _tiny_deepseek_v4_config()
+    config.num_hidden_layers = 1
+    config.layer_types = ["sliding_attention"]
+    config.mlp_layer_types = ["hash_moe"]
+    qeff_model = QEFFAutoModelForCausalLM(DeepseekV4ForCausalLM(config).eval())
+    captured = {}
+
+    def fake_export(example_inputs, output_names, dynamic_axes, **kwargs):
+        captured["example_inputs"] = example_inputs
+        captured["output_names"] = output_names
+        return "unused.onnx"
+
+    monkeypatch.setattr(qeff_model, "_export", fake_export)
+    qeff_model.export(export_batch_size=1, cache_ctx_len=8, prefill_only=True, prefill_seq_len=4, dynamo=False)
+
+    assert [len(layer_state) for layer_state in captured["example_inputs"]["past_key_values"]] == [1]
+    assert captured["output_names"].count("past_sliding_window_kv.0_RetainedState") == 1
+
+
 @pytest.mark.llm_model
 def test_deepseek_v4_three_layer_decode_parity():
     config = _tiny_deepseek_v4_config()
