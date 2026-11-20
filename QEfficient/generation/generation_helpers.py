@@ -17,6 +17,7 @@ import onnx
 import yaml
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
