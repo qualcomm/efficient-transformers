@@ -305,6 +305,39 @@ class TestBlockingModes:
 
         assert _uses_blocked_kv_cache(BlockingMode.KV_HEADPAR)
 
+    def test_kv_headpar_masks_future_lanes_before_softmax(self):
+        from QEfficient.blocking.blocked_attention_forwards import blocked_kv_attention_forward_headpar_offline
+
+        class DummyCache:
+            def __init__(self):
+                self.key = torch.tensor([[[[-40000.0], [-40000.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0]]]])
+                self.value = torch.tensor([[[[7.0], [9.0], [0.0], [0.0], [0.0], [0.0], [0.0], [0.0]]]])
+
+            def read_only_blocked_K(self, start_index, end_index, layer_idx, cache_kwargs):
+                return self.key[:, :, start_index:end_index, :]
+
+            def read_only_blocked_V(self, start_index, end_index, layer_idx, cache_kwargs):
+                return self.value[:, :, start_index:end_index, :]
+
+        module = nn.Module()
+        module.num_key_value_groups = 1
+        output, _ = blocked_kv_attention_forward_headpar_offline(
+            module=module,
+            query=torch.ones(1, 1, 1, 1),
+            key=torch.empty(1, 1, 1, 1),
+            value=torch.empty(1, 1, 1, 1),
+            attention_mask=None,
+            scaling=1.0,
+            num_kv_blocks=1,
+            cache_kwargs={"position_ids": torch.tensor([[1]])},
+            layer_idx=0,
+            past_key_value=DummyCache(),
+            ctx_len=8,
+            configured_split=2,
+        )
+
+        assert torch.allclose(output, torch.tensor([[[[8.0]]]]))
+
     def test_decode_kv_blocking_does_not_pad_export_query_axis(self):
         from QEfficient.transformers.models.modeling_auto import _blocking_requires_query_axis_export_padding
 
