@@ -33,6 +33,8 @@ from QEfficient.proxy.modeling_utils import (
     _get_language_config,
     _get_layer_signature,
     _get_signature_horizon,
+    _get_vision_config,
+    _get_vision_num_layers,
 )
 from QEfficient.transformers.cache_utils import InvalidIndexProvider
 from QEfficient.utils.cache import QEFF_HOME
@@ -414,15 +416,21 @@ def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
     if model_config is None:
         return None
 
-    language_config = _get_language_config(model_config)
-    num_hidden_layers = getattr(language_config, "num_hidden_layers", None)
+    proxy_component = getattr(qeff_model, "_proxy_component", "language")
+    if proxy_component == "vision":
+        component_config = _get_vision_config(model_config)
+        num_hidden_layers = _get_vision_num_layers(component_config)
+    else:
+        component_config = _get_language_config(model_config)
+        num_hidden_layers = getattr(component_config, "num_hidden_layers", None)
+
     if not isinstance(num_hidden_layers, int) or num_hidden_layers < 1:
         return None
 
-    signature_horizon = _get_signature_horizon(language_config, num_hidden_layers)
-    required_signatures = {_get_layer_signature(language_config, layer_idx) for layer_idx in range(signature_horizon)}
+    signature_horizon = _get_signature_horizon(component_config, num_hidden_layers)
+    required_signatures = {_get_layer_signature(component_config, layer_idx) for layer_idx in range(signature_horizon)}
     observed_signatures = [
-        _get_layer_signature(language_config, layer_idx) for layer_idx in range(len(decoder_call_nodes))
+        _get_layer_signature(component_config, layer_idx) for layer_idx in range(len(decoder_call_nodes))
     ]
     function_signatures = {}
     for node, signature in zip(decoder_call_nodes, observed_signatures):
@@ -432,11 +440,25 @@ def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
 
 
 def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
-    """Return language-layer classes that need repeated proxy subfunction calls."""
+    """Return component-layer classes that need repeated proxy subfunction calls."""
+    model = qeff_model.model
+    proxy_component = getattr(qeff_model, "_proxy_component", "language")
+
+    if proxy_component == "vision":
+        get_vision_encoder = getattr(model, "get_qeff_vision_encoder", None)
+        if callable(get_vision_encoder):
+            try:
+                model = get_vision_encoder()
+            except Exception as exc:
+                logger.warning(
+                    f"get_qeff_vision_encoder failed for {model.__class__.__name__}: "
+                    f"{type(exc).__name__}: {exc}. Falling back to model-level subfunction validation."
+                )
+        return set(get_decoder_layer_classes_for_export(model))
+
     if qeff_model.__class__.__name__ == "QEffVisionEncoderForTextImageToTextModel":
         return set()
 
-    model = qeff_model.model
     get_language_decoder = getattr(model, "get_qeff_language_decoder", None)
     if callable(get_language_decoder):
         try:
@@ -454,11 +476,19 @@ def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
     return {cls for cls in submodule_classes if "vision" not in cls.__name__.lower()}
 
 
+def _subfunction_target_classes(qeff_model) -> set[type[nn.Module]]:
+    """Return module classes to export as ONNX subfunctions."""
+    if getattr(qeff_model, "_enable_proxy", False):
+        return _proxy_subfunction_validation_classes(qeff_model)
+    return set(get_decoder_layer_classes_for_export(qeff_model.model))
+
+
 def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
-    """Ensure proxy decoder subfunctions are repeated enough to be useful performance proxies."""
+    """Ensure proxy component subfunctions are repeated enough to be useful performance proxies."""
     if not getattr(qeff_model, "_enable_proxy", False):
         return
 
+    proxy_component = getattr(qeff_model, "_proxy_component", "language")
     decoder_layer_classes = _proxy_subfunction_validation_classes(qeff_model)
     if not decoder_layer_classes:
         return
@@ -472,8 +502,8 @@ def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
     }
     if not function_ids:
         raise RuntimeError(
-            "Proxy ONNX subfunction validation failed: no decoder-layer subfunctions were found "
-            f"for expected classes {sorted(target_classnames)}."
+            "Proxy ONNX subfunction validation failed: no proxy-component subfunctions were found "
+            f"for {proxy_component} classes {sorted(target_classnames)}."
         )
 
     decoder_call_nodes = _decoder_function_call_nodes(onnx_model, function_ids)
@@ -514,7 +544,7 @@ def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
 
     if underrepresented_signatures or mixed_signature_functions or unused_function_variants:
         raise RuntimeError(
-            "Proxy ONNX subfunction validation failed: each required logical decoder-layer signature must be "
+            "Proxy ONNX subfunction validation failed: each proxy-component subfunction must be "
             "invoked at least twice for a faithful compiler performance proxy. "
             f"Observed exact function-variant call counts: {exact_function_variant_counts}. "
             f"Observed logical layer-signature call counts: {logical_signature_counts}. "
@@ -848,7 +878,7 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
         qeff_model._onnx_transforms.append(LocalizeFunctionReduceSumAxesTransform)
 
     # TODO: Handle this in the modelling class QEFFTransformersBase, remove from here.
-    decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
+    decoder_layer_classes = _subfunction_target_classes(qeff_model)
     if decoder_layer_classes:
         if dynamo:
             # Dynamo needs ordered duplicate names; TorchScript only accepts unique module classes below.

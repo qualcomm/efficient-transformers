@@ -273,7 +273,9 @@ DYNAMIC_PREFILL_SEQ_LEN_SUPPORTED_MODEL_ARCH = {"gemma4"}
 _PROXY_ONLY_ONNX_TRANSFORMS = (FP16ClipTransform, SplitTensorsTransform)
 
 
-def _configure_proxy_for_model(instance: "QEFFBaseModel", enable_proxy: bool) -> None:
+def _configure_proxy_for_model(
+    instance: "QEFFBaseModel", enable_proxy: bool, proxy_component: str = "language"
+) -> None:
     """
     Configure per-instance transform lists based on proxy mode.
 
@@ -283,14 +285,15 @@ def _configure_proxy_for_model(instance: "QEFFBaseModel", enable_proxy: bool) ->
     instance._pytorch_transforms = list(instance._pytorch_transforms)
     instance._onnx_transforms = list(instance._onnx_transforms)
     instance._enable_proxy = enable_proxy
+    instance._proxy_component = proxy_component
 
     if enable_proxy:
-        if QeffProxyModuleTransform not in instance._pytorch_transforms:
+        if proxy_component == "language" and QeffProxyModuleTransform not in instance._pytorch_transforms:
             instance._pytorch_transforms.append(QeffProxyModuleTransform)
         for transform in _PROXY_ONLY_ONNX_TRANSFORMS:
             if transform not in instance._onnx_transforms:
                 instance._onnx_transforms.append(transform)
-        logger.info("Proxy Model Enabled for QEfficient Model")
+        logger.info("Proxy Model Enabled for QEfficient %s Model", proxy_component)
 
 
 # Define a transformers layers to QEff layers dictionary
