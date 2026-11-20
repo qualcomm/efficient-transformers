@@ -76,20 +76,6 @@ def _nonnegative_integer_floor_div(position: torch.Tensor, divisor: int) -> torc
         return torch.div(position, divisor, rounding_mode="floor")
 
 
-def _clamp_in_dtype(
-    hidden_states: torch.Tensor,
-    *,
-    min_value: float | None = None,
-    max_value: float | None = None,
-) -> torch.Tensor:
-    """Clamp without promoting low-precision activations to float32."""
-    if min_value is not None:
-        hidden_states = torch.maximum(hidden_states, torch.full_like(hidden_states, min_value))
-    if max_value is not None:
-        hidden_states = torch.minimum(hidden_states, torch.full_like(hidden_states, max_value))
-    return hidden_states
-
-
 def _sliding_window_context_indices(
     position_ids: torch.Tensor,
     sliding_window: int,
@@ -1314,7 +1300,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         num_tiles = (capacity + tile_size - 1) // tile_size
         top_k = min(index_topk, capacity)
         topk_per_tile = max(topk_per_tile, (top_k + num_tiles - 1) // num_tiles)
-        causal_threshold = _nonnegative_integer_floor_div(position_ids, compression_rate).unsqueeze(-1)
+        causal_threshold = (
+            torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype).unsqueeze(-1)
+        )
 
         candidate_scores = []
         candidate_indices = []
@@ -1325,7 +1313,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             tile_scores = (tile_scores * index_weights.unsqueeze(-1)).sum(dim=2)
             tile_indices = torch.arange(tile_start, tile_end, device=indexer_kv_cache.device).view(1, 1, -1)
             tile_scores = tile_scores.masked_fill(tile_indices >= causal_threshold, -3.0e4)
-            tile_topk = torch.topk(tile_scores.to(q_index.dtype), k=min(topk_per_tile, tile_end - tile_start), dim=-1)
+            tile_topk = torch.topk(tile_scores, k=min(topk_per_tile, tile_end - tile_start), dim=-1)
             candidate_scores.append(tile_topk.values)
             candidate_indices.append(tile_start + tile_topk.indices)
 
@@ -1336,7 +1324,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             selection = torch.arange(candidate_count, device=indexer_kv_cache.device).view(1, 1, -1)
             selection = selection.expand(batch_size, chunk_length, -1)
         else:
-            selection = torch.topk(candidate_scores.to(q_index.dtype), k=index_topk, dim=-1).indices
+            selection = torch.topk(candidate_scores, k=index_topk, dim=-1).indices
         selected = torch.gather(candidate_indices, dim=-1, index=selection)
         return selected, selected < causal_threshold
 
@@ -1965,7 +1953,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 num_kv_blocks,
                 block_width,
             ).reshape(batch_local, layer.attention_dp, capacity)
-            selected = torch.topk(scores.to(q_index.dtype), k=top_k, dim=-1)
+            selected = torch.topk(scores, k=top_k, dim=-1)
             top_k_indices = torch.gather(global_ids, 2, selected.indices).to(torch.int32)
             valid = top_k_indices < completed_entries.view(batch_local, layer.attention_dp, 1)
             return top_k_indices, valid
@@ -2020,7 +2008,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         tile_scores = tile_scores.masked_fill(global_ids >= threshold, -3.0e4)
 
         core_k = min(top_k, tokens_per_core)
-        core_scores, core_indices = torch.topk(tile_scores.to(q_index.dtype), k=core_k, dim=-1)
+        core_scores, core_indices = torch.topk(tile_scores, k=core_k, dim=-1)
         core_ids = torch.gather(
             local_ids.expand(
                 batch_local,
@@ -2035,7 +2023,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         )
         local_k = min(top_k, num_kv_blocks * attention_cores * core_k)
         local_scores, local_indices = torch.topk(
-            core_scores.reshape(batch_local, layer.attention_dp, cp, -1).to(q_index.dtype), k=local_k, dim=-1
+            core_scores.reshape(batch_local, layer.attention_dp, cp, -1), k=local_k, dim=-1
         )
         local_ids = torch.gather(core_ids.reshape(batch_local, layer.attention_dp, cp, -1), -1, local_indices)
 
@@ -2048,7 +2036,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         )
         candidate_global = candidate_local * cp + candidate_cp.reshape(batch_local, layer.attention_dp, cp * local_k)
         global_k = min(top_k, candidate_scores.shape[-1])
-        _, selected = torch.topk(candidate_scores.to(q_index.dtype), k=global_k, dim=-1)
+        _, selected = torch.topk(candidate_scores, k=global_k, dim=-1)
         top_k_indices = torch.gather(candidate_global, 2, selected).to(torch.int32)
         valid = top_k_indices < completed_entries.view(batch_local, layer.attention_dp, 1)
         return top_k_indices, valid
@@ -2444,7 +2432,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 future_mask = entry_indices.view(1, 1, -1) >= completed_entries.unsqueeze(-1)
                 index_scores = index_scores.masked_fill(future_mask, float("-inf"))
                 top_k = min(indexer.index_topk, compressed_capacity)
-                top_k_indices = index_scores.to(q_index.dtype).topk(top_k, dim=-1).indices
+                top_k_indices = index_scores.topk(top_k, dim=-1).indices
                 valid = top_k_indices < completed_entries.unsqueeze(-1)
                 safe_indices = torch.where(valid, top_k_indices, torch.zeros_like(top_k_indices)).to(torch.int32)
                 compressed_kv = ctx_gather_blocked_kv(compressed_kv, safe_indices[:, 0].unsqueeze(1))
@@ -2791,8 +2779,8 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
             down_proj = self.down_proj[flat_indices]
             gate = torch.bmm(expert_in, gate_proj)
             up = torch.bmm(expert_in, up_proj)
-            gate = _clamp_in_dtype(gate, max_value=self.limit)
-            up = _clamp_in_dtype(up, min_value=-self.limit, max_value=self.limit)
+            gate = gate.float().clamp(max=self.limit).to(gate.dtype)
+            up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
             activated = self.act_fn(gate) * up
             expert_out = torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
         else:
@@ -2804,8 +2792,8 @@ class QEffDeepseekV4Experts(DeepseekV4Experts):
                 down_proj = self.down_proj[:, start:end, :][flat_indices]
                 gate = torch.bmm(expert_in, gate_proj)
                 up = torch.bmm(expert_in, up_proj)
-                gate = _clamp_in_dtype(gate, max_value=self.limit)
-                up = _clamp_in_dtype(up, min_value=-self.limit, max_value=self.limit)
+                gate = gate.float().clamp(max=self.limit).to(gate.dtype)
+                up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
                 activated = self.act_fn(gate) * up
                 expert_out += torch.bmm(activated, down_proj).view(num_tokens, self.top_k, hidden_dim)
 
@@ -2819,8 +2807,8 @@ class QEffDeepseekV4MLP(DeepseekV4MLP):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate = self.gate_proj(hidden_states)
         up = self.up_proj(hidden_states)
-        gate = _clamp_in_dtype(gate, max_value=self.limit)
-        up = _clamp_in_dtype(up, min_value=-self.limit, max_value=self.limit)
+        gate = gate.float().clamp(max=self.limit).to(gate.dtype)
+        up = up.float().clamp(min=-self.limit, max=self.limit).to(up.dtype)
         return self.down_proj(self.act_fn(gate) * up)
 
 
@@ -2859,8 +2847,8 @@ def _deepseek_v4_clamped_swiglu_mlp(
 ) -> torch.Tensor:
     gate = x @ gate_proj
     up = x @ up_proj
-    gate = _clamp_in_dtype(gate, max_value=limit)
-    up = _clamp_in_dtype(up, min_value=-limit, max_value=limit)
+    gate = gate.float().clamp(max=limit).to(gate.dtype)
+    up = up.float().clamp(min=-limit, max=limit).to(up.dtype)
     return (act_fn(gate) * up) @ down_proj
 
 
@@ -2948,9 +2936,8 @@ class QEffDeepseekV4TopKRouter(DeepseekV4TopKRouter):
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
-        scores = self.score_fn(logits if logits.dtype == torch.bfloat16 else logits.float())
-        choice_scores = (scores + self.e_score_correction_bias).to(flat.dtype)
-        indices = torch.topk(choice_scores, self.top_k, dim=-1, sorted=False).indices
+        scores = self.score_fn(logits.float())
+        indices = torch.topk(scores + self.e_score_correction_bias, self.top_k, dim=-1, sorted=False).indices
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
         return logits, (weights * self.routed_scaling_factor).to(flat.dtype), indices
@@ -2962,7 +2949,7 @@ class QEffDeepseekV4HashRouter(DeepseekV4HashRouter):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
-        scores = self.score_fn(logits if logits.dtype == torch.bfloat16 else logits.float())
+        scores = self.score_fn(logits.float())
         indices = self.tid2eid[input_ids.reshape(-1)].reshape(-1, self.top_k).long()
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
