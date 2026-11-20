@@ -4542,6 +4542,41 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             final_compile=final_compile,
         )
 
+    def _configure_csa_prefill_position_offset(
+        self,
+        position_offset: int | None,
+        *,
+        prefill_only: bool | None,
+        prefill_seq_len: int | None,
+    ) -> int:
+        config = self.model.config
+        is_deepseek_v4 = getattr(config, "model_type", None) == "deepseek_v4"
+        configured_offset = int(getattr(config, "qeff_csa_prefill_position_offset", 0))
+        if position_offset is None:
+            position_offset = configured_offset if prefill_only is True else 0
+        if isinstance(position_offset, bool) or not isinstance(position_offset, int) or position_offset < 0:
+            raise ValueError("csa_prefill_position_offset must be a non-negative integer.")
+        if position_offset and (
+            not is_deepseek_v4
+            or prefill_only is not True
+            or "compressed_sparse_attention" not in getattr(config, "layer_types", ())
+        ):
+            raise ValueError("A nonzero CSA prefill position offset requires DeepSeek V4 CSA prefill export.")
+
+        if is_deepseek_v4:
+            config.qeff_csa_prefill_position_offset = position_offset if prefill_only is True else 0
+        if position_offset:
+            if prefill_seq_len is None or prefill_seq_len < 1:
+                raise ValueError("prefill_seq_len must be positive when csa_prefill_position_offset is nonzero.")
+            if getattr(self, "_layerwise_outer_meta", False):
+                raise ValueError("Nonzero CSA prefill position offsets are not supported by layerwise export.")
+            deepseek_model = getattr(self.model, "model", None)
+            ensure_rope_cache_length = getattr(deepseek_model, "ensure_rope_cache_length", None)
+            if ensure_rope_cache_length is None:
+                raise TypeError("DeepSeek V4 CSA prefill requires the QEff rotary-cache wrapper.")
+            ensure_rope_cache_length(position_offset + prefill_seq_len)
+        return position_offset
+
     def export(
         self,
         export_dir: str | None = None,
@@ -4554,6 +4589,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         dynamo: bool = False,
         export_batch_size: Optional[int] = None,
         cache_ctx_len: Optional[int] = None,
+        csa_prefill_position_offset: int | None = None,
         **kwargs,
     ) -> str:
         """
@@ -4576,6 +4612,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             Batch size used to construct example inputs and retained-state caches.
         cache_ctx_len: int, optional
             Context length used to construct DeepSeek V4 retained-state caches.
+        csa_prefill_position_offset: int, optional
+            Static starting position for DeepSeek V4 CSA prefill export.
         Returns
         -------
         str
@@ -4587,6 +4625,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 "Use the default non-prefill export path for standard CausalLM decode graphs."
             )
         reject_legacy_moe_prefill_packed_chunk_size(kwargs)
+        csa_prefill_position_offset = self._configure_csa_prefill_position_offset(
+            csa_prefill_position_offset,
+            prefill_only=prefill_only,
+            prefill_seq_len=prefill_seq_len,
+        )
+        if csa_prefill_position_offset and layerwise:
+            raise NotImplementedError("Nonzero CSA prefill position offsets are not supported by layerwise export.")
         enable_chunking = override_gptoss_prefill_chunking(
             self.model.config, prefill_only, kwargs.get("enable_chunking", False)
         )
@@ -4649,6 +4694,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         bs: int = export_batch_size or constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
         fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
+        if bs < 1:
+            raise ValueError("export_batch_size must be at least 1.")
+        if cache_ctx_len is not None and cache_ctx_len < 1:
+            raise ValueError("cache_ctx_len must be at least 1.")
 
         # GLM weight-free Dynamo export declares batch_size with a minimum of 2.
         if dynamo and getattr(self.model.config, "model_type", None) == "glm_moe_dsa":
@@ -4909,6 +4958,84 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             dynamic_axes["position_ids"] = {1: "batch_size", 2: "seq_len"}
 
         # TODO Update the get_padding_shape_from_config method to handle the case when the model config has attention_chunk_size or sliding_window and it should return a list of shapes for each layer
+        if is_deepseek_v4:
+            deepseek_v4_cache_ctx_len = cache_ctx_len or seq_len
+            required_ctx_len = csa_prefill_position_offset + query_seq_len
+            if deepseek_v4_prefill and csa_prefill_position_offset:
+                if cache_ctx_len is not None and cache_ctx_len < required_ctx_len:
+                    raise ValueError(
+                        "cache_ctx_len must cover csa_prefill_position_offset + prefill_seq_len "
+                        f"({required_ctx_len}); got {cache_ctx_len}."
+                    )
+                deepseek_v4_cache_ctx_len = max(deepseek_v4_cache_ctx_len, required_ctx_len)
+            pkv_cache = self.model.get_dummy_pkv_cache(
+                self.model.config,
+                fbs if self.continuous_batching else bs,
+                deepseek_v4_cache_ctx_len,
+            )
+            for layer_idx, layer_state in enumerate(pkv_cache):
+                state_names = self.model.get_onnx_past_key_value_names(layer_idx, layer_state)
+                layer_type = self.model.config.layer_types[layer_idx]
+                csa_dp_layout = (
+                    layer_type == "compressed_sparse_attention"
+                    and int(getattr(self.model.config, "qeff_csa_attention_dp", 1)) > 1
+                )
+                csa_prefill_layout = layer_type == "compressed_sparse_attention" and bool(
+                    getattr(self.model.config, "qeff_csa_prefill_only", False)
+                )
+                hca_prefill_layout = layer_type == "heavily_compressed_attention" and bool(
+                    getattr(self.model.config, "qeff_hca_prefill_only", False)
+                )
+                hca_dp_layout = (
+                    layer_type == "heavily_compressed_attention"
+                    and not hca_prefill_layout
+                    and int(getattr(self.model.config, "qeff_hca_attention_dp", 1)) > 1
+                )
+                parallel_layout = csa_dp_layout or hca_dp_layout
+                folded_row_cache = (
+                    bool(getattr(self.model.config, "qeff_sliding_folded_row_cache", True))
+                    if layer_type == "sliding_attention"
+                    else (
+                        bool(getattr(self.model.config, "qeff_csa_folded_row_cache", False))
+                        if layer_type == "compressed_sparse_attention" and not csa_prefill_layout
+                        else bool(getattr(self.model.config, "qeff_hca_folded_row_cache", False))
+                        and not hca_prefill_layout
+                    )
+                )
+                for state_name, state in zip(state_names, layer_state):
+                    example_inputs["past_key_values"][layer_idx].append(state)
+                    state_axes = {}
+                    if folded_row_cache and "sliding_window_kv" in state_name:
+                        state_axes[1] = "full_batch_size" if self.continuous_batching else "batch_size"
+                    elif not parallel_layout:
+                        state_axes[0] = "full_batch_size" if self.continuous_batching else "batch_size"
+                    if state_name.startswith("local_kv_cache"):
+                        if not csa_prefill_layout and not folded_row_cache:
+                            state_axes[2] = "ctx_len"
+                    elif "sliding_window_kv" in state_name:
+                        if not folded_row_cache and not hca_prefill_layout:
+                            state_axes[2] = "ctx_len"
+                    elif state_name.startswith(("compressed_kv_cache", "indexer_kv_cache")):
+                        if csa_prefill_layout:
+                            state_axes[1] = f"compressed_ctx_len_{layer_idx}"
+                        else:
+                            cp_tiled_indexer_cache = (
+                                state_name.startswith("indexer_kv_cache")
+                                and int(getattr(self.model.config, "qeff_csa_indexer_cp", 1)) > 1
+                            )
+                            if not cp_tiled_indexer_cache:
+                                state_axes[2] = f"compressed_ctx_len_{layer_idx}"
+                    elif "actual_" in state_name:
+                        cp_tiled_indexer_cache = (
+                            "actual_indexer_compressed_kv" in state_name
+                            and int(getattr(self.model.config, "qeff_csa_indexer_cp", 1)) > 1
+                        )
+                        if hca_prefill_layout:
+                            state_axes[2] = f"compressed_ctx_len_{layer_idx}"
+                        elif not (cp_tiled_indexer_cache or hca_dp_layout):
+                            state_axes[2] = f"compressed_ctx_len_{layer_idx}"
+                    dynamic_axes[state_name] = state_axes
+                    output_names.append(f"{state_name}_RetainedState")
         if hasattr(self.model, "get_onnx_retained_state_specs"):
             retained_state_specs = self.model.get_onnx_retained_state_specs(
                 batch_size=fbs if self.continuous_batching else bs,
@@ -5443,6 +5570,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         offload_pt_weights: bool | None = True,
         enable_chunking: bool | None = False,
         retain_full_kv: bool | None = None,
+        csa_prefill_position_offset: int | None = None,
         layerwise: bool = False,
         layerwise_window_size: int = 1,
         kv_cache_prefix: str | None = None,
@@ -5493,6 +5621,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         prefill_only : bool, optional
             If True, compiles only for the prefill stage. If False, compiles only for
             the decode stage. If None, compiles for both stages. Default is None.
+        csa_prefill_position_offset : int, optional
+            Static starting position for DeepSeek V4 CSA prefill. The exported graph
+            expects runtime position_ids to begin at this offset.
         use_onnx_subfunctions: bool, optional
             whether to enable ONNX subfunctions during export. Exporting PyTorch model to ONNX with modules as subfunctions helps to reduce export/compile time. Defaults to False
         **compiler_options : dict
@@ -5537,6 +5668,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         qaic_config = compiler_options.pop("qaic_config", getattr(self.model, "qaic_config", None))
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         _ignore_public_mdp_ts_num_devices(compiler_options)
+        csa_prefill_position_offset = self._configure_csa_prefill_position_offset(
+            csa_prefill_position_offset,
+            prefill_only=prefill_only,
+            prefill_seq_len=prefill_seq_len,
+        )
+        if csa_prefill_position_offset and layerwise:
+            raise NotImplementedError("Nonzero CSA prefill position offsets are not supported by layerwise compile.")
         enable_chunking = override_gptoss_prefill_chunking(self.model.config, prefill_only, enable_chunking)
         if layerwise:
             warnings.warn(
@@ -5625,6 +5763,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
             self.comp_ctx_lengths_prefill, self.comp_ctx_lengths_decode, ctx_len = process_ccl_specializations(
                 self.comp_ctx_lengths_prefill, self.comp_ctx_lengths_decode, ctx_len, prefill_seq_len, enable_chunking
+            )
+        if csa_prefill_position_offset and ctx_len < csa_prefill_position_offset + prefill_seq_len:
+            raise ValueError(
+                "ctx_len must cover csa_prefill_position_offset + prefill_seq_len "
+                f"({csa_prefill_position_offset + prefill_seq_len}); got {ctx_len}."
             )
         # --- Validation ---
         if prefill_only is not None and not isinstance(prefill_only, bool):

@@ -208,6 +208,36 @@ def _(data, block_ids):
     return data.new_empty((*block_ids.shape, data.shape[-2], data.shape[-1]))
 
 
+@torch.library.custom_op("qefficient::csa_joint_attention", mutates_args=())
+def csa_joint_attention_op(
+    local_kv: torch.Tensor,
+    local_valid: torch.Tensor,
+    compressed_kv: torch.Tensor,
+    compressed_indices: torch.Tensor,
+    compressed_valid: torch.Tensor,
+    query: torch.Tensor,
+    sinks: torch.Tensor,
+    scale: torch.Tensor,
+    masked_logit: torch.Tensor,
+) -> torch.Tensor:
+    return CSAJointAttentionFunc.forward(
+        local_kv,
+        local_valid,
+        compressed_kv,
+        compressed_indices,
+        compressed_valid,
+        query,
+        sinks,
+        scale,
+        masked_logit,
+    )
+
+
+@csa_joint_attention_op.register_fake
+def _(local_kv, local_valid, compressed_kv, compressed_indices, compressed_valid, query, sinks, scale, masked_logit):
+    return torch.empty_like(query)
+
+
 @torch.library.custom_op("qefficient::rms_norm", mutates_args=())
 def rms_norm_op(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     """Custom RMS Norm operation for QEfficient"""
@@ -323,6 +353,57 @@ def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
     seq_len = ctx_indices.shape[1]
     feature_shape = data.shape[2:]
     return torch.empty((batch_size, seq_len, *feature_shape), dtype=data.dtype, device=data.device)
+
+
+@torch.library.custom_op("qefficient::ctx_gather_dp", mutates_args=())
+def ctx_gather_dp_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
+    dp_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+    safe_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    return data[batch_idx, dp_idx, safe_indices.long()]
+
+
+@ctx_gather_dp_op.register_fake
+def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    return torch.empty(
+        (*ctx_indices.shape, *data.shape[3:]),
+        dtype=data.dtype,
+        device=data.device,
+    )
+
+
+@torch.library.custom_op("qefficient::ctx_gather_folded_rows", mutates_args=())
+def ctx_gather_folded_rows_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    safe_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    batch_idx = torch.arange(data.shape[1], device=data.device).view(-1, 1)
+    return data[0, batch_idx, safe_indices.long()].unsqueeze(0)
+
+
+@ctx_gather_folded_rows_op.register_fake
+def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
+    return torch.empty((1, *ctx_indices.shape, *data.shape[3:]), dtype=data.dtype, device=data.device)
+
+
+@torch.library.custom_op("qefficient::ctx_gather_dp_cp", mutates_args=())
+def ctx_gather_dp_cp_op(data: torch.Tensor, ctx_indices: torch.Tensor, context_parallel: int) -> torch.Tensor:
+    batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
+    dp_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+    safe_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
+    slots_per_cp = data.shape[2] // context_parallel
+    address = (
+        torch.remainder(safe_indices, context_parallel) * slots_per_cp
+        + torch.div(safe_indices, context_parallel, rounding_mode="floor")
+    ).long()
+    return data[batch_idx, dp_idx, address]
+
+
+@ctx_gather_dp_cp_op.register_fake
+def _(data: torch.Tensor, ctx_indices: torch.Tensor, context_parallel: int) -> torch.Tensor:
+    return torch.empty(
+        (*ctx_indices.shape, *data.shape[3:]),
+        dtype=data.dtype,
+        device=data.device,
+    )
 
 
 @torch.library.custom_op("qefficient::ctx_gather_dp", mutates_args=())

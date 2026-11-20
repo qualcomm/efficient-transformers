@@ -84,6 +84,7 @@ _MINIMAX_NPI_OUTPUT_SUFFIXES = (
     "/self_attn/k_norm/CustomRMSNorm_output_0",
     "/norm/CustomRMSNorm_output_0",
 )
+_MINIMAX_ROUTER_FP32_NODE_PREFIX = "minimax_router_fp32_"
 
 
 def _dynamic_sequence_chunks(
@@ -134,12 +135,15 @@ def _dynamic_sequence_nested_chunks(
     )
 
 
-def _decoder_function_npi_names(model: onnx.ModelProto) -> list[str]:
-    """Collect RMSNorms and decoder residual merges inside MiniMax functions."""
+def _decoder_function_npi_names(model: onnx.ModelProto) -> tuple[list[str], bool]:
+    """Collect precision-sensitive outputs inside MiniMax decoder functions."""
     functions = {(function.domain, function.name): function for function in model.functions}
     npi_names = []
+    renamed_router_nodes = False
+    processed_router_functions = set()
     for function_call in model.graph.node:
-        function = functions.get((function_call.domain, function_call.op_type))
+        function_key = (function_call.domain, function_call.op_type)
+        function = functions.get(function_key)
         is_decoder_call = "/language_model/layers." in function_call.name or function_call.op_type.startswith(
             "QEffMiniMaxM3VLDecoderLayer"
         )
@@ -159,7 +163,85 @@ def _decoder_function_npi_names(model: onnx.ModelProto) -> list[str]:
             if function_node.op_type in ("Add", "CustomRMSNorm") and function_node.name
         ]
         npi_names.extend(f"{layer_scope}/{function_node.name}_output_0" for function_node in residual_adds)
-    return npi_names
+        if function_key not in processed_router_functions:
+            for function_node in _router_fp32_nodes(function.node):
+                if not function_node.name.startswith(_MINIMAX_ROUTER_FP32_NODE_PREFIX):
+                    function_node.name = f"{_MINIMAX_ROUTER_FP32_NODE_PREFIX}{function_node.name}"
+                    renamed_router_nodes = True
+                npi_names.append(function_node.name)
+            processed_router_functions.add(function_key)
+    return npi_names, renamed_router_nodes
+
+
+def _router_fp32_nodes(nodes) -> list[onnx.NodeProto]:
+    """Find the routed-MoE sigmoid and normalization chain by connectivity."""
+    producer = {output: node for node in nodes for output in node.output if output}
+    consumers = {}
+    router_nodes = []
+    for node in nodes:
+        for input_name in node.input:
+            consumers.setdefault(input_name, []).append(node)
+
+    for sigmoid in nodes:
+        if sigmoid.op_type != "Sigmoid" or not sigmoid.input or not sigmoid.output:
+            continue
+        cast = producer.get(sigmoid.input[0])
+        if cast is None or cast.op_type != "Cast" or not cast.name:
+            continue
+        sigmoid_output = sigmoid.output[0]
+        gather = next(
+            (
+                consumer
+                for consumer in consumers.get(sigmoid_output, ())
+                if consumer.op_type == "GatherElements" and consumer.name and consumer.output
+            ),
+            None,
+        )
+        if gather is None:
+            continue
+        gather_output = gather.output[0]
+        denominator = next(
+            (
+                consumer
+                for consumer in consumers.get(gather_output, ())
+                if consumer.op_type in ("Einsum", "ReduceSum") and consumer.name and consumer.output
+            ),
+            None,
+        )
+        if denominator is None:
+            continue
+
+        denominator_path = []
+        denominator_output = denominator.output[0]
+        while True:
+            path_consumers = consumers.get(denominator_output, ())
+            division = next(
+                (
+                    consumer
+                    for consumer in path_consumers
+                    if consumer.op_type == "Div"
+                    and consumer.name
+                    and consumer.output
+                    and gather_output in consumer.input
+                ),
+                None,
+            )
+            if division is not None:
+                router_nodes.extend([cast, sigmoid, gather, denominator, *denominator_path, division])
+                break
+            shape_node = next(
+                (
+                    consumer
+                    for consumer in path_consumers
+                    if consumer.op_type in ("Identity", "Reshape", "Unsqueeze") and consumer.name and consumer.output
+                ),
+                None,
+            )
+            if shape_node is None:
+                break
+            denominator_path.append(shape_node)
+            denominator_output = shape_node.output[0]
+    return router_nodes
 
 
 def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
@@ -174,7 +256,8 @@ def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
         for output_name in node.output
         if output_name and output_name.endswith(_MINIMAX_NPI_OUTPUT_SUFFIXES)
     ]
-    fp32_names.extend(_decoder_function_npi_names(model))
+    decoder_function_names, renamed_router_nodes = _decoder_function_npi_names(model)
+    fp32_names.extend(decoder_function_names)
     # Dynamo/torch.export can flatten decoder functions and replace the
     # hierarchical output names with generated names such as ``add_42`` and
     # ``rms_norm_7``.  Include graph-level residual/RMSNorm outputs, while
@@ -187,9 +270,19 @@ def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
         for output_name in node.output
         if output_name
     )
+    fp32_names.extend(
+        output_name for node in _router_fp32_nodes(model.graph.node) for output_name in node.output if output_name
+    )
     fp32_names = list(dict.fromkeys(fp32_names))
     if not fp32_names:
         raise ValueError(f"Could not find Minimax FP32 NPI nodes in ONNX graph: {onnx_path}")
+
+    if renamed_router_nodes:
+        # Subfunctions are converted before call nodes exist, so call-qualified
+        # NPI names cannot select their internal router operations. Give only
+        # the sparse-router chain globally unique node names and persist them in
+        # the exported ONNX before compilation.
+        onnx.save(model, str(onnx_path))
 
     with npi_path.open("w") as fp:
         yaml.safe_dump({"FP32NodeInstanceNames": fp32_names}, fp, sort_keys=False)
@@ -224,6 +317,17 @@ def qeff_apply_rotary_pos_emb(
 def _scalar_like(reference: torch.Tensor, value: int | float) -> torch.Tensor:
     """Create a scalar constant without materializing ``reference.shape``."""
     return reference.new_full((), value)
+
+
+def _gather_flattened_rope_rows(
+    table: torch.Tensor,
+    rope_indices: torch.Tensor,
+    coefficient_count: int,
+) -> torch.Tensor:
+    """Gather complete RoPE rows independently for every physical lane."""
+    offsets = rope_indices.unsqueeze(-1) * table.shape[-1]
+    offsets = offsets + torch.arange(coefficient_count, device=rope_indices.device)
+    return table.view(-1)[offsets]
 
 
 class QEffMiniMaxM3VLRotaryEmbedding(MiniMaxM3VLRotaryEmbedding):
@@ -463,6 +567,34 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         ctx_indices = torch.arange(start_index, end_index, device=index_key_cache.device).view(1, 1, block_len)
         invalid_idx = torch.iinfo(torch.int32).max if torch.onnx.is_in_onnx_export() else 0
         ctx_indices = torch.where(ctx_indices > gather_limit.unsqueeze(-1), invalid_idx, ctx_indices)
+        ctx_indices = ctx_indices.to(torch.int32).expand(batch_local, rows, block_len)
+        return ctx_gather_blocked_kv_dp(index_key_cache, ctx_indices)
+
+    @staticmethod
+    def _read_blocked_k_dp_unified(
+        index_key_cache: torch.Tensor,
+        position_ids_dp: torch.Tensor,
+        start_index: int,
+        end_index: int,
+        index_block_size: int,
+        cp: int,
+        hkv: int,
+    ) -> torch.Tensor:
+        """Gather with the common CP-row limit used by unified sparse decode."""
+        batch_local, rows, _, _ = index_key_cache.shape
+        dp = position_ids_dp.shape[1]
+        block_len = end_index - start_index
+        pos_max = position_ids_dp.max(dim=-1).values
+        cycle_size = index_block_size * cp
+        gather_limit = (
+            (pos_max // cycle_size * index_block_size + index_block_size - 1)
+            .view(batch_local, dp, 1)
+            .expand(batch_local, dp, cp * hkv)
+            .reshape(batch_local, rows, 1)
+        )
+        ctx_indices = torch.arange(start_index, end_index, device=index_key_cache.device).view(1, 1, block_len)
+        invalid_idx = torch.iinfo(torch.int32).max if torch.compiler.is_exporting() else 0
+        ctx_indices = torch.where(ctx_indices > gather_limit, invalid_idx, ctx_indices)
         ctx_indices = ctx_indices.to(torch.int32).expand(batch_local, rows, block_len)
         return ctx_gather_blocked_kv_dp(index_key_cache, ctx_indices)
 
@@ -926,8 +1058,10 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                 scores = scores.permute(0, 1, 4, 2, 3, 5).reshape(batch, num_index_heads, -1, num_blocks)
                 q_positions = query_position_blocks[q_block_idx]
                 block_ids = torch.arange(num_blocks, device=hidden_states.device).view(1, 1, 1, num_blocks)
-                mask_score = torch.tensor(mask_value, dtype=scores.dtype, device=scores.device)
-                local_score = torch.tensor(-mask_value, dtype=scores.dtype, device=scores.device)
+                # mask_score = torch.tensor(mask_value, dtype=scores.dtype, device=scores.device)
+                # local_score = torch.tensor(-mask_value, dtype=scores.dtype, device=scores.device)
+                mask_score = _scalar_like(scores, mask_value)
+                local_score = _scalar_like(scores, -mask_value)
                 block_skip_future = block_ids * index_block_size > q_positions[:, None, :, None]
                 scores = torch.where(
                     block_skip_future,
@@ -1409,7 +1543,8 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         cos: torch.Tensor,
         sin: torch.Tensor,
         blocking_config: Optional[AttentionBlockingConfig] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_core_candidates: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
         """DP-optimised block selection using the GP cache custom operations.
 
         Mirrors the benchmark's ``_select_blocks`` DP path while preserving
@@ -1493,6 +1628,10 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         idx_k = self.k_proj(hidden_states).view(dp, batch_local, query_len, hkv, dim).permute(1, 0, 3, 2, 4)
         idx_q = self.q_norm(idx_q)
         idx_k = self.k_norm(idx_k)
+        replicated_rope = return_core_candidates and cos_dp.ndim == 5
+        if replicated_rope:
+            idx_q = idx_q.unsqueeze(2).expand(batch_local, dp, cp, num_index_heads, query_len, dim)
+            idx_k = idx_k.unsqueeze(2).expand(batch_local, dp, cp, hkv, query_len, dim)
         idx_q = self._apply_rope_dp(
             idx_q,
             cos_dp,
@@ -1506,11 +1645,8 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             int(cfg.head_dim * cfg.rope_parameters.get("partial_rotary_factor", 1.0)),
         )
 
-        k_updates = (
-            idx_k.unsqueeze(2)
-            .expand(batch_local, dp, cp, hkv, query_len, dim)
-            .reshape(batch_local, rows, query_len, dim)
-        )
+        k_updates = idx_k if replicated_rope else idx_k.unsqueeze(2).expand(batch_local, dp, cp, hkv, query_len, dim)
+        k_updates = k_updates.reshape(batch_local, rows, query_len, dim)
         logical_index_block = position_ids_dp // cfg.index_block_size
         live_way = (
             (logical_index_block % cp)[:, :, None, None, :]
@@ -1536,12 +1672,15 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
 
         q_heads_per_kv = num_index_heads // hkv
         ql_eff = q_heads_per_kv * query_len
-        q_rows = (
-            idx_q.reshape(batch_local, dp, hkv, q_heads_per_kv, query_len, dim)
-            .unsqueeze(2)
-            .expand(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, dim)
-            .reshape(batch_local, rows, ql_eff, dim)
-        )
+        if replicated_rope:
+            q_rows = idx_q.reshape(batch_local, rows, ql_eff, dim)
+        else:
+            q_rows = (
+                idx_q.reshape(batch_local, dp, hkv, q_heads_per_kv, query_len, dim)
+                .unsqueeze(2)
+                .expand(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, dim)
+                .reshape(batch_local, rows, ql_eff, dim)
+            )
 
         q_pos_rows_all = (
             position_ids_dp[:, :, 0]
@@ -1559,6 +1698,8 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
 
         candidate_score_groups: list[torch.Tensor] = []
         candidate_block_groups: list[torch.Tensor] = []
+        core_score_groups: list[torch.Tensor] = []
+        core_block_groups: list[torch.Tensor] = []
         local_batch_size = 1
         is_export = torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()
 
@@ -1594,6 +1735,16 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             )
 
             def read_key_block(start: int, end: int) -> torch.Tensor:
+                if return_core_candidates:
+                    return self._read_blocked_k_dp_unified(
+                        key_local,
+                        pos_local,
+                        start,
+                        end,
+                        cfg.index_block_size,
+                        cp,
+                        hkv,
+                    )
                 return self._read_blocked_k_dp(key_local, pos_local, start, end, cfg.index_block_size, cp, hkv)
 
             def compute_block_scores(key_5d: torch.Tensor) -> torch.Tensor:
@@ -1676,6 +1827,10 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             core_topk = min(selected_blocks, device_block_scores.shape[-1])
             core_topk_scores, core_topk_indices = torch.topk(device_block_scores, k=core_topk, dim=-1)
             core_topk_block_ids = torch.gather(device_block_ids, -1, core_topk_indices)
+            if return_core_candidates:
+                core_score_groups.append(core_topk_scores)
+                core_block_groups.append(core_topk_block_ids)
+                continue
             core_candidate_scores = core_topk_scores.permute(0, 1, 3, 2, 4).reshape(
                 local, rows, ql_eff, num_cores * core_topk
             )
@@ -1687,6 +1842,10 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             device_topk_block_ids = torch.gather(core_candidate_block_ids, -1, device_topk_indices)
             candidate_score_groups.append(device_topk_scores)
             candidate_block_groups.append(device_topk_block_ids)
+
+        if return_core_candidates:
+            past_key_values.index_keys[layer_idx] = index_key_cache
+            return torch.cat(core_score_groups, dim=0), torch.cat(core_block_groups, dim=0)
 
         candidate_scores = (
             torch.cat(candidate_score_groups, dim=0)
@@ -1741,6 +1900,88 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
             self.last_block_indices = block_indices.detach()
         # safe_indices/block_valid: [B, index_n_heads, selected_blocks]
+        return safe_indices, block_valid
+
+    def _finalize_blocks_dp_unified(
+        self,
+        core_topk_scores: torch.Tensor,
+        core_topk_block_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        blocking_config: AttentionBlockingConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Merge every core and indexer-CP candidate before one final top-k."""
+        cfg = self.config
+        batch, query_len = position_ids.shape
+        dp = int(blocking_config.msa_indexer_dp or 1)
+        cp = int(blocking_config.msa_indexer_cp or 1)
+        hkv = int(blocking_config.indexer_n_head or 1)
+        if dp != 1:
+            raise ValueError("MiniMax-M3 unified MSA decode supports msa_indexer_dp=1 only.")
+        if batch % dp:
+            raise ValueError("MSA indexer batch size must be divisible by msa_indexer_dp.")
+        batch_local = batch // dp
+        num_index_heads = cfg.index_n_heads
+        q_heads_per_kv = num_index_heads // hkv
+        ql_eff = q_heads_per_kv * query_len
+        rows = dp * cp * hkv
+        num_cores = int(blocking_config.num_cores_per_device or 1)
+        core_topk = core_topk_scores.shape[-1]
+        selected_blocks = min(cfg.index_topk_blocks, math.ceil(blocking_config.ctx_len / cfg.index_block_size))
+
+        expected_shape = (batch_local, rows, num_cores, ql_eff, core_topk)
+        if tuple(core_topk_scores.shape) != expected_shape or tuple(core_topk_block_ids.shape) != expected_shape:
+            raise ValueError(f"Unified MSA indexer core candidates must both have shape {expected_shape}.")
+        core_candidate_width = num_cores * core_topk
+        candidate_scores = (
+            core_topk_scores.permute(0, 1, 3, 2, 4)
+            .reshape(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, core_candidate_width)
+            .permute(0, 1, 3, 4, 5, 2, 6)
+            .reshape(batch, num_index_heads, cp * core_candidate_width)
+        )
+        candidate_block_ids = (
+            core_topk_block_ids.permute(0, 1, 3, 2, 4)
+            .reshape(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, core_candidate_width)
+            .permute(0, 1, 3, 4, 5, 2, 6)
+            .reshape(batch, num_index_heads, cp * core_candidate_width)
+        )
+        topk_rows = max(rows, num_index_heads)
+        row_repeats = (topk_rows + num_index_heads - 1) // num_index_heads
+        topk_input = candidate_scores
+        if row_repeats > 1:
+            topk_input = candidate_scores.repeat(1, row_repeats, 1)[:, :topk_rows, :]
+        topk_scores, candidate_topk = torch.topk(topk_input, k=selected_blocks, dim=-1)
+        if row_repeats > 1:
+            topk_scores = topk_scores[:, :num_index_heads, :]
+            candidate_topk = candidate_topk[:, :num_index_heads, :]
+        block_indices = torch.gather(candidate_block_ids, -1, candidate_topk)
+        topk_scores = topk_scores.view(batch_local, dp, hkv, q_heads_per_kv, query_len, selected_blocks)
+        block_indices = block_indices.view(batch_local, dp, hkv, q_heads_per_kv, query_len, selected_blocks)
+        current_block_ids = (
+            (position_ids.view(dp, batch_local, query_len).permute(1, 0, 2) // cfg.index_block_size)
+            .view(batch_local, dp, 1, 1, query_len, 1)
+            .expand(batch_local, dp, hkv, q_heads_per_kv, query_len, 1)
+            .to(block_indices.dtype)
+        )
+        block_indices = torch.cat([block_indices[..., :-1], current_block_ids], dim=-1)
+        topk_scores = torch.cat([topk_scores[..., :-1], torch.zeros_like(topk_scores[..., -1:])], dim=-1)
+        topk_scores = (
+            topk_scores.unsqueeze(2)
+            .expand(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, selected_blocks)
+            .permute(1, 0, 2, 3, 4, 5, 6)
+            .reshape(batch, cp, num_index_heads, query_len, selected_blocks)
+        )
+        block_indices = (
+            block_indices.unsqueeze(2)
+            .expand(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, selected_blocks)
+            .permute(1, 0, 2, 3, 4, 5, 6)
+            .reshape(batch, cp, num_index_heads, query_len, selected_blocks)
+        )
+        block_valid = topk_scores > (MASKED_ATTENTION_LOGIT / 2)
+        block_indices = block_indices[..., 0, :]
+        block_valid = block_valid[..., 0, :]
+        safe_indices = torch.where(block_valid, block_indices, torch.zeros_like(block_indices)).to(torch.int32)
+        if not (torch.onnx.is_in_onnx_export() or torch.jit.is_tracing() or torch._dynamo.is_compiling()):
+            self.last_block_indices = block_indices.detach()
         return safe_indices, block_valid
 
     def _select_blocks_prefill(
@@ -2019,6 +2260,166 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
 
 
 class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
+    def _supports_unified_sparse_decode(
+        self,
+        hidden_states: torch.Tensor,
+        past_key_values: Optional[Cache],
+        position_ids: Optional[torch.Tensor],
+        blocking_config: Optional[AttentionBlockingConfig],
+        indexer_block_table: Optional[torch.Tensor],
+        attention_block_table: Optional[torch.Tensor],
+    ) -> bool:
+        """Return whether the normal decode inputs match the validated unified layout."""
+        if (
+            self.indexer is None
+            or not isinstance(past_key_values, QEffMiniMaxSparseCache)
+            or position_ids is None
+            or hidden_states.shape[1] != 1
+            or blocking_config is None
+            or indexer_block_table is not None
+            or attention_block_table is not None
+            or getattr(blocking_config, "paged_attention", False)
+            or getattr(blocking_config, "paged_gqa", False)
+        ):
+            return False
+
+        indexer_dp = int(blocking_config.msa_indexer_dp or 1)
+        attention_dp = int(blocking_config.msa_attn_dp or 1)
+        indexer_cp = int(blocking_config.msa_indexer_cp or 1)
+        attention_cp = int(blocking_config.msa_attn_cp or 1)
+        indexer_n_head = int(blocking_config.indexer_n_head or 1)
+        num_cores = int(blocking_config.num_cores_per_device or 1)
+        ctx_len = int(blocking_config.ctx_len or 0)
+        if (
+            indexer_dp != 1
+            or attention_dp != 1
+            or indexer_cp <= 1
+            or attention_cp <= 1
+            or ctx_len <= 0
+            or ctx_len % indexer_cp
+            or ctx_len % attention_cp
+            or indexer_n_head != 1
+            or self.config.index_n_heads != self.config.num_key_value_heads
+            or self.config.num_attention_heads % (attention_cp * self.config.num_key_value_heads)
+            or self.config.index_local_blocks != 1
+            or num_cores <= 0
+        ):
+            return False
+
+        indexer_num_blocks = int(blocking_config.indexer_num_blocks or blocking_config.num_kv_blocks or 0)
+        indexer_cache_slots = ctx_len // indexer_cp
+        if indexer_num_blocks <= 0 or indexer_cache_slots % indexer_num_blocks:
+            return False
+        indexer_cache_block = indexer_cache_slots // indexer_num_blocks
+        selected_blocks = min(self.config.index_topk_blocks, math.ceil(ctx_len / self.config.index_block_size))
+        if (
+            indexer_cache_block % num_cores
+            or (indexer_cache_block // num_cores) % self.config.index_block_size
+            or (ctx_len // attention_cp) % self.config.index_block_size
+            or (selected_blocks * self.config.index_block_size) % num_cores
+        ):
+            return False
+
+        if self.layer_idx >= len(past_key_values.layers):
+            return False
+        layer = past_key_values.layers[self.layer_idx]
+        index_cache = past_key_values.index_keys.get(self.layer_idx)
+        batch = hidden_states.shape[0]
+        expected_main_prefix = (batch, attention_cp * self.config.num_key_value_heads)
+        expected_index_shape = (
+            batch,
+            indexer_cp * indexer_n_head,
+            indexer_cache_slots,
+            self.config.index_head_dim,
+        )
+        return (
+            layer.keys is not None
+            and layer.values is not None
+            and tuple(layer.keys.shape[:2]) == expected_main_prefix
+            and tuple(layer.values.shape) == tuple(layer.keys.shape)
+            and layer.keys.shape[2] == ctx_len // attention_cp
+            and layer.keys.shape[3] == self.head_dim
+            and index_cache is not None
+            and tuple(index_cache.shape) == expected_index_shape
+        )
+
+    @staticmethod
+    def _apply_rope_dp_unified(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        """Apply RoPE while preserving the explicit DP axis."""
+        rotary_dim = cos.shape[-1]
+        rotated = x[..., :rotary_dim]
+        passthrough = x[..., rotary_dim:]
+        if cos.ndim != x.ndim:
+            head_axis = x.ndim - 3
+            cos = cos.unsqueeze(head_axis)
+            sin = sin.unsqueeze(head_axis)
+        rotated = rotated * cos + rotate_half(rotated) * sin
+        return torch.cat((rotated, passthrough), dim=-1)
+
+    @staticmethod
+    def _write_interleaved_msa_kv_unified(
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        position_ids: torch.Tensor,
+        blocking_config: AttentionBlockingConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Write main-attention K/V in token-interleaved CP layout."""
+        cp = int(blocking_config.msa_attn_cp or 1)
+        if key_states.ndim == 6:
+            batch_local, dp, key_cp, hkv, query_len, head_dim = key_states.shape
+            if key_cp != cp:
+                raise ValueError("Unified MSA key updates must match the configured CP factor.")
+        else:
+            batch_local, dp, hkv, query_len, head_dim = key_states.shape
+        rows = dp * cp * hkv
+        if tuple(value_states.shape) != (batch_local, dp, hkv, query_len, head_dim):
+            raise ValueError("Unified MSA key/value updates must have matching shapes.")
+        if tuple(key_cache.shape[:2]) != (batch_local, rows) or tuple(value_cache.shape) != tuple(key_cache.shape):
+            raise ValueError(f"Unified MSA key/value cache shape must start with {(batch_local, rows)}.")
+        if key_cache.shape[-1] != head_dim:
+            raise ValueError("Unified MSA cache head dimension does not match K/V updates.")
+
+        if key_states.ndim == 6:
+            key_updates = key_states.reshape(batch_local, rows, query_len, head_dim)
+        else:
+            key_updates = (
+                key_states.unsqueeze(2)
+                .expand(batch_local, dp, cp, hkv, query_len, head_dim)
+                .reshape(batch_local, rows, query_len, head_dim)
+            )
+        value_updates = (
+            value_states.unsqueeze(2)
+            .expand(batch_local, dp, cp, hkv, query_len, head_dim)
+            .reshape(batch_local, rows, query_len, head_dim)
+        )
+        position_ids_dp = position_ids.view(dp, batch_local, query_len).permute(1, 0, 2)
+        addr_base = torch.div(position_ids_dp, cp, rounding_mode="floor")
+        live_way = (
+            torch.remainder(position_ids_dp, cp)
+            .view(batch_local, dp, 1, 1, query_len)
+            .expand(batch_local, dp, cp, hkv, query_len)
+            .reshape(batch_local, rows, query_len)
+        )
+        row_way = torch.arange(rows, device=key_states.device).remainder(cp * hkv) // hkv
+        row_live = row_way.view(1, rows, 1) == live_way
+        batch_id = torch.arange(batch_local, device=key_states.device).view(batch_local, 1, 1)
+        block_id = torch.where(
+            row_live,
+            batch_id.expand(batch_local, rows, query_len),
+            torch.iinfo(torch.int32).max,
+        ).to(torch.int32)
+        addr = (
+            addr_base.to(torch.int32)
+            .view(batch_local, dp, 1, 1, query_len)
+            .expand(batch_local, dp, cp, hkv, query_len)
+            .reshape(batch_local, rows, query_len)
+        )
+        key_cache = QEffMiniMaxSparseCache.paged_scatter(key_cache, block_id, addr, key_updates)
+        value_cache = QEffMiniMaxSparseCache.paged_scatter(value_cache, block_id, addr, value_updates)
+        return key_cache, value_cache
+
     @staticmethod
     def _gqa_read_blocked_dp(
         cache: torch.Tensor,
@@ -2983,6 +3384,110 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             value_cache,
         )
 
+    def _unified_sparse_decode(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        past_key_values: QEffMiniMaxSparseCache,
+        position_ids: torch.Tensor,
+        blocking_config: AttentionBlockingConfig,
+        indexer_position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, None]:
+        """Run the validated non-paged, single-token sparse decode graph."""
+        indexer_cos, indexer_sin = indexer_position_embeddings or position_embeddings
+        core_topk_scores, core_topk_block_ids = self.indexer._select_blocks_dp(
+            hidden_states,
+            position_ids,
+            past_key_values,
+            self.layer_idx,
+            indexer_cos,
+            indexer_sin,
+            blocking_config,
+            return_core_candidates=True,
+        )
+
+        batch, query_len, _ = hidden_states.shape
+        attn_dp = int(blocking_config.msa_attn_dp or 1)
+        batch_local = batch // attn_dp
+        query_states = self.q_norm(
+            self.q_proj(hidden_states)
+            .view(attn_dp, batch_local, query_len, self.config.num_attention_heads, self.head_dim)
+            .permute(1, 0, 2, 3, 4)
+        ).transpose(2, 3)
+        key_states = self.k_norm(
+            self.k_proj(hidden_states)
+            .view(attn_dp, batch_local, query_len, self.config.num_key_value_heads, self.head_dim)
+            .permute(1, 0, 2, 3, 4)
+        ).transpose(2, 3)
+        value_states = (
+            self.v_proj(hidden_states)
+            .view(attn_dp, batch_local, query_len, self.config.num_key_value_heads, self.head_dim)
+            .permute(1, 0, 2, 3, 4)
+            .transpose(2, 3)
+        )
+        cos, sin = position_embeddings
+        if cos.ndim == query_states.ndim:
+            attn_cp = int(blocking_config.msa_attn_cp or 1)
+            head_lanes = attn_cp * self.config.num_key_value_heads
+            cos_dp, sin_dp = cos, sin
+            lane_rope_shape = (
+                batch_local,
+                attn_dp,
+                head_lanes,
+                self.config.num_attention_heads // head_lanes,
+                query_len,
+                cos.shape[-1],
+            )
+            key_cos = cos.view(lane_rope_shape)[:, :, :, 0]
+            key_sin = sin.view(lane_rope_shape)[:, :, :, 0]
+            key_states = (
+                key_states.unsqueeze(2)
+                .expand(batch_local, attn_dp, attn_cp, self.config.num_key_value_heads, query_len, self.head_dim)
+                .reshape(batch_local, attn_dp, head_lanes, query_len, self.head_dim)
+            )
+        else:
+            cos_dp = cos.view(attn_dp, batch_local, query_len, cos.shape[-1]).permute(1, 0, 2, 3)
+            sin_dp = sin.view(attn_dp, batch_local, query_len, sin.shape[-1]).permute(1, 0, 2, 3)
+            key_cos, key_sin = cos_dp, sin_dp
+        query_states = self._apply_rope_dp_unified(query_states, cos_dp, sin_dp)
+        key_states = self._apply_rope_dp_unified(key_states, key_cos, key_sin)
+        if cos.ndim == 5:
+            key_states = key_states.reshape(
+                batch_local, attn_dp, attn_cp, self.config.num_key_value_heads, query_len, self.head_dim
+            )
+
+        token_indices, token_valid = self.indexer._finalize_blocks_dp_unified(
+            core_topk_scores,
+            core_topk_block_ids,
+            position_ids,
+            blocking_config,
+        )
+        layer = past_key_values.layers[self.layer_idx]
+        layer.keys, layer.values = self._write_interleaved_msa_kv_unified(
+            key_states,
+            value_states,
+            layer.keys,
+            layer.values,
+            position_ids,
+            blocking_config,
+        )
+        attn_output, layer.keys, layer.values = self._baseline_attention_gp_cp_unified(
+            query_states,
+            token_indices,
+            token_valid,
+            layer.keys,
+            layer.values,
+            blocking_config,
+            position_ids,
+        )
+        attn_output = (
+            attn_output.to(hidden_states.dtype)
+            .reshape(batch, self.config.num_attention_heads, query_len, self.head_dim)
+            .transpose(1, 2)
+            .reshape(batch, query_len, -1)
+        )
+        return self.o_proj(attn_output), None
+
     def _baseline_attention(
         self,
         query_states: torch.Tensor,
@@ -3338,6 +3843,130 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         )
         return out, key_cache, value_cache
 
+    def _baseline_attention_gp_cp_unified(
+        self,
+        query_states: torch.Tensor,
+        token_indices: torch.Tensor,
+        token_valid: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        blocking_config: AttentionBlockingConfig,
+        position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Shard selected tokens across cores, then reduce cores and CP."""
+        batch_local, query_dp, _, query_len, head_dim = query_states.shape
+        cfg = self.config
+        hkv = cfg.num_key_value_heads
+        num_kv_groups = self.num_key_value_groups
+        dp = int(blocking_config.msa_attn_dp or 1)
+        cp = int(blocking_config.msa_attn_cp or 1)
+        num_cores = int(blocking_config.num_cores_per_device or 1)
+        if dp != 1:
+            raise ValueError("MiniMax-M3 unified MSA decode supports msa_attn_dp=1 only.")
+        if query_dp != dp or query_len != 1:
+            raise ValueError("MiniMax-M3 unified MSA attention requires one-token DP-divisible decode.")
+        batch = batch_local * dp
+        rows = dp * cp * hkv
+        if tuple(key_cache.shape[:2]) != (batch_local, rows) or tuple(value_cache.shape) != tuple(key_cache.shape):
+            raise ValueError(f"Unified MSA key/value cache shape must start with {(batch_local, rows)}.")
+        ctx_len = int(blocking_config.ctx_len or key_cache.shape[2] * cp)
+        if token_indices.ndim == 4:
+            indexer_cp = int(blocking_config.msa_indexer_cp or 1)
+            selector_shape = (batch, indexer_cp, hkv, token_indices.shape[-1])
+            if tuple(token_indices.shape) != selector_shape or tuple(token_valid.shape) != selector_shape:
+                raise ValueError(f"Unified MSA CP-expanded block selection must have shape {selector_shape}.")
+            token_indices = token_indices[:, 0]
+            token_valid = token_valid[:, 0]
+        if tuple(token_indices.shape[:2]) != (batch, hkv) or tuple(token_valid.shape) != tuple(token_indices.shape):
+            raise ValueError("Unified MSA block indices and validity must have shape [batch, Hkv, selected_blocks].")
+        if ctx_len % (cp * cfg.index_block_size):
+            raise ValueError("Unified MSA CP gather requires whole index blocks in every CP partition.")
+
+        selected_blocks = token_indices.shape[-1]
+        selected_len = selected_blocks * cfg.index_block_size
+        block_ids_global = token_indices.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
+        valid_global = token_valid.reshape(dp, batch_local, hkv, selected_blocks).permute(1, 0, 2, 3)
+        token_offset = torch.arange(cfg.index_block_size, device=query_states.device).view(1, 1, 1, 1, -1)
+        selected_token_ids = block_ids_global.unsqueeze(-1) * cfg.index_block_size + token_offset
+        position_ids_dp = position_ids.reshape(dp, batch_local, query_len).permute(1, 0, 2)
+        position_limit = position_ids_dp[:, :, None, None, :]
+        valid_base = valid_global.unsqueeze(-1) & (selected_token_ids < ctx_len)
+        local_q = position_limit - block_ids_global.unsqueeze(-1) * cfg.index_block_size
+        valid_base = valid_base & (token_offset <= local_q)
+        local_offset = torch.div(token_offset, cp, rounding_mode="floor").to(torch.int32)
+        offset_way = torch.remainder(token_offset, cp).to(torch.int64)
+        gather_local_base = (block_ids_global.unsqueeze(-1) * (cfg.index_block_size // cp) + local_offset).reshape(
+            batch_local, dp, hkv, selected_len
+        )
+        valid_base = valid_base.reshape(batch_local, dp, hkv, selected_len)
+        gather_idx = (
+            gather_local_base.unsqueeze(2)
+            .expand(batch_local, dp, cp, hkv, selected_len)
+            .reshape(batch_local, rows, selected_len)
+            .to(torch.int32)
+        )
+        valid_idx = (
+            valid_base.unsqueeze(2)
+            .expand(batch_local, dp, cp, hkv, selected_len)
+            .reshape(batch_local, rows, selected_len)
+        )
+        offset_way = offset_way.expand(1, 1, 1, selected_blocks, cfg.index_block_size).reshape(1, 1, 1, 1, selected_len)
+        way_idx = torch.arange(cp, device=query_states.device).view(1, 1, cp, 1, 1)
+        gather_live = (
+            (offset_way == way_idx)
+            .expand(batch_local, dp, cp, hkv, selected_len)
+            .reshape(batch_local, rows, selected_len)
+        )
+        valid_idx = valid_idx & gather_live
+        gather_idx = torch.where(valid_idx, gather_idx, torch.iinfo(torch.int32).max).to(torch.int32)
+
+        if selected_len % num_cores:
+            raise ValueError("Unified MSA selected-token count must divide evenly across cores.")
+        tokens_per_core = selected_len // num_cores
+        selected_k = QEffMiniMaxSparseCache.gather_blocked_kv_dp(key_cache, gather_idx).reshape(
+            batch_local, rows, num_cores, tokens_per_core, head_dim
+        )
+        selected_v = QEffMiniMaxSparseCache.gather_blocked_kv_dp(value_cache, gather_idx).reshape(
+            batch_local, rows, num_cores, tokens_per_core, head_dim
+        )
+        valid_core = valid_idx.reshape(batch_local, rows, num_cores, tokens_per_core)
+        q_rows = (
+            query_states.view(batch_local, dp, hkv, num_kv_groups, query_len, head_dim)
+            .unsqueeze(2)
+            .expand(batch_local, dp, cp, hkv, num_kv_groups, query_len, head_dim)
+            .reshape(batch_local, rows, num_kv_groups * query_len, head_dim)
+        )
+        q_core = q_rows.unsqueeze(2).expand(batch_local, rows, num_cores, num_kv_groups * query_len, head_dim)
+
+        attn = torch.matmul(q_core.float(), selected_k.transpose(-1, -2).float()) * (head_dim**-0.5)
+        attn = torch.where(~valid_core.unsqueeze(3), _scalar_like(attn, MASKED_ATTENTION_LOGIT), attn)
+        max_core = attn.max(dim=-1).values
+        exp_core = torch.exp(attn - max_core.unsqueeze(-1))
+        exp_core = torch.where(valid_core.unsqueeze(3), exp_core, _scalar_like(exp_core, 0.0))
+        selected_v = torch.where(valid_core.unsqueeze(-1), selected_v, _scalar_like(selected_v, 0.0))
+        sum_core = exp_core.sum(dim=-1)
+        out_core = torch.matmul(exp_core, selected_v.float())
+
+        max_core = max_core.reshape(batch_local * dp, cp, hkv, num_cores, num_kv_groups * query_len)
+        sum_core = sum_core.reshape(batch_local * dp, cp, hkv, num_cores, num_kv_groups * query_len)
+        out_core = out_core.reshape(batch_local * dp, cp, hkv, num_cores, num_kv_groups * query_len, head_dim)
+        max_tokens = max_core.max(dim=3).values
+        core_weight = torch.exp(max_core - max_tokens.unsqueeze(3))
+        sum_tokens = (core_weight * sum_core).sum(dim=3)
+        out_tokens = (core_weight.unsqueeze(-1) * out_core).sum(dim=3)
+        max_all = max_tokens.max(dim=1).values
+        cp_weight = torch.exp(max_tokens - max_all.unsqueeze(1))
+        sum_all = (cp_weight * sum_tokens).sum(dim=1)
+        out_all = (cp_weight.unsqueeze(-1) * out_tokens).sum(dim=1)
+        sum_all = torch.where(sum_all > 0, sum_all, torch.ones_like(sum_all))
+        out = out_all / sum_all.unsqueeze(-1)
+        out = (
+            out.reshape(batch_local, dp, hkv, num_kv_groups, query_len, head_dim)
+            .permute(1, 0, 2, 3, 4, 5)
+            .reshape(batch, hkv * num_kv_groups, query_len, head_dim)
+        )
+        return out, key_cache, value_cache
+
     def _paged_attention(
         self,
         query_states,
@@ -3470,86 +4099,6 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         )
         return out
 
-    def _msa_attention_gp_batched(
-        self,
-        query_states,
-        token_indices,
-        token_valid,
-        key_cache,
-        value_cache,
-        dp,
-        blocking_config,
-        position_ids,
-    ):
-        """Batched entry point for the retained MSA GP path.
-
-        The QEfficient cache contract already keeps the batch-local and DP
-        dimensions explicit; reuse the CP-aware implementation so callers can
-        select the batched implementation without changing that contract.
-        """
-        return self._baseline_attention_gp(
-            query_states,
-            token_indices,
-            token_valid,
-            key_cache,
-            value_cache,
-            dp=dp,
-            blocking_config=blocking_config,
-            position_ids=position_ids,
-        )
-
-    def _msa_indexer_attention_gp_unified(
-        self,
-        hidden_states,
-        query_states,
-        key_states,
-        value_states,
-        position_ids,
-        indexer_cos,
-        indexer_sin,
-        past_key_values,
-        blocking_config,
-    ):
-        """Unified MSA indexer + attention GP decode entry point.
-
-        This keeps selector output and compact-cache writes in one model
-        boundary, matching the layer benchmark's unified implementation while
-        retaining QEfficient's cache object and export interfaces.
-        """
-        if position_ids is None or hidden_states.shape[1] != 1:
-            raise ValueError("Unified MSA GP requires decode with position_ids.")
-        if blocking_config is None or getattr(blocking_config, "paged_attention", False):
-            raise ValueError("Unified MSA GP requires non-paged decode.")
-
-        token_indices, token_valid = self.indexer._select_blocks(
-            hidden_states,
-            position_ids,
-            past_key_values,
-            self.layer_idx,
-            indexer_cos,
-            indexer_sin,
-            blocking_config=blocking_config,
-            block_table=None,
-        )
-        cache_kwargs = {
-            "position_ids": position_ids,
-            "dp": getattr(blocking_config, "msa_attn_dp", 1) or 1,
-            "hkv": self.config.num_key_value_heads,
-            "cp": getattr(blocking_config, "msa_attn_cp", 1) or 1,
-        }
-        past_key_values.write_only_sparse(key_states, value_states, self.layer_idx, cache_kwargs)
-        layer = past_key_values.layers[self.layer_idx]
-        return self._baseline_attention_gp(
-            query_states,
-            token_indices,
-            token_valid,
-            layer.keys,
-            layer.values,
-            dp=cache_kwargs["dp"],
-            blocking_config=blocking_config,
-            position_ids=position_ids,
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -3561,9 +4110,28 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
         hidden_states = hidden_states.to(dtype=self.q_proj.weight.dtype)
+        blocking_config = getattr(self, "attn_blocking_config", None)
+        indexer_block_table = kwargs.get("msa_indexer_block_table")
+        attention_block_table = kwargs.get("msa_attn_block_table")
+        if self._supports_unified_sparse_decode(
+            hidden_states,
+            past_key_values,
+            position_ids,
+            blocking_config,
+            indexer_block_table,
+            attention_block_table,
+        ):
+            return self._unified_sparse_decode(
+                hidden_states,
+                position_embeddings,
+                past_key_values,
+                position_ids,
+                blocking_config,
+                kwargs.get("indexer_position_embeddings"),
+            )
         query_shape = (*input_shape, self.config.num_attention_heads, self.head_dim)
         key_value_shape = (*input_shape, self.config.num_key_value_heads, self.head_dim)
-        blocking_config = getattr(self, "attn_blocking_config", AttentionBlockingConfig())
+        blocking_config = blocking_config or AttentionBlockingConfig()
         dedicated_gqa = (
             self.indexer is None
             and blocking_config is not None
@@ -3625,8 +4193,6 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 cache_kwargs["hkv"] = self.config.num_key_value_heads
                 cache_kwargs["cp"] = getattr(blocking_config, "msa_attn_cp", 1) or 1
 
-            indexer_block_table = kwargs.get("msa_indexer_block_table")
-            attention_block_table = kwargs.get("msa_attn_block_table")
             paged = attention_block_table is not None
             is_prefill = input_shape[1] > 1
             indexer_position_embeddings = kwargs.get("indexer_position_embeddings")
@@ -3635,25 +4201,6 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 indexer_cos, indexer_sin = indexer_position_embeddings
             else:
                 indexer_cos, indexer_sin = cos, sin
-
-            qaic_config = getattr(self, "qaic_config", None) or {}
-            msa_impl = getattr(blocking_config, "msa_impl", None) or qaic_config.get("msa_impl")
-            if msa_impl == "msa_indexer_attention_GP_unified" and not is_prefill and not paged:
-                attn_output, _, _ = self._msa_indexer_attention_gp_unified(
-                    hidden_states,
-                    query_states,
-                    key_states,
-                    value_states,
-                    position_ids,
-                    indexer_cos,
-                    indexer_sin,
-                    past_key_values,
-                    blocking_config,
-                )
-                attn_output = attn_output.transpose(1, 2).reshape(
-                    *input_shape, self.config.num_attention_heads * self.head_dim
-                )
-                return self.o_proj(attn_output.to(dtype=self.o_proj.weight.dtype).contiguous()), None
 
             if is_prefill:
                 selector = (
@@ -3815,14 +4362,9 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
                 return self.o_proj(attn_output.to(dtype=self.o_proj.weight.dtype).contiguous()), None
             # Sparse decode gathers from the retained cache, so write the current token before either path.
             past_key_values.write_only_sparse(key_states, value_states, self.layer_idx, cache_kwargs)
-            if attn_dp > 1 or attn_cp > 1 or msa_impl == "msa_attention_GP_batched":
+            if attn_dp > 1 or attn_cp > 1:
                 layer = past_key_values.layers[self.layer_idx]
-                attention_impl = (
-                    self._msa_attention_gp_batched
-                    if msa_impl == "msa_attention_GP_batched"
-                    else self._baseline_attention_gp
-                )
-                attn_output, key_cache, value_cache = attention_impl(
+                attn_output, key_cache, value_cache = self._baseline_attention_gp(
                     query_states,
                     token_indices,
                     token_valid,
@@ -4072,15 +4614,29 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
         sin = self.sin_cached[rope_indices].to(device=hidden_states.device, dtype=hidden_states.dtype)
         position_embeddings = (cos, sin)
         indexer_position_embeddings = None
+        unified_indexer_position_embeddings = None
         indexer = None
         blocking_config = None
+        sparse_attention = None
         for layer in self.layers:
             attention = getattr(layer, "self_attn", None)
             candidate = getattr(attention, "indexer", None)
             if candidate is not None:
+                sparse_attention = attention
                 indexer = candidate
                 blocking_config = getattr(attention, "attn_blocking_config", None)
                 break
+        unified_decode = bool(
+            sparse_attention is not None
+            and sparse_attention._supports_unified_sparse_decode(
+                inputs_embeds,
+                past_key_values,
+                position_ids,
+                blocking_config,
+                kwargs.get("msa_indexer_block_table"),
+                kwargs.get("msa_attn_block_table"),
+            )
+        )
         indexer_dim = getattr(getattr(indexer, "config", None), "index_head_dim", None)
         indexer_dp = getattr(blocking_config, "msa_indexer_dp", 1) or 1
         if indexer_dim is not None:
@@ -4088,7 +4644,7 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
             rotary_dim = min(cos.shape[-1], indexer_dim)
             indexer_cos = cos[..., :rotary_dim].clone()
             indexer_sin = sin[..., :rotary_dim].clone()
-            if inputs_embeds.shape[1] == 1 and indexer_dp > 1:
+            if inputs_embeds.shape[1] == 1 and indexer_dp > 1 and indexer_cos.ndim == 3:
                 batch_local = inputs_embeds.shape[0] // indexer_dp
                 indexer_cos = indexer_cos.reshape(
                     indexer_dp, batch_local, indexer_cos.shape[1], indexer_cos.shape[-1]
@@ -4097,15 +4653,66 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
                     indexer_dp, batch_local, indexer_sin.shape[1], indexer_sin.shape[-1]
                 ).permute(1, 0, 2, 3)
             indexer_position_embeddings = (indexer_cos, indexer_sin)
+            if unified_decode:
+                batch_local = inputs_embeds.shape[0] // indexer_dp
+                indexer_cp = int(blocking_config.msa_indexer_cp or 1)
+                indexer_rope_indices = (
+                    rope_indices.view(indexer_dp, batch_local, rope_indices.shape[1])
+                    .permute(1, 0, 2)
+                    .unsqueeze(2)
+                    .expand(batch_local, indexer_dp, indexer_cp, rope_indices.shape[1])
+                )
+                indexer_cos = _gather_flattened_rope_rows(self.cos_cached, indexer_rope_indices, rotary_dim).to(
+                    device=hidden_states.device, dtype=hidden_states.dtype
+                )
+                indexer_sin = _gather_flattened_rope_rows(self.sin_cached, indexer_rope_indices, rotary_dim).to(
+                    device=hidden_states.device, dtype=hidden_states.dtype
+                )
+                unified_indexer_position_embeddings = (indexer_cos, indexer_sin)
+        unified_position_embeddings = None
+        if unified_decode:
+            attn_dp = int(blocking_config.msa_attn_dp or 1)
+            batch_local = inputs_embeds.shape[0] // attn_dp
+            attn_rope_indices = (
+                rope_indices.view(attn_dp, batch_local, rope_indices.shape[1])
+                .permute(1, 0, 2)
+                .unsqueeze(2)
+                .expand(batch_local, attn_dp, self.config.num_attention_heads, rope_indices.shape[1])
+            )
+            attn_cos = _gather_flattened_rope_rows(self.cos_cached, attn_rope_indices, self.cos_cached.shape[-1]).to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            attn_sin = _gather_flattened_rope_rows(self.sin_cached, attn_rope_indices, self.sin_cached.shape[-1]).to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            unified_position_embeddings = (attn_cos, attn_sin)
         for decoder_layer in self.layers:
+            layer_position_embeddings = position_embeddings
+            layer_indexer_position_embeddings = indexer_position_embeddings
+            layer_attention = getattr(decoder_layer, "self_attn", None)
+            layer_blocking_config = getattr(layer_attention, "attn_blocking_config", None)
+            if (
+                unified_position_embeddings is not None
+                and getattr(layer_attention, "indexer", None) is not None
+                and layer_attention._supports_unified_sparse_decode(
+                    hidden_states,
+                    past_key_values,
+                    position_ids,
+                    layer_blocking_config,
+                    kwargs.get("msa_indexer_block_table"),
+                    kwargs.get("msa_attn_block_table"),
+                )
+            ):
+                layer_position_embeddings = unified_position_embeddings
+                layer_indexer_position_embeddings = unified_indexer_position_embeddings
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                position_embeddings=position_embeddings,
-                indexer_position_embeddings=indexer_position_embeddings,
+                position_embeddings=layer_position_embeddings,
+                indexer_position_embeddings=layer_indexer_position_embeddings,
                 **kwargs,
             )
         hidden_states = self.norm(hidden_states)
