@@ -81,9 +81,9 @@ def write_runner_io_bundle(
     missing_inputs = runner_metadata.required_host_input_names - host_inputs.keys()
     if missing_inputs:
         raise ValueError(f"Missing qaic-runner host inputs: {sorted(missing_inputs)}")
-    unexpected_inputs = host_inputs.keys() - runner_metadata.input_names
+    unexpected_inputs = host_inputs.keys() - runner_metadata.runtime_input_names
     if unexpected_inputs:
-        raise ValueError(f"Inputs are not present in the exported ONNX graph: {sorted(unexpected_inputs)}")
+        raise ValueError(f"Inputs are not runtime inputs of the exported ONNX graph: {sorted(unexpected_inputs)}")
 
     io_entries = []
     numpy_inputs = {name: np.asarray(value) for name, value in host_inputs.items()}
@@ -155,6 +155,7 @@ def write_causal_lm_runner_bundle(
 
     full_batch_size = specialization.get("full_batch_size")
     _add_specialization_control_inputs(runner_metadata, host_inputs, specialization, sampling_params=sampling_params)
+    host_inputs = _filter_graph_inputs(runner_metadata, host_inputs)
 
     shape_overrides = {}
     context_length = specialization.get("ctx_len")

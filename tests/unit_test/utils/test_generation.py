@@ -1822,6 +1822,227 @@ def test_runner_metadata_reuses_loaded_onnx_across_runner_helpers(tmp_path, monk
 
 
 @pytest.mark.cpu_only
+def test_runner_metadata_excludes_weight_free_constant_inputs(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation import runner_io
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
+    weight = helper.make_tensor_value_info("transformer.wte.weight", TensorProto.FLOAT, [4, 4])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 4])
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "weight_free_runner", [input_ids, weight], [logits])), onnx_path)
+    (tmp_path / "weight_spec.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "format": "safetensors",
+                        "path": "models--org--model/snapshots/prepared/model.safetensors",
+                    }
+                ],
+                "inputs": [{"name": "transformer.wte.weight", "location": {"file": 0, "key": "wte.weight"}}],
+                "model_id": "org/model",
+                "model_name": "GPT2LMHeadModel",
+                "version": 5,
+            }
+        )
+    )
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.required_host_input_names == {"input_ids"}
+    io_dir = runner_io.write_runner_io_bundle(
+        runner_metadata=runner_metadata,
+        specialization={"batch_size": 1, "seq_len": 1},
+        host_inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+    )
+    entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    assert [entry["map-to"] for entry in entries] == ["input_ids", "logits"]
+
+
+@pytest.mark.cpu_only
+def test_runner_metadata_excludes_shape_only_inputs_but_keeps_mixed_uses(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    shape_only = helper.make_tensor_value_info("shape_only", TensorProto.FLOAT, [1, 4])
+    cast_shape_only = helper.make_tensor_value_info("cast_shape_only", TensorProto.FLOAT, [1, 4])
+    mixed_use = helper.make_tensor_value_info("mixed_use", TensorProto.FLOAT, [1, 4])
+    graph_output = helper.make_tensor_value_info("graph_output", TensorProto.FLOAT, [1, 4])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Shape", ["shape_only"], ["shape_only_shape"]),
+            helper.make_node("Cast", ["cast_shape_only"], ["cast_shape_only_cast"], to=TensorProto.DOUBLE),
+            helper.make_node("Shape", ["cast_shape_only_cast"], ["cast_shape_only_shape"]),
+            helper.make_node("Cast", ["mixed_use"], ["mixed_use_cast"], to=TensorProto.DOUBLE),
+            helper.make_node("Shape", ["mixed_use_cast"], ["mixed_shape"]),
+            helper.make_node("Identity", ["mixed_use_cast"], ["identity_output"]),
+            helper.make_node("Cast", ["graph_output"], ["graph_output_cast"], to=TensorProto.DOUBLE),
+            helper.make_node("Shape", ["graph_output_cast"], ["graph_output_shape"]),
+        ],
+        "shape_only_inputs",
+        [shape_only, cast_shape_only, mixed_use, graph_output],
+        [
+            helper.make_tensor_value_info("shape_only_shape", TensorProto.INT64, [2]),
+            helper.make_tensor_value_info("cast_shape_only_shape", TensorProto.INT64, [2]),
+            helper.make_tensor_value_info("mixed_shape", TensorProto.INT64, [2]),
+            helper.make_tensor_value_info("identity_output", TensorProto.DOUBLE, [1, 4]),
+            helper.make_tensor_value_info("graph_output_shape", TensorProto.INT64, [2]),
+            graph_output,
+        ],
+    )
+    onnx_path = tmp_path / "shape-only.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"mixed_use", "graph_output"}
+    assert runner_metadata.required_host_input_names == {"mixed_use", "graph_output"}
+
+
+@pytest.mark.cpu_only
+def test_shape_only_classification_respects_captured_and_shadowed_subgraph_inputs(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    captured = helper.make_tensor_value_info("captured", TensorProto.FLOAT, [1])
+    shadowed = helper.make_tensor_value_info("shadowed", TensorProto.FLOAT, [1])
+    then_output = helper.make_tensor_value_info("branch_output", TensorProto.FLOAT, [1])
+    else_output = helper.make_tensor_value_info("else_output", TensorProto.FLOAT, [1])
+    local_value = helper.make_tensor("shadowed_value", TensorProto.FLOAT, [1], [0.0])
+    then_graph = helper.make_graph(
+        [
+            helper.make_node("Identity", ["captured"], ["branch_output"]),
+            helper.make_node("Constant", [], ["shadowed"], value=local_value),
+            helper.make_node("Identity", ["shadowed"], ["local_output"]),
+        ],
+        "then_branch",
+        [],
+        [then_output],
+    )
+    else_graph = helper.make_graph(
+        [helper.make_node("Identity", ["captured"], ["else_output"])],
+        "else_branch",
+        [],
+        [else_output],
+    )
+    graph = helper.make_graph(
+        [
+            helper.make_node("Shape", ["captured"], ["captured_shape"]),
+            helper.make_node("Shape", ["shadowed"], ["shadowed_shape"]),
+            helper.make_node(
+                "If",
+                ["condition"],
+                ["branch_result"],
+                then_branch=then_graph,
+                else_branch=else_graph,
+            ),
+        ],
+        "nested_shape_inputs",
+        [condition, captured, shadowed],
+        [
+            helper.make_tensor_value_info("captured_shape", TensorProto.INT64, [1]),
+            helper.make_tensor_value_info("shadowed_shape", TensorProto.INT64, [1]),
+            helper.make_tensor_value_info("branch_result", TensorProto.FLOAT, [1]),
+        ],
+    )
+    onnx_path = tmp_path / "nested-shape-inputs.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"condition", "captured"}
+
+
+@pytest.mark.cpu_only
+def test_shape_only_classification_follows_captured_cast_inside_subgraph(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    shape_input = helper.make_tensor_value_info("shape_input", TensorProto.FLOAT, [1, 4])
+    then_shape = helper.make_tensor_value_info("then_shape", TensorProto.INT64, [2])
+    else_shape = helper.make_tensor_value_info("else_shape", TensorProto.INT64, [2])
+    then_graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["shape_input"], ["shape_input_cast"], to=TensorProto.DOUBLE),
+            helper.make_node("Shape", ["shape_input_cast"], ["then_shape"]),
+        ],
+        "then_branch",
+        [],
+        [then_shape],
+    )
+    else_graph = helper.make_graph(
+        [helper.make_node("Shape", ["shape_input"], ["else_shape"])],
+        "else_branch",
+        [],
+        [else_shape],
+    )
+    branch_shape = helper.make_tensor_value_info("branch_shape", TensorProto.INT64, [2])
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "If",
+                ["condition"],
+                ["branch_shape"],
+                then_branch=then_graph,
+                else_branch=else_graph,
+            )
+        ],
+        "nested_cast_shape_input",
+        [condition, shape_input],
+        [branch_shape],
+    )
+    onnx_path = tmp_path / "nested-cast-shape-input.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"condition"}
+    assert runner_metadata.required_host_input_names == {"condition"}
+
+
+@pytest.mark.cpu_only
+def test_runner_metadata_preserves_retained_state_without_requiring_host_input(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
+    retained_state = helper.make_tensor_value_info("past_key", TensorProto.FLOAT, [1, 4])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1])
+    retained_output = helper.make_tensor_value_info("past_key_RetainedState", TensorProto.INT64, [2])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Identity", ["input_ids"], ["logits"]),
+            helper.make_node("Cast", ["past_key"], ["past_key_cast"], to=TensorProto.INT64),
+            helper.make_node("Shape", ["past_key_cast"], ["past_key_RetainedState"]),
+        ],
+        "retained_state",
+        [input_ids, retained_state],
+        [logits, retained_output],
+    )
+    onnx_path = tmp_path / "retained-state.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"input_ids", "past_key"}
+    assert runner_metadata.required_host_input_names == {"input_ids"}
+
+
+@pytest.mark.cpu_only
 def test_graph_input_filter_selects_model_specific_vision_metadata(tmp_path):
     import onnx
     from onnx import TensorProto, helper
@@ -1844,6 +2065,82 @@ def test_graph_input_filter_selects_model_specific_vision_metadata(tmp_path):
 
     assert set(inputs) == {"pixel_values", "image_grid_thw"}
     np.testing.assert_array_equal(inputs["image_grid_thw"], [[1, 2, 2]])
+
+
+@pytest.mark.cpu_only
+def test_runner_io_filters_and_rejects_shape_only_inputs(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation import runner_io
+    from QEfficient.generation.generation_helpers import RunnerMetadata, _filter_graph_inputs
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
+    shape_only = helper.make_tensor_value_info("shape_only", TensorProto.FLOAT, [1, 4])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Identity", ["input_ids"], ["logits"]),
+            helper.make_node("Cast", ["shape_only"], ["shape_only_cast"], to=TensorProto.FLOAT),
+            helper.make_node("Shape", ["shape_only_cast"], ["shape_only_shape"]),
+        ],
+        "runtime_filter",
+        [input_ids, shape_only],
+        [logits, helper.make_tensor_value_info("shape_only_shape", TensorProto.INT64, [2])],
+    )
+    onnx_path = tmp_path / "runtime-filter.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+    host_inputs = {"input_ids": np.array([[1]], dtype=np.int64), "shape_only": np.ones((1, 4), dtype=np.float32)}
+
+    filtered = _filter_graph_inputs(runner_metadata, host_inputs)
+    assert set(filtered) == {"input_ids"}
+    with pytest.raises(ValueError, match="not runtime inputs"):
+        runner_io.write_runner_io_bundle(
+            runner_metadata=runner_metadata,
+            specialization={"batch_size": 1, "seq_len": 1},
+            host_inputs=host_inputs,
+        )
+
+
+@pytest.mark.cpu_only
+def test_cross_qpc_placeholders_skip_shape_only_inputs_and_use_runtime_precision(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata, _add_cross_qpc_placeholders
+
+    vision_embeds = helper.make_tensor_value_info("vision_embeds", TensorProto.FLOAT, [1, 2, 4])
+    shape_only = helper.make_tensor_value_info("deepstack_features_shape", TensorProto.FLOAT, [1, 3])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Identity", ["vision_embeds"], ["vision_output"]),
+            helper.make_node("Shape", ["deepstack_features_shape"], ["features_shape"]),
+        ],
+        "cross_qpc_inputs",
+        [vision_embeds, shape_only],
+        [
+            helper.make_tensor_value_info("vision_output", TensorProto.FLOAT, [1, 2, 4]),
+            helper.make_tensor_value_info("features_shape", TensorProto.INT64, [2]),
+        ],
+    )
+    onnx_path = tmp_path / "cross-qpc.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+    (tmp_path / "custom_io.yaml").write_text(
+        """ - IOName: vision_embeds
+   Precision: bfloat16
+
+ - IOName: deepstack_features_shape
+   Precision: bfloat16
+"""
+    )
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+    host_inputs = {}
+
+    _add_cross_qpc_placeholders(runner_metadata, host_inputs, {"batch_size": 1})
+
+    assert set(host_inputs) == {"vision_embeds"}
+    assert host_inputs["vision_embeds"].dtype == np.uint16
 
 
 @pytest.mark.cpu_only
@@ -1967,6 +2264,60 @@ def test_causal_lm_runner_bundle_uses_live_prefill_preparation(tmp_path):
     assert np.fromfile(io_dir / "data/input_ids.raw", dtype=np.int64).tolist() == [5, 6, 7, 0]
     assert np.fromfile(io_dir / "data/position_ids.raw", dtype=np.int64).tolist() == [0, 1, 2, -1]
     assert np.fromfile(io_dir / "data/batch_index.raw", dtype=np.int64).tolist() == [0]
+
+
+@pytest.mark.cpu_only
+def test_causal_lm_runner_bundle_filters_shape_only_generated_inputs(tmp_path):
+    from types import SimpleNamespace
+
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_causal_lm_runner_bundle
+
+    class FakeTokenizer:
+        padding_side = "right"
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def __call__(self, prompt, return_tensors, padding, max_length=None):
+            del prompt, return_tensors, padding, max_length
+            input_ids = np.array([[1, 2]], dtype=np.int64)
+            return {"input_ids": input_ids, "attention_mask": np.ones_like(input_ids)}
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 2])
+    position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1, 2])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 2])
+    position_shape = helper.make_tensor_value_info("position_ids_shape", TensorProto.INT64, [2])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["input_ids"], ["logits"], to=TensorProto.FLOAT),
+            helper.make_node("Cast", ["position_ids"], ["position_ids_cast"], to=TensorProto.INT32),
+            helper.make_node("Shape", ["position_ids_cast"], ["position_ids_shape"]),
+        ],
+        "causal_shape_only_position_ids",
+        [input_ids, position_ids],
+        [logits, position_shape],
+    )
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+    compile_dir = tmp_path / "qpc"
+    compile_dir.mkdir()
+    (compile_dir / "specializations.json").write_text(
+        json.dumps({"specializations": [{"batch_size": 1, "seq_len": 2}]})
+    )
+    model = SimpleNamespace(
+        qpc_path=None,
+        compile_artifacts_path=compile_dir,
+        onnx_path=onnx_path,
+        model=SimpleNamespace(config=SimpleNamespace()),
+    )
+
+    io_dir = write_causal_lm_runner_bundle(model=model, tokenizer=FakeTokenizer(), prompts=["hello"])
+
+    entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    assert [entry["map-to"] for entry in entries] == ["input_ids", "logits", "position_ids_shape"]
+    assert not (io_dir / "data/position_ids.raw").exists()
 
 
 @pytest.mark.cpu_only
