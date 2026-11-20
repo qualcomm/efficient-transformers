@@ -164,7 +164,11 @@ def _make_qwen3_5_hybrid_qeff_inputs(transformed_model, input_ids, ctx_len=CTX_L
             )
         else:
             layer = transformed_model.model.layers[layer_idx].linear_attn
-            conv_shape = (batch, layer.conv_dim, layer.conv_kernel_size)
+            conv_shape = (
+                (batch, layer.conv_kernel_size, layer.conv_dim)
+                if cfg.model_type in {"qwen3_5_moe", "qwen3_5_moe_text"}
+                else (batch, layer.conv_dim, layer.conv_kernel_size)
+            )
             recurrent_shape = (batch, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
             past_key_values.append(
                 (torch.zeros(conv_shape, dtype=torch.float32), torch.zeros(recurrent_shape, dtype=torch.float32))
