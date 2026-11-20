@@ -70,6 +70,26 @@ def yarn_linear_ramp_mask(min, max, dim):
     return ramp_func
 
 
+def _get_deepseek_rope_config(config):
+    """Read DeepSeek RoPE settings across Transformers' legacy and standardized config layouts."""
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if rope_parameters is None:
+        rope_parameters = getattr(config, "rope_scaling", None)
+    rope_parameters = rope_parameters or {}
+
+    rope_theta = rope_parameters.get("rope_theta")
+    if rope_theta is None:
+        rope_theta = getattr(config, "rope_theta", 10000)
+
+    scaling_factor = rope_parameters.get("factor", 1.0)
+    kwargs = {
+        key: rope_parameters[key]
+        for key in ["original_max_position_embeddings", "beta_fast", "beta_slow", "mscale", "mscale_all_dim"]
+        if key in rope_parameters
+    }
+    return rope_theta, scaling_factor, kwargs
+
+
 class QEffDeepseekV3CustomRMSNormAIC(nn.Module):
     """
     RMSNorm module that works by replacing the current module with compiler known custom-op.
@@ -223,6 +243,19 @@ class QEffDeepseekV3Attention(nn.Module):
     def __qeff_init__(
         self,
     ):
+        # Transformers/custom DeepSeek checkpoints use either spelling for the QK dimension.
+        head_dim = getattr(self, "qk_head_dim", None)
+        if head_dim is None:
+            head_dim = getattr(self, "q_head_dim", None)
+        if head_dim is None:
+            head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.qk_head_dim = head_dim
+        if not hasattr(self, "q_head_dim"):
+            self.q_head_dim = head_dim
+
+        if not hasattr(self, "softmax_scale"):
+            self.softmax_scale = self.scaling
+
         q_up, q_rope = self.q_b_proj.weight.T.view(
             -1, self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim
         ).split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -1088,24 +1121,13 @@ class QEffDeepseekV3Model(nn.Module):
     """Adapted DeepseekV3Model with batch_index and QEff rotary embedding."""
 
     def __qeff_init__(self):
-        scaling_factor = self.config.rope_scaling["factor"]
-        kwargs = {
-            key: self.config.rope_scaling[key]
-            for key in [
-                "original_max_position_embeddings",
-                "beta_fast",
-                "beta_slow",
-                "mscale",
-                "mscale_all_dim",
-            ]
-            if key in self.config.rope_scaling
-        }
+        rope_theta, scaling_factor, kwargs = _get_deepseek_rope_config(self.config)
         self.rotary_emb = DeepseekV3YarnRotaryEmbedding(
             self.config.torch_dtype,
             self.config.qk_rope_head_dim,
             max_position_embeddings=MAX_POSITION_EMBEDDINGS,
             scaling_factor=scaling_factor,
-            base=self.config.rope_theta,
+            base=rope_theta,
             **kwargs,
         )
         self.sin_cached = torch.nn.Parameter(self.rotary_emb.sin_cached.to(torch.float16))
