@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import pytest
 import torch
 
@@ -92,6 +93,7 @@ TINY_GEMMA3 = "tiny-random/gemma-3"
 TINY_QWEN2_5_VL = "optimum-intel-internal-testing/tiny-random-qwen2.5-vl"
 TINY_INTERNVL = "optimum-intel-internal-testing/tiny-random-internvl2"
 TINY_QWEN3_MOE = "tiny-random/qwen3-moe"
+TINY_QWEN3_5 = "tiny-random/qwen3.5"
 TINY_QWEN3_5_MOE = "tiny-random/qwen3.5-moe"
 TINY_QWEN3_VL_MOE = "tiny-random/qwen3-vl-moe"
 FULL_MODEL_ENV = "QEFF_REPRODUCER_RUN_FULL_MODELS"
@@ -99,7 +101,7 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 58
+EXPECTED_SCENARIO_COUNT = 59
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
         "retain_full_kv",
@@ -1126,6 +1128,31 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
             "tests/transformers/spd/test_dflash_spd_inference.py::test_dflash_stops_at_eos_inside_an_accepted_block"
         ),
     ),
+    RegressionScenario(
+        name="qwen35-cb-slot-reuse-repeated-prompts",
+        stage="inference",
+        source_model_card="Qwen/Qwen3.5-4B",
+        tiny_model_id=TINY_QWEN3_5,
+        summary="continuous batching gave different greedy tokens for the same prompt once its slot was reused",
+        # Four prompts on two slots: the second "My name is" / France pair runs in reused slots.
+        config={
+            "prompts": [
+                "My name is",
+                "The capital city of France is called",
+                "My name is",
+                "The capital city of France is called",
+            ]
+        },
+        load_kwargs={"continuous_batching": True},
+        compile_kwargs={
+            "prefill_seq_len": 32,
+            "ctx_len": 128,
+            "full_batch_size": 2,
+            "num_cores": 4,
+            "num_devices": 1,
+        },
+        inference_kwargs={"generation_len": 8},
+    ),
 )
 
 
@@ -1723,8 +1750,9 @@ def _run_model_inference_test(scenario: RegressionScenario, tmp_path: Path) -> N
 
     if not Path("/opt/qti-aic/exec/qaic-compile").is_file():
         pytest.skip("QAIC runtime is unavailable because qaic-compile is not installed on this host")
-    if not any(Path("/dev").glob("qaic*")):
-        pytest.skip("no /dev/qaic* device is available on this host")
+    # Older drivers expose /dev/qaic_*; the upstream accel driver exposes /dev/accel/accel*.
+    if not any(Path("/dev").glob("qaic*")) and not any(Path("/dev/accel").glob("accel*")):
+        pytest.skip("no /dev/qaic* or /dev/accel/accel* device is available on this host")
     try:
         from QEfficient.generation import cloud_infer
     except Exception as exc:
@@ -1738,8 +1766,18 @@ def _run_model_inference_test(scenario: RegressionScenario, tmp_path: Path) -> N
     qpc_path = qeff_model.compile(compile_dir=compile_dir, **scenario.compile_kwargs)
     _qpc_succeeded(qpc_path)
     tokenizer = load_hf_tokenizer(_scenario_model_id(scenario))
-    exec_info = qeff_model.generate(tokenizer=tokenizer, prompts=["My name is"], **scenario.inference_kwargs)
+    prompts = scenario.config.get("prompts", ["My name is"])
+    exec_info = qeff_model.generate(tokenizer=tokenizer, prompts=prompts, **scenario.inference_kwargs)
     assert exec_info.generated_ids is not None
+    # Generation is greedy, so every copy of a prompt must produce the same tokens.
+    generated_ids = np.asarray(exec_info.generated_ids)
+    for index, prompt in enumerate(prompts):
+        first_index = prompts.index(prompt)
+        np.testing.assert_array_equal(
+            generated_ids[index],
+            generated_ids[first_index],
+            err_msg=f"prompt {index} differs from prompt {first_index}",
+        )
     _record_result(scenario, "PASSED", "generation returned output IDs")
 
 

@@ -5,13 +5,24 @@
 #
 # -----------------------------------------------------------------------------
 
+from types import SimpleNamespace
+
 import pytest
 import torch
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeGatedDeltaNet
 
 from QEfficient.transformers.models.qwen3_5.modeling_qwen3_5 import QEffQwen3_5GatedDeltaNet
 from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeGatedDeltaNet
 
 MAX_ABS_DEV_RECURSIVE_VS_ORIGINAL = 1e-4
+CB_LAYERS = {
+    "dense": (Qwen3_5TextConfig, Qwen3_5GatedDeltaNet, QEffQwen3_5GatedDeltaNet),
+    "moe": (Qwen3_5MoeTextConfig, Qwen3_5MoeGatedDeltaNet, QEffQwen3_5MoeGatedDeltaNet),
+}
+NUM_SLOTS = 2
 
 
 def _build_chunk_masks(chunk_size: int, device: torch.device):
@@ -157,3 +168,83 @@ def test_recurrent_step_rejects_non_decode_sequence():
         assert "sequence_length == 1" in str(error)
     else:
         raise AssertionError("Expected non-decode recurrence to raise ValueError")
+
+
+def _make_cb_layer(kind):
+    config_cls, hf_cls, qeff_cls = CB_LAYERS[kind]
+    config = config_cls(
+        hidden_size=32,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_conv_kernel_dim=4,
+    )
+    torch.manual_seed(0)
+    layer = hf_cls(config, layer_idx=0)
+    layer.__class__ = qeff_cls
+    layer.__qeff_init__()
+    return layer.eval()
+
+
+def _random_cb_states(layer, kind):
+    conv_shape = (
+        (NUM_SLOTS, layer.conv_kernel_size, layer.conv_dim)
+        if kind == "moe"
+        else (NUM_SLOTS, layer.conv_dim, layer.conv_kernel_size)
+    )
+    conv = torch.randn(*conv_shape)
+    recurrent = torch.randn(NUM_SLOTS, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
+    return conv, recurrent
+
+
+def _run_cb(layer, hidden_states, position_ids, batch_index, conv, recurrent):
+    cache = SimpleNamespace(conv_states=[conv.clone()], recurrent_states=[recurrent.clone()])
+    # The text model hands the layers mrope position_ids of shape (4, batch, seq).
+    mrope_position_ids = position_ids.unsqueeze(0).expand(4, -1, -1)
+    with torch.no_grad():
+        return layer(
+            hidden_states,
+            cache_params=cache,
+            position_ids=mrope_position_ids,
+            batch_index=batch_index,
+            return_cache_states=True,
+        )
+
+
+@pytest.mark.parametrize("kind", CB_LAYERS)
+def test_padded_batch_slot_does_not_overwrite_live_state(kind):
+    """A padded row (batch_index -1) must not write into any slot, including the last one."""
+    layer = _make_cb_layer(kind)
+    conv, recurrent = _random_cb_states(layer, kind)
+    hidden_states = torch.randn(NUM_SLOTS, 1, 32)
+    position_ids = torch.tensor([[5], [-1]])
+    batch_index = torch.tensor([[0], [-1]])
+
+    _, new_conv, new_recurrent = _run_cb(layer, hidden_states, position_ids, batch_index, conv, recurrent)
+
+    assert not torch.equal(new_conv[0], conv[0])
+    assert not torch.equal(new_recurrent[0], recurrent[0])
+    assert torch.equal(new_conv[NUM_SLOTS - 1], conv[NUM_SLOTS - 1])
+    assert torch.equal(new_recurrent[NUM_SLOTS - 1], recurrent[NUM_SLOTS - 1])
+
+
+@pytest.mark.parametrize("kind", CB_LAYERS)
+def test_new_request_ignores_previous_state_of_its_slot(kind):
+    """A request starting at position 0 must not see the state left in its slot by the previous request."""
+    layer = _make_cb_layer(kind)
+    stale_conv, stale_recurrent = _random_cb_states(layer, kind)
+    hidden_states = torch.randn(1, 4, 32)
+    position_ids = torch.arange(4)[None, :]
+    batch_index = torch.tensor([[1]])
+
+    stale = _run_cb(layer, hidden_states, position_ids, batch_index, stale_conv, stale_recurrent)
+    clean = _run_cb(
+        layer, hidden_states, position_ids, batch_index, torch.zeros_like(stale_conv), torch.zeros_like(stale_recurrent)
+    )
+
+    stale_output, stale_conv_out, stale_recurrent_out = stale
+    clean_output, clean_conv_out, clean_recurrent_out = clean
+    torch.testing.assert_close(stale_output, clean_output)
+    torch.testing.assert_close(stale_conv_out[1], clean_conv_out[1])
+    torch.testing.assert_close(stale_recurrent_out[1], clean_recurrent_out[1])

@@ -798,6 +798,27 @@ class QEffTextGenerationBase:
         self.generation_len[decode_batch] = generation_len
         return next_token_id
 
+    def _refresh_decode_inputs_for_slot(self, decode_inputs: Dict[str, np.ndarray], decode_batch_id: int) -> None:
+        """Copy a refilled slot's first decode token and position into ``decode_inputs``.
+
+        ``prepare_decode_inputs`` returns copies of ``decode_input_ids`` / ``decode_pos_ids`` when the
+        session needs padded or multi-section (for example mRoPE) inputs, so ``update_decode_input``
+        alone does not reach them.
+        """
+        if self.is_tlm:
+            return
+        slot = slice(decode_batch_id, decode_batch_id + 1)
+        if decode_inputs["input_ids"] is not self.decode_input_ids:
+            decode_inputs["input_ids"][slot] = self._format_input_ids_for_session(self.decode_input_ids[slot])
+        if decode_inputs["position_ids"] is not self.decode_pos_ids:
+            slot_position_ids = self._format_position_ids_for_session(
+                self.decode_pos_ids[slot], expected_seq_len=self._decode_input_seq_len()
+            )
+            if decode_inputs["position_ids"].ndim == 3:
+                decode_inputs["position_ids"][:, slot] = slot_position_ids
+            else:
+                decode_inputs["position_ids"][slot] = slot_position_ids
+
     def _runtime_schedule_position_batch_axis(
         self, position_ids: np.ndarray, decode_inputs: Dict[str, np.ndarray]
     ) -> int:
@@ -1158,6 +1179,7 @@ class QEffTextGenerationBase:
                         )
 
                         new_token_id = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
+                        self._refresh_decode_inputs_for_slot(decode_inputs, decode_batch_id)
 
                         batch_id_map[decode_batch_id] = replacement_prompt_index
                         self.generated_ids[batch_id_map[decode_batch_id], 0] = new_token_id.squeeze()
