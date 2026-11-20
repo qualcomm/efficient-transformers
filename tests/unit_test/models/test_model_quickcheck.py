@@ -86,6 +86,7 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4HashRouter,
     QEffDeepseekV4TopKRouter,
     QEffDeepseekV4UnweightedRMSNorm,
+    _clamp_in_dtype,
 )
 from QEfficient.transformers.models.minimax_m3_vl import (
     MiniMaxM3SparseForConditionalGeneration,
@@ -179,6 +180,37 @@ def test_deepseek_v4_fp16_router_scores_and_weights_stay_finite(router_class):
         weights.float().sum(dim=-1),
         torch.full((1,), config.routed_scaling_factor),
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_deepseek_v4_clamp_stays_in_model_dtype_without_changing_values(dtype):
+    values = torch.tensor([-10.0, -7.0, -1.5, 0.0, 6.5, 7.0, 10.0], dtype=dtype)
+
+    expected = values.float().clamp(min=-7.0, max=7.0).to(dtype)
+    actual = _clamp_in_dtype(values, min_value=-7.0, max_value=7.0)
+
+    assert actual.dtype is dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_deepseek_v4_bf16_router_selects_from_bf16_scores():
+    config = _tiny_deepseek_v4_config()
+    router = QEffDeepseekV4TopKRouter(config).to(torch.bfloat16).eval()
+    hidden_states = torch.randn(1, 3, config.hidden_size, dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        logits = F.linear(hidden_states.reshape(-1, config.hidden_size), router.weight)
+        scores = router.score_fn(logits)
+        expected_indices = torch.topk(
+            (scores + router.e_score_correction_bias).to(hidden_states.dtype),
+            router.top_k,
+            dim=-1,
+            sorted=False,
+        ).indices
+        _, weights, indices = router(hidden_states)
+
+    assert weights.dtype is torch.bfloat16
+    torch.testing.assert_close(indices, expected_indices)
 
 
 @pytest.mark.parametrize(
@@ -557,6 +589,7 @@ def test_deepseek_v4_csa_dp_cp_export_uses_requested_capture_layout(monkeypatch)
     monkeypatch.setattr(qeff_model, "_export", fake_export)
     qeff_model.export(export_batch_size=4, cache_ctx_len=8, dynamo=False)
 
+    assert [len(layer_state) for layer_state in captured["example_inputs"]["past_key_values"]] == [4, 4, 7]
     csa_indexer_cache = captured["example_inputs"]["past_key_values"][2][6]
     assert captured["example_inputs"]["input_ids"].shape == (4, 1)
     assert csa_indexer_cache.shape == (2, 2, 4, 2 * config.index_head_dim)
@@ -581,6 +614,7 @@ def test_deepseek_v4_hca_dp_export_uses_requested_capture_layout(monkeypatch):
     monkeypatch.setattr(qeff_model, "_export", fake_export)
     qeff_model.export(export_batch_size=2, cache_ctx_len=16, dynamo=False)
 
+    assert [len(layer_state) for layer_state in captured["example_inputs"]["past_key_values"]] == [4, 4, 7]
     hca_cache = captured["example_inputs"]["past_key_values"][0]
     assert hca_cache[0].shape == (1, 2, config.sliding_window, config.head_dim)
     assert hca_cache[3].shape == (1, 2, 4, config.head_dim)

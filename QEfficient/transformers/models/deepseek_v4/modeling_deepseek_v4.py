@@ -1314,9 +1314,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         num_tiles = (capacity + tile_size - 1) // tile_size
         top_k = min(index_topk, capacity)
         topk_per_tile = max(topk_per_tile, (top_k + num_tiles - 1) // num_tiles)
-        causal_threshold = (
-            torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype).unsqueeze(-1)
-        )
+        causal_threshold = _nonnegative_integer_floor_div(position_ids, compression_rate).unsqueeze(-1)
 
         candidate_scores = []
         candidate_indices = []
@@ -2950,8 +2948,9 @@ class QEffDeepseekV4TopKRouter(DeepseekV4TopKRouter):
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
-        scores = self.score_fn(logits.float())
-        indices = torch.topk(scores + self.e_score_correction_bias, self.top_k, dim=-1, sorted=False).indices
+        scores = self.score_fn(logits if logits.dtype == torch.bfloat16 else logits.float())
+        choice_scores = (scores + self.e_score_correction_bias).to(flat.dtype)
+        indices = torch.topk(choice_scores, self.top_k, dim=-1, sorted=False).indices
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
         return logits, (weights * self.routed_scaling_factor).to(flat.dtype), indices
@@ -2963,7 +2962,7 @@ class QEffDeepseekV4HashRouter(DeepseekV4HashRouter):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         flat = hidden_states.reshape(-1, self.hidden_dim)
         logits = F.linear(flat, self.weight)
-        scores = self.score_fn(logits.float())
+        scores = self.score_fn(logits if logits.dtype == torch.bfloat16 else logits.float())
         indices = self.tid2eid[input_ids.reshape(-1)].reshape(-1, self.top_k).long()
         weights = scores.gather(1, indices)
         weights = weights / (torch.einsum("tk->t", weights).unsqueeze(-1) + 1e-20)
