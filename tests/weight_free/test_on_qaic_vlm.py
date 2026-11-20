@@ -32,6 +32,7 @@ import os
 import random
 from pathlib import Path
 from time import perf_counter
+from types import SimpleNamespace
 
 import numpy as np
 import onnx
@@ -49,6 +50,7 @@ from QEfficient.generation.cloud_infer import QAICInferenceSession
 from QEfficient.utils import constants, resolve_retained_state_output
 from QEfficient.utils.device_utils import get_available_device_id, get_qaic_mdp_device_groups
 from QEfficient.utils.test_utils import load_vlm_model_from_config
+from scripts.kv_batch_fold_weight_free_e2e import _tile_retained_vision_inputs
 
 from ._helpers import (
     WEIGHT_FREE_BLOCKING_MODE_CASES,
@@ -640,6 +642,31 @@ def _update_retained_vision_inputs(target_inputs, source_outputs):
         target_inputs["image_idx"] = source_outputs["image_idx_output"]
 
 
+def test_tile_retained_vision_inputs_to_folded_decode_shape():
+    names = ("vision_embeds", "deepstack_features", "image_idx")
+    shapes = ((2, 176, 1024), (3, 2, 176, 1024), (2, 1))
+    decode_session = SimpleNamespace(
+        binding_index_map=dict(zip(names, range(len(names)))),
+        bindings=[SimpleNamespace(dims=shape) for shape in shapes],
+    )
+    inputs = {
+        "vision_embeds": np.ones((1, 176, 1024), dtype=np.float16),
+        "deepstack_features": np.ones((3, 1, 176, 1024), dtype=np.float16),
+        "image_idx": np.array([[5]], dtype=np.int64),
+    }
+    physical_slots = np.array([1, 0])
+
+    _tile_retained_vision_inputs(inputs, decode_session, batch_size=2, physical_slots=physical_slots)
+
+    batch_axes = (0, 1, 0)
+    for name, shape, batch_axis in zip(names, shapes, batch_axes):
+        assert inputs[name].shape == shape
+        np.testing.assert_array_equal(
+            np.take(inputs[name], 0, axis=batch_axis),
+            np.take(inputs[name], 1, axis=batch_axis),
+        )
+
+
 def _slice_prefill_chunk(value: np.ndarray, start: int, end: int, padded_len: int) -> np.ndarray:
     if value.ndim >= 2 and value.shape[-1] == padded_len:
         return value[..., start:end]
@@ -852,6 +879,8 @@ def _run_vlm_three_qpc(
                 if name.startswith(("past_key.", "past_value.", "conv_state.", "recurrent_state.")):
                     decode_inputs[name] = _tile_retained_state(value, decode_batch_size, physical_slots)
         _update_retained_vision_inputs(decode_inputs, prefill_outputs)
+        if batch_fold_decode:
+            _tile_retained_vision_inputs(decode_inputs, decode_session, decode_batch_size, physical_slots)
 
         decode_start = perf_counter()
         if model_type == "gemma4":
@@ -891,6 +920,8 @@ def _run_vlm_three_qpc(
                 decode_inputs["mm_token_type_ids"] = np.zeros_like(decode_inputs["mm_token_type_ids"])
             _update_retained_states(decode_inputs, decode_outputs, layer_types)
             _update_retained_vision_inputs(decode_inputs, decode_outputs)
+            if batch_fold_decode:
+                _tile_retained_vision_inputs(decode_inputs, decode_session, decode_batch_size, physical_slots)
         decode_time = perf_counter() - decode_start
         generated_ids = np.stack(generated_tokens[:generation_len], axis=1)
         if return_metrics:
