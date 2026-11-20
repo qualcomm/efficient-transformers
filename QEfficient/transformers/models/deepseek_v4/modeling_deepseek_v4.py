@@ -1327,7 +1327,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             tile_scores = (tile_scores * index_weights.unsqueeze(-1)).sum(dim=2)
             tile_indices = torch.arange(tile_start, tile_end, device=indexer_kv_cache.device).view(1, 1, -1)
             tile_scores = tile_scores.masked_fill(tile_indices >= causal_threshold, -3.0e4)
-            tile_topk = torch.topk(tile_scores, k=min(topk_per_tile, tile_end - tile_start), dim=-1)
+            tile_topk = torch.topk(tile_scores.to(q_index.dtype), k=min(topk_per_tile, tile_end - tile_start), dim=-1)
             candidate_scores.append(tile_topk.values)
             candidate_indices.append(tile_start + tile_topk.indices)
 
@@ -1338,7 +1338,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             selection = torch.arange(candidate_count, device=indexer_kv_cache.device).view(1, 1, -1)
             selection = selection.expand(batch_size, chunk_length, -1)
         else:
-            selection = torch.topk(candidate_scores, k=index_topk, dim=-1).indices
+            selection = torch.topk(candidate_scores.to(q_index.dtype), k=index_topk, dim=-1).indices
         selected = torch.gather(candidate_indices, dim=-1, index=selection)
         return selected, selected < causal_threshold
 
@@ -1967,7 +1967,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 num_kv_blocks,
                 block_width,
             ).reshape(batch_local, layer.attention_dp, capacity)
-            selected = torch.topk(scores, k=top_k, dim=-1)
+            selected = torch.topk(scores.to(q_index.dtype), k=top_k, dim=-1)
             top_k_indices = torch.gather(global_ids, 2, selected.indices).to(torch.int32)
             valid = top_k_indices < completed_entries.view(batch_local, layer.attention_dp, 1)
             return top_k_indices, valid
@@ -2022,7 +2022,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         tile_scores = tile_scores.masked_fill(global_ids >= threshold, -3.0e4)
 
         core_k = min(top_k, tokens_per_core)
-        core_scores, core_indices = torch.topk(tile_scores, k=core_k, dim=-1)
+        core_scores, core_indices = torch.topk(tile_scores.to(q_index.dtype), k=core_k, dim=-1)
         core_ids = torch.gather(
             local_ids.expand(
                 batch_local,
@@ -2037,7 +2037,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         )
         local_k = min(top_k, num_kv_blocks * attention_cores * core_k)
         local_scores, local_indices = torch.topk(
-            core_scores.reshape(batch_local, layer.attention_dp, cp, -1), k=local_k, dim=-1
+            core_scores.reshape(batch_local, layer.attention_dp, cp, -1).to(q_index.dtype), k=local_k, dim=-1
         )
         local_ids = torch.gather(core_ids.reshape(batch_local, layer.attention_dp, cp, -1), -1, local_indices)
 
@@ -2050,7 +2050,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         )
         candidate_global = candidate_local * cp + candidate_cp.reshape(batch_local, layer.attention_dp, cp * local_k)
         global_k = min(top_k, candidate_scores.shape[-1])
-        _, selected = torch.topk(candidate_scores, k=global_k, dim=-1)
+        _, selected = torch.topk(candidate_scores.to(q_index.dtype), k=global_k, dim=-1)
         top_k_indices = torch.gather(candidate_global, 2, selected).to(torch.int32)
         valid = top_k_indices < completed_entries.view(batch_local, layer.attention_dp, 1)
         return top_k_indices, valid
@@ -2446,7 +2446,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 future_mask = entry_indices.view(1, 1, -1) >= completed_entries.unsqueeze(-1)
                 index_scores = index_scores.masked_fill(future_mask, float("-inf"))
                 top_k = min(indexer.index_topk, compressed_capacity)
-                top_k_indices = index_scores.topk(top_k, dim=-1).indices
+                top_k_indices = index_scores.to(q_index.dtype).topk(top_k, dim=-1).indices
                 valid = top_k_indices < completed_entries.unsqueeze(-1)
                 safe_indices = torch.where(valid, top_k_indices, torch.zeros_like(top_k_indices)).to(torch.int32)
                 compressed_kv = ctx_gather_blocked_kv(compressed_kv, safe_indices[:, 0].unsqueeze(1))
