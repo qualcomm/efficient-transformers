@@ -197,23 +197,21 @@ def _runtime_device_ids(device_ids: list[int]) -> list[int]:
 
 
 @pytest.mark.cpu_only
-@pytest.mark.parametrize(
-    "visible_devices,discovered_device_ids,expected_device_ids",
-    [
-        (None, [4], [4]),
-        ("4,5", [4], [0]),
-    ],
-)
+@pytest.mark.parametrize("num_devices", [1, VLM_HEAD_BLOCKING_NUM_DEVICES])
+@pytest.mark.parametrize("is_masked", [False, True])
 def test_vlm_runtime_device_ids_respect_qaic_visibility(
     monkeypatch,
-    visible_devices,
-    discovered_device_ids,
-    expected_device_ids,
+    num_devices,
+    is_masked,
 ):
-    if visible_devices is None:
-        monkeypatch.delenv("QAIC_VISIBLE_DEVICES", raising=False)
-    else:
+    discovered_device_ids = list(range(num_devices, 2 * num_devices))
+    if is_masked:
+        visible_devices = ",".join(map(str, discovered_device_ids))
         monkeypatch.setenv("QAIC_VISIBLE_DEVICES", visible_devices)
+        expected_device_ids = list(range(num_devices))
+    else:
+        monkeypatch.delenv("QAIC_VISIBLE_DEVICES", raising=False)
+        expected_device_ids = discovered_device_ids
 
     assert _runtime_device_ids(discovered_device_ids) == expected_device_ids
 
