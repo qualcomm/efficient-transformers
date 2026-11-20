@@ -68,6 +68,8 @@ from QEfficient.transformers.modeling_utils import (
     DYNAMIC_SEQ_LEN_SUPPORTED_MODEL_ARCH,
     SPECIALIZED_DISAGG_SERVING_MODEL_ARCH,
     _configure_proxy_for_model,
+    _resolve_retained_state_dtype,
+    _validate_retained_state_dtype,
 )
 from QEfficient.transformers.models.gpt_oss.modeling_gpt_oss import override_gptoss_prefill_chunking
 from QEfficient.transformers.models.pytorch_transforms import (
@@ -1506,6 +1508,8 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                     if transform not in self._onnx_transforms:
                         self._onnx_transforms.append(transform)
         self.hash_params["qeff_auto_class"] = self.__class__.__name__
+        if getattr(model.config, "model_type", None) == "qwen3_5_moe":
+            self.hash_params["qwen3_5_moe_conv_state_layout"] = constants.QWEN3_5_MOE_CONV_STATE_LAYOUT_VERSION
         self.continuous_batching = False
         if qaic_config and (mla_absorption := qaic_config.get("mla_absorption", None)):
             self.hash_params["mla_absorption"] = mla_absorption
@@ -2264,6 +2268,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         vision_num_cores: int | None = None,
         mxfp6_matmul: bool = False,
         mxint8_kv_cache: bool = False,
+        recurrent_state_dtype: str | None = None,
         skip_vision: bool | None = False,
         skip_lang: bool | None = False,
         use_onnx_subfunctions: bool = False,
@@ -2316,6 +2321,9 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             Use MXFP6 compression for weights in the language model. Default is False.
         mxint8_kv_cache : bool, optional
             Use MXINT8 compression for KV cache. Default is False.
+        recurrent_state_dtype : str, optional
+            Override the precision of ``recurrent_state.*`` retained-state inputs and outputs.
+            This allows KV and convolution states to remain MXINT8 while recurrent states use FP16.
         num_speculative_tokens : int, optional
             Not supported for this model; must be None.
         skip_vision : bool, optional
@@ -2484,6 +2492,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             )
 
         # Apply compile-dependent transforms like blocking transform
+        _validate_retained_state_dtype(recurrent_state_dtype, "recurrent_state_dtype")
+
         moe_batch_size = (
             full_batch_size if self.continuous_batching and not prefill_only and prefill_seq_len == 1 else batch_size
         )
@@ -2608,10 +2618,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             custom_io_lang = {}
             for output_name in output_names["lang"]:
                 if output_name.endswith("_RetainedState"):
-                    dtype = (
-                        CUSTOM_IO_DTYPE_MAP[target_dtype]
-                        if ("vision_embeds" in output_name or "deepstack_features" in output_name)
-                        else kv_cache_dtype
+                    dtype = _resolve_retained_state_dtype(
+                        output_name,
+                        model_dtype=CUSTOM_IO_DTYPE_MAP[target_dtype],
+                        kv_cache_dtype=kv_cache_dtype,
+                        recurrent_state_dtype=recurrent_state_dtype,
                     )
                     _add_retained_state_custom_io(
                         custom_io_lang,
