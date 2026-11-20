@@ -513,6 +513,8 @@ def qeff_torch_causal_conv1d_update(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     _, hidden_size, seq_len = hidden_states.shape
     grouped_conv_state = conv_state.ndim == 4
+    # Non-grouped cache callers use either channel-first or channel-last state.
+    channel_last_conv_state = not grouped_conv_state and conv_state.shape[1] != hidden_size
 
     if grouped_conv_state:
         bsz, num_kv_heads, conv_group_dim, state_len = conv_state.shape
@@ -523,7 +525,7 @@ def qeff_torch_causal_conv1d_update(
             )
         conv_state_flat = conv_state.reshape(bsz, hidden_size, state_len)
     else:
-        conv_state_flat = conv_state
+        conv_state_flat = conv_state.transpose(1, 2) if channel_last_conv_state else conv_state
 
     state_len = conv_state_flat.shape[-1]
     pos_ids = _text_position_ids(position_ids)
@@ -559,6 +561,8 @@ def qeff_torch_causal_conv1d_update(
     updated_conv_state = torch.where(is_decode, shifted_conv_state, gathered_conv_state)
     out = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)
     out = F.silu(out[:, :, -seq_len:]).to(hidden_states.dtype)
+    if channel_last_conv_state:
+        updated_conv_state = updated_conv_state.transpose(1, 2)
     return out, updated_conv_state
 
 

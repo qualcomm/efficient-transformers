@@ -573,7 +573,7 @@ def qeff_torch_causal_conv1d_update(
             )
         conv_state_flat = conv_state.reshape(bsz, hidden_size, state_len)
     else:
-        conv_state_flat = conv_state
+        conv_state_flat = conv_state.transpose(1, 2)
 
     state_len = conv_state_flat.shape[-1]
     pos_ids = _text_position_ids(position_ids)
@@ -609,6 +609,8 @@ def qeff_torch_causal_conv1d_update(
     out = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)
     out = F.silu(out[:, :, -seq_len:]).to(hidden_states.dtype)
     updated_conv_state = updated_conv_state.clone()
+    if not grouped_conv_state:
+        updated_conv_state = updated_conv_state.transpose(1, 2)
     return out, updated_conv_state
 
 

@@ -397,12 +397,12 @@ def test_prepare_vlm_test_inputs_can_skip_vision():
         processor,
         model=None,
         qeff_model=None,
-        model_config={},
+        model_config={"text_prompt": VLM_PROMPT},
         skip_vision=True,
     )
 
     assert "images" not in processor.processor_kwargs
-    assert all(item["type"] == "text" for item in processor.conversation[0]["content"])
+    assert processor.processor_kwargs["text"] == VLM_PROMPT
     assert "pixel_values" not in hf_inputs
     assert "pixel_values" not in qeff_inputs
 

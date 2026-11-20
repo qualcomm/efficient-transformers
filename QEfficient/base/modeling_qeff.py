@@ -1509,6 +1509,8 @@ class QEFFBaseModel(ABC):
                 num_cores=num_cores,
                 prefill_only=bool(compiler_options.get("prefill_only", False)),
             )
+        elif any(hasattr(module, "attn_blocking_config") for module in self.model.modules()):
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=AttentionBlockingConfig())
         if blocking_config is not None:
             self.hash_params["blocking_kwargs"] = blocking_config
         else:

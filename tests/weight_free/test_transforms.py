@@ -253,15 +253,16 @@ def _load_prepared_tensors(root):
     return loaded
 
 
-def test_weight_free_cache_validation_rejects_missing_external_root(tmp_path):
+def test_weight_free_cache_validation_rejects_missing_external_shards(tmp_path):
     weight_spec_path = tmp_path / "weight_spec.json"
-    external_root = tmp_path / "deleted_weight_free_checkpoints"
+    external_root = tmp_path / "weight_free_checkpoints"
+    model_path = external_root / "prepared"
+    model_path.mkdir(parents=True)
     save_weight_spec(
         weight_spec_path,
         WeightSpec(
             model_name="TinyModel",
-            model_id=str(external_root / "prepared"),
-            external_data_root=str(external_root),
+            model_id=str(model_path),
             files=[ExternalDataFile(path="prepared/model.safetensors", format="safetensors")],
         ),
     )
@@ -280,7 +281,6 @@ def test_weight_free_cache_validation_accepts_existing_external_shards(tmp_path)
         WeightSpec(
             model_name="TinyModel",
             model_id=str(external_root / "prepared"),
-            external_data_root=str(external_root),
             files=[ExternalDataFile(path="prepared/model.safetensors", format="safetensors")],
         ),
     )
