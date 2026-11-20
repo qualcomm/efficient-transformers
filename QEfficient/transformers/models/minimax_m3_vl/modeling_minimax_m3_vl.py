@@ -233,9 +233,7 @@ def _router_fp32_nodes(nodes) -> list[onnx.NodeProto]:
                 (
                     consumer
                     for consumer in path_consumers
-                    if consumer.op_type in ("Identity", "Reshape", "Unsqueeze")
-                    and consumer.name
-                    and consumer.output
+                    if consumer.op_type in ("Identity", "Reshape", "Unsqueeze") and consumer.name and consumer.output
                 ),
                 None,
             )
@@ -273,10 +271,7 @@ def _generate_minimax_npi_file(onnx_path: Union[str, Path]) -> str:
         if output_name
     )
     fp32_names.extend(
-        output_name
-        for node in _router_fp32_nodes(model.graph.node)
-        for output_name in node.output
-        if output_name
+        output_name for node in _router_fp32_nodes(model.graph.node) for output_name in node.output if output_name
     )
     fp32_names = list(dict.fromkeys(fp32_names))
     if not fp32_names:
@@ -322,6 +317,17 @@ def qeff_apply_rotary_pos_emb(
 def _scalar_like(reference: torch.Tensor, value: int | float) -> torch.Tensor:
     """Create a scalar constant without materializing ``reference.shape``."""
     return reference.new_full((), value)
+
+
+def _gather_flattened_rope_rows(
+    table: torch.Tensor,
+    rope_indices: torch.Tensor,
+    coefficient_count: int,
+) -> torch.Tensor:
+    """Gather complete RoPE rows independently for every physical lane."""
+    offsets = rope_indices.unsqueeze(-1) * table.shape[-1]
+    offsets = offsets + torch.arange(coefficient_count, device=rope_indices.device)
+    return table.view(-1)[offsets]
 
 
 class QEffMiniMaxM3VLRotaryEmbedding(MiniMaxM3VLRotaryEmbedding):
@@ -1622,6 +1628,10 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
         idx_k = self.k_proj(hidden_states).view(dp, batch_local, query_len, hkv, dim).permute(1, 0, 3, 2, 4)
         idx_q = self.q_norm(idx_q)
         idx_k = self.k_norm(idx_k)
+        replicated_rope = return_core_candidates and cos_dp.ndim == 5
+        if replicated_rope:
+            idx_q = idx_q.unsqueeze(2).expand(batch_local, dp, cp, num_index_heads, query_len, dim)
+            idx_k = idx_k.unsqueeze(2).expand(batch_local, dp, cp, hkv, query_len, dim)
         idx_q = self._apply_rope_dp(
             idx_q,
             cos_dp,
@@ -1635,11 +1645,8 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             int(cfg.head_dim * cfg.rope_parameters.get("partial_rotary_factor", 1.0)),
         )
 
-        k_updates = (
-            idx_k.unsqueeze(2)
-            .expand(batch_local, dp, cp, hkv, query_len, dim)
-            .reshape(batch_local, rows, query_len, dim)
-        )
+        k_updates = idx_k if replicated_rope else idx_k.unsqueeze(2).expand(batch_local, dp, cp, hkv, query_len, dim)
+        k_updates = k_updates.reshape(batch_local, rows, query_len, dim)
         logical_index_block = position_ids_dp // cfg.index_block_size
         live_way = (
             (logical_index_block % cp)[:, :, None, None, :]
@@ -1665,12 +1672,15 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
 
         q_heads_per_kv = num_index_heads // hkv
         ql_eff = q_heads_per_kv * query_len
-        q_rows = (
-            idx_q.reshape(batch_local, dp, hkv, q_heads_per_kv, query_len, dim)
-            .unsqueeze(2)
-            .expand(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, dim)
-            .reshape(batch_local, rows, ql_eff, dim)
-        )
+        if replicated_rope:
+            q_rows = idx_q.reshape(batch_local, rows, ql_eff, dim)
+        else:
+            q_rows = (
+                idx_q.reshape(batch_local, dp, hkv, q_heads_per_kv, query_len, dim)
+                .unsqueeze(2)
+                .expand(batch_local, dp, cp, hkv, q_heads_per_kv, query_len, dim)
+                .reshape(batch_local, rows, ql_eff, dim)
+            )
 
         q_pos_rows_all = (
             position_ids_dp[:, :, 0]
@@ -2290,6 +2300,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             or ctx_len % attention_cp
             or indexer_n_head != 1
             or self.config.index_n_heads != self.config.num_key_value_heads
+            or self.config.num_attention_heads % (attention_cp * self.config.num_key_value_heads)
             or self.config.index_local_blocks != 1
             or num_cores <= 0
         ):
@@ -2356,20 +2367,28 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Write main-attention K/V in token-interleaved CP layout."""
         cp = int(blocking_config.msa_attn_cp or 1)
-        batch_local, dp, hkv, query_len, head_dim = key_states.shape
+        if key_states.ndim == 6:
+            batch_local, dp, key_cp, hkv, query_len, head_dim = key_states.shape
+            if key_cp != cp:
+                raise ValueError("Unified MSA key updates must match the configured CP factor.")
+        else:
+            batch_local, dp, hkv, query_len, head_dim = key_states.shape
         rows = dp * cp * hkv
-        if tuple(value_states.shape) != tuple(key_states.shape):
+        if tuple(value_states.shape) != (batch_local, dp, hkv, query_len, head_dim):
             raise ValueError("Unified MSA key/value updates must have matching shapes.")
         if tuple(key_cache.shape[:2]) != (batch_local, rows) or tuple(value_cache.shape) != tuple(key_cache.shape):
             raise ValueError(f"Unified MSA key/value cache shape must start with {(batch_local, rows)}.")
         if key_cache.shape[-1] != head_dim:
             raise ValueError("Unified MSA cache head dimension does not match K/V updates.")
 
-        key_updates = (
-            key_states.unsqueeze(2)
-            .expand(batch_local, dp, cp, hkv, query_len, head_dim)
-            .reshape(batch_local, rows, query_len, head_dim)
-        )
+        if key_states.ndim == 6:
+            key_updates = key_states.reshape(batch_local, rows, query_len, head_dim)
+        else:
+            key_updates = (
+                key_states.unsqueeze(2)
+                .expand(batch_local, dp, cp, hkv, query_len, head_dim)
+                .reshape(batch_local, rows, query_len, head_dim)
+            )
         value_updates = (
             value_states.unsqueeze(2)
             .expand(batch_local, dp, cp, hkv, query_len, head_dim)
@@ -3407,10 +3426,35 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             .transpose(2, 3)
         )
         cos, sin = position_embeddings
-        cos_dp = cos.view(attn_dp, batch_local, query_len, cos.shape[-1]).permute(1, 0, 2, 3)
-        sin_dp = sin.view(attn_dp, batch_local, query_len, sin.shape[-1]).permute(1, 0, 2, 3)
+        if cos.ndim == query_states.ndim:
+            attn_cp = int(blocking_config.msa_attn_cp or 1)
+            head_lanes = attn_cp * self.config.num_key_value_heads
+            cos_dp, sin_dp = cos, sin
+            lane_rope_shape = (
+                batch_local,
+                attn_dp,
+                head_lanes,
+                self.config.num_attention_heads // head_lanes,
+                query_len,
+                cos.shape[-1],
+            )
+            key_cos = cos.view(lane_rope_shape)[:, :, :, 0]
+            key_sin = sin.view(lane_rope_shape)[:, :, :, 0]
+            key_states = (
+                key_states.unsqueeze(2)
+                .expand(batch_local, attn_dp, attn_cp, self.config.num_key_value_heads, query_len, self.head_dim)
+                .reshape(batch_local, attn_dp, head_lanes, query_len, self.head_dim)
+            )
+        else:
+            cos_dp = cos.view(attn_dp, batch_local, query_len, cos.shape[-1]).permute(1, 0, 2, 3)
+            sin_dp = sin.view(attn_dp, batch_local, query_len, sin.shape[-1]).permute(1, 0, 2, 3)
+            key_cos, key_sin = cos_dp, sin_dp
         query_states = self._apply_rope_dp_unified(query_states, cos_dp, sin_dp)
-        key_states = self._apply_rope_dp_unified(key_states, cos_dp, sin_dp)
+        key_states = self._apply_rope_dp_unified(key_states, key_cos, key_sin)
+        if cos.ndim == 5:
+            key_states = key_states.reshape(
+                batch_local, attn_dp, attn_cp, self.config.num_key_value_heads, query_len, self.head_dim
+            )
 
         token_indices, token_valid = self.indexer._finalize_blocks_dp_unified(
             core_topk_scores,
@@ -4570,15 +4614,29 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
         sin = self.sin_cached[rope_indices].to(device=hidden_states.device, dtype=hidden_states.dtype)
         position_embeddings = (cos, sin)
         indexer_position_embeddings = None
+        unified_indexer_position_embeddings = None
         indexer = None
         blocking_config = None
+        sparse_attention = None
         for layer in self.layers:
             attention = getattr(layer, "self_attn", None)
             candidate = getattr(attention, "indexer", None)
             if candidate is not None:
+                sparse_attention = attention
                 indexer = candidate
                 blocking_config = getattr(attention, "attn_blocking_config", None)
                 break
+        unified_decode = bool(
+            sparse_attention is not None
+            and sparse_attention._supports_unified_sparse_decode(
+                inputs_embeds,
+                past_key_values,
+                position_ids,
+                blocking_config,
+                kwargs.get("msa_indexer_block_table"),
+                kwargs.get("msa_attn_block_table"),
+            )
+        )
         indexer_dim = getattr(getattr(indexer, "config", None), "index_head_dim", None)
         indexer_dp = getattr(blocking_config, "msa_indexer_dp", 1) or 1
         if indexer_dim is not None:
@@ -4586,7 +4644,7 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
             rotary_dim = min(cos.shape[-1], indexer_dim)
             indexer_cos = cos[..., :rotary_dim].clone()
             indexer_sin = sin[..., :rotary_dim].clone()
-            if inputs_embeds.shape[1] == 1 and indexer_dp > 1:
+            if inputs_embeds.shape[1] == 1 and indexer_dp > 1 and indexer_cos.ndim == 3:
                 batch_local = inputs_embeds.shape[0] // indexer_dp
                 indexer_cos = indexer_cos.reshape(
                     indexer_dp, batch_local, indexer_cos.shape[1], indexer_cos.shape[-1]
@@ -4595,15 +4653,66 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
                     indexer_dp, batch_local, indexer_sin.shape[1], indexer_sin.shape[-1]
                 ).permute(1, 0, 2, 3)
             indexer_position_embeddings = (indexer_cos, indexer_sin)
+            if unified_decode:
+                batch_local = inputs_embeds.shape[0] // indexer_dp
+                indexer_cp = int(blocking_config.msa_indexer_cp or 1)
+                indexer_rope_indices = (
+                    rope_indices.view(indexer_dp, batch_local, rope_indices.shape[1])
+                    .permute(1, 0, 2)
+                    .unsqueeze(2)
+                    .expand(batch_local, indexer_dp, indexer_cp, rope_indices.shape[1])
+                )
+                indexer_cos = _gather_flattened_rope_rows(self.cos_cached, indexer_rope_indices, rotary_dim).to(
+                    device=hidden_states.device, dtype=hidden_states.dtype
+                )
+                indexer_sin = _gather_flattened_rope_rows(self.sin_cached, indexer_rope_indices, rotary_dim).to(
+                    device=hidden_states.device, dtype=hidden_states.dtype
+                )
+                unified_indexer_position_embeddings = (indexer_cos, indexer_sin)
+        unified_position_embeddings = None
+        if unified_decode:
+            attn_dp = int(blocking_config.msa_attn_dp or 1)
+            batch_local = inputs_embeds.shape[0] // attn_dp
+            attn_rope_indices = (
+                rope_indices.view(attn_dp, batch_local, rope_indices.shape[1])
+                .permute(1, 0, 2)
+                .unsqueeze(2)
+                .expand(batch_local, attn_dp, self.config.num_attention_heads, rope_indices.shape[1])
+            )
+            attn_cos = _gather_flattened_rope_rows(self.cos_cached, attn_rope_indices, self.cos_cached.shape[-1]).to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            attn_sin = _gather_flattened_rope_rows(self.sin_cached, attn_rope_indices, self.sin_cached.shape[-1]).to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            unified_position_embeddings = (attn_cos, attn_sin)
         for decoder_layer in self.layers:
+            layer_position_embeddings = position_embeddings
+            layer_indexer_position_embeddings = indexer_position_embeddings
+            layer_attention = getattr(decoder_layer, "self_attn", None)
+            layer_blocking_config = getattr(layer_attention, "attn_blocking_config", None)
+            if (
+                unified_position_embeddings is not None
+                and getattr(layer_attention, "indexer", None) is not None
+                and layer_attention._supports_unified_sparse_decode(
+                    hidden_states,
+                    past_key_values,
+                    position_ids,
+                    layer_blocking_config,
+                    kwargs.get("msa_indexer_block_table"),
+                    kwargs.get("msa_attn_block_table"),
+                )
+            ):
+                layer_position_embeddings = unified_position_embeddings
+                layer_indexer_position_embeddings = unified_indexer_position_embeddings
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                position_embeddings=position_embeddings,
-                indexer_position_embeddings=indexer_position_embeddings,
+                position_embeddings=layer_position_embeddings,
+                indexer_position_embeddings=layer_indexer_position_embeddings,
                 **kwargs,
             )
         hidden_states = self.norm(hidden_states)
