@@ -953,7 +953,7 @@ class TestPrefillChunking:
 class TestContinuousBatching:
     """run_continuous_batching_decode must handle the CB decode loop correctly."""
 
-    def _make_cb_instance(self, full_batch_size=2, enable_full_batch_prefill=False):
+    def _make_cb_instance(self, full_batch_size=2, enable_full_batch_prefill=False, position_ids_sections=None):
         from QEfficient.generation.text_generation_inference import QEffTextGenerationBase
 
         tok = _make_tokenizer()
@@ -980,16 +980,17 @@ class TestContinuousBatching:
         mock_session.input_names.append("batch_index")
 
         # allowed_shapes for full_batch_size detection
+        sections = [position_ids_sections] if position_ids_sections else []
         mock_session.allowed_shapes = [
             [
                 (4, [full_batch_size, PREFILL_LEN]),  # input_ids
-                (4, [full_batch_size, PREFILL_LEN]),  # position_ids
+                (4, [*sections, full_batch_size, PREFILL_LEN]),  # position_ids
                 (4, [full_batch_size, PREFILL_LEN, VOCAB_SIZE]),  # logits
                 (4, [full_batch_size, 1]),  # batch_index
             ],
             [
                 (4, [full_batch_size, 1]),  # input_ids decode
-                (4, [full_batch_size, 1]),  # position_ids decode
+                (4, [*sections, full_batch_size, 1]),  # position_ids decode
                 (4, [full_batch_size, 1, VOCAB_SIZE]),  # logits decode
                 (4, [full_batch_size, 1]),  # batch_index
             ],
@@ -1091,6 +1092,29 @@ class TestContinuousBatching:
         assert replacement_event["trigger"] == "generation_len"
         assert replacement_event["queue_depth_before_pop"] == 1
         assert replacement_event["queue_depth_after_pop"] == 0
+
+    @pytest.mark.parametrize("position_ids_sections", [None, 4])
+    def test_replacement_prefill_restarts_decode_position_ids(self, position_ids_sections):
+        obj, tok, mock_session = self._make_cb_instance(full_batch_size=1, position_ids_sections=position_ids_sections)
+        schedule_events = []
+        mock_session.input_dumper = SimpleNamespace(record_schedule_event=schedule_events.append)
+        prompt = "Hello world"
+        prompt_len = len(tok(prompt)["input_ids"])
+        obj.initialize_decode_inputs(2, 1, CTX_LEN)
+        obj.batch_index = np.arange(1).reshape(-1, 1)
+        prompt_queue = deque([prompt, prompt])
+
+        obj.run_prefill_for_all_inputs(prompt_queue, generation_len=3)
+        obj.run_continuous_batching_decode(prompt_queue, generation_len=3)
+
+        decode_positions = [
+            np.asarray(event["decode_position_ids"][0]).reshape(-1)[0]
+            for event in schedule_events
+            if event["type"] == "decode_invocation"
+        ]
+        # The replacement request in slot 0 must decode from its own prompt length, not the previous request's.
+        first_request = [prompt_len, prompt_len + 1, prompt_len + 2]
+        assert decode_positions == first_request + first_request
 
     def test_runtime_schedule_position_ids_do_not_assume_batch_major(self):
         obj, _, _ = self._make_cb_instance(full_batch_size=2)
