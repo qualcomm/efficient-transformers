@@ -1614,3 +1614,27 @@ class TestArtifactsGenerationAPIs:
             )
         assert result == expected
         writer.assert_called_once()
+
+
+class TestDeepseekIntegerFloorDivision:
+    def test_dynamo_export_preserves_position_index_dtype(self):
+        from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
+            _nonnegative_integer_floor_div,
+        )
+
+        class FloorDivision(torch.nn.Module):
+            def forward(self, position):
+                return _nonnegative_integer_floor_div(position, 4)
+
+        position = torch.tensor([0, 3, 4, 7], dtype=torch.int64)
+        exported = torch.export.export(FloorDivision(), (position,)).module()
+        position_node = next(node for node in exported.graph.nodes if node.op == "placeholder")
+        division_node = next(
+            node
+            for node in exported.graph.nodes
+            if node.op == "call_function" and node.target == torch.ops.aten.div.Tensor_mode
+        )
+
+        assert division_node.args[0] is position_node
+        assert division_node.meta["val"].dtype == torch.int64
+        torch.testing.assert_close(exported(position), torch.tensor([0, 0, 1, 1], dtype=torch.int64))

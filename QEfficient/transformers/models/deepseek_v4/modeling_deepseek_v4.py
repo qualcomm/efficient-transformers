@@ -62,8 +62,8 @@ def _nonnegative_integer_floor_div(position: torch.Tensor, divisor: int) -> torc
     """Divide nonnegative position/index tensors using integer floor division."""
     if divisor < 1:
         raise ValueError(f"divisor must be positive, got {divisor}")
-    position_int32 = position.to(torch.int32)
     if torch.onnx.is_in_onnx_export():
+        position_int32 = position.to(torch.int32)
         divisor_tensor = torch.full((), divisor, dtype=torch.int32, device=position.device)
         quotient = torch.onnx.ops.symbolic(
             "Div",
@@ -71,9 +71,9 @@ def _nonnegative_integer_floor_div(position: torch.Tensor, divisor: int) -> torc
             dtype=torch.int32,
             shape=position.shape,
         )
+        return quotient.to(position.dtype)
     else:
-        quotient = torch.div(position_int32, divisor, rounding_mode="floor")
-    return quotient.to(position.dtype)
+        return torch.div(position, divisor, rounding_mode="floor")
 
 
 def _clamp_in_dtype(
