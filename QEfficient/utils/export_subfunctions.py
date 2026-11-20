@@ -281,17 +281,62 @@ def _apply_region_merges(root, merges):
     root.recompile()
 
 
+def _plan_equivalent_symbolic_stride_replacements(root):
+    """Find stride reads that are exactly equivalent to a symbolic tensor size."""
+    replacements = []
+    for _, module in root.named_modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.nodes:
+            if node.op != "call_function" or node.target is not torch.ops.aten.sym_stride.int:
+                continue
+            tensor_node, stride_dim = node.args[:2]
+            if not isinstance(tensor_node, torch.fx.Node) or not isinstance(stride_dim, int):
+                continue
+            value = tensor_node.meta.get("val")
+            if not isinstance(value, torch.Tensor) or not 0 <= stride_dim < value.ndim:
+                continue
+            stride = value.stride()[stride_dim]
+            if not isinstance(stride, torch.SymInt):
+                continue
+            stride_key = _symbolic_key(stride)
+            for size_dim, size in enumerate(value.shape):
+                if isinstance(size, torch.SymInt) and _symbolic_key(size) == stride_key:
+                    replacements.append((module, node, size_dim))
+                    break
+    return replacements
+
+
+def _apply_equivalent_symbolic_stride_replacements(replacements):
+    """Replace proven symbolic stride/size aliases with ONNX-lowerable size reads."""
+    changed_modules = set()
+    for module, node, size_dim in replacements:
+        tensor_node = node.args[0]
+        with module.graph.inserting_before(node):
+            replacement = module.graph.call_function(torch.ops.aten.sym_size.int, (tensor_node, size_dim))
+        replacement.meta = node.meta.copy()
+        node.replace_all_uses_with(replacement)
+        module.graph.erase_node(node)
+        changed_modules.add(module)
+
+    for module in changed_modules:
+        module.graph.lint()
+        module.recompile()
+
+
 def reuse_exported_subfunctions(exported_program):
     """Share equivalent exported region bodies while preserving call operands.
 
-    This is an optimization. Any planning failure returns the original
-    ExportedProgram unchanged so export can continue with duplicate functions.
+    Equivalent symbolic strides are first rewritten as size reads. Any planning
+    failure returns the original ExportedProgram unchanged so export can
+    continue with duplicate functions.
     """
     root = exported_program.graph_module
     try:
         with disable_proxy_modes_tracing():
+            stride_replacements = _plan_equivalent_symbolic_stride_replacements(root)
             merges = _plan_region_merges(root)
-    except Exception:  # noqa: BLE001 - reuse is an optimization; export must continue.
+    except Exception:
         logger.warning(
             "ONNX subfunction reuse was skipped because planning failed; "
             "repeated layers may be exported as duplicate functions.",
@@ -299,7 +344,10 @@ def reuse_exported_subfunctions(exported_program):
         )
         return exported_program
 
+    _apply_equivalent_symbolic_stride_replacements(stride_replacements)
     if not merges:
+        if stride_replacements:
+            exported_program.validate()
         return exported_program
 
     _apply_region_merges(root, merges)

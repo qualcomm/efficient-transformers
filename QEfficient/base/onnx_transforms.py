@@ -701,8 +701,10 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
             "CtxPagedScatterPage",
             "GlmPagedScatter",
             "ScatterND",
+            "CtxChunkScatterBatch",
         }
     )
+    _STATE_PASSTHROUGH_OP_TYPES = frozenset({"Cast", "Identity", "Reshape"})
 
     @staticmethod
     def _retained_state_name(state_kind: str, layer_idx: str, kv_cache_prefix: str | None = None) -> str:
@@ -712,14 +714,20 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         return name
 
     @classmethod
-    def _resolve_state_scatter_outputs(cls, fn, node, layer_idx: str, state_kinds: set[str]) -> dict[str, str] | None:
+    def _resolve_state_scatter_outputs(
+        cls, fn, node, layer_idx: str, state_kinds: set[str], graph_value_info
+    ) -> dict[str, str] | None:
         """Resolve nested cache-state scatter outputs from function data flow.
 
         ONNX function-call inputs bind positionally. Each cache scatter consumes
         the state buffer as its first input, so the matching scatter is identified
         from that buffer's function argument rather than output names or node order.
+        Batch-folded KV writes reshape the state to a folded physical layout,
+        scatter, and may reshape it again for attention. Select the value that
+        restores the cache input layout for retained-state output.
         """
         function_state_inputs: dict[str, str] = {}
+        graph_state_inputs: dict[str, str] = {}
         for input_index, input_name in enumerate(node.input):
             match = cls._STATE_INPUT_RE.match(input_name)
             if match is None:
@@ -738,13 +746,109 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                     f"'{state_kind}.{layer_idx}' inputs."
                 )
             function_state_inputs[state_kind] = fn.input[input_index]
+            graph_state_inputs[state_kind] = input_name
 
         if set(function_state_inputs) != state_kinds:
             return None
 
+        function_value_info = {value.name: value for value in fn.value_info}
+
+        def tensor_signature(value_info):
+            if value_info is None or not value_info.type.HasField("tensor_type"):
+                return None
+            tensor_type = value_info.type.tensor_type
+            if not tensor_type.HasField("shape"):
+                return None
+            dimensions = tuple(
+                dimension.dim_value
+                if dimension.HasField("dim_value")
+                else dimension.dim_param
+                if dimension.HasField("dim_param")
+                else None
+                for dimension in tensor_type.shape.dim
+            )
+            return tensor_type.elem_type, dimensions
+
+        producer_by_output = {output: fn_node for fn_node in fn.node for output in fn_node.output}
+        consumers_by_input: dict[str, list] = {}
+        for fn_node in fn.node:
+            for input_name in fn_node.input:
+                consumers_by_input.setdefault(input_name, []).append(fn_node)
+
+        def is_derived_from(value_name: str, source_name: str) -> bool:
+            visited = set()
+            pending = [value_name]
+            while pending:
+                current = pending.pop()
+                if current == source_name:
+                    return True
+                if current in visited:
+                    continue
+                visited.add(current)
+                producer = producer_by_output.get(current)
+                if producer is None or producer.op_type not in cls._STATE_PASSTHROUGH_OP_TYPES:
+                    continue
+                pending.extend(producer.input)
+            return False
+
+        function_outputs = set(fn.output)
+
+        def retained_state_value(writer_output: str, state_input: str, graph_state_input: str) -> str:
+            visited = set()
+            pending = [(writer_output, 0)]
+            passthrough_values = [(writer_output, 0)]
+            while pending:
+                current, distance = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                for consumer in consumers_by_input.get(current, []):
+                    if consumer.op_type not in cls._STATE_PASSTHROUGH_OP_TYPES or not consumer.output:
+                        continue
+                    next_value = consumer.output[0]
+                    passthrough_values.append((next_value, distance + 1))
+                    pending.append((next_value, distance + 1))
+
+            source_signature = tensor_signature(graph_value_info.get(graph_state_input))
+            if source_signature is None:
+                source_signature = tensor_signature(function_value_info.get(state_input))
+            layout_candidates = [
+                (value, distance)
+                for value, distance in passthrough_values
+                if source_signature is not None and tensor_signature(function_value_info.get(value)) == source_signature
+            ]
+            if layout_candidates:
+                return min(layout_candidates, key=lambda item: item[1])[0]
+
+            output_candidates = [
+                (value, distance) for value, distance in passthrough_values if value in function_outputs
+            ]
+            if output_candidates:
+                return max(output_candidates, key=lambda item: item[1])[0]
+            return max(passthrough_values, key=lambda item: item[1])[0]
+
         scatter_outputs: dict[str, str] = {}
         for state_kind, function_input in function_state_inputs.items():
-            scatter_outputs[state_kind] = cls._resolve_retained_state_output(fn, function_input)
+            writers = [
+                fn_node
+                for fn_node in fn.node
+                if fn_node.op_type in cls._SCATTER_OP_TYPES
+                and fn_node.input
+                and is_derived_from(fn_node.input[0], function_input)
+                and fn_node.output
+            ]
+            if len(writers) != 1:
+                writer_names = [
+                    f"{writer.op_type}({writer.output[0] if writer.output else '<no-output>'})" for writer in writers
+                ]
+                raise ValueError(
+                    f"Could not uniquely resolve the nested {state_kind}.{layer_idx} state writer in function "
+                    f"'{fn.name}': expected one cache scatter writer derived from data input '{function_input}', "
+                    f"found {len(writers)} ({writer_names})."
+                )
+            scatter_outputs[state_kind] = retained_state_value(
+                writers[0].output[0], function_input, graph_state_inputs[state_kind]
+            )
 
         return scatter_outputs
 
@@ -918,6 +1022,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
     @classmethod
     def apply(cls, model: ModelProto, kv_cache_prefix: str | None = None, model_type: str | None = None) -> bool:
         graph = model.graph
+        graph_value_info = {value.name: value for value in (*graph.input, *graph.value_info, *graph.output)}
         produced_names = {name for node in graph.node for name in node.output}
         dangling_retained_outputs = {
             out.name
@@ -1091,7 +1196,9 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                 if has_index_key:
                     scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx, include_index_key=True)
                 else:
-                    scatter_outputs = cls._resolve_state_scatter_outputs(fn, node, layer_idx, set(state_inputs))
+                    scatter_outputs = cls._resolve_state_scatter_outputs(
+                        fn, node, layer_idx, set(state_inputs), graph_value_info
+                    )
                 if scatter_outputs is None:
                     continue
 
@@ -1102,18 +1209,54 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
                 for state_kind, desired_output in desired_outputs.items():
                     scatter_key = state_kind.removeprefix("past_") if has_index_key else state_kind
                     scatter_output = scatter_outputs[scatter_key]
-                    if scatter_output not in fn.output:
+                    exposed_output = None
+                    if scatter_output in fn.output:
+                        output_index = list(fn.output).index(scatter_output)
+                        if output_index == len(node.output):
+                            node.output.append(desired_output)
+                            produced_names.add(desired_output)
+                            changed = True
+                        elif output_index > len(node.output):
+                            raise ValueError(
+                                f"Function call '{node.name or node.op_type}' does not expose output "
+                                f"'{scatter_output}' from nested function '{fn.name}'."
+                            )
+                        else:
+                            exposed_output = node.output[output_index]
+                            if desired_output not in produced_names and desired_output not in node.output:
+                                graph.node.append(
+                                    onnx.helper.make_node(
+                                        "Identity",
+                                        inputs=[exposed_output],
+                                        outputs=[desired_output],
+                                        name=f"{desired_output}_Identity",
+                                    )
+                                )
+                                produced_names.add(desired_output)
+                                changed = True
+                    else:
                         fn.output.append(scatter_output)
                         changed = True
+
+                        if desired_output not in node.output:
+                            node.output.append(desired_output)
+                            produced_names.add(desired_output)
+                            changed = True
+
+                    function_value_info = {value.name: value for value in fn.value_info}
+                    state_value_info = function_value_info.get(scatter_output)
+                    if state_value_info is None and exposed_output is not None:
+                        state_value_info = graph_value_info.get(exposed_output)
+                    if state_value_info is None:
+                        state_value_info = graph_value_info.get(state_inputs[state_kind])
+                    retained_output_info = graph_value_info.get(desired_output)
+                    if state_value_info is not None and retained_output_info is not None:
+                        retained_output_info.type.CopyFrom(state_value_info.type)
 
                     retained_input = state_inputs[state_kind]
                     plain_input = f"{state_kind}.{layer_idx}"
                     if retained_input.endswith("_RetainedState"):
                         state_rename_map[retained_input] = plain_input
-
-                    if desired_output not in node.output:
-                        node.output.append(desired_output)
-                        changed = True
                     remaining_dangling_outputs.discard(desired_output)
 
                 if has_index_key:

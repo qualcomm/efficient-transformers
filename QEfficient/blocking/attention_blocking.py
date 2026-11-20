@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from transformers.cache_utils import Cache
@@ -418,7 +418,8 @@ def generic_blocked_attention_interface(
     mla_kwargs: dict[str, Any] | None = None,
     is_mla: bool = False,
     prefill_only: bool = False,
-    auxiliary_state: Optional[Any] = None,
+    auxiliary_state: Any | None = None,
+    skip_kv: bool | None = None,
     **kwargs,
 ):
     model_strategy = getattr(module, "qeff_attention_strategy", None)
@@ -474,28 +475,7 @@ def generic_blocked_attention_interface(
         layer_keys = getattr(layer, "keys", None)
         if layer_keys is not None:
             cache_shape = torch._shape_as_tensor(layer_keys)
-            layer_local_zero = (cache_shape[0] - cache_shape[0]).to(dtype=position_ids.dtype)
-            position_ids = position_ids + layer_local_zero
-
-    # Keep a zero-valued, layer-local dependency in the traced graph for
-    # batch-folded decode. The folded-cache index/mask expressions are built
-    # by the layer-specific attention forward below. Without this dependency,
-    # ONNX export can treat those expressions as identical across decoder
-    # layers, lift them out of the subfunction body, and expose them as extra
-    # subfunction inputs/outputs. Besides producing unnecessary subfunction
-    # variants, that prevents the AIC compiler from applying its range
-    # optimizations. The dependency is intentionally numerical no-op: it
-    # preserves position_ids while anchoring the graph to this layer's cache.
-    if blocking_mode == BlockingMode.KV_BATCH_FOLD and past_key_value is not None and position_ids is not None:
-        layers = getattr(past_key_value, "layers", None)
-        # Dynamic caches can start with no layer entries during initial tracing.
-        # In that case, there is no cache tensor to use as a graph dependency;
-        # leave position_ids unchanged until the requested layer is available.
-        layer = layers[layer_idx] if layers is not None and layer_idx is not None and layer_idx < len(layers) else None
-        layer_keys = getattr(layer, "keys", None)
-        if layer_keys is not None:
-            cache_shape = torch._shape_as_tensor(layer_keys)
-            layer_local_zero = (cache_shape[0] - cache_shape[0]).to(dtype=position_ids.dtype)
+            layer_local_zero = cache_shape[0] - cache_shape[0]
             position_ids = position_ids + layer_local_zero
 
     cache_kwargs = {"position_ids": position_ids, "batch_index": batch_index}
@@ -610,7 +590,7 @@ def generic_blocked_attention_interface(
         configured_split=blocking_config.headpar_split,
         ctx_len=blocking_config.ctx_len,
         kv_block_unroll=blocking_config.kv_block_unroll,
-        skip_kv=blocking_config.skip_kv or False,
+        skip_kv=(blocking_config.skip_kv or False) if skip_kv is None else skip_kv,
         paged_attention=blocking_config.paged_attention,
         # prefill-specific — omit when None so function default (1) applies
         **({"n_rep_chunk": blocking_config.n_rep_chunk} if blocking_config.n_rep_chunk is not None else {}),

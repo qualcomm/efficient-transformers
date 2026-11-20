@@ -141,6 +141,12 @@ def _qeff_custom_io_precision(dtype, default_dtype="float16"):
     return default_dtype
 
 
+def _text_position_ids(position_ids: torch.Tensor) -> torch.Tensor:
+    if position_ids.ndim == 3:
+        return position_ids.narrow(0, 0, 1).squeeze(0)
+    return position_ids
+
+
 class QEffQwen3_5MoeGatedDeltaNetCustomRMSNormAIC(nn.Module):
     """
     RMSNorm module that works by replacing the current module with compiler known custom-op.
@@ -556,28 +562,31 @@ def qeff_torch_causal_conv1d_update(
     dflash: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     _, hidden_size, seq_len = hidden_states.shape
-    if conv_state.ndim != 3 or conv_state.shape[-1] != hidden_size:
-        raise ValueError(
-            "conv_state must use channel-last layout [batch, conv_kernel, conv_dim], "
-            f"got shape={tuple(conv_state.shape)} for conv_dim={hidden_size}"
-        )
+    grouped_conv_state = conv_state.ndim == 4
 
-    state_len = conv_state.shape[1]
-    conv_state_cf = conv_state.transpose(1, 2)
-    pos_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
-    hidden_states_new = torch.cat([conv_state_cf, hidden_states], dim=-1).to(weight.dtype)
+    if grouped_conv_state:
+        bsz, num_kv_heads, conv_group_dim, state_len = conv_state.shape
+        if hidden_size != num_kv_heads * conv_group_dim:
+            raise ValueError(
+                "Grouped conv_state shape mismatch: "
+                f"hidden_size={hidden_size}, num_kv_heads={num_kv_heads}, conv_group_dim={conv_group_dim}"
+            )
+        conv_state_flat = conv_state.reshape(bsz, hidden_size, state_len)
+    else:
+        conv_state_flat = conv_state.transpose(1, 2)
 
-    position_scalar = pos_ids.reshape(-1)[0]
-    seq_len_tensor = torch.full_like(position_scalar, seq_len)
+    state_len = conv_state_flat.shape[-1]
+    pos_ids = _text_position_ids(position_ids)
+    hidden_states_new = torch.cat([conv_state_flat, hidden_states], dim=-1).to(weight.dtype)
+
+    seq_len_tensor = torch.ones((), dtype=torch.int64, device=hidden_states.device) * seq_len
     is_decode = seq_len_tensor == torch.ones_like(seq_len_tensor)
 
     # Decode is a fixed shift. Keep this branch tensor-only so the compiler can
     # select it for both BS1 and folded decode graphs.
-    shifted_conv_state = torch.cat(
-        [conv_state[:, 1:, :], hidden_states[:, :, -1:].transpose(1, 2).to(conv_state.dtype)], dim=1
-    )
+    shifted_conv_state = torch.cat([conv_state_flat[..., 1:], hidden_states_new[..., -1:]], dim=-1)
     valid_decode = (pos_ids[:, -1:] >= 0).to(shifted_conv_state.dtype).reshape(-1, 1, 1)
-    shifted_conv_state = shifted_conv_state * valid_decode + conv_state * (1 - valid_decode)
+    shifted_conv_state = shifted_conv_state * valid_decode + conv_state_flat * (1 - valid_decode)
 
     # Prefill and padded chunks retain the general last-valid-position gather.
     if dflash:
@@ -588,15 +597,20 @@ def qeff_torch_causal_conv1d_update(
         order = torch.argsort(torch.cat([cached_order, token_order], dim=1), dim=1)
     else:
         # Derive zeros from an existing state view; torch.zeros emits a dynamic ConstantOfShape in subfunctions.
-        zeros = conv_state[:, :, 0].to(pos_ids.dtype) * 0
+        zeros = conv_state_flat[:, 0, :].to(pos_ids.dtype) * 0
         order = torch.argsort(torch.cat([zeros, pos_ids], dim=1), dim=1)
     last_positions = order[:, -state_len:]
     ctx_idx = last_positions.to(torch.long).unsqueeze(1).expand(-1, hidden_size, -1)
-    gathered_conv_state = torch.gather(hidden_states_new, dim=2, index=ctx_idx).transpose(1, 2)
+    gathered_conv_state = torch.gather(hidden_states_new, dim=2, index=ctx_idx)
+    if grouped_conv_state:
+        shifted_conv_state = shifted_conv_state.reshape(bsz, num_kv_heads, conv_group_dim, state_len)
+        gathered_conv_state = gathered_conv_state.reshape(bsz, num_kv_heads, conv_group_dim, state_len)
     updated_conv_state = torch.where(is_decode, shifted_conv_state, gathered_conv_state)
     out = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)
     out = F.silu(out[:, :, -seq_len:]).to(hidden_states.dtype)
     updated_conv_state = updated_conv_state.clone()
+    if not grouped_conv_state:
+        updated_conv_state = updated_conv_state.transpose(1, 2)
     return out, updated_conv_state
 
 
@@ -1174,19 +1188,23 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 recurrent_state = recurrent_state_all
 
             if position_ids is not None:
-                text_position_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
+                text_position_ids = _text_position_ids(position_ids)
                 zero_cumsum = torch.cumsum((text_position_ids == 0).to(torch.int32), dim=1)[:, -1:]
-                conv_reset_mask = zero_cumsum.to(dtype=torch.bool, device=conv_state.device).reshape(
-                    conv_state.shape[0], *([1] * (conv_state.ndim - 1))
+                conv_reset_mask = (
+                    zero_cumsum[: conv_state.shape[0]]
+                    .to(dtype=torch.bool, device=conv_state.device)
+                    .reshape(conv_state.shape[0], *([1] * (conv_state.ndim - 1)))
                 )
                 # Blend the small reset mask instead of broadcasting it through
                 # a full Select/Where tensor in the folded decode graph.
                 conv_keep = (~conv_reset_mask).to(conv_state.dtype)
                 conv_state = conv_state * conv_keep
 
-                recurrent_reset_mask = conv_reset_mask.reshape(
-                    recurrent_state.shape[0], *([1] * (recurrent_state.ndim - 1))
-                ).to(device=recurrent_state.device)
+                recurrent_reset_mask = (
+                    zero_cumsum[: recurrent_state.shape[0]]
+                    .to(dtype=torch.bool, device=recurrent_state.device)
+                    .reshape(recurrent_state.shape[0], *([1] * (recurrent_state.ndim - 1)))
+                )
                 recurrent_keep = (~recurrent_reset_mask).to(recurrent_state.dtype)
                 recurrent_state = recurrent_state * recurrent_keep
 
@@ -1319,8 +1337,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                     ones_lower=self._ones_lower,
                     eye=self._eye,
                 )
-                position_scalar = position_ids.reshape(-1)[0]
-                seq_len_tensor = torch.full_like(position_scalar, hidden_states.shape[1])
+                seq_len_tensor = torch.ones((), dtype=torch.int64, device=hidden_states.device) * hidden_states.shape[1]
                 is_decode = seq_len_tensor == torch.ones_like(seq_len_tensor)
                 core_attn_out = torch.where(is_decode, recurrent_out, chunk_out)
                 last_recurrent_state = torch.where(is_decode, recurrent_state_new, chunk_state)
@@ -2765,7 +2782,9 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
             bs = max(2, bs)
         elif bs > 1:
             bs = 2
-        fbs = constants.ONNX_EXPORT_EXAMPLE_FBS
+        fbs = int(
+            kwargs.get("kv_cache_batch_size") or kwargs.get("full_batch_size") or constants.ONNX_EXPORT_EXAMPLE_FBS
+        )
         batch_fold = kwargs.pop("batch_fold", False)
         gdn_full_state_update = kwargs.pop("gdn_full_state_update", False)
         if continuous_batching and (batch_fold or gdn_full_state_update):

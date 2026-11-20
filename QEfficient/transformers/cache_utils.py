@@ -13,13 +13,13 @@ import torch
 from transformers.cache_utils import Cache, CacheLayerMixin, EncoderDecoderCache
 
 from QEfficient.customop import (
-    CtxGatherFuncBlockedKVBatch,
     CtxGatherFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
     CtxScatterFuncPagedAttention,  # TODO: apply the dynamo related changes coming from latest mainline
     ctx_chunk_scatter_batch,
     ctx_gather,
     ctx_gather_3d,
     ctx_gather_blocked_kv,
+    ctx_gather_blocked_kv_batch,
     ctx_gather_blocked_kv_cb,
     ctx_gather_cb,
     ctx_gather_cb_3d,
@@ -376,7 +376,7 @@ class QEffDynamicLayer(CacheLayerMixin):
             # [1, FBS * Hkv, T_block] layout, so no additional reshape or range
             # construction is needed in the cache reader.
             ctx_indices = prepared_ctx_indices
-        k_out = CtxGatherFuncBlockedKVBatch.apply(k_out, ctx_indices)
+        k_out = ctx_gather_blocked_kv_batch(k_out, ctx_indices)
 
         return k_out
 
@@ -479,7 +479,7 @@ class QEffDynamicLayer(CacheLayerMixin):
             # Unlike the K read, the V read must retain the mask after the
             # gather so invalid/future positions can be zeroed explicitly.
             invalid_mask = cache_kwargs["_qeff_batch_fold_invalid_mask"]
-        v_out = CtxGatherFuncBlockedKVBatch.apply(v_out, ctx_indices)
+        v_out = ctx_gather_blocked_kv_batch(v_out, ctx_indices)
 
         v_out = torch.where(invalid_mask.unsqueeze(-1), torch.zeros_like(v_out, dtype=v_out.dtype), v_out)
         return v_out
@@ -2355,6 +2355,15 @@ class QEffGPTOSSHybridCache(QEffDynamicCache):
 
     def read_only_blockedKV(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
         return self.layers[layer_idx].read_only_blockedKV(start_idx, end_idx, cache_kwargs)
+
+    def read_only_blocked_kv(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
+        return self.layers[layer_idx].read_only_blocked_kv(start_idx, end_idx, cache_kwargs)
+
+    def read_only_blocked_K(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
+        return self.layers[layer_idx].read_only_blocked_K(start_idx, end_idx, cache_kwargs)
+
+    def read_only_blocked_V(self, start_idx, end_idx, layer_idx, cache_kwargs=None):
+        return self.layers[layer_idx].read_only_blocked_V(start_idx, end_idx, cache_kwargs)
 
     def full_cache_update_chunked(self, key_states, value_states, layer_idx, cache_kwargs=None):
         self.append_new_layers(layer_idx)

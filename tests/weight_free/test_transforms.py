@@ -44,6 +44,7 @@ from QEfficient.base.checkpoint_transforms import (
     detect_group_transform,
     execute_checkpoint_plan,
 )
+from QEfficient.base.modeling_qeff import _weight_free_external_files_available
 from QEfficient.base.onnx_transforms import (
     PreserveNestedCacheRetainedStateTransform,
     PruneFakeInitializersTransform,
@@ -69,10 +70,12 @@ from QEfficient.exporter.weight_free.export import (
     _resolve_weight_free_target_dtype,
 )
 from QEfficient.exporter.weight_free.ort_weight_injection import load_weight_free_ort_inputs
+from QEfficient.exporter.weight_free.weight_spec import ExternalDataFile, WeightSpec, save_weight_spec
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.transformers.moe.weights import MoEWeights
-from QEfficient.utils import runtime_requirements
+from QEfficient.utils import resolve_retained_state_output, runtime_requirements
+from QEfficient.utils.checkpoint_utils import checkpoint_root
 from QEfficient.utils.export_utils import (
     _generate_export_hash,
     convert_dynamic_axes_to_dynamic_shapes,
@@ -248,6 +251,58 @@ def _load_prepared_tensors(root):
         with safe_open(str(root / shard_name), framework="pt") as handle:
             loaded[key] = handle.get_tensor(key)
     return loaded
+
+
+def test_weight_free_cache_validation_rejects_missing_external_shards(tmp_path):
+    weight_spec_path = tmp_path / "weight_spec.json"
+    external_root = tmp_path / "weight_free_checkpoints"
+    model_path = external_root / "prepared"
+    model_path.mkdir(parents=True)
+    save_weight_spec(
+        weight_spec_path,
+        WeightSpec(
+            model_name="TinyModel",
+            model_id=str(model_path),
+            files=[ExternalDataFile(path="prepared/model.safetensors", format="safetensors")],
+        ),
+    )
+
+    assert not _weight_free_external_files_available(weight_spec_path)
+
+
+def test_weight_free_cache_validation_accepts_existing_external_shards(tmp_path):
+    weight_spec_path = tmp_path / "weight_spec.json"
+    external_root = tmp_path / "weight_free_checkpoints"
+    shard_path = external_root / "prepared" / "model.safetensors"
+    shard_path.parent.mkdir(parents=True)
+    shard_path.write_bytes(b"weights")
+    save_weight_spec(
+        weight_spec_path,
+        WeightSpec(
+            model_name="TinyModel",
+            model_id=str(external_root / "prepared"),
+            files=[ExternalDataFile(path="prepared/model.safetensors", format="safetensors")],
+        ),
+    )
+
+    assert _weight_free_external_files_available(weight_spec_path)
+
+
+def test_checkpoint_root_symlinked_shards(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    blob = hub / "models--org--m" / "blobs" / "abc"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"x")
+    local = tmp_path / "mymodel"
+    local.mkdir()
+    shard = local / "model.safetensors"
+    shard.symlink_to(blob)
+
+    root = checkpoint_root(str(local), [str(shard)])
+
+    assert root == tmp_path
+    assert shard.relative_to(root) == Path("mymodel/model.safetensors")
 
 
 # ---------------------------------------------------------------------------
@@ -2200,6 +2255,33 @@ class TestPreserveNestedCacheRetainedStateTransform:
         assert "moe_scatter_0" not in fn.output
         assert fn.output[-2:] == ["scatter_0_0", "scatter_0_1"]
         assert call_node.output[-2:] == ["past_key.0_RetainedState", "past_value.0_RetainedState"]
+
+
+class TestRetainedStateOutputResolver:
+    def test_resolves_prefixed_retained_state_stem(self):
+        outputs = {"past_key.3_vllmKvCache_RetainedState": object()}
+
+        target_name, value = resolve_retained_state_output(outputs, "past_key.3")
+
+        assert target_name == "past_key.3_vllmKvCache"
+        assert value is outputs["past_key.3_vllmKvCache_RetainedState"]
+
+    def test_resolves_internal_retained_state_suffix_and_basename(self):
+        outputs = {"decoder/past_value.1_InternalRetainedState": object()}
+
+        target_name, value = resolve_retained_state_output(outputs, "past_value.1")
+
+        assert target_name == "past_value.1"
+        assert value is outputs["decoder/past_value.1_InternalRetainedState"]
+
+    def test_raises_on_ambiguous_retained_state_outputs(self):
+        outputs = {
+            "conv_state.0_RetainedState": object(),
+            "conv_state.0_vllmKvCache_RetainedState": object(),
+        }
+
+        with pytest.raises(KeyError, match="Expected one retained-state output"):
+            resolve_retained_state_output(outputs, "conv_state.0")
 
 
 # ---------------------------------------------------------------------------

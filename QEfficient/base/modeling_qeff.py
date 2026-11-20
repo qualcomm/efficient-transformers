@@ -34,6 +34,7 @@ from QEfficient.base.onnx_transforms import (
     SplitTensorsTransform,
 )
 from QEfficient.base.pytorch_transforms import PytorchTransform
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.blocking.blocking_configurator import (
     build_gated_delta_config_for_transform,
     build_transformer_blocking_config_for_transform,
@@ -204,6 +205,33 @@ def _weight_free_external_data_root(weight_spec_path: Optional[Union[str, Path]]
         return checkpoint_root(spec.model_id, [str(model_id_path / external_file.path) for external_file in spec.files])
 
     return huggingface_hub_cache_dir()
+
+
+def _weight_free_external_files_available(weight_spec_path: Optional[Union[str, Path]]) -> bool:
+    """Return whether a weight-free sidecar still resolves every checkpoint shard."""
+    if weight_spec_path is None:
+        return False
+
+    weight_spec_path = Path(weight_spec_path)
+    if not weight_spec_path.is_file():
+        return False
+
+    spec = load_weight_spec(weight_spec_path)
+    if not spec.files:
+        return True
+
+    root = _weight_free_external_data_root(weight_spec_path)
+    if root is not None and not root.exists():
+        return False
+
+    for external_file in spec.files:
+        path = Path(external_file.path).expanduser()
+        if path.is_absolute():
+            if not path.is_file():
+                return False
+        elif root is None or not (root / path).is_file():
+            return False
+    return True
 
 
 def _compiler_env_with_external_data_root(weight_spec_path: Optional[Union[str, Path]]) -> Optional[Dict[str, str]]:
@@ -850,10 +878,15 @@ class QEFFBaseModel(ABC):
 
         # Return early if ONNX already exists (restore complete export output state).
         if onnx_path.is_file():
-            self.onnx_path = onnx_path
-            self.weight_spec_path = str(_weight_spec_path) if _weight_spec_path.is_file() else None
-            self._export_cache_hit = True
-            return onnx_path
+            if not self._weight_free or _weight_free_external_files_available(_weight_spec_path):
+                self.onnx_path = onnx_path
+                self.weight_spec_path = str(_weight_spec_path) if _weight_spec_path.is_file() else None
+                self._export_cache_hit = True
+                return onnx_path
+            logger.warning(
+                "Ignoring stale weight-free ONNX cache at %s because its checkpoint shards are unavailable.",
+                onnx_path,
+            )
 
         export_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1476,6 +1509,8 @@ class QEFFBaseModel(ABC):
                 num_cores=num_cores,
                 prefill_only=bool(compiler_options.get("prefill_only", False)),
             )
+        elif any(hasattr(module, "attn_blocking_config") for module in self.model.modules()):
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=AttentionBlockingConfig())
         if blocking_config is not None:
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
@@ -1554,6 +1589,10 @@ class QEFFBaseModel(ABC):
             self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
+            if any(hasattr(module, "attn_blocking_config") for module in self.model.modules()):
+                self.model, _ = BlockingAttentionTransform.apply(
+                    self.model, attn_blocking_config=AttentionBlockingConfig()
+                )
             self.hash_params.pop("blocking_kwargs", None)
         self.model, _ = FFNBlockingTransform.apply(self.model, qaic_config=qaic_config)
         if qaic_config is not None:

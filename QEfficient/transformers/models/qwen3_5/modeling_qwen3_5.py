@@ -94,6 +94,12 @@ def _batch_index_gather(tensor: torch.Tensor, batch_index: torch.Tensor) -> torc
     return tensor.index_select(0, batch_index.reshape(-1).long())
 
 
+def _text_position_ids(position_ids: torch.Tensor) -> torch.Tensor:
+    if position_ids.ndim == 3:
+        return position_ids.narrow(0, 0, 1).squeeze(0)
+    return position_ids
+
+
 class QEffQwen3_5GatedDeltaNetCustomRMSNormAIC(nn.Module):
     """
     RMSNorm module that works by replacing the current module with compiler known custom-op.
@@ -507,6 +513,8 @@ def qeff_torch_causal_conv1d_update(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     _, hidden_size, seq_len = hidden_states.shape
     grouped_conv_state = conv_state.ndim == 4
+    # Non-grouped cache callers use either channel-first or channel-last state.
+    channel_last_conv_state = not grouped_conv_state and conv_state.shape[1] != hidden_size
 
     if grouped_conv_state:
         bsz, num_kv_heads, conv_group_dim, state_len = conv_state.shape
@@ -517,14 +525,13 @@ def qeff_torch_causal_conv1d_update(
             )
         conv_state_flat = conv_state.reshape(bsz, hidden_size, state_len)
     else:
-        conv_state_flat = conv_state
+        conv_state_flat = conv_state.transpose(1, 2) if channel_last_conv_state else conv_state
 
     state_len = conv_state_flat.shape[-1]
-    pos_ids = position_ids[0]
+    pos_ids = _text_position_ids(position_ids)
     hidden_states_new = torch.cat([conv_state_flat, hidden_states], dim=-1).to(weight.dtype)
 
-    position_scalar = pos_ids.reshape(-1)[0]
-    seq_len_tensor = torch.full_like(position_scalar, seq_len)
+    seq_len_tensor = torch.ones((), dtype=torch.int64, device=hidden_states.device) * seq_len
     is_decode = seq_len_tensor == torch.ones_like(seq_len_tensor)
 
     # Decode is a fixed shift. Keep this branch tensor-only so the compiler can
@@ -554,6 +561,8 @@ def qeff_torch_causal_conv1d_update(
     updated_conv_state = torch.where(is_decode, shifted_conv_state, gathered_conv_state)
     out = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)
     out = F.silu(out[:, :, -seq_len:]).to(hidden_states.dtype)
+    if channel_last_conv_state:
+        updated_conv_state = updated_conv_state.transpose(1, 2)
     return out, updated_conv_state
 
 
@@ -1124,10 +1133,12 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 recurrent_state = recurrent_state_all
 
             if (batch_fold or dflash_commit_final is not None) and position_ids is not None:
-                text_position_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
+                text_position_ids = _text_position_ids(position_ids)
                 zero_cumsum = torch.cumsum((text_position_ids == 0).to(torch.int32), dim=1)[:, -1:]
-                conv_reset_mask = zero_cumsum.to(dtype=torch.bool, device=conv_state.device).reshape(
-                    conv_state.shape[0], *([1] * (conv_state.ndim - 1))
+                conv_reset_mask = (
+                    zero_cumsum[: conv_state.shape[0]]
+                    .to(dtype=torch.bool, device=conv_state.device)
+                    .reshape(conv_state.shape[0], *([1] * (conv_state.ndim - 1)))
                 )
                 # Blend the small reset mask instead of broadcasting it through
                 # a full Select/Where tensor in the folded decode graph.
@@ -1292,8 +1303,7 @@ class QEffQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     ones_lower=self._ones_lower,
                     eye=self._eye,
                 )
-                position_scalar = position_ids.reshape(-1)[0]
-                seq_len_tensor = torch.full_like(position_scalar, hidden_states.shape[1])
+                seq_len_tensor = torch.ones((), dtype=torch.int64, device=hidden_states.device) * hidden_states.shape[1]
                 is_decode = seq_len_tensor == torch.ones_like(seq_len_tensor)
                 core_attn_out = torch.where(is_decode, recurrent_out, chunk_out)
                 last_recurrent_state = torch.where(is_decode, recurrent_state_new, chunk_state)
@@ -2551,7 +2561,11 @@ class QEffQwen3_5ForConditionalGeneration(Qwen3_5ForConditionalGeneration):
         bs = kwargs.get("batch_size", constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE)
         if kwargs.get("weight_free", False):
             bs = max(2, bs)
-        fbs: int = constants.ONNX_EXPORT_EXAMPLE_FBS
+        fbs: int = int(
+            kwargs.get("kv_cache_batch_size") or kwargs.get("full_batch_size") or constants.ONNX_EXPORT_EXAMPLE_FBS
+        )
+        if continuous_batching and kwargs.get("batch_fold", False):
+            bs = fbs
         inputs_shapes["input_ids"] = (bs, dummy_seq_len)
 
         inputs_shapes["position_ids"] = (
