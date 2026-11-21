@@ -81,6 +81,8 @@ if not skip_vision:
         split_model_io=True,
         skip_lang=True,
         use_onnx_subfunctions=True,
+        # Uncomment for vision inputs with height > 2048 or width > 2048:
+        # elf_va_limit=2048,
     )
 
 prefill_qpc_path = qeff_model.compile(
