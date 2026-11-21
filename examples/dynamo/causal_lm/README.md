@@ -137,4 +137,22 @@ python examples/dynamo/causal_lm/disagg_weight_free_inference.py \
     --num-cores 4
 ```
 
+Offline prefill blocking for a disaggregated QPC:
+
+```bash
+python examples/dynamo/causal_lm/disagg_weight_free_inference.py \
+    --model-name tiny-random/qwen3-moe \
+    --prefill-seq-len 32 \
+    --ctx-len 128 \
+    --num-cores 4 \
+    --prefill-blocking-mode prefill_qkv \
+    --prefill-num-q-blocks 2 \
+    --prefill-num-kv-blocks 2 \
+    --prefill-headpar-split 1
+```
+
+`--prefill-blocking-mode` applies only to the prefill QPC and supports the offline
+`prefill_q`, `prefill_kv`, and `prefill_qkv` modes. The KV-bearing modes also
+use `--prefill-headpar-split`; it must divide each KV block size.
+
 The script prints separate QPC paths for the prefill and decode workers. In standard mode it then runs a prompt through prefill, transfers the retained KV state to decode, and prints generated text. With `--continuous-batching`, it compiles the CB QPCs and leaves the runtime KV-DMA handoff to the serving integration.
