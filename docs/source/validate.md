@@ -132,6 +132,25 @@ If the `kv_offload` is set to `True` it runs in dual QPC and if its set to `Fals
 | **Whisper**  | Whisper      | [openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny)<br>[openai/whisper-base](https://huggingface.co/openai/whisper-base)<br>[openai/whisper-small](https://huggingface.co/openai/whisper-small)<br>[openai/whisper-medium](https://huggingface.co/openai/whisper-medium)<br>[openai/whisper-large](https://huggingface.co/openai/whisper-large)<br>[openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) | ✔️          |
 | **Wav2Vec2** | Wav2Vec2     | [facebook/wav2vec2-base](https://huggingface.co/facebook/wav2vec2-base)<br>[facebook/wav2vec2-large](https://huggingface.co/facebook/wav2vec2-large) |           |
 
+### Text-to-Speech Models
+
+**QEff Auto Class:** `QEffChatterboxMultilingualTTS`
+
+| Architecture | Model Family | Representative Models | vLLM Support |
+|--------------|--------------|-----------------------|--------------|
+| **Chatterbox** (T3 Llama + S3Gen flow + HiFT) | Chatterbox Multilingual | [ResembleAI/chatterbox](https://huggingface.co/ResembleAI/chatterbox) (`t3_model="v3"`, 23 languages) | |
+
+Supported modes:
+
+- One request at a time (no continuous batching); graphs exported in fp32 and compiled to fp16.
+- Validated with the Multilingual V3 and V2 checkpoints (`t3_model="v3"`, `t3_model="v2"`).
+- Known limitation: when the speech is padded to a length bucket, the last ~5 mel frames (about 100 ms) of audio can differ slightly from upstream.
+- Needs Resemble AI's `chatterbox` package at git commit `5de7a54`, installed with `--no-deps` (see `examples/audio/README.md`).
+
+Reference examples:
+
+- [text_to_speech.py](https://github.com/quic/efficient-transformers/blob/main/examples/audio/text_to_speech.py)
+
 ---
 
 ## Diffusion Models

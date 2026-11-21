@@ -21,6 +21,7 @@ export HF_TOKEN=<your_huggingface_token>
 **QEff Auto Classes:** 
 - `QEFFAutoModelForSpeechSeq2Seq` (for Whisper models)
 - `QEFFAutoModelForCTC` (for Wav2Vec2 models)
+- `QEffChatterboxMultilingualTTS` (text-to-speech, Chatterbox Multilingual)
 
 For the complete list of supported audio models, see the [Validated Models - Audio Section](../../docs/source/validate.md#audio-models).
 
@@ -79,6 +80,34 @@ This example:
 - Uses Wav2Vec2-base-960h model by default
 - Compiles and runs inference on Cloud AI 100
 - Outputs the recognized text
+
+### text_to_speech.py
+Text-to-speech with Resemble AI Chatterbox Multilingual (23 languages). The default config gives T3, the acoustic
+language model, 16 cores and the four S3Gen graphs (flow encoder, flow estimator, HiFT F0 predictor and decoder) 16
+cores together, so it needs two SoCs' worth of cores; the runtime picks the devices.
+
+Multilingual V3 is only in upstream git (not in the `chatterbox-tts` 0.1.7 release), and Chatterbox pins older
+torch/transformers releases, so install the pinned commit without its dependencies, then its runtime dependencies:
+```bash
+pip install --no-deps "chatterbox-tts @ git+https://github.com/resemble-ai/chatterbox@5de7a54aa4e5e2baadb0182dde554908b48b85c2"
+# torchaudio must match QEfficient's torch 2.7.0 CPU wheel; install it first so s3tokenizer does not pull a newer torch
+pip install torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cpu
+pip install s3tokenizer==0.3.0 conformer==0.3.2 einops==0.8.1 omegaconf==2.4.0 librosa==0.10.2 \
+    resemble-perth==1.0.1 pykakasi==2.3.0 spacy-pkuseg==1.0.2 "setuptools<81"
+```
+
+```bash
+# With default parameters (English, built-in voice, default compile config)
+python text_to_speech.py
+
+# French, cloning the voice of a reference recording
+python text_to_speech.py --language fr --text "Bonjour, comment allez-vous?" --audio-prompt reference.wav \
+    --output bonjour.wav
+
+# Pin devices or change cores: copy QEfficient/tts/pipelines/configs/chatterbox_config.json, edit
+# execute.device_ids / compilation, and pass it
+python text_to_speech.py --compile-config my_chatterbox_config.json
+```
 
 ## Documentation
 
