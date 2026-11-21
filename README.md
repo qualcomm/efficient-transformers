@@ -41,21 +41,21 @@
 - [06/2025] Added support for Llama4 Multi-Model [meta-llama/Llama-4-Scout-17B-16E-Instruct](https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct)
 - [06/2025] Added support for Gemma3 Multi-Modal-Model [google/gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it)
 - [06/2025] Added support of model `hpcai-tech/grok-1` [hpcai-tech/grok-1](https://huggingface.co/hpcai-tech/grok-1)
-- [06/2025] Added support for sentence embedding which improves efficiency, Flexible/Custom Pooling configuration and compilation with multiple sequence lengths, [Embedding model](https://github.com/quic/efficient-transformers/pull/424)
-- [04/2025] Support for [SpD, multiprojection heads](https://quic.github.io/efficient-transformers/source/quick_start.html#draft-based-speculative-decoding). Implemented post-attention hidden size projections to speculate tokens ahead of the base model
-- [04/2025] [QNN Compilation support](https://github.com/quic/efficient-transformers/pull/374) for AutoModel classes. QNN compilation capabilities for multi-models, embedding models and causal models.
-- [04/2025] Added support for separate prefill and decode compilation for encoder (vision) and language models. This feature will be utilized for [disaggregated serving](https://github.com/quic/efficient-transformers/pull/365).
-- [04/2025] SwiftKV Support for both [continuous and non-continuous batching execution](https://github.com/quic/efficient-transformers/pull/367) in SwiftKV.
-- [04/2025] Support for [GGUF model execution](https://github.com/quic/efficient-transformers/pull/368) (without quantized weights) 
-- [04/2025] Enabled FP8 model support on [replicate_kv_heads script](https://github.com/quic/efficient-transformers/tree/main/scripts/replicate_kv_head)
-- [04/2025] Added support for [gradient checkpointing](https://github.com/quic/efficient-transformers/pull/338) in the finetuning script
+- [06/2025] Added support for sentence embedding which improves efficiency, Flexible/Custom Pooling configuration and compilation with multiple sequence lengths, [Embedding model](https://github.com/qualcomm/efficient-transformers/pull/424)
+- [04/2025] Support for [SpD, multiprojection heads](https://qualcomm.github.io/efficient-transformers/source/quick_start.html#draft-based-speculative-decoding). Implemented post-attention hidden size projections to speculate tokens ahead of the base model
+- [04/2025] [QNN Compilation support](https://github.com/qualcomm/efficient-transformers/pull/374) for AutoModel classes. QNN compilation capabilities for multi-models, embedding models and causal models.
+- [04/2025] Added support for separate prefill and decode compilation for encoder (vision) and language models. This feature will be utilized for [disaggregated serving](https://github.com/qualcomm/efficient-transformers/pull/365).
+- [04/2025] SwiftKV Support for both [continuous and non-continuous batching execution](https://github.com/qualcomm/efficient-transformers/pull/367) in SwiftKV.
+- [04/2025] Support for [GGUF model execution](https://github.com/qualcomm/efficient-transformers/pull/368) (without quantized weights)
+- [04/2025] Enabled FP8 model support on [replicate_kv_heads script](https://github.com/qualcomm/efficient-transformers/tree/main/scripts/replicate_kv_head)
+- [04/2025] Added support for [gradient checkpointing](https://github.com/qualcomm/efficient-transformers/pull/338) in the finetuning script
 - [03/2025] Added support for swiftkv model [Snowflake/Llama-3.1-SwiftKV-8B-Instruct](https://huggingface.co/Snowflake/Llama-3.1-SwiftKV-8B-Instruct)
-- [02/2025] [VLMs support](https://github.com/quic/efficient-transformers/pull/267) added for the models [InternVL-1B](https://huggingface.co/OpenGVLab/InternVL2_5-1B), [Llava](https://huggingface.co/llava-hf/llava-1.5-7b-hf) and [Mllama](https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct) *(Mllama support is deprecated — please migrate to Llama-4)*
+- [02/2025] [VLMs support](https://github.com/qualcomm/efficient-transformers/pull/267) added for the models [InternVL-1B](https://huggingface.co/OpenGVLab/InternVL2_5-1B), [Llava](https://huggingface.co/llava-hf/llava-1.5-7b-hf) and [Mllama](https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct) *(Mllama support is deprecated — please migrate to Llama-4)*
 - [01/2025] [FP8 models support](https://huggingface.co/collections/neuralmagic/fp8-llms-for-vllm-666742ed2b78b7ac8df13127) Added support for inference of FP8 models.
 - [01/2025] Added support for [Ibm-Granite] (https://huggingface.co/ibm-granite/granite-3.1-8b-instruct)
 - [01/2025] Added support for [Ibm-Granite-Guardian] (https://huggingface.co/ibm-granite/granite-guardian-3.1-8b)
-- [11/2024] [finite adapters support](https://github.com/quic/efficient-transformers/pull/153) allows mixed adapter usage for peft models.
-- [11/2024] [Speculative decoding TLM](https://github.com/quic/efficient-transformers/pull/119) QEFFAutoModelForCausalLM model can be compiled for returning more than 1 logits during decode for TLM.
+- [11/2024] [finite adapters support](https://github.com/qualcomm/efficient-transformers/pull/153) allows mixed adapter usage for peft models.
+- [11/2024] [Speculative decoding TLM](https://github.com/qualcomm/efficient-transformers/pull/119) QEFFAutoModelForCausalLM model can be compiled for returning more than 1 logits during decode for TLM.
 - [11/2024] Added support for [Meta-Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct), [Meta-Llama-3.2-1B](https://huggingface.co/meta-llama/Llama-3.2-1B) and [Meta-Llama-3.2-3B](https://huggingface.co/meta-llama/Llama-3.2-3B)
 - [09/2024] [AWQ](https://arxiv.org/abs/2306.00978)/[GPTQ](https://arxiv.org/abs/2210.17323) 4-bit quantized models are supported <br>
 - [09/2024] Now we support [PEFT](https://huggingface.co/docs/peft/index) models
@@ -79,7 +79,7 @@
 - [06/2024] Added support for [Codestral-22B-v0.1](https://huggingface.co/mistralai/Codestral-22B-v0.1)
 - [06/2024] Added support for [Vicuna-v1.5](https://huggingface.co/lmsys/vicuna-13b-v1.5)
 - [05/2024] Added support for [Mixtral-8x7B](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1) & [Mistral-7B-Instruct-v0.1](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.1).
-- [04/2024] Initial release of [efficient transformers](https://github.com/quic/efficient-transformers) for seamless inference on pre-trained LLMs.
+- [04/2024] Initial release of [efficient transformers](https://github.com/qualcomm/efficient-transformers) for seamless inference on pre-trained LLMs.
 </details>
 
 # Overview
@@ -115,11 +115,11 @@ source qeff_env/bin/activate
 pip install -U pip
 
 # Clone and Install the QEfficient repository from the mainline branch
-pip install git+https://github.com/quic/efficient-transformers
+pip install git+https://github.com/qualcomm/efficient-transformers
 
 # Clone and Install the QEfficient repository from a specific branch, tag or commit by appending @ref
 # Release branch (e.g., release/v1.20.0):
-pip install "git+https://github.com/quic/efficient-transformers@release/v1.20.0"
+pip install "git+https://github.com/qualcomm/efficient-transformers@release/v1.20.0"
 
 # Or build wheel package using the below command.
 pip install build wheel
@@ -128,15 +128,15 @@ pip install dist/qefficient-0.0.1.dev0-py3-none-any.whl
 
 ``` 
 
-For more details about using ``QEfficient`` via Cloud AIxxx (AI100, AI200 and so on) Apps SDK, visit [Linux Installation Guide](https://quic.github.io/efficient-transformers/source/installation.html)
+For more details about using ``QEfficient`` via Cloud AIxxx (AI100, AI200 and so on) Apps SDK, visit [Linux Installation Guide](https://qualcomm.github.io/efficient-transformers/source/installation.html)
 
 
 ## Documentation
 
-* [Quick Start Guide](https://quic.github.io/efficient-transformers/source/quick_start.html)
-* [QEFF API](https://quic.github.io/efficient-transformers/source/qeff_autoclasses.html)
-* [Validated Models](https://quic.github.io/efficient-transformers/source/validate.html)
-* [Models coming soon](https://quic.github.io/efficient-transformers/source/validate.html#models-coming-soon)
+* [Quick Start Guide](https://qualcomm.github.io/efficient-transformers/source/quick_start.html)
+* [QEFF API](https://qualcomm.github.io/efficient-transformers/source/qeff_autoclasses.html)
+* [Validated Models](https://qualcomm.github.io/efficient-transformers/source/validate.html)
+* [Models coming soon](https://qualcomm.github.io/efficient-transformers/source/validate.html#models-coming-soon)
 
 > Note: More details are here: https://quic.github.io/cloud-ai-sdk-pages/latest/Getting-Started/Model-Architecture-Support/Large-Language-Models/llm/
 
