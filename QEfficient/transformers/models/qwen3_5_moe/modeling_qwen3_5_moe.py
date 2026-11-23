@@ -332,6 +332,22 @@ class QEffQwen3_5MoeDynamicCache(Cache):
             raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
         return layer.write_only_batch(key_states, value_states, cache_kwargs)
 
+    def write_only_headpar_cpdp(
+        self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int, cache_kwargs: dict
+    ):
+        """Write CP/DP head-parallel GQA updates through the selected attention layer."""
+        layer = self.kv_layers[layer_idx]
+        if layer is None:
+            raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
+        return layer.write_only_headpar_cpdp(key_states, value_states, cache_kwargs)
+
+    def read_only_headpar_cpdp(self, start_index: int, end_index: int, layer_idx: int, cache_kwargs: dict):
+        """Read a local CP context block from the selected compact GQA cache layer."""
+        layer = self.kv_layers[layer_idx]
+        if layer is None:
+            raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
+        return layer.read_only_headpar_cpdp(start_index, end_index, cache_kwargs)
+
     def has_previous_state(self, layer_idx=None) -> bool:
         if layer_idx is not None:
             if layer_idx < 0 or layer_idx >= len(self.layer_types):

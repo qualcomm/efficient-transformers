@@ -105,6 +105,40 @@ def _get_valid_num_blocks(config: Dict, requested_key: str) -> int:
     return config.get(requested_key)
 
 
+def get_compact_headpar_specialization_dims(
+    qaic_config: Optional[dict], *, batch_size: int, ctx_len: int
+) -> Dict[str, int]:
+    """Return local cache dimensions for a CP/DP ``kv_headpar`` specialization.
+
+    Compact head-parallel GQA caches split the global context across CP lanes
+    and, when DP is enabled, split the global batch across DP lanes. Their
+    retained-state ONNX inputs therefore use ``local_ctx_len`` and optionally
+    ``local_batch_size`` rather than the global dimensions. The compiler must
+    specialize those symbols to the corresponding local values.
+
+    The input specialization owns the final batch and context values, so this
+    function intentionally returns a new dictionary instead of mutating it.
+    """
+    blocking_mode = qaic_config.get("blocking_mode") if qaic_config else None
+    if blocking_mode is None or BlockingMode.resolve(blocking_mode) != BlockingMode.KV_HEADPAR:
+        return {}
+
+    attn_dp = int(qaic_config.get("attn_dp", 1) or 1)
+    attn_cp = int(qaic_config.get("attn_cp", 1) or 1)
+    if attn_dp == 1 and attn_cp == 1:
+        return {}
+
+    if ctx_len % attn_cp:
+        raise ValueError(f"ctx_len ({ctx_len}) must be divisible by attn_cp ({attn_cp}).")
+
+    local_dims = {"local_ctx_len": ctx_len // attn_cp}
+    if attn_dp > 1:
+        if batch_size % attn_dp:
+            raise ValueError(f"batch_size ({batch_size}) must be divisible by attn_dp ({attn_dp}).")
+        local_dims["local_batch_size"] = batch_size // attn_dp
+    return local_dims
+
+
 def _is_minimax_m3_config(model_config: Any) -> bool:
     text_config = getattr(model_config, "text_config", model_config)
     model_types = {

@@ -76,6 +76,42 @@ def test_dynamic_shapes_keep_singleton_local_batch_dynamic():
     assert local_batch_size.min == 1
 
 
+@pytest.mark.cpu_only
+def test_dynamic_shapes_relates_batch_size_to_compact_dp_cache_batch():
+    """DP compact-cache exports must declare batch_size as DP times the local batch."""
+
+    class DecodeWithCompactCache(torch.nn.Module):
+        def forward(self, input_ids, past_key_values):
+            cache_values = past_key_values[0][0][:, 0, 0, 0].unsqueeze(1)
+            return input_ids + cache_values.repeat_interleave(2, dim=0).to(input_ids.dtype)
+
+    config = SimpleNamespace(model_type="qwen3_5_moe", max_position_embeddings=128)
+    inputs = (
+        torch.zeros(4, 1, dtype=torch.long),
+        [[torch.zeros(2, 8, 128, 4), torch.zeros(2, 8, 128, 4)]],
+    )
+    dynamic_shapes = convert_dynamic_axes_to_dynamic_shapes(
+        {
+            "input_ids": {0: "batch_size"},
+            "past_key.0": {0: "local_batch_size", 2: "ctx_len"},
+            "past_value.0": {0: "local_batch_size", 2: "ctx_len"},
+        },
+        config,
+        {"input_ids": inputs[0], "past_key.0": inputs[1][0][0], "past_value.0": inputs[1][0][1]},
+        qaic_config={"attn_dp": 2},
+    )
+
+    local_batch_size = dynamic_shapes["past_key_values"][0][0][0]
+    batch_size = dynamic_shapes["input_ids"][0]
+    assert local_batch_size.__name__ == "local_batch_size"
+    assert local_batch_size.max == 512
+    assert batch_size.root is local_batch_size
+    assert str(batch_size) == "2*local_batch_size"
+
+    torch.export.export(DecodeWithCompactCache(), inputs, dynamic_shapes=dynamic_shapes, strict=True)
+    assert hash_dict_params({"dynamic_shapes": dynamic_shapes}) == hash_dict_params({"dynamic_shapes": dynamic_shapes})
+
+
 # ---------------------------------------------------------------------------
 # Helpers: get_padding_shape_from_config
 # ---------------------------------------------------------------------------

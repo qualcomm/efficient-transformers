@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 
 import torch
+from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -26,6 +27,7 @@ os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 MODEL_ID = "Qwen/Qwen3.8-2.4T-A95B"
 SYNTHETIC_CHECKPOINT_DIR = ".qeff/qwen3_8_decode/synthetic_tiny_checkpoint"
+SYNTHETIC_CHECKPOINT_FORMAT_VERSION = "qwen3_8_fused_experts_v1"
 RANDOM_SEED = 42
 DType = torch.dtype
 
@@ -161,9 +163,14 @@ def tiny_config(dtype: DType, num_hidden_layers: int) -> Qwen3_5MoeTextConfig:
 
 def ensure_synthetic_checkpoint(config: Qwen3_5MoeTextConfig, checkpoint_dir: Path, dtype: DType, seed: int) -> Path:
     config_path = checkpoint_dir / "config.json"
+    format_path = checkpoint_dir / ".qeff_synthetic_checkpoint_format"
     if config_path.exists():
         saved_config = Qwen3_5MoeTextConfig.from_pretrained(checkpoint_dir)
-        if saved_config.to_dict() != config.to_dict():
+        if (
+            saved_config.to_dict() != config.to_dict()
+            or not format_path.exists()
+            or format_path.read_text().strip() != SYNTHETIC_CHECKPOINT_FORMAT_VERSION
+        ):
             shutil.rmtree(checkpoint_dir)
 
     if (checkpoint_dir / "model.safetensors").exists():
@@ -172,7 +179,10 @@ def ensure_synthetic_checkpoint(config: Qwen3_5MoeTextConfig, checkpoint_dir: Pa
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
     model = Qwen3_5MoeForCausalLM(config).eval().to(dtype)
-    model.save_pretrained(checkpoint_dir, safe_serialization=True)
+    config.save_pretrained(checkpoint_dir)
+    model.generation_config.save_pretrained(checkpoint_dir)
+    save_file(model.state_dict(), checkpoint_dir / "model.safetensors", metadata={"format": "pt"})
+    format_path.write_text(SYNTHETIC_CHECKPOINT_FORMAT_VERSION + "\n")
     return checkpoint_dir
 
 

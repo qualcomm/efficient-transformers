@@ -298,17 +298,18 @@ class TestQEFFTransformersBase:
     ):
         """Weight-free CausalLM export should use source safetensors unless opted out."""
 
-        def fake_new(cls, model, *args, **kwargs):
-            return SimpleNamespace(
-                _weight_free=kwargs["weight_free"],
-                _use_original_checkpoint=kwargs["use_original_checkpoint"],
-            )
+        def fake_init(self, _model, **kwargs):
+            self._weight_free = kwargs["weight_free"]
+            self._use_original_checkpoint = kwargs["use_original_checkpoint"]
 
         monkeypatch.setattr(modeling_auto, "validate_dynamo_export_requirements", lambda *_: None)
         monkeypatch.setattr(modeling_auto, "_resolve_torch_dtype", lambda _kwargs: None)
         monkeypatch.setattr(modeling_auto, "_build_meta_model", lambda *_args, **_kwargs: object())
-        monkeypatch.setattr(QEFFAutoModelForCausalLM._hf_auto_class, "from_pretrained", lambda *_args, **_kwargs: object())
-        monkeypatch.setattr(QEFFAutoModelForCausalLM, "__new__", staticmethod(fake_new))
+        monkeypatch.setattr(modeling_auto, "_peek_architectures", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(
+            QEFFAutoModelForCausalLM._hf_auto_class, "from_pretrained", lambda *_args, **_kwargs: object()
+        )
+        monkeypatch.setattr(QEFFAutoModelForCausalLM, "__init__", fake_init)
 
         model = QEFFAutoModelForCausalLM.from_pretrained(
             "dummy-model",
@@ -464,6 +465,24 @@ class TestQEFFAutoModelForCausalLMLogic:
         assert decode["_graph_name"] == "Decode"
         assert prefill["_graph_name"] == "Prefill"
 
+    def test_build_prefill_specialization_adds_compact_headpar_dimensions(self):
+        """CP/DP headpar specs include the local dimensions used by compact KV cache inputs."""
+        qeff = object.__new__(QEFFAutoModelForCausalLM)
+        qeff.model = SimpleNamespace(qaic_config={"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4})
+        qeff.continuous_batching = False
+        qeff.dflash_tlm = False
+        qeff.is_tlm = False
+
+        spec = qeff.build_prefill_specialization(
+            prefill_seq_len=1,
+            ctx_len=128,
+            batch_size=2,
+            kv_cache_batch_size=2,
+        )
+
+        assert spec["local_batch_size"] == 1
+        assert spec["local_ctx_len"] == 32
+
     # --- build_decode_specialization ---
 
     def test_build_decode_specialization_basic(self):
@@ -600,6 +619,40 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
         qeff = QEFFAutoModelForCausalLM(model)
         with pytest.raises(TypeError, match="prefill_only"):
             qeff.compile(prefill_seq_len=32, ctx_len=128, prefill_only="yes")
+
+    def test_compile_syncs_qaic_config_before_compact_headpar_specialization(self, tmp_path, monkeypatch):
+        """Compile-only QAIC configuration drives compact CP/DP cache specializations."""
+        model, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model)
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"fake")
+        captured_kwargs = {}
+        qaic_config = {
+            "blocking_mode": "kv_headpar",
+            "num_kv_blocks": 2,
+            "attn_dp": 2,
+            "attn_cp": 4,
+        }
+
+        def fake_compile(**kwargs):
+            captured_kwargs.update(kwargs)
+            return tmp_path / "qpc"
+
+        monkeypatch.setattr(qeff, "_compile", fake_compile)
+
+        qeff.compile(
+            onnx_path=str(onnx_path),
+            compile_dir=str(tmp_path),
+            prefill_seq_len=1,
+            ctx_len=128,
+            batch_size=2,
+            qaic_config=qaic_config,
+        )
+
+        assert qeff.model.qaic_config is qaic_config
+        specialization = captured_kwargs["specializations"][0]
+        assert specialization["local_batch_size"] == 1
+        assert specialization["local_ctx_len"] == 32
 
     @pytest.mark.parametrize(
         ("compile_kwargs", "expected_graph_names"),

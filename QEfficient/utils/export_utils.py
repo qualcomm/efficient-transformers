@@ -138,6 +138,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
     dynamic_axes: dict[str, dict[int, str]],
     model_config=None,
     example_inputs=None,
+    qaic_config: dict | None = None,
 ) -> dict[str, Any]:
     """
     Convert ONNX dynamic_axes format to torch.export dynamic_shapes format.
@@ -158,6 +159,10 @@ def convert_dynamic_axes_to_dynamic_shapes(
         Concrete export inputs used to identify dimensions that are statically
         specialized by the traced graph, such as singleton vision axes and
         one-token decode sequence length.
+    qaic_config : optional
+        QAIC topology settings. When retained-state axes include
+        ``local_batch_size``, ``attn_dp`` declares that the model batch is the
+        derived dimension ``attn_dp * local_batch_size``.
 
     Returns
     -------
@@ -182,6 +187,12 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 if axis_idx < sample.ndim:
                     observed_dim_values.setdefault(dim_name, set()).add(int(sample.shape[axis_idx]))
 
+    has_local_batch_size = any(
+        dim_name == "local_batch_size" for axes_map in dynamic_axes.values() for dim_name in axes_map.values()
+    )
+    attn_dp = int((qaic_config or {}).get("attn_dp", 1) or 1)
+    local_batch_factor = attn_dp if has_local_batch_size and attn_dp > 1 else 1
+
     dim_registry: dict[str, Any] = {}
 
     def resolve_dim(dim_name: str):
@@ -203,7 +214,9 @@ def convert_dynamic_axes_to_dynamic_shapes(
             elif "local_ctx_len" in dim_name:
                 dim_registry[dim_name] = Dim("local_ctx_len", min=1, max=max_seq_len)
             elif dim_name == "local_batch_size":
-                dim_registry[dim_name] = Dim("local_batch_size", min=1, max=DYNAMO_DIM_MAX_BATCH_SIZE)
+                dim_registry[dim_name] = Dim(
+                    "local_batch_size", min=1, max=DYNAMO_DIM_MAX_BATCH_SIZE // local_batch_factor
+                )
             elif dim_name == "time" and observed_dim_values.get(dim_name) == {1}:
                 dim_registry[dim_name] = Dim("time")
             elif observed_dim_values.get(dim_name) == {1}:
@@ -212,6 +225,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 # GLM DSA can fold batch across attention-DP lanes. Dynamo may
                 # specialize it to the export batch for a concrete DP layout.
                 dim_registry[dim_name] = Dim.STATIC
+            elif dim_name == "batch_size" and local_batch_factor > 1:
+                dim_registry[dim_name] = local_batch_factor * resolve_dim("local_batch_size")
             elif dim_name == "batch_size":
                 dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
             elif dim_name == "full_batch_size":
@@ -603,7 +618,10 @@ def export_wrapper(func):
                 model_config = getattr(self.model, "config", None)
                 example_inputs = bound_export_args.arguments.get("example_inputs")
                 kwargs["dynamic_shapes"] = convert_dynamic_axes_to_dynamic_shapes(
-                    dynamic_axes, model_config, example_inputs
+                    dynamic_axes,
+                    model_config,
+                    example_inputs,
+                    getattr(self.model, "qaic_config", None),
                 )
 
         # Cache probe flag (used for layerwise inspection runs)

@@ -345,6 +345,33 @@ class TestQEffDynamicLayerCorrectness:
 
 
 @pytest.mark.cache
+def test_qwen3_5_moe_cache_delegates_cpdp_headpar_cache_io():
+    """Qwen3.5-MoE must expose the CP/DP compact-cache APIs used by blocked attention."""
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeDynamicCache
+
+    cache = object.__new__(QEffQwen3_5MoeDynamicCache)
+    cache.kv_layers = [QEffDynamicLayer()]
+    keys = torch.arange(4, dtype=torch.float32).reshape(1, 1, 1, 4)
+    values = keys + 10
+
+    cache.write_only_headpar_cpdp(
+        keys,
+        values,
+        layer_idx=0,
+        cache_kwargs={"position_ids": torch.tensor([[3]]), "attn_dp": 1, "attn_cp": 2, "ctx_len": 4},
+    )
+
+    layer = cache.kv_layers[0]
+    assert layer.keys.shape == (1, 2, 2, 4)
+    assert torch.equal(layer.keys[0, 1, 1], keys[0, 0, 0])
+    assert torch.equal(layer.values[0, 1, 1], values[0, 0, 0])
+
+    read_keys, read_values = cache.read_only_headpar_cpdp(0, 2, layer_idx=0, cache_kwargs={})
+    assert torch.equal(read_keys, layer.keys)
+    assert torch.equal(read_values, layer.values)
+
+
+@pytest.mark.cache
 class TestQEffDynamicCacheCorrectness:
     """QEffDynamicCache must correctly manage multiple layers."""
 

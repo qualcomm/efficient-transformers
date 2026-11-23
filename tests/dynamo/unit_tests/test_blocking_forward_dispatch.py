@@ -27,7 +27,10 @@ from torch import nn
 
 from QEfficient.blocking import attention_blocking
 from QEfficient.blocking.attention_blocking import BlockingMode
-from QEfficient.blocking.blocking_configurator import build_transformer_blocking_config_for_transform
+from QEfficient.blocking.blocking_configurator import (
+    build_transformer_blocking_config_for_transform,
+    get_compact_headpar_specialization_dims,
+)
 from QEfficient.transformers.models.pytorch_transforms import (
     BlockingAttentionTransform,
     CustomOpsTransform,
@@ -603,6 +606,28 @@ def test_cpdp_headpar_rejects_incompatible_blocking_config(qaic_config, ctx_len,
             qaic_config=qaic_config,
             aic_num_cores=4,
         )
+
+
+def test_compact_headpar_specialization_dims_are_local_cache_dimensions():
+    dims = get_compact_headpar_specialization_dims(
+        {"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4},
+        batch_size=2,
+        ctx_len=128,
+    )
+
+    assert dims == {"local_ctx_len": 32, "local_batch_size": 1}
+
+
+@pytest.mark.parametrize(
+    "qaic_config, batch_size, ctx_len, error",
+    [
+        ({"blocking_mode": "kv_headpar", "attn_cp": 3}, 1, 128, "ctx_len"),
+        ({"blocking_mode": "kv_headpar", "attn_dp": 2}, 1, 128, "batch_size"),
+    ],
+)
+def test_compact_headpar_specialization_dims_reject_invalid_local_shapes(qaic_config, batch_size, ctx_len, error):
+    with pytest.raises(ValueError, match=error):
+        get_compact_headpar_specialization_dims(qaic_config, batch_size=batch_size, ctx_len=ctx_len)
 
 
 @pytest.mark.dynamo

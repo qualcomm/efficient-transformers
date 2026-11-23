@@ -36,6 +36,7 @@ from QEfficient.base.modeling_qeff import (
 )
 from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTransform
 from QEfficient.blocking.attention_blocking import BlockingMode
+from QEfficient.blocking.blocking_configurator import get_compact_headpar_specialization_dims
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DeepseekV4CheckpointTransform,
     DtypeConversionCheckpointTransform,
@@ -4648,6 +4649,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         )
         kwargs["enable_chunking"] = enable_chunking
         qaic_config = kwargs.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        if qaic_config is not None:
+            # Model hooks that determine cache shapes and dynamic axes read this
+            # state, matching the MiniMax distributed-cache lifecycle.
+            self.model.qaic_config = qaic_config
         # Weight-free export always uses the dynamo (torch.export) path.
         # Must be set here — @export_wrapper reads dynamo from kwargs before _export() body runs.
         dynamo = dynamo or self._weight_free
@@ -5408,6 +5413,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 spec["full_batch_exec_size"] = full_batch_size
             else:
                 spec["full_batch_exec_size"] = exec_batch_size
+        spec.update(
+            get_compact_headpar_specialization_dims(
+                self.model.qaic_config,
+                batch_size=spec["batch_size"],
+                ctx_len=spec["ctx_len"],
+            )
+        )
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
             or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
@@ -5476,20 +5488,6 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if comp_ctx_lengths is not None:
             spec["comp_ctx_lengths"] = comp_ctx_lengths
 
-        blocking_kwargs = self.hash_params.get("blocking_kwargs")
-        qaic_config = getattr(self.model, "qaic_config", None) or {}
-        blocking_mode = blocking_kwargs.mode if blocking_kwargs is not None else qaic_config.get("blocking_mode")
-        attn_dp = int(getattr(blocking_kwargs, "attn_dp", qaic_config.get("attn_dp", 1)) or 1)
-        attn_cp = int(getattr(blocking_kwargs, "attn_cp", qaic_config.get("attn_cp", 1)) or 1)
-        if (
-            blocking_mode is not None
-            and BlockingMode.resolve(blocking_mode) == BlockingMode.KV_HEADPAR
-            and (attn_dp > 1 or attn_cp > 1)
-        ):
-            spec["local_ctx_len"] = ctx_len // attn_cp
-            if attn_dp > 1:
-                spec["local_batch_size"] = (full_batch_size if self.continuous_batching else batch_size) // attn_dp
-
         spec["num_logits_to_keep"] = (num_speculative_tokens + 1) if self.is_tlm else None
 
         if getattr(self, "dflash_tlm", None) or getattr(self, "dflash_dlm", None):
@@ -5503,6 +5501,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             spec["full_batch_size"] = kv_cache_batch_size
         else:
             spec["batch_size"] = kv_cache_batch_size
+        spec.update(
+            get_compact_headpar_specialization_dims(
+                self.model.qaic_config,
+                batch_size=spec["batch_size"],
+                ctx_len=spec["ctx_len"],
+            )
+        )
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
             or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
@@ -5634,6 +5639,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if artifacts:
             compiler_options["artifacts"] = True
         qaic_config = compiler_options.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        if qaic_config is not None:
+            # Keep compile-only overrides visible to cache-shape and
+            # specialization hooks before any export or specialization work.
+            self.model.qaic_config = qaic_config
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         _ignore_public_mdp_ts_num_devices(compiler_options)
         csa_prefill_position_offset = self._configure_csa_prefill_position_offset(
