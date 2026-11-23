@@ -18,6 +18,8 @@ from QEfficient.utils import create_json
 
 logger = logging.getLogger(__name__)
 
+_MAX_INLINABLE_NODES = 100
+
 
 class MdpStrategy(str, Enum):
     """MDP partition-config generation strategy for disaggregated prefill.
@@ -147,11 +149,12 @@ def _layer_partition_bounds(num_layers: int, num_partitions: int) -> List[int]:
 def _get_compiler_expanded_functions(model) -> Tuple[Dict[str, Any], Set[str]]:
     """Return local functions which the compiler expands and known custom ops.
 
-    QAIC expands ONNX local functions into the caller regardless of function
-    body size.  Expanded body nodes are named ``<call-site>/<function-node>``;
-    function-node names exported by Dynamo begin with ``/``, which produces
-    the compiler-visible ``<call-site>//<function-name>/<body-node>`` form.
-    Registered custom operations remain call sites and retain their own names.
+    QAIC expands non-custom local functions with fewer than
+    :data:`_MAX_INLINABLE_NODES` body nodes. Expanded body nodes are named
+    ``<call-site>/<function-node>``; function-node names exported by Dynamo
+    begin with ``/``, which produces the compiler-visible
+    ``<call-site>//<function-name>/<body-node>`` form. Large functions and
+    registered custom operations remain call sites in the compiler IR.
     """
     # Op types registered via DEFINEKNOWNCUSTOMOP in ONNXModelLoaderCustomOp.cpp.
     _KNOWN_CUSTOM_OPS = frozenset(
@@ -164,9 +167,13 @@ def _get_compiler_expanded_functions(model) -> Tuple[Dict[str, Any], Set[str]]:
     local_functions = {f.name: f for f in model.functions}
     logger.info(f"Found {len(local_functions)} local function types: {set(local_functions.keys())}")
 
-    expanded_functions = set(local_functions) - _KNOWN_CUSTOM_OPS
+    expanded_functions = {
+        func_name
+        for func_name, function in local_functions.items()
+        if func_name not in _KNOWN_CUSTOM_OPS and len(function.node) < _MAX_INLINABLE_NODES
+    }
     for func_name, func in local_functions.items():
-        expansion = "expanded" if func_name in expanded_functions else "custom call-site"
+        expansion = "expanded" if func_name in expanded_functions else "call-site"
         logger.info(f"  {func_name}: {len(func.node)} nodes, {expansion}")
 
     return local_functions, expanded_functions
@@ -254,9 +261,10 @@ def generate_disagg_mdp_partition_config(
     spreads to middle stages first, then to the first stage).  Non-layer nodes
     (embeddings, lm_head) follow the nearest layer in topological order.  nodeList
     is a superset of the compiler dump; the compiler silently ignores names it has
-    optimised away.  Compiler-expanded local function call-sites are replaced by
-    their recursively expanded body-node names in topological position. Known
-    custom ops (e.g. CustomRMSNorm) are included by call-site name.
+    optimised away. Small compiler-expanded local-function call-sites are
+    replaced by their recursively expanded body-node names in topological
+    position. Large local functions and known custom ops (e.g.
+    CustomRMSNorm) are included by call-site name.
 
     For PP+TS: ``num_devices // num_partitions`` devices per partition.
 

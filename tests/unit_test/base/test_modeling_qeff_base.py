@@ -487,6 +487,41 @@ def _build_synthetic_local_function_onnx(out_path: Path) -> None:
     onnx.save(onnx_model, str(out_path))
 
 
+def _build_synthetic_large_local_function_onnx(out_path: Path) -> None:
+    """Write a two-layer graph whose local function exceeds QAIC's inline limit."""
+    body_nodes = []
+    input_name = "X"
+    for node_index in range(100):
+        output_name = "Y" if node_index == 99 else f"v{node_index}"
+        body_nodes.append(helper.make_node("Identity", [input_name], [output_name], name=f"large_{node_index}"))
+        input_name = output_name
+    large_function = helper.make_function(
+        "local",
+        "LargeLayerFn",
+        ["X"],
+        ["Y"],
+        body_nodes,
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    graph = helper.make_graph(
+        [
+            helper.make_node("LargeLayerFn", ["input"], ["layer0"], domain="local", name="layer_0/call"),
+            helper.make_node("LargeLayerFn", ["layer0"], ["output"], domain="local", name="layer_1/call"),
+        ],
+        "synthetic_large_local_function_graph",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])],
+    )
+    onnx.save(
+        helper.make_model(
+            graph,
+            functions=[large_function],
+            opset_imports=[helper.make_opsetid("", 17), helper.make_opsetid("local", 1)],
+        ),
+        str(out_path),
+    )
+
+
 def _fake_subprocess_run(command: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
     """Monkeypatch for subprocess.run: create compile artifacts requested by the command."""
     binary_dir: Optional[Path] = None
@@ -614,6 +649,21 @@ class TestMdpLocalFunctionExpansion:
             "layer_1/call//LayerFn/linear",
             "layer_1/call//LayerFn/nested/n0",
         ]
+
+    def test_large_local_function_uses_compiler_callsite(self, tmp_path: Path):
+        """Functions at the compiler inline limit must not expand their MDP node list."""
+        onnx_path = tmp_path / "large_local_function.onnx"
+        _build_synthetic_large_local_function_onnx(onnx_path)
+
+        mdp = generate_disagg_mdp_partition_config(
+            onnx_path=str(onnx_path),
+            num_devices=2,
+            num_partitions=2,
+            num_layers=2,
+        )
+
+        assert mdp["partitions"][0]["nodeList"] == ["layer_0/call"]
+        assert mdp["partitions"][1]["nodeList"] == ["layer_1/call"]
 
 
 @pytest.mark.cpu_only
