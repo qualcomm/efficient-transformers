@@ -207,37 +207,6 @@ def ctx_gather_block_range_kv_dp_op(data: torch.Tensor, block_ids: torch.Tensor)
 def _(data, block_ids):
     return data.new_empty((*block_ids.shape, data.shape[-2], data.shape[-1]))
 
-
-@torch.library.custom_op("qefficient::csa_joint_attention", mutates_args=())
-def csa_joint_attention_op(
-    local_kv: torch.Tensor,
-    local_valid: torch.Tensor,
-    compressed_kv: torch.Tensor,
-    compressed_indices: torch.Tensor,
-    compressed_valid: torch.Tensor,
-    query: torch.Tensor,
-    sinks: torch.Tensor,
-    scale: torch.Tensor,
-    masked_logit: torch.Tensor,
-) -> torch.Tensor:
-    return CSAJointAttentionFunc.forward(
-        local_kv,
-        local_valid,
-        compressed_kv,
-        compressed_indices,
-        compressed_valid,
-        query,
-        sinks,
-        scale,
-        masked_logit,
-    )
-
-
-@csa_joint_attention_op.register_fake
-def _(local_kv, local_valid, compressed_kv, compressed_indices, compressed_valid, query, sinks, scale, masked_logit):
-    return torch.empty_like(query)
-
-
 @torch.library.custom_op("qefficient::rms_norm", mutates_args=())
 def rms_norm_op(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     """Custom RMS Norm operation for QEfficient"""
