@@ -207,6 +207,7 @@ def ctx_gather_block_range_kv_dp_op(data: torch.Tensor, block_ids: torch.Tensor)
 def _(data, block_ids):
     return data.new_empty((*block_ids.shape, data.shape[-2], data.shape[-1]))
 
+
 @torch.library.custom_op("qefficient::rms_norm", mutates_args=())
 def rms_norm_op(hidden_states: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     """Custom RMS Norm operation for QEfficient"""
