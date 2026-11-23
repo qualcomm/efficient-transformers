@@ -840,20 +840,32 @@ def test_dflash_example_fixed_prompt_defaults(monkeypatch, script, thinking):
     monkeypatch.setitem(sys.modules, "utils", utils)
     monkeypatch.setattr(sys, "path", sys.path.copy())
     namespace = runpy.run_path(str(Path(utils.__file__).with_name(script)))
-    arguments = [script, "--model_name", "Qwen3-4B"]
+    model_name = "Qwen3-4B" if script == "basic_inference_text.py" else "Qwen3.5-4B"
+    arguments = [script, "--model_name", model_name]
     if thinking:
         arguments.append(thinking)
     monkeypatch.setattr(sys, "argv", arguments)
     args = namespace["parse_args"]()
     assert args.prompt == utils.DEFAULT_TEXT_PROMPT
     assert args.enable_thinking is (thinking == "--enable-thinking")
+    if script == "basic_inference_vision.py":
+        assert args.image is True
     monkeypatch.setattr(sys, "argv", [*arguments, "--prompt", "Custom prompt"])
-    assert namespace["parse_args"]().prompt == "Custom prompt"
+    custom = namespace["parse_args"]()
+    assert custom.prompt == "Custom prompt"
+    if script == "basic_inference_vision.py":
+        assert custom.image is False
+        monkeypatch.setattr(sys, "argv", [*arguments, "--no-image"])
+        text = namespace["parse_args"]()
+        assert text.image is False and text.prompt == utils.DEFAULT_TEXT_PROMPT
+        monkeypatch.setattr(sys, "argv", [*arguments, "--prompt", "Custom prompt", "--image"])
+        assert namespace["parse_args"]().image is True
 
 
 @pytest.mark.parametrize("method", ["dflash", "dflash-2"])
 @pytest.mark.parametrize("reuse_qpcs", [False, True])
-def test_dflash_vision_example_default_image(monkeypatch, method, reuse_qpcs):
+@pytest.mark.parametrize("image_flag", [None, "--image"])
+def test_dflash_vision_example_default_image(monkeypatch, method, reuse_qpcs, image_flag):
     import io
 
     from PIL import Image
@@ -925,7 +937,6 @@ def test_dflash_vision_example_default_image(monkeypatch, method, reuse_qpcs):
         "Qwen3.8-27B",
         "--dflash-method",
         method,
-        "--image",
         "--no-disagg-tlm",
         "--height",
         "448",
@@ -934,6 +945,8 @@ def test_dflash_vision_example_default_image(monkeypatch, method, reuse_qpcs):
         "--dlm_qpc",
         "draft",
     ]
+    if image_flag:
+        arguments.append(image_flag)
     if reuse_qpcs:
         arguments += ["--tlm_qpc", "target", "--vision_qpc", "vision"]
     monkeypatch.setattr(sys, "argv", arguments)

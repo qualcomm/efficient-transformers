@@ -95,8 +95,13 @@ def parse_args():
     )
     parser.add_argument("--tlm_hf_path", "--target-model", dest="tlm_hf_path", default=None)
     parser.add_argument("--dlm_hf_path", "--draft-model", dest="dlm_hf_path", default=None)
-    parser.add_argument("--prompt", default=DEFAULT_TEXT_PROMPT)
-    parser.add_argument("--image", action="store_true")
+    parser.add_argument("--prompt", default=None, help="Custom text-only prompt unless --image is also supplied.")
+    parser.add_argument(
+        "--image",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use the default image/question when no --prompt is supplied; --no-image uses the coding prompt.",
+    )
     parser.add_argument("--image_url", default=None)
     parser.add_argument("--image_prompt", default=None)
     thinking = parser.add_mutually_exclusive_group()
@@ -158,7 +163,12 @@ def parse_args():
         default=True,
         help="Use MXINT8 retained KV-cache I/O for the DFlash-2 draft.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.image is None:
+        args.image = args.prompt is None
+    if args.prompt is None:
+        args.prompt = DEFAULT_TEXT_PROMPT
+    return args
 
 
 def _resolve_batch_size(batch_size):

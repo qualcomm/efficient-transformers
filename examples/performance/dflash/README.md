@@ -10,9 +10,13 @@ single prompt in-process via `QEfficient.generation.dflash_generation`. The thre
 | text — single prompt | `basic_inference_text.py` | `dflash_generation.run_spd_inference_single` |
 | vision — single prompt/image | `basic_inference_vision.py` | text, Gemma4, or Qwen3-VL generation adapter |
 
-Both scripts default to a fixed coding prompt. With `--image`, the vision
-script uses a fixed triangle image and question for both DFlash and DFlash2.
-Override with `--prompt`, `--image_url`, or `--image_prompt`.
+Run the commands below from this directory unless a repository-relative path is
+shown. Select the model with `--model_name`; `--prompt` is optional.
+The text script defaults to a coding problem. The vision script defaults to the
+linked triangle image and question for both DFlash and DFlash2; `--image` is
+optional. Use `--no-image` for the coding prompt through the VLM, or `--prompt "..."`
+for custom text-only input. Override image inputs with `--image_url` and
+`--image_prompt`. The default image uses a pinned URL and requires network access.
 
 ---
 
@@ -121,11 +125,13 @@ default `lang_only=True` preserves the language-path string return; use
 ```bash
 # gemma4
 python basic_inference_vision.py --model_name gemma-4-31B-it --tlm_hf_path google/gemma-4-31B-it \
-    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51
+    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
+    --no-image
 
 # qwen3-vl
 python basic_inference_vision.py --model_name Qwen3-VL-32B-Instruct \
-    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51
+    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
+    --no-image
 ```
 
 ### Single image + text prompt
@@ -133,13 +139,11 @@ python basic_inference_vision.py --model_name Qwen3-VL-32B-Instruct \
 ```bash
 # gemma4
 python basic_inference_vision.py --model_name gemma-4-31B-it --tlm_hf_path google/gemma-4-31B-it \
-    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
-    --image
+    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51
 
 # qwen3-vl
 python basic_inference_vision.py --model_name Qwen3-VL-32B-Instruct \
-    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
-    --image
+    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51
 ```
 
 `--height`/`--width` (qwen3-vl only) set the vision encoder's compiled input resolution;
@@ -153,10 +157,10 @@ Qwen3.5 uses the VLM entry point with its DFlash target and draft checkpoints:
 python basic_inference_vision.py --model_name Qwen3.5-4B \
     --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
     --ctx_len 4096 --prefill_seq_len 128 \
-    --height 448 --width 448 --image
+    --height 448 --width 448
 ```
 
-Omit `--image` for the default coding prompt, or pass `--prompt "..."` for custom text.
+Use `--no-image` for the default coding prompt, or pass `--prompt "..."` for custom text.
 Qwen3.5 dense and MoE targets use concatenated replay and verification. Each decode call takes
 `2 * block_size` positions: the previous accepted prefix (padded with position IDs
 of `-1`), followed by the next draft block. Convolution and recurrent states
@@ -291,7 +295,7 @@ prompt settings do not require recompiling QPCs.
 | Flag | Default | Notes |
 |---|---|---|
 | `--vision_devices` | `0,1,2,3` | vision-encoder device IDs (usually a separate group) |
-| `--image` | off | run an image+text prompt instead of text |
+| `--image` / `--no-image` | image unless `--prompt` is supplied | `--no-image` runs the default coding prompt |
 | `--image_url` | — | image URL for `--image` |
 | `--image_prompt` | — | prompt text for `--image` |
 | `--height` / `--width` | `354` / `536` | qwen3-vl only — compiled vision-encoder input resolution |
@@ -300,8 +304,9 @@ prompt settings do not require recompiling QPCs.
 ## DFlash-2
 
 `basic_inference_vision.py --dflash-method dflash-2` compiles missing TLM and DLM QPCs automatically.
-Omit `--prompt` to use the default coding prompt. For Qwen VLMs, `--image` uses
-the same image/question as DFlash through the existing Qwen generation adapter.
+For Qwen VLMs, omitting `--prompt` uses the same default image/question as DFlash
+through the existing Qwen generation adapter. Use `--no-image` for the default
+coding prompt, or `--prompt "..."` for custom text.
 DFlash2 image dimensions must be square (default: 448). Add `--compile-only`
 to compile without inference.
 The host-side top-k candidate selector is disabled by default, so draft tokens use
@@ -314,10 +319,10 @@ python examples/performance/dflash/basic_inference_vision.py \
     --tlm_devices 34,35,36,37 \
     --dlm_devices 38,39,40,41 \
     --tlm_cores 16 \
-    --no-top-k-selector
+    --no-top-k-selector --no-image
 ```
 
-Pass `--tlm_qpc` and `--dlm_qpc` (also `--vision_qpc` with `--image`) to reuse compiled QPCs, or
+Pass `--tlm_qpc` and `--dlm_qpc` (also `--vision_qpc` in the default image mode) to reuse compiled QPCs, or
 `--target-model` and `--draft-model` to override the model pair. To enable the
 DFlash-2 bigram selector, pass `--top-k-selector`; that mode requires a DLM QPC
 compiled with the `selector_hidden` output. DLM retained KV-cache I/O defaults
