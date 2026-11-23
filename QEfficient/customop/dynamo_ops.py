@@ -376,57 +376,6 @@ def _(data: torch.Tensor, ctx_indices: torch.Tensor, context_parallel: int) -> t
     )
 
 
-@torch.library.custom_op("qefficient::ctx_gather_dp", mutates_args=())
-def ctx_gather_dp_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
-    batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
-    dp_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
-    safe_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
-    return data[batch_idx, dp_idx, safe_indices.long()]
-
-
-@ctx_gather_dp_op.register_fake
-def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
-    return torch.empty(
-        (*ctx_indices.shape, *data.shape[3:]),
-        dtype=data.dtype,
-        device=data.device,
-    )
-
-
-@torch.library.custom_op("qefficient::ctx_gather_folded_rows", mutates_args=())
-def ctx_gather_folded_rows_op(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
-    safe_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
-    batch_idx = torch.arange(data.shape[1], device=data.device).view(-1, 1)
-    return data[0, batch_idx, safe_indices.long()].unsqueeze(0)
-
-
-@ctx_gather_folded_rows_op.register_fake
-def _(data: torch.Tensor, ctx_indices: torch.Tensor) -> torch.Tensor:
-    return torch.empty((1, *ctx_indices.shape, *data.shape[3:]), dtype=data.dtype, device=data.device)
-
-
-@torch.library.custom_op("qefficient::ctx_gather_dp_cp", mutates_args=())
-def ctx_gather_dp_cp_op(data: torch.Tensor, ctx_indices: torch.Tensor, context_parallel: int) -> torch.Tensor:
-    batch_idx = torch.arange(data.shape[0], device=data.device).view(-1, 1, 1)
-    dp_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
-    safe_indices = torch.where(ctx_indices == torch.iinfo(torch.int32).max, 0, ctx_indices)
-    slots_per_cp = data.shape[2] // context_parallel
-    address = (
-        torch.remainder(safe_indices, context_parallel) * slots_per_cp
-        + torch.div(safe_indices, context_parallel, rounding_mode="floor")
-    ).long()
-    return data[batch_idx, dp_idx, address]
-
-
-@ctx_gather_dp_cp_op.register_fake
-def _(data: torch.Tensor, ctx_indices: torch.Tensor, context_parallel: int) -> torch.Tensor:
-    return torch.empty(
-        (*ctx_indices.shape, *data.shape[3:]),
-        dtype=data.dtype,
-        device=data.device,
-    )
-
-
 @torch.library.custom_op("qefficient::ctx_gather", mutates_args=())
 def ctx_gather_op(data: torch.Tensor, ctx_indices: torch.Tensor, comp_ctx_len: int) -> torch.Tensor:
     batch_indices = torch.arange(data.shape[0]).view(-1, 1, 1)
