@@ -161,7 +161,8 @@ class QEffQwen3_5MoeDynamicCache(Cache):
     Hybrid cache for Qwen3.5 models.
 
     Full-attention layers retain KV cache, while linear-attention layers retain
-    convolution and recurrent states.
+    channel-last convolution state ``[batch, conv_kernel, conv_dim]`` and
+    recurrent state ``[batch, value_heads, key_dim, value_dim]``.
     """
 
     def __init__(self, config):
@@ -271,6 +272,12 @@ class QEffQwen3_5MoeDynamicCache(Cache):
         query_length = cache_position.shape[0]
         past_seen_tokens = self.get_seq_length(layer_idx)
         return query_length + past_seen_tokens, kv_offset
+
+    def read_only(self, layer_idx: int, cache_kwargs: dict) -> Tuple[torch.Tensor, torch.Tensor]:
+        layer = self.kv_layers[layer_idx]
+        if layer is None:
+            raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
+        return layer.read_only(cache_kwargs)
 
     def read_only_blocked_kv(self, start_index: int, end_index: int, layer_idx: int, cache_kwargs: dict):
         layer = self.kv_layers[layer_idx]
@@ -555,22 +562,16 @@ def qeff_torch_causal_conv1d_update(
     dflash: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     _, hidden_size, seq_len = hidden_states.shape
-    grouped_conv_state = conv_state.ndim == 4
+    if conv_state.ndim != 3 or conv_state.shape[-1] != hidden_size:
+        raise ValueError(
+            "conv_state must use channel-last layout [batch, conv_kernel, conv_dim], "
+            f"got shape={tuple(conv_state.shape)} for conv_dim={hidden_size}"
+        )
 
-    if grouped_conv_state:
-        bsz, num_kv_heads, conv_group_dim, state_len = conv_state.shape
-        if hidden_size != num_kv_heads * conv_group_dim:
-            raise ValueError(
-                "Grouped conv_state shape mismatch: "
-                f"hidden_size={hidden_size}, num_kv_heads={num_kv_heads}, conv_group_dim={conv_group_dim}"
-            )
-        conv_state_flat = conv_state.reshape(bsz, hidden_size, state_len)
-    else:
-        conv_state_flat = conv_state
-
-    state_len = conv_state_flat.shape[-1]
+    state_len = conv_state.shape[1]
+    conv_state_cf = conv_state.transpose(1, 2)
     pos_ids = position_ids[0] if position_ids.ndim == 3 else position_ids
-    hidden_states_new = torch.cat([conv_state_flat, hidden_states], dim=-1).to(weight.dtype)
+    hidden_states_new = torch.cat([conv_state_cf, hidden_states], dim=-1).to(weight.dtype)
 
     position_scalar = pos_ids.reshape(-1)[0]
     seq_len_tensor = torch.full_like(position_scalar, seq_len)
@@ -578,9 +579,11 @@ def qeff_torch_causal_conv1d_update(
 
     # Decode is a fixed shift. Keep this branch tensor-only so the compiler can
     # select it for both BS1 and folded decode graphs.
-    shifted_conv_state = torch.cat([conv_state_flat[..., 1:], hidden_states_new[..., -1:]], dim=-1)
+    shifted_conv_state = torch.cat(
+        [conv_state[:, 1:, :], hidden_states[:, :, -1:].transpose(1, 2).to(conv_state.dtype)], dim=1
+    )
     valid_decode = (pos_ids[:, -1:] >= 0).to(shifted_conv_state.dtype).reshape(-1, 1, 1)
-    shifted_conv_state = shifted_conv_state * valid_decode + conv_state_flat * (1 - valid_decode)
+    shifted_conv_state = shifted_conv_state * valid_decode + conv_state * (1 - valid_decode)
 
     # Prefill and padded chunks retain the general last-valid-position gather.
     if dflash:
@@ -591,15 +594,11 @@ def qeff_torch_causal_conv1d_update(
         order = torch.argsort(torch.cat([cached_order, token_order], dim=1), dim=1)
     else:
         # Derive zeros from an existing state view; torch.zeros emits a dynamic ConstantOfShape in subfunctions.
-        zeros = conv_state_flat[:, 0, :].to(pos_ids.dtype) * 0
+        zeros = conv_state[:, :, 0].to(pos_ids.dtype) * 0
         order = torch.argsort(torch.cat([zeros, pos_ids], dim=1), dim=1)
     last_positions = order[:, -state_len:]
     ctx_idx = last_positions.to(torch.long).unsqueeze(1).expand(-1, hidden_size, -1)
-    gathered_conv_state = torch.gather(hidden_states_new, dim=2, index=ctx_idx)
-
-    if grouped_conv_state:
-        shifted_conv_state = shifted_conv_state.reshape(bsz, num_kv_heads, conv_group_dim, state_len)
-        gathered_conv_state = gathered_conv_state.reshape(bsz, num_kv_heads, conv_group_dim, state_len)
+    gathered_conv_state = torch.gather(hidden_states_new, dim=2, index=ctx_idx).transpose(1, 2)
     updated_conv_state = torch.where(is_decode, shifted_conv_state, gathered_conv_state)
     out = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)
     out = F.silu(out[:, :, -seq_len:]).to(hidden_states.dtype)
@@ -951,6 +950,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
         initial_state=None,
         output_final_state=False,
         use_qk_l2norm_in_kernel=False,
+        use_reciprocal_for_qk_norm=False,
         mask_causal=None,
         mask_strict=None,
         ones_lower=None,
@@ -974,8 +974,14 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
         #     query = l2norm(query, dim=-1, eps=1e-6)
         #     key = l2norm(key, dim=-1, eps=1e-6)
         if use_qk_l2norm_in_kernel:
-            query = query * torch.rsqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6)
-            key = key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6)
+            query_squared_norm = (query * query).sum(dim=-1, keepdim=True) + 1e-6
+            key_squared_norm = (key * key).sum(dim=-1, keepdim=True) + 1e-6
+            if use_reciprocal_for_qk_norm:
+                query = query * torch.reciprocal(torch.sqrt(query_squared_norm))
+                key = key * torch.reciprocal(torch.sqrt(key_squared_norm))
+            else:
+                query = query / torch.sqrt(query_squared_norm)
+                key = key / torch.sqrt(key_squared_norm)
         query, key, value, beta, g = [
             x.transpose(1, 2).contiguous().to(self.torch_dtype) for x in (query, key, value, beta, g)
         ]
@@ -1149,7 +1155,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
 
             if conv_state_all is None or recurrent_state_all is None:
                 # Eager prefill can create the hybrid cache before GDN state exists.
-                conv_state_all = mixed_qkv.new_zeros(batch_size, self.conv_dim, self.conv_kernel_size)
+                conv_state_all = mixed_qkv.new_zeros(batch_size, self.conv_kernel_size, self.conv_dim)
                 recurrent_state_all = torch.zeros(
                     batch_size,
                     self.num_v_heads,
@@ -1163,24 +1169,11 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
 
             # Continuous batching path: gather only active rows, then scatter updates back.
             if state_batch_index is not None:
-                conv_state_grouped = conv_state_all.ndim == 4
-                if conv_state_grouped:
-                    conv_state_all_flat = conv_state_all.reshape(
-                        conv_state_all.shape[0],
-                        conv_state_all.shape[1] * conv_state_all.shape[2],
-                        conv_state_all.shape[3],
-                    )
-                else:
-                    conv_state_all_flat = conv_state_all
-                conv_batch_index = state_batch_index.to(conv_state_all_flat.device)
+                conv_batch_index = state_batch_index.to(conv_state_all.device)
                 conv_ctx_indices = torch.arange(
-                    conv_state_all_flat.shape[1], dtype=torch.int64, device=conv_state_all_flat.device
+                    conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
-                conv_state = ctx_gather_cb_3d(conv_state_all_flat, conv_batch_index, conv_ctx_indices)
-                if conv_state_grouped:
-                    conv_state = conv_state.reshape(
-                        conv_state.shape[0], conv_state_all.shape[1], conv_state_all.shape[2], conv_state_all.shape[3]
-                    )
+                conv_state = ctx_gather_cb_3d(conv_state_all, conv_batch_index, conv_ctx_indices)
 
                 recurrent_batch_index = state_batch_index.to(recurrent_state_all.device)
                 recurrent_ctx_indices = torch.arange(
@@ -1204,9 +1197,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_keep = (~conv_reset_mask).to(conv_state.dtype)
                 conv_state = conv_state * conv_keep
 
-                recurrent_reset_mask = zero_cumsum.to(dtype=torch.bool, device=recurrent_state.device).reshape(
+                recurrent_reset_mask = conv_reset_mask.reshape(
                     recurrent_state.shape[0], *([1] * (recurrent_state.ndim - 1))
-                )
+                ).to(device=recurrent_state.device)
                 recurrent_keep = (~recurrent_reset_mask).to(recurrent_state.dtype)
                 recurrent_state = recurrent_state * recurrent_keep
 
@@ -1245,37 +1238,15 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                     dflash=dflash_chunk_size is not None,
                 )
             if state_batch_index is not None:
-                if conv_state_all.ndim == 4:
-                    conv_state_all_flat = conv_state_all.reshape(
-                        conv_state_all.shape[0],
-                        conv_state_all.shape[1] * conv_state_all.shape[2],
-                        conv_state_all.shape[3],
-                    )
-                    new_conv_state_flat = new_conv_state.reshape(
-                        new_conv_state.shape[0],
-                        new_conv_state.shape[1] * new_conv_state.shape[2],
-                        new_conv_state.shape[3],
-                    )
-                else:
-                    conv_state_all_flat = conv_state_all
-                    new_conv_state_flat = new_conv_state
-                conv_batch_index = state_batch_index.to(conv_state_all_flat.device)
+                conv_batch_index = state_batch_index.to(conv_state_all.device)
                 conv_position_ids = torch.arange(
-                    conv_state_all_flat.shape[1], dtype=torch.int64, device=conv_state_all_flat.device
+                    conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
                 if dflash_commit_final is not None:
                     conv_position_ids = torch.where(commit_rows, conv_position_ids, torch.iinfo(torch.int32).max)
-                scattered_conv = ctx_scatter_cb_3d(
-                    conv_state_all_flat, conv_batch_index, conv_position_ids, new_conv_state_flat
+                updated_conv_state = ctx_scatter_cb_3d(
+                    conv_state_all, conv_batch_index, conv_position_ids, new_conv_state
                 )
-                if conv_state_all.ndim == 4:
-                    scattered_conv = scattered_conv.reshape(
-                        conv_state_all.shape[0],
-                        conv_state_all.shape[1],
-                        conv_state_all.shape[2],
-                        conv_state_all.shape[3],
-                    )
-                updated_conv_state = scattered_conv
             else:
                 updated_conv_state = new_conv_state
             if not return_cache_states:
@@ -1356,6 +1327,7 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                     initial_state=recurrent_state,
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
+                    use_reciprocal_for_qk_norm=batch_index is None and not batch_fold,
                     mask_causal=self._mask_causal,
                     mask_strict=self._mask_strict,
                     ones_lower=self._ones_lower,
@@ -1864,8 +1836,7 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
                 ]
             else:
                 layer = self.model.layers[layer_idx].linear_attn
-                # Keep the exported retained-state contract flat; the conv kernel consumes [B, conv_dim, K].
-                conv_shape = (batch_size, layer.conv_dim, layer.conv_kernel_size)
+                conv_shape = (batch_size, layer.conv_kernel_size, layer.conv_dim)
                 recurrent_shape = (batch_size, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
                 layer_names = [f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}"]
                 layer_tensors = [
@@ -2875,8 +2846,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
                     lang_inputs["past_key_values"][i].append(torch.zeros(kv_cache_shape, dtype=kv_dtype))
             else:
                 layer = self.model.language_model.layers[i].linear_attn
-                # Keep the exported retained-state contract flat; the conv kernel consumes [B, conv_dim, K].
-                conv_shape = (linear_batch_size, layer.conv_dim, layer.conv_kernel_size)
+                conv_shape = (linear_batch_size, layer.conv_kernel_size, layer.conv_dim)
                 recurrent_shape = (linear_batch_size, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
                 lang_inputs["past_key_values"][i].append(torch.zeros(conv_shape, dtype=kv_dtype))
                 lang_inputs["past_key_values"][i].append(torch.zeros(recurrent_shape, dtype=kv_dtype))

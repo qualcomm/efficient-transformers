@@ -21,6 +21,7 @@ from QEfficient.compile.mdp_generator import (
     _repair_scoped_alias_partitioning,
     generate_disagg_mdp_config,
     generate_disagg_mdp_intersection_config,
+    generate_disagg_mdp_partition_config,
     precheck_and_autofix_mdp_partition_order,
 )
 
@@ -140,6 +141,24 @@ def test_intersection_preserves_scoped_and_unscoped_nodes_selected_by_compiler(t
         "/language_model/Gather_10",
     ]
     assert mdp_json["partitions"][1]["nodeList"] == ["/language_model/layers.1/hidden", "/Gather_10"]
+
+
+@pytest.mark.cpu_only
+def test_precheck_preserves_model_scoped_decoder_layer_callsite(tmp_path):
+    decoder_callsite = "/model/layers.0/QEffGptOssDecoderLayer"
+    producer = "/model/embed_tokens/Gather"
+    onnx_path = _save_dependency_graph(
+        tmp_path / "model_scoped_decoder.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["hidden"], name=producer),
+            helper.make_node("Identity", ["hidden"], ["output"], name=decoder_callsite),
+        ],
+    )
+    mdp_json = _mdp([decoder_callsite], [producer])
+
+    precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json)
+
+    assert decoder_callsite in mdp_json["partitions"][0]["nodeList"]
 
 
 @pytest.mark.cpu_only
@@ -522,6 +541,41 @@ def test_precheck_alias_cleanup_respects_exact_protected_name(
 
 
 @pytest.mark.cpu_only
+def test_precheck_preserves_same_suffix_nodes_with_distinct_computations(tmp_path):
+    nodes = [
+        helper.make_node("Reshape", ["data", "shape_a"], ["scoped_reshape"], name="/language_model/Reshape_4"),
+        helper.make_node("Reshape", ["data", "shape_b"], ["top_reshape"], name="/Reshape_4"),
+        helper.make_node("Gather", ["data", "indices"], ["scoped_gather"], axis=0, name="/language_model/Gather_9"),
+        helper.make_node("Gather", ["data", "indices"], ["top_gather"], axis=1, name="/Gather_9"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "distinct_same_suffix_computations",
+        inputs=[
+            helper.make_tensor_value_info("data", TensorProto.FLOAT, [2, 2]),
+            helper.make_tensor_value_info("shape_a", TensorProto.INT64, [2]),
+            helper.make_tensor_value_info("shape_b", TensorProto.INT64, [2]),
+            helper.make_tensor_value_info("indices", TensorProto.INT64, [1]),
+        ],
+        outputs=[
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, [None, None])
+            for name in ("scoped_reshape", "top_reshape", "scoped_gather", "top_gather")
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model)
+    onnx_path = tmp_path / "distinct_same_suffix_computations.onnx"
+    onnx.save(model, onnx_path)
+    mdp_json = _mdp(["/language_model/Reshape_4", "/language_model/Gather_9"], ["/Reshape_4", "/Gather_9"])
+
+    removed = precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json)
+
+    assert removed == 0
+    assert mdp_json["partitions"][0]["nodeList"] == ["/language_model/Reshape_4", "/language_model/Gather_9"]
+    assert mdp_json["partitions"][1]["nodeList"] == ["/Reshape_4", "/Gather_9"]
+
+
+@pytest.mark.cpu_only
 def test_compiler_repair_uses_exact_top_level_name_not_scoped_peer(tmp_path):
     """Only the unscoped top-level name is relocated; its scoped peer is distinct."""
     onnx_path = _save_dependency_graph(
@@ -661,3 +715,61 @@ def test_intersection_repair_skips_moves_crossing_transitive_dependencies(tmp_pa
 
     assert repaired == 0
     assert [partition["nodeList"] for partition in mdp_json["partitions"]] == original_node_lists
+
+
+@pytest.mark.cpu_only
+def test_mdp_partition_assigns_generic_producer_to_first_consumer_layer(tmp_path):
+    decoder_layer_0 = "/model/layers.0/QEffGptOssDecoderLayer"
+    decoder_layer_1 = "/model/layers.1/QEffGptOssDecoderLayer"
+    producer = "Identity_100"
+    onnx_path = _save_dependency_graph(
+        tmp_path / "generic_layer_producer.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["later_output"], name=decoder_layer_1),
+            helper.make_node("Identity", ["input"], ["layer0_input"], name=producer),
+            helper.make_node("Identity", ["layer0_input"], ["output"], name=decoder_layer_0),
+        ],
+    )
+
+    mdp_json = generate_disagg_mdp_partition_config(str(onnx_path), 2, 2, 2, 4)
+
+    assert mdp_json["partitions"][0]["nodeList"] == [producer, decoder_layer_0]
+    assert mdp_json["partitions"][1]["nodeList"] == [decoder_layer_1]
+    assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json) == 0
+
+
+@pytest.mark.cpu_only
+def test_mdp_partition_keeps_external_gathers_in_first_partition(tmp_path):
+    full_attention_gather = "/language_model/Gather"
+    sliding_attention_gather = "/language_model/Gather_2"
+    decoder_layer_0 = "/language_model/layers.0/QEffGemma4TextDecoderLayer"
+    decoder_layer_1 = "/language_model/layers.1/QEffGemma4TextDecoderLayer"
+    onnx_path = tmp_path / "external_gathers.onnx"
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "Gather", ["full_cache", "position_ids"], ["full_rotary"], axis=0, name=full_attention_gather
+            ),
+            helper.make_node(
+                "Gather", ["sliding_cache", "position_ids"], ["sliding_rotary"], axis=0, name=sliding_attention_gather
+            ),
+            helper.make_node("Identity", ["sliding_rotary"], ["hidden"], name=decoder_layer_0),
+            helper.make_node("Add", ["hidden", "full_rotary"], ["output"], name=decoder_layer_1),
+        ],
+        "gemma4_external_gathers",
+        inputs=[
+            helper.make_tensor_value_info("full_cache", TensorProto.FLOAT, [4, 4]),
+            helper.make_tensor_value_info("sliding_cache", TensorProto.FLOAT, [4, 4]),
+            helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1]),
+        ],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    onnx.checker.check_model(model)
+    onnx.save(model, onnx_path)
+
+    mdp_json = generate_disagg_mdp_partition_config(str(onnx_path), 2, 2, 2, 4)
+
+    assert full_attention_gather in mdp_json["partitions"][0]["nodeList"]
+    assert sliding_attention_gather in mdp_json["partitions"][0]["nodeList"]
+    assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json) == 0

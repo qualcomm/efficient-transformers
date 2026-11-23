@@ -6,6 +6,7 @@
 # -----------------------------------------------------------------------------
 import copy
 from collections import Counter
+from pathlib import Path
 
 import pytest
 import torch
@@ -724,6 +725,11 @@ def test_qwen3moe_disagg_compile_uses_distinct_decode_and_prefill_onnx(tmp_path,
 
     def fake_compile(command, *args, **kwargs):
         compile_commands.append(command)
+        qpc_dir = Path(
+            next(argument.split("=", 1)[1] for argument in command if argument.startswith("-aic-binary-dir="))
+        )
+        qpc_dir.mkdir(parents=True, exist_ok=True)
+        (qpc_dir / "programqpc.bin").write_bytes(b"mock qpc")
         return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_compile)
