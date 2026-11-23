@@ -8,7 +8,6 @@
 """Single-prompt DFlash runner for a VLM text or image prompt."""
 
 import argparse
-import io
 import os
 import sys
 import time
@@ -66,15 +65,6 @@ IMAGE_PROMPT = (
 IMAGE_URL = "https://raw.githubusercontent.com/mathllm/MATH-V/a1f5cc3add200c0cd080fad463e500f44ef1fb41/images/8.jpg"
 
 
-def _load_image(source):
-    if str(source).startswith(("https://", "http://")):
-        response = requests.get(source, timeout=60)
-        response.raise_for_status()
-        source = io.BytesIO(response.content)
-    with Image.open(source) as image:
-        return image.convert("RGB")
-
-
 def parse_device_list(value):
     return [int(device) for device in value.split(",") if device.strip()]
 
@@ -107,7 +97,7 @@ def parse_args():
     parser.add_argument("--dlm_hf_path", "--draft-model", dest="dlm_hf_path", default=None)
     parser.add_argument("--prompt", default=DEFAULT_TEXT_PROMPT)
     parser.add_argument("--image", action="store_true")
-    parser.add_argument("--image-path", "--image_url", dest="image_url", help="Local image path or URL.")
+    parser.add_argument("--image_url", default=None)
     parser.add_argument("--image_prompt", default=None)
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument(
@@ -134,8 +124,7 @@ def parse_args():
     parser.add_argument("--dlm_devices", type=parse_device_list, default=[0, 1, 2, 3])
     parser.add_argument("--vision_devices", type=parse_device_list, default=[0, 1, 2, 3])
     parser.add_argument("--tlm_cores", type=int, default=8)
-    parser.add_argument("--dlm_cores", type=int, default=4)
-    parser.add_argument("--vision_cores", type=int, default=4)
+    parser.add_argument("--dlm_cores", type=int, default=8)
     parser.add_argument("--ctx_len", type=int, default=4096)
     parser.add_argument("--prefill_seq_len", type=int, default=128)
     parser.add_argument(
@@ -211,29 +200,27 @@ def _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size):
         raise ValueError("This DFlash-2 example uses a combined TLM QPC; omit the split-TLM options.")
     if args.image and args.tlm_qpc and not args.vision_qpc:
         raise ValueError("Reusing an image-capable TLM requires --vision_qpc as well as --tlm_qpc.")
-    image_size = args.height or args.width or 448
-    if args.height is not None and args.width is not None and args.height != args.width:
-        raise ValueError("The DFlash-2 compile helper requires equal --height and --width.")
-    args.height = args.width = image_size
+    if args.image:
+        if args.height is not None and args.width is not None and args.height != args.width:
+            raise ValueError("The DFlash-2 compile helper requires equal --height and --width.")
+        args.height = args.width = args.height or args.width or 448
 
     meta = read_dflash2_meta(dlm_repo, args.hf_token)
-    target_auto_class = _dflash2_target_auto_class(tlm_config)
     tlm_qpc = args.tlm_qpc or compile_dflash2_tlm_qpc(
         tlm_repo,
         dlm_repo,
-        target_auto_class=target_auto_class,
+        target_auto_class=_dflash2_target_auto_class(tlm_config),
         prefill_seq_len=args.prefill_seq_len,
         ctx_len=args.ctx_len,
         num_cores=args.tlm_cores,
         num_devices=len(args.tlm_devices),
-        vision_num_cores=args.vision_cores if target_auto_class == "image_text_to_text" else None,
-        vision_num_devices=len(args.vision_devices) if target_auto_class == "image_text_to_text" else None,
+        vision_num_devices=len(args.vision_devices) if args.image else None,
         block_size=meta.block_size,
         mxfp6_matmul=args.precision == "fp6",
         mxint8_kv_cache=True,
         kv_offload=True,
         lang_only=not args.image,
-        image_size=image_size,
+        image_size=args.height if args.image else 56,
         mos=1,
         node_precision_info=True,
         hf_token=args.hf_token,
@@ -348,7 +335,7 @@ def _run_gemma(
 
         image_url = args.image_url or IMAGE_URL
         user_prompt = args.image_prompt or IMAGE_PROMPT
-        image = _load_image(image_url)
+        image = Image.open(requests.get(image_url, stream=True, timeout=60).raw).convert("RGB")
         input_ids, mm_token_type_ids, processor_inputs = build_inputs_gemma4(
             processor, tokenizer, user_prompt, image=image, enable_thinking=args.enable_thinking
         )
@@ -423,7 +410,7 @@ def _run_qwen3_vl(
             raise ValueError("--image requires the Qwen3-VL vision-encoder QPC.")
         image_url = args.image_url or IMAGE_URL
         logger.info(f"Image: {image_url}")
-        image = _load_image(image_url)
+        image = Image.open(requests.get(image_url, stream=True, timeout=60).raw).convert("RGB")
         vision_devices = args.vision_devices if args.vision_devices is not None else args.tlm_devices
         vision_session = QAICInferenceSession(vision_qpc, vision_devices)
         prompt_text = args.image_prompt or IMAGE_PROMPT
@@ -529,7 +516,7 @@ def main():
     if args.tlm_prefill_devices and len(args.tlm_prefill_devices) != len(args.tlm_devices):
         raise ValueError("Split TLM prefill and verification device groups must have the same device count.")
 
-    if args.tlm_qpc and (args.vision_qpc or not args.image):
+    if args.tlm_qpc and args.vision_qpc:
         tlm_qpc, vision_qpc = args.tlm_qpc, args.vision_qpc
     else:
         if args.tlm_qpc or args.vision_qpc:
@@ -540,8 +527,6 @@ def main():
             "ctx_len": args.ctx_len,
             "num_cores": args.tlm_cores,
             "num_devices": len(args.tlm_devices),
-            "vision_num_cores": args.vision_cores,
-            "vision_num_devices": len(args.vision_devices),
             "hf_token": args.hf_token,
         }
         if is_qwen3vl:
@@ -570,9 +555,6 @@ def main():
         logger.info(f"TLM prefill qpc: {args.tlm_prefill_qpc}")
     logger.info(f"Vision qpc: {vision_qpc}")
     logger.info(f"DLM qpc: {dlm_qpc}")
-
-    if args.compile_only:
-        return
 
     tokenizer = AutoTokenizer.from_pretrained(tlm_repo, token=args.hf_token, trust_remote_code=True)
     if tokenizer.pad_token_id is None:

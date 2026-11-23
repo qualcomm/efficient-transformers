@@ -64,6 +64,7 @@ def _build_aliases(model_map):
 
 MODEL_ALIASES = _build_aliases(MODEL_MAP)
 
+
 DEFAULT_TEXT_PROMPT = '''Write a solution to the following problem and make sure that it passes the tests:
 ```python
 from typing import List
@@ -467,8 +468,6 @@ def compile_gemma_vlm_qpcs(
     ctx_len: int,
     num_cores: int,
     num_devices: int,
-    vision_num_cores: int | None = None,
-    vision_num_devices: int | None = None,
     hf_token: str | None = None,
 ) -> tuple[str, str]:
     """Build a vision-language model (VLM) TLM — vision encoder + language decoder — and
@@ -481,8 +480,8 @@ def compile_gemma_vlm_qpcs(
     scaling as the text ``compile_tlm_qpc`` path); the DFlashTLMTransform attaches the
     modules but leaves them random until this injection runs.
 
-    The vision encoder inherits the language resource budget unless overridden.
-    ``node_precision_info`` stays on: the VLM language decoder needs
+    The vision encoder compiles on the same ``num_cores``/``num_devices`` budget as the
+    language decoder. ``node_precision_info`` stays on: the VLM language decoder needs
     FP32 node-precision-info on its precision-sensitive ops or decode collapses.
 
     Currently exercised with the gemma4 VLM family; other VLMs can be added to MODEL_MAP.
@@ -521,8 +520,6 @@ def compile_gemma_vlm_qpcs(
         ctx_len=ctx_len,
         num_cores=num_cores,
         num_devices=num_devices,
-        vision_num_cores=vision_num_cores,
-        vision_num_devices=vision_num_devices,
         mxfp6_matmul=True,
         mxint8_kv_cache=True,
         aic_enable_depth_first=True,
@@ -547,8 +544,6 @@ def compile_qwen3vl_vlm_qpcs(
     ctx_len: int,
     num_cores: int,
     num_devices: int,
-    vision_num_cores: int | None = None,
-    vision_num_devices: int | None = None,
     height: int | None = None,
     width: int | None = None,
     hf_token: str | None = None,
@@ -615,8 +610,6 @@ def compile_qwen3vl_vlm_qpcs(
         "ctx_len": ctx_len,
         "num_cores": num_cores,
         "num_devices": num_devices,
-        "vision_num_cores": vision_num_cores,
-        "vision_num_devices": vision_num_devices,
         "mxfp6_matmul": True,
         "mxint8_kv_cache": True,
         "mos": 1,

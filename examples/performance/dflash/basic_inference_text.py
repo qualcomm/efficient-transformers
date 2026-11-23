@@ -18,8 +18,7 @@ script:
 
 Examples:
     # Compile + run with all defaults
-    python basic_inference_text.py --model_name Qwen3-4B \\
-        --prompt "Explain speculative decoding in two sentences."
+    python basic_inference_text.py --model_name Qwen3-4B
 
     # Full HF path also accepted
     python basic_inference_text.py --model_name Qwen/Qwen3-4B \\
@@ -124,13 +123,13 @@ def parse_args():
     p.add_argument(
         "--tlm_devices",
         type=parse_device_list,
-        default=[0, 1, 2, 3],
+        default=[40, 41, 42, 43],
         help="Comma-separated device IDs, e.g. '0,1,2,3' or '0'.",
     )
     p.add_argument(
         "--dlm_devices",
         type=parse_device_list,
-        default=[0, 1, 2, 3],
+        default=[40, 41, 42, 43],
         help="Comma-separated device IDs, e.g. '0,1,2,3' or '0'.",
     )
     p.add_argument("--tlm_cores", type=int, default=8)

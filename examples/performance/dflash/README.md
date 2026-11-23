@@ -10,56 +10,9 @@ single prompt in-process via `QEfficient.generation.dflash_generation`. The thre
 | text — single prompt | `basic_inference_text.py` | `dflash_generation.run_spd_inference_single` |
 | vision — single prompt/image | `basic_inference_vision.py` | text, Gemma4, or Qwen3-VL generation adapter |
 
-Both scripts include a fixed coding prompt. The vision script's `--image` mode
-uses a fixed image URL and question. Override them with `--prompt`, or with
-`--image-path` and `--image_prompt`. Thinking is disabled by default; use
-`--enable-thinking` to opt in. These are single-input examples, not benchmark
-results. The default image is downloaded directly from a commit-pinned URL;
-use `--image-path /path/to/image.jpg` when offline. Input attribution is in
-[NOTICE.md](NOTICE.md).
-
-### Qwen3.5-family quick start
-
-Run from the repository root. The following combined-TLM setup uses the same four
-devices for language, draft, and vision, with 8/4/4 cores per device:
-
-```bash
-EXAMPLES=examples/performance/dflash
-MODEL=Qwen3.8-27B
-METHOD=dflash-2
-
-# Compile missing artifacts and run the default image prompt.
-python "$EXAMPLES/basic_inference_vision.py" \
-    --model_name "$MODEL" --dflash-method "$METHOD" --no-disagg-tlm \
-    --tlm_devices 0,1,2,3 --dlm_devices 0,1,2,3 --vision_devices 0,1,2,3 \
-    --tlm_cores 8 --dlm_cores 4 --vision_cores 4 \
-    --ctx_len 4096 --prefill_seq_len 128 --generation_len 1024 \
-    --height 448 --width 448 --image
-
-# Reuse compiled artifacts without exporting or compiling.
-TLM_QPC=/path/to/language/qpc
-DLM_QPC=/path/to/draft/qpc
-VISION_QPC=/path/to/vision/qpc
-python "$EXAMPLES/basic_inference_vision.py" \
-    --model_name "$MODEL" --dflash-method "$METHOD" --no-disagg-tlm \
-    --tlm_qpc "$TLM_QPC" --dlm_qpc "$DLM_QPC" --vision_qpc "$VISION_QPC" \
-    --height 448 --width 448 --generation_len 1024 --image
-```
-
-For ordinary DFlash, set `METHOD=dflash` and, for example, `MODEL=Qwen3.5-4B`
-or `MODEL=Qwen3.6-35B-A3B`. Omit `--image` to run the default coding prompt
-through the VLM language model; a vision QPC is not required when reusing a
-language QPC for text input. Add `--compile-only` to build without inference.
-QPC precision, core counts, device counts, and image resolution must match the
-intended runtime setup; CLI settings do not change supplied QPCs.
-
-For a text-only architecture:
-
-```bash
-python "$EXAMPLES/basic_inference_text.py" --model_name Qwen3-4B
-python "$EXAMPLES/basic_inference_text.py" --model_name Qwen3-4B \
-    --tlm_qpc /path/to/language/qpc --dlm_qpc /path/to/draft/qpc
-```
+Both scripts default to a fixed coding prompt. With `--image`, the vision
+script uses a fixed triangle image and question for both DFlash and DFlash2.
+Override with `--prompt`, `--image_url`, or `--image_prompt`.
 
 ---
 
@@ -70,8 +23,7 @@ python "$EXAMPLES/basic_inference_text.py" --model_name Qwen3-4B \
 ### Single prompt
 
 ```bash
-python basic_inference_text.py --model_name Qwen3-4B \
-    --prompt "Explain speculative decoding in two sentences."
+python basic_inference_text.py --model_name Qwen3-4B
 ```
 
 ---
@@ -123,8 +75,8 @@ works for either — gemma4 entries have no default TLM HF path (pass `--tlm_hf_
 `Qwen3-VL-32B-Instruct` does, so `--tlm_hf_path` is optional for it.
 
 The combined-TLM vision path compiles **three** QPCs: the language decoder (TLM), the **vision
-encoder** (`pixel_values -> vision_embeds`), and the DFlash draft (DLM). Components
-can use separate devices or share devices when their core and memory budgets fit.
+encoder** (`pixel_values -> vision_embeds`), and the DFlash draft (DLM). Because the
+TLM and DLM fill their own cards, the vision encoder usually needs its **own** devices.
 Qwen3.5-MoE's default split TLM adds a fourth QPC for language prefill.
 
 > Set `QEFF_HOME` to a filesystem with free space before compiling — the VLM TLM QPC
@@ -169,13 +121,11 @@ default `lang_only=True` preserves the language-path string return; use
 ```bash
 # gemma4
 python basic_inference_vision.py --model_name gemma-4-31B-it --tlm_hf_path google/gemma-4-31B-it \
-    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
-    --prompt "Tell me about the Taj Mahal."
+    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51
 
 # qwen3-vl
 python basic_inference_vision.py --model_name Qwen3-VL-32B-Instruct \
-    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51 \
-    --prompt "Tell me about the Taj Mahal."
+    --tlm_devices 40,41,42,43 --dlm_devices 44,45,46,47 --vision_devices 48,49,50,51
 ```
 
 ### Single image + text prompt
@@ -206,13 +156,12 @@ python basic_inference_vision.py --model_name Qwen3.5-4B \
     --height 448 --width 448 --image
 ```
 
-Omit `--image` for the default coding prompt, or use `--prompt "..."` for custom text input.
+Omit `--image` for the default coding prompt, or pass `--prompt "..."` for custom text.
 Qwen3.5 dense and MoE targets use concatenated replay and verification. Each decode call takes
 `2 * block_size` positions: the previous accepted prefix (padded with position IDs
-of `-1`), followed by the next draft block. It commits only the prefix's convolution
-and recurrent states. Full-attention K/V is updated once for every valid replay
-and verification position. Causal masking hides rejected suffixes, and subsequent
-blocks overwrite them, so a second accepted-only K/V scatter is unnecessary.
+of `-1`), followed by the next draft block. Convolution and recurrent states
+still commit only the accepted prefix. Full-attention KV uses one update for
+all valid positions: causal masking hides rejected suffixes, which later blocks overwrite.
 Only the new block's token predictions and projected features are used by DFlash.
 The first decode call has an entirely masked replay half. After each verification,
 the runtime queues the seed plus accepted draft tokens for the next call; the new
@@ -229,19 +178,14 @@ export hash distinguishes the new cache protocol; existing artifacts are not del
 Omit both `--tlm_qpc` and `--vision_qpc` to let this example select/compile compatible artifacts.
 The existing vision and DLM QPCs do not need to change for fused replay.
 
-The direct full-attention retained-KV update uses the `fused_replay_kv_direct_v3`
-cache protocol. Earlier concatenated TLM artifacts, including
-`fused_replay_kv_commit_v2`, need re-export/recompilation to remove the redundant
-accepted-only update. Explicit `--tlm_qpc` paths must be replaced with rebuilt
-artifacts; their input shapes alone do not identify the retained-state behavior.
+The direct retained-KV update uses the `fused_replay_kv_direct_v3` cache protocol.
+Re-export/recompile earlier TLM artifacts, including `fused_replay_kv_commit_v2`.
+Replace explicit `--tlm_qpc` paths; input shapes alone cannot identify this fix.
 
-The single-request Qwen target helpers explicitly use `continuous_batching=False`
-at load/export time. This removes unnecessary request-slot routing for linear
-attention states from BS=1 graphs. The existing API and higher-batch support are
-unchanged: multi-slot serving should keep continuous batching enabled. Passing
-slot zero at runtime to an already compiled CB QPC does not remove those graph
-operations. Full-attention KV still uses the padding-aware scatter so replay
-positions of `-1` cannot overwrite valid cache entries.
+BS1 Qwen VLM target helpers explicitly set `continuous_batching=False` for
+DFlash and DFlash2 to omit unnecessary request-slot routing during export.
+Higher-batch support is unchanged; multi-slot serving still needs CB.
+Passing slot zero to an existing CB QPC does not remove those graph operations.
 
 The previous two-call TLM QPCs are no longer supported; the example rejects them
 with a recompilation message. There is no two-call fallback or mode switch.
@@ -304,15 +248,16 @@ block-width QPCs. An explicitly requested width must match the supplied QPC.
 
 Single prompts are always wrapped in the model's native chat template, with a
 user message and an assistant-generation prefix. The default coding prompt
-includes its task instruction; custom prompts are otherwise left unchanged. In the text example,
+includes its task instruction; custom prompts are unchanged. In the text example,
 `--format_prompt --category math` (or `coding`) adds the existing dataset-style
 instruction before chat formatting.
 
-Do not pass an already chat-formatted prompt, because it would be wrapped twice.
+Dataset benchmarks preserve their task instructions: text datasets use
+`utils.py`, and MathVision requests a boxed answer or option letter. Do not pass
+an already chat-formatted prompt, because it would be wrapped twice.
 
-Thinking is disabled by default in these single-prompt DFlash and DFlash2 examples,
-including Qwen3.5-family dense and MoE models. Use `--enable-thinking` to opt in
-where the model supports that option; underscore aliases are also accepted. Templates
+Thinking is disabled by default in these single-prompt DFlash and DFlash2 examples.
+Use `--enable-thinking` to opt in where supported; underscore aliases are also accepted. Templates
 without a thinking mode are not given synthetic thinking tokens.
 
 Baseline and DFlash comparisons must use the same task instructions, chat
@@ -323,7 +268,7 @@ prompt settings do not require recompiling QPCs.
 |---|---|---|
 | `--tlm_devices` | `0,1,2,3` | TLM device IDs |
 | `--dlm_devices` | `0,1,2,3` | DLM device IDs |
-| `--tlm_cores` / `--dlm_cores` | `8` / `8` (text), `8` / `4` (vision) | per-side core count |
+| `--tlm_cores` / `--dlm_cores` | `8` | per-side core count |
 | `--ctx_len` | `4096` | both scripts |
 | `--prefill_seq_len` | `128` | |
 | `--dlm-target-seq-len` | TLM prefill width | New DLM compilation; reused QPCs use their compiled width |
@@ -345,20 +290,20 @@ prompt settings do not require recompiling QPCs.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--vision_devices` | `0,1,2,3` | vision-encoder device IDs |
-| `--vision_cores` | `4` | vision cores per device, independent of language/draft |
+| `--vision_devices` | `0,1,2,3` | vision-encoder device IDs (usually a separate group) |
 | `--image` | off | run an image+text prompt instead of text |
-| `--image-path` / `--image_url` | pinned image URL | local path or URL for `--image` |
-| `--image_prompt` | triangle question | prompt text for `--image` |
-| `--height` / `--width` | `354` / `536` (DFlash), `448` / `448` (DFlash2) | compiled vision input resolution; DFlash2 helper requires square inputs |
+| `--image_url` | — | image URL for `--image` |
+| `--image_prompt` | — | prompt text for `--image` |
+| `--height` / `--width` | `354` / `536` | qwen3-vl only — compiled vision-encoder input resolution |
 | `--dflash-method` | `dflash` | select `dflash` or `dflash-2` |
 
 ## DFlash-2
 
 `basic_inference_vision.py --dflash-method dflash-2` compiles missing TLM and DLM QPCs automatically.
-It accepts text prompts and Qwen VLM image prompts through the shared Qwen
-generation adapter. Image mode also compiles or reuses the vision QPC.
-Add `--compile-only` to compile without running inference.
+Omit `--prompt` to use the default coding prompt. For Qwen VLMs, `--image` uses
+the same image/question as DFlash through the existing Qwen generation adapter.
+DFlash2 image dimensions must be square (default: 448). Add `--compile-only`
+to compile without inference.
 The host-side top-k candidate selector is disabled by default, so draft tokens use
 per-position logits argmax (`top_k_selector=False`).
 
@@ -369,8 +314,7 @@ python examples/performance/dflash/basic_inference_vision.py \
     --tlm_devices 34,35,36,37 \
     --dlm_devices 38,39,40,41 \
     --tlm_cores 16 \
-    --no-top-k-selector \
-    --prompt "Write a Python function that returns the nth Fibonacci number."
+    --no-top-k-selector
 ```
 
 Pass `--tlm_qpc` and `--dlm_qpc` (also `--vision_qpc` with `--image`) to reuse compiled QPCs, or
@@ -412,3 +356,32 @@ Edit `MODEL_MAP` in `utils.py`:
 ```
 
 Both entry points reuse the same map automatically.
+
+## Example input attribution
+
+The triangle question and linked image are from [MathVision](https://github.com/mathllm/MATH-V)
+(item 8); the coding prompt is [HumanEval](https://github.com/openai/human-eval) task 0.
+These fixed inputs are examples, not representative benchmark results.
+Both inputs are distributed under the MIT license; their notices are retained below.
+
+Copyright (c) 2021 Dan Hendrycks (MathVision upstream notice)
+
+Copyright (c) OpenAI (https://openai.com) (HumanEval)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
