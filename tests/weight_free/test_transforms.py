@@ -1967,8 +1967,8 @@ class TestWeightFreeExportDtype:
 
 class TestRuntimeRequirements:
     def test_validate_runtime_requirements_accepts_matching_requirements(self, monkeypatch):
-        requirements = {"torch": "==2.13.0", "accelerate": "==1.9.0"}
-        versions = {"torch": "2.13.0+cpu", "accelerate": "1.9.0"}
+        requirements = {"torch": "==2.13.0", "accelerate": "==1.10.1"}
+        versions = {"torch": "2.13.0+cpu", "accelerate": "1.10.1"}
 
         monkeypatch.setattr(runtime_requirements.metadata, "version", lambda name: versions[name])
 
@@ -1979,7 +1979,7 @@ class TestRuntimeRequirements:
         )
 
     def test_validate_runtime_requirements_reports_all_mismatches(self, monkeypatch):
-        requirements = {"accelerate": "==1.9.0", "missing-package": "==1.0"}
+        requirements = {"accelerate": "==1.10.1", "missing-package": "==1.0"}
 
         def version(name):
             if name == "missing-package":
@@ -1999,7 +1999,7 @@ class TestRuntimeRequirements:
         assert "dynamo=True requires the Dynamo export environment" in message
         assert "Mismatched packages:" in message
         assert "Install or repair the environment with:" in message
-        assert "accelerate: installed 1.14.0, expected ==1.9.0" in message
+        assert "accelerate: installed 1.14.0, expected ==1.10.1" in message
         assert "missing-package: not installed, expected ==1.0" in message
 
     def test_weight_free_from_pretrained_validates_requirements_before_model_build(self, monkeypatch):

@@ -13,7 +13,7 @@ from packaging.specifiers import SpecifierSet
 DYNAMO_EXPORT_REQUIREMENTS = {
     "torch": "==2.13.0",
     "torchvision": "==0.28.0",
-    "accelerate": "==1.9.0",
+    "accelerate": "==1.10.1",
     "compressed-tensors": "==0.17.0",
     "onnxscript": "==0.6.2",
 }
