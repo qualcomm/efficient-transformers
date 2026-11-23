@@ -240,7 +240,7 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
         )
     model = qeff.lang_model.model.language_model
     model.dflash_chunk_size = chunk_size
-    assert qeff.lang_model.hash_params["dflash_cache_protocol"].endswith("fused_replay_kv_commit_v2")
+    assert qeff.lang_model.hash_params["dflash_cache_protocol"].endswith("fused_replay_kv_direct_v3")
     for layer in model.layers:
         if layer.layer_type == "linear_attention":
             layer.linear_attn.dflash_matrix_solve = matrix_solve
@@ -292,7 +292,7 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
             )
             torch.testing.assert_close(output.hidden_states[:, -chunk_size:], projection, rtol=2e-4, atol=2e-4)
             if torch.all(replay_positions == -1):
-                for layer in range(len(cache)):
+                for layer in (0, 2):
                     torch.testing.assert_close(output.past_key_values[layer], before[layer], rtol=0, atol=0)
             else:
                 # An independent prefix-only call is the retained-state oracle,
@@ -305,13 +305,18 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
                     use_cache=True,
                 )
                 for layer in range(len(cache)):
-                    torch.testing.assert_close(
-                        output.past_key_values[layer], committed.past_key_values[layer], rtol=2e-4, atol=2e-4
-                    )
+                    for actual_state, prefix_state in zip(
+                        output.past_key_values[layer], committed.past_key_values[layer]
+                    ):
+                        if model.layers[layer].layer_type == "full_attention":
+                            actual_state = actual_state[:, :, : history.shape[1]]
+                            prefix_state = prefix_state[:, :, : history.shape[1]]
+                        torch.testing.assert_close(actual_state, prefix_state, rtol=2e-4, atol=2e-4)
             for layer in (1, 3):
                 for actual_state, old_state in zip(output.past_key_values[layer], before[layer]):
                     cache_positions = torch.arange(old_state.shape[2])
-                    updated = (cache_positions[None, :] == replay_positions.reshape(-1, 1)).any(dim=0)
+                    written_positions = torch.cat([replay_positions, pos], dim=1)
+                    updated = (cache_positions[None, :] == written_positions.reshape(-1, 1)).any(dim=0)
                     torch.testing.assert_close(actual_state[:, :, ~updated], old_state[:, :, ~updated], rtol=0, atol=0)
             cache = output.past_key_values
             replay_ids, replay_positions = ids, pos.clone()
@@ -333,7 +338,8 @@ def test_qwen3_5_dflash_concatenated_matches_autoregressive(
 @pytest.mark.parametrize("moe", [False, True])
 @pytest.mark.parametrize("continuous_batching", [False, True])
 @pytest.mark.parametrize("commit", [0, 1])
-def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe, continuous_batching, commit):
+@pytest.mark.parametrize("at_boundary", [False, True])
+def test_qwen3_5_dflash_retained_kv_export_updates_once(moe, continuous_batching, commit, at_boundary):
     import onnx
 
     from QEfficient import QEFFAutoModelForImageTextToText
@@ -374,6 +380,8 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe, continuous_bat
     batch_size, cache_size = (2, 4) if continuous_batching else (1, 1)
     positions = torch.arange(32).reshape(1, 1, -1).repeat(1, batch_size, 1)
     positions[:, 0, 3:16] = -1
+    if at_boundary:
+        positions = torch.where(positions >= 0, positions + 32, positions)
     inputs = (
         torch.randn(batch_size, 32, 32),
         torch.randn(cache_size, 1, 64, 16),
@@ -385,9 +393,24 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe, continuous_bat
     if continuous_batching:
         inputs += (torch.tensor([[2], [0]]),)
         input_names.append("batch_index")
+    module = AttentionExport().eval()
+    with torch.no_grad():
+        actual = module(*(tensor.clone() for tensor in inputs))
+        attention = module.attention
+        shape = (batch_size, 32, -1, attention.head_dim)
+        keys = attention.k_norm(attention.k_proj(inputs[0]).view(shape)).transpose(1, 2)
+        values = attention.v_proj(inputs[0]).view(shape).transpose(1, 2)
+        expected = [tensor.clone() for tensor in inputs[1:3]]
+        slots = [2, 0] if continuous_batching else [0]
+        for row, slot in enumerate(slots):
+            for token, position in enumerate(positions[0, row].tolist()):
+                if position >= 0:
+                    expected[0][slot, :, position] = keys[row, :, token]
+                    expected[1][slot, :, position] = values[row, :, token]
+        torch.testing.assert_close(actual[1:], tuple(expected), rtol=0, atol=0)
     buffer = io.BytesIO()
     torch.onnx.export(
-        AttentionExport().eval(),
+        module,
         inputs,
         buffer,
         opset_version=17,
@@ -398,6 +421,8 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe, continuous_bat
     graph = onnx.load_from_string(buffer.getvalue())
     onnx.checker.check_model(graph)
     producers = {output: node for node in graph.graph.node for output in node.output}
+    assert sum(node.op_type.startswith("CtxScatter") for node in graph.graph.node) == 2
+    assert "cache_commit" not in {item.name for item in graph.graph.input}
     for output in ("past_key_out", "past_value_out"):
         assert producers[output].op_type == "CtxScatterCB"
         assert producers[output].input[0] in {"past_key", "past_value"}
@@ -408,7 +433,8 @@ def test_qwen3_5_dflash_retained_kv_export_uses_commit_input(moe, continuous_bat
             if name not in seen and name in producers:
                 pending.extend(producers[name].input)
             seen.add(name)
-        assert "cache_commit" in seen
+        assert "cache_commit" not in seen
+        assert "positions" in seen
         if continuous_batching:
             assert "batch_index" in seen
 

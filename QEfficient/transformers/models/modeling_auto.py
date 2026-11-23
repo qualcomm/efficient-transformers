@@ -1779,7 +1779,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             self.lang_model.hash_params["dflash_output_logits"] = True
         if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
             prefix = "qwen35_moe" if self.model.config.model_type == "qwen3_5_moe" else "qwen35"
-            self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_kv_commit_v2"
+            self.lang_model.hash_params["dflash_cache_protocol"] = f"{prefix}_fused_replay_kv_direct_v3"
             self.lang_model.hash_params["dflash_chunk_size"] = getattr(
                 self.model.model.language_model, "dflash_chunk_size", 16
             )

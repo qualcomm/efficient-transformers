@@ -39,6 +39,7 @@ from rich.console import Console
 from rich.markup import escape
 from transformers import AutoConfig, AutoTokenizer
 from utils import (
+    DEFAULT_TEXT_PROMPT,
     MODEL_MAP,
     compile_dlm_qpc,
     compile_tlm_qpc,
@@ -79,7 +80,7 @@ def parse_args():
         "the full HF repo path (e.g. 'Qwen/Qwen3-4B'). "
         f"Supported: {', '.join(MODEL_MAP.keys())}",
     )
-    p.add_argument("--prompt", required=True, help="Input prompt text.")
+    p.add_argument("--prompt", default=DEFAULT_TEXT_PROMPT, help="Input prompt text.")
     p.add_argument(
         "--category",
         default="",
@@ -96,8 +97,8 @@ def parse_args():
         "--enable-thinking",
         "--enable_thinking",
         action="store_true",
-        default=None,
-        help="Enable thinking when supported; default: model chat-template setting.",
+        default=False,
+        help="Enable thinking when supported; disabled by default.",
     )
     thinking.add_argument("--disable-thinking", "--disable_thinking", dest="enable_thinking", action="store_false")
     p.add_argument(
@@ -123,13 +124,13 @@ def parse_args():
     p.add_argument(
         "--tlm_devices",
         type=parse_device_list,
-        default=[40, 41, 42, 43],
+        default=[0, 1, 2, 3],
         help="Comma-separated device IDs, e.g. '0,1,2,3' or '0'.",
     )
     p.add_argument(
         "--dlm_devices",
         type=parse_device_list,
-        default=[40, 41, 42, 43],
+        default=[0, 1, 2, 3],
         help="Comma-separated device IDs, e.g. '0,1,2,3' or '0'.",
     )
     p.add_argument("--tlm_cores", type=int, default=8)

@@ -111,8 +111,10 @@ def test_qwen35_batched_state_matches_independent_requests(moe, with_image, idle
             actual[3][row : row + 1, valid_hidden], expected[3][:, valid_hidden], atol=3e-4, rtol=3e-4
         )
 
-    def unchanged(actual, before, slots):
-        for layer, old_layer in zip(actual, before):
+    def unchanged(actual, before, slots, linear_only=False):
+        for kind, layer, old_layer in zip(hf.config.text_config.layer_types, actual, before):
+            if linear_only and kind != "linear_attention":
+                continue
             for tensor, old in zip(layer, old_layer):
                 torch.testing.assert_close(tensor[slots], old[slots], atol=0, rtol=0)
 
@@ -138,9 +140,9 @@ def test_qwen35_batched_state_matches_independent_requests(moe, with_image, idle
         actual = call(ids, pos, state, images[order[0]], 0, order)
         unchanged(actual[-1], state, [1, 3])
         if not (pos[:, :16] >= 0).any():
-            unchanged(actual[-1], state, [0, 1, 2, 3])
+            unchanged(actual[-1], state, [0, 1, 2, 3], linear_only=True)
             repeated = call(ids, pos, actual[-1], images[order[0]], 0, order)
-            unchanged(repeated[-1], state, [0, 1, 2, 3])
+            unchanged(repeated[-1], actual[-1], [0, 1, 2, 3])
             torch.testing.assert_close(repeated[0], actual[0], atol=0, rtol=0)
         for row, slot in enumerate(order):
             expected = call(ids[row : row + 1], pos[row : row + 1], refs[slot], images[slot], 0)
