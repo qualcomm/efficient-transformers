@@ -418,6 +418,7 @@ def generic_blocked_attention_interface(
     mla_kwargs: dict[str, Any] | None = None,
     is_mla: bool = False,
     prefill_only: bool = False,
+    skip_kv: bool = None,
     auxiliary_state: Optional[Any] = None,
     **kwargs,
 ):
@@ -539,7 +540,15 @@ def generic_blocked_attention_interface(
                             "sliding_window": _get_sliding_window_len(past_key_value, module.layer_idx),
                         }
                     )
-                past_key_value.write_only(key, value, module.layer_idx, cache_kwargs)
+                cache_key, cache_value = past_key_value.write_only(key, value, module.layer_idx, cache_kwargs)
+
+                # Offline prefill uses the current K/V tensors for attention, so the
+                # cache writes otherwise have no data dependency on the layer output.
+                # Keep both writes live during Dynamo export: nested ONNX functions
+                # must expose the updated retained states to the prefill QPC.
+                if torch._dynamo.is_compiling():
+                    cache_dependency = cache_key.reshape(-1)[0] - cache_value.reshape(-1)[0]
+                    query = query + cache_dependency.to(dtype=query.dtype) * 0
         elif past_key_value is not None:
             use_kv_blocked = _uses_blocked_kv_cache(mode) and supports_blocked_kv(past_key_value)
             if mode == BlockingMode.KV_BATCH_FOLD:
@@ -610,7 +619,7 @@ def generic_blocked_attention_interface(
         configured_split=blocking_config.headpar_split,
         ctx_len=blocking_config.ctx_len,
         kv_block_unroll=blocking_config.kv_block_unroll,
-        skip_kv=blocking_config.skip_kv or False,
+        skip_kv=(blocking_config.skip_kv or False) if skip_kv is None else skip_kv,
         paged_attention=blocking_config.paged_attention,
         # prefill-specific — omit when None so function default (1) applies
         **({"n_rep_chunk": blocking_config.n_rep_chunk} if blocking_config.n_rep_chunk is not None else {}),
