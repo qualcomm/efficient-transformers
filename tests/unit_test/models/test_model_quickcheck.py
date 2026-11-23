@@ -2855,9 +2855,7 @@ def test_minimax_npi_preserves_sparse_router_normalization_in_fp32(tmp_path):
     sparse_function_name = "QEffMiniMaxM3VLDecoderLayer"
     dense_function_name = "QEffMiniMaxM3VLDecoderLayerDense"
     sparse_nodes = [
-        helper.make_node(
-            "Cast", ["router_logits"], ["router_fp32"], name="node__to_copy_34", to=TensorProto.FLOAT
-        ),
+        helper.make_node("Cast", ["router_logits"], ["router_fp32"], name="node__to_copy_34", to=TensorProto.FLOAT),
         helper.make_node("Sigmoid", ["router_fp32"], ["router_weights"], name="node_sigmoid"),
         helper.make_node(
             "GatherElements",
@@ -2873,12 +2871,8 @@ def test_minimax_npi_preserves_sparse_router_normalization_in_fp32(tmp_path):
             name="node_einsum",
             equation="...i->...",
         ),
-        helper.make_node(
-            "Unsqueeze", ["weight_sum", "axes"], ["weight_sum_reshaped"], name="node_unsqueeze_51"
-        ),
-        helper.make_node(
-            "Div", ["selected_weights", "weight_sum_reshaped"], ["normalized_weights"], name="node_div_2"
-        ),
+        helper.make_node("Unsqueeze", ["weight_sum", "axes"], ["weight_sum_reshaped"], name="node_unsqueeze_51"),
+        helper.make_node("Div", ["selected_weights", "weight_sum_reshaped"], ["normalized_weights"], name="node_div_2"),
         helper.make_node("Add", ["normalized_weights", "normalized_weights"], ["output"], name="node_add"),
     ]
     sparse_function = helper.make_function(
@@ -2958,10 +2952,11 @@ def test_minimax_npi_preserves_sparse_router_normalization_in_fp32(tmp_path):
     dense_node_names = [node.name for node in functions[(domain, dense_function_name)].node]
     assert sparse_node_names[:6] == router_names
     assert dense_node_names == ["node_sigmoid"]
-    assert [(node.op_type, tuple(node.input), tuple(node.output)) for node in persisted_model.graph.node] == graph_signature
     assert [
-        (node.op_type, tuple(node.input), tuple(node.output))
-        for node in functions[(domain, sparse_function_name)].node
+        (node.op_type, tuple(node.input), tuple(node.output)) for node in persisted_model.graph.node
+    ] == graph_signature
+    assert [
+        (node.op_type, tuple(node.input), tuple(node.output)) for node in functions[(domain, sparse_function_name)].node
     ] == sparse_signature
 
 

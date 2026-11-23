@@ -12,7 +12,6 @@ import warnings
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from math import lcm
 from pathlib import Path
 from typing import Any
 
