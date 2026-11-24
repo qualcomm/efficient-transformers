@@ -797,3 +797,37 @@ def test_qeff_gemma3_decoder_wrapper_casts_vision_embeds_to_text_embed_dtype():
     )
     assert next_image_idx.item() == 1
     assert logits.dtype == torch.float32
+
+
+def test_qwen2_5_vl_decoder_skips_vision_gather_for_single_token_decode():
+    from QEfficient.transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+        QEffQwen_2_5_vl_DecoderWrapper,
+    )
+
+    class _QwenCore(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = nn.Identity()
+
+        def forward(self, inputs_embeds, past_key_values, **kwargs):
+            return type("ModelOutput", (), {"last_hidden_state": inputs_embeds, "past_key_values": past_key_values})()
+
+    model = SimpleNamespace(
+        model=_QwenCore(),
+        config=SimpleNamespace(image_token_id=99),
+        get_input_embeddings=lambda: nn.Embedding(100, 4),
+        lm_head=nn.Linear(4, 8),
+    )
+    decoder = QEffQwen_2_5_vl_DecoderWrapper(model)
+
+    logits, returned_vision_embeds, image_idx, _ = decoder(
+        input_ids=torch.tensor([[5]]),
+        vision_embeds=torch.empty((1, 0, 4)),
+        position_ids=torch.zeros((4, 1, 1), dtype=torch.int64),
+        image_idx=torch.zeros((1, 1), dtype=torch.int64),
+        past_key_values=[],
+    )
+
+    assert logits.shape == (1, 1, 8)
+    assert returned_vision_embeds.shape == (1, 0, 4)
+    assert image_idx.item() == 0

@@ -180,6 +180,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 and observed_dim_values.get(dim_name) == {1}
                 and model_type
                 in {
+                    "qwen2_5_vl",
                     "qwen3_vl",
                     "qwen3_vl_moe",
                     "qwen3_5",

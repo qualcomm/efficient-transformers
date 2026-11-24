@@ -888,15 +888,15 @@ class QEffQwen_2_5_vl_DecoderWrapper(nn.Module):
         comp_ctx_lengths: Optional[List[int]] = None,
     ):
         inputs_embeds = self.model.get_input_embeddings()(input_ids)
-        B, N, C = inputs_embeds.shape
+        hidden_size = inputs_embeds.shape[-1]
         selected = input_ids == self.model.config.image_token_id
         # indices1 = qeff_cumsum_dim1(selected.to(torch.int64)) - 1
         indices1 = selected.to(torch.int64).cumsum(1) - 1
         indices1 = torch.where(indices1 != -1, indices1 + image_idx, indices1)
-        indices0 = torch.arange(selected.unsqueeze(0).shape[0]).view(-1, 1)
-        image_features_expanded = vision_embeds.reshape(-1, C).unsqueeze(0)[indices0, indices1]
-        image_input_embeds = torch.where(selected.unsqueeze(-1), image_features_expanded, inputs_embeds)
-        inputs_embeds = torch.where(input_ids.shape[1] == torch.tensor(1), inputs_embeds, image_input_embeds)
+        if input_ids.shape[1] != 1:
+            indices0 = torch.arange(selected.shape[0]).view(-1, 1)
+            image_features_expanded = vision_embeds.reshape(-1, hidden_size).unsqueeze(0)[indices0, indices1]
+            inputs_embeds = torch.where(selected.unsqueeze(-1), image_features_expanded, inputs_embeds)
         outputs = self.model.model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
@@ -965,10 +965,11 @@ class QEffQwen_2_5_vl_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneratio
         vision_inputs["image_grid_thw"] = torch.zeros((inputs_shapes["image_grid_thw"]), dtype=torch.int64)
 
         # Add data for KV
+        cache_seq_len = int(kwargs.get("ctx_len") or prefill_seq_len)
         kv_cache_shape = get_padding_shape_from_config(
             config=self.model.config.text_config,
             batch_size=fbs if continuous_batching else bs,
-            seq_len=prefill_seq_len,
+            seq_len=cache_seq_len,
         )
 
         lang_inputs["input_ids"] = torch.zeros((inputs_shapes["input_ids"]), dtype=torch.int64)
