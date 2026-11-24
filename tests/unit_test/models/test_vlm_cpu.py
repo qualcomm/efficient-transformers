@@ -474,6 +474,34 @@ def test_dual_qpc_independent_vision_resources(
         assert "vision_num_cores" not in transform
 
 
+def test_qwen2_5_vl_disagg_compiles_three_qpcs(dual_qpc_compile_model):
+    model, calls = dual_qpc_compile_model
+    model.model.config.model_type = "qwen2_5_vl"
+    common_kwargs = {
+        "batch_size": 1,
+        "ctx_len": 64,
+        "vision_onnx_path": "vision.onnx",
+        "lang_onnx_path": "lang.onnx",
+        "use_onnx_subfunctions": True,
+    }
+
+    vision_qpc = model.compile(**common_kwargs, prefill_seq_len=8, skip_lang=True)
+    decode_qpc = model.compile(**common_kwargs, prefill_seq_len=1, skip_vision=True)
+    prefill_qpc = model.compile(
+        **common_kwargs,
+        prefill_seq_len=8,
+        prefill_only=True,
+        enable_chunking=True,
+        skip_vision=True,
+    )
+
+    assert set(vision_qpc) == {"vision_qpc_path"}
+    assert set(prefill_qpc) == {"lang_prefill_qpc_path"}
+    assert set(decode_qpc) == {"lang_decode_qpc_path"}
+    assert len(calls) == 3
+    assert all(call["use_onnx_subfunctions"] for call in calls)
+
+
 @pytest.mark.parametrize("name", ["vision_num_devices", "vision_num_cores"])
 @pytest.mark.parametrize("value", [0, -1, True, "4", 4.0])
 def test_dual_qpc_rejects_invalid_vision_resources(dual_qpc_compile_model, name, value):
