@@ -47,6 +47,7 @@ from QEfficient.generation.cloud_infer import QAICInferenceSession, is_retained_
 from QEfficient.generation.input_dump import resolve_runtime_dump_inputs_path
 from QEfficient.generation.runner_io import (
     write_causal_lm_runner_bundle,
+    write_compile_runner_bundle,
     write_dual_qpc_vlm_runner_bundle,
     write_single_qpc_vlm_runner_bundle,
 )
@@ -173,6 +174,117 @@ def _validate_export_contract(
         raise ValueError(
             f"{component} ONNX graph is missing dynamic symbols declared by its specializations: "
             f"{sorted(missing_symbols)}"
+        )
+
+
+def _compile_dummy_inputs(
+    model,
+    *,
+    specialization: Mapping[str, int],
+    vision_specialization: Mapping[str, int] | None = None,
+    kv_offload: bool = True,
+    continuous_batching: bool = False,
+    weight_free: bool = False,
+) -> Mapping[str, object]:
+    """Ask the owning family for a specialization-shaped compile replay input set."""
+    comp_ctx_length = specialization.get("comp_ctx_lengths")
+    return model.get_dummy_inputs(
+        kv_offload=kv_offload,
+        continuous_batching=continuous_batching,
+        comp_ctx_lengths=[int(comp_ctx_length)] if comp_ctx_length is not None else None,
+        batch_size=int(specialization.get("batch_size", constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE)),
+        prefill_seq_len=int(specialization.get("seq_len", constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)),
+        ctx_len=specialization.get("ctx_len"),
+        vision_specialization=vision_specialization,
+        language_specialization=specialization,
+        weight_free=weight_free,
+    )
+
+
+def _write_dual_qpc_compile_runner_bundles(
+    model,
+    *,
+    specializations: Mapping[str, Sequence[Mapping[str, int]]],
+    skip_vision: bool,
+    skip_lang: bool,
+    continuous_batching: bool,
+    weight_free: bool,
+) -> None:
+    """Serialize family-owned dummy inputs for every selected dual-QPC specialization."""
+    vision_specs = list(specializations.get("vision", ()))
+    language_specs = list(specializations.get("lang", ()))
+
+    if not skip_vision:
+        for index, vision_specialization in enumerate(vision_specs):
+            dummy_inputs = _compile_dummy_inputs(
+                model,
+                specialization=language_specs[0] if language_specs else vision_specialization,
+                vision_specialization=vision_specialization,
+                continuous_batching=continuous_batching,
+                weight_free=weight_free,
+            )
+            write_compile_runner_bundle(
+                onnx_path=model.vision_model.onnx_path,
+                compile_dir=model.vision_model.compile_artifacts_path,
+                dummy_inputs=dummy_inputs["vision"],
+                specialization=vision_specialization,
+                bundle_name=f"vision-{index}",
+            )
+
+    if not skip_lang:
+        for index, language_specialization in enumerate(language_specs):
+            compatible_vision = next(
+                (
+                    vision_specialization
+                    for vision_specialization in vision_specs
+                    if all(
+                        vision_specialization.get(symbol) == language_specialization.get(symbol)
+                        for symbol in ("vision_batch_size", "vision_size")
+                        if symbol in language_specialization
+                    )
+                ),
+                vision_specs[0] if vision_specs else None,
+            )
+            dummy_inputs = _compile_dummy_inputs(
+                model,
+                specialization=language_specialization,
+                vision_specialization=compatible_vision,
+                continuous_batching=continuous_batching,
+                weight_free=weight_free,
+            )
+            role = "decode" if int(language_specialization.get("seq_len", 0)) == 1 else "prefill"
+            write_compile_runner_bundle(
+                onnx_path=model.lang_model.onnx_path,
+                compile_dir=model.lang_model.compile_artifacts_path,
+                dummy_inputs=dummy_inputs["lang"],
+                specialization=language_specialization,
+                bundle_name=f"language-{role}-{index}",
+            )
+
+
+def _write_single_qpc_compile_runner_bundles(
+    model,
+    *,
+    specializations: Sequence[Mapping[str, int]],
+    continuous_batching: bool,
+    weight_free: bool,
+) -> None:
+    """Serialize family-owned dummy inputs for every fused-QPC execution block."""
+    for index, specialization in enumerate(specializations):
+        dummy_inputs = _compile_dummy_inputs(
+            model.model,
+            specialization=specialization,
+            kv_offload=False,
+            continuous_batching=continuous_batching,
+            weight_free=weight_free,
+        )
+        role = "decode" if int(specialization.get("seq_len", 0)) == 1 else "prefill"
+        write_compile_runner_bundle(
+            onnx_path=model.onnx_path,
+            compile_dir=model.compile_artifacts_path,
+            dummy_inputs=dummy_inputs,
+            specialization=specialization,
+            bundle_name=f"fused-{role}-{index}",
         )
 
 
@@ -2434,6 +2546,8 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             enable_chunking=enable_chunking,
             **compiler_options,
         )
+        vision_specializations = list(specializations["vision"])
+        language_specializations = list(specializations["lang"])
 
         custom_io_vision = {}
         target_dtype = getattr(self.model.config, "torch_dtype", torch.float32)
@@ -2542,7 +2656,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             # CCL is enabled. The disagg prefill/decode QPCs must therefore keep the
             # whole prefill/decode slice (not just the first/last spec), otherwise all
             # but one CCL value is silently dropped.
-            lang_specs = specializations["lang"]
+            lang_specs = language_specializations
             if prefill_only:
                 if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
                     # Prefill and block-sized verification share the chunk graph.
@@ -2582,6 +2696,15 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 **compiler_options,
             )
             self.qpc_paths.update({qpc_key: lang_qpc_path})
+        if artifacts:
+            _write_dual_qpc_compile_runner_bundles(
+                self,
+                specializations={"vision": vision_specializations, "lang": language_specializations},
+                skip_vision=skip_vision,
+                skip_lang=skip_lang,
+                continuous_batching=self.continuous_batching,
+                weight_free=getattr(self, "_weight_free", False),
+            )
         return self.qpc_paths
 
     @log_generate_call
@@ -3424,6 +3547,13 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
             kv_cache_prefix=kv_cache_prefix,
             **compiler_options,
         )
+        if artifacts:
+            _write_single_qpc_compile_runner_bundles(
+                self,
+                specializations=specializations,
+                continuous_batching=self.continuous_batching,
+                weight_free=getattr(self, "_weight_free", False),
+            )
         return compile_path
 
     def get_onnx_dynamic_axes(self):

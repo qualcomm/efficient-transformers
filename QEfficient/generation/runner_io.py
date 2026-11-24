@@ -144,6 +144,7 @@ def _normalize_runner_input(runner_metadata: RunnerMetadata, name: str, value) -
 __all__ = [
     "load_prefill_specialization",
     "write_causal_lm_runner_bundle",
+    "write_compile_runner_bundle",
     "write_dual_qpc_vlm_runner_bundle",
     "write_runner_io_bundle",
     "write_single_qpc_vlm_runner_bundle",
@@ -160,6 +161,7 @@ def write_runner_io_bundle(
     input_shape_overrides: Optional[Mapping[str, Sequence[int]]] = None,
     output_shape_overrides: Optional[Mapping[str, Sequence[int]]] = None,
     fallback_logits_width: Optional[int] = None,
+    io_dir: Optional[Union[str, Path]] = None,
 ) -> Path:
     """Write raw inputs and ``aic_batch_io.json`` for one qaic-runner invocation."""
     if runner_metadata is None:
@@ -168,7 +170,7 @@ def write_runner_io_bundle(
         runner_metadata = RunnerMetadata.from_paths(onnx_path, compile_dir)
 
     compile_dir = runner_metadata.compile_dir
-    io_dir = compile_dir / "io"
+    io_dir = Path(io_dir) if io_dir is not None else compile_dir / "io"
     data_dir = io_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -228,6 +230,36 @@ def write_runner_io_bundle(
 
     (io_dir / "aic_batch_io.json").write_text(json.dumps({"IO-files": [io_entries]}, indent=2))
     return io_dir
+
+
+def write_compile_runner_bundle(
+    *,
+    onnx_path: Union[str, Path],
+    compile_dir: Union[str, Path],
+    dummy_inputs: Mapping[str, object],
+    specialization: Mapping[str, int],
+    bundle_name: str,
+) -> Path:
+    """Write replay inputs from family dummy tensors after ``compile(artifacts=True)``.
+
+    Unlike generation artifact bundles, this helper deliberately has no
+    processor, tokenizer, prompt, image, session, or paired-component input.
+    The owning model family supplies the dummy tensors and ONNX/custom-IO
+    metadata defines the final runner contract.
+    """
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, compile_dir)
+    host_inputs = {
+        name: value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+        for name, value in dummy_inputs.items()
+        if name in runner_metadata.input_names
+    }
+    _add_specialization_control_inputs(runner_metadata, host_inputs, specialization)
+    return write_runner_io_bundle(
+        runner_metadata=runner_metadata,
+        specialization=specialization,
+        host_inputs=host_inputs,
+        io_dir=runner_metadata.compile_dir / "io" / bundle_name,
+    )
 
 
 def write_causal_lm_runner_bundle(
