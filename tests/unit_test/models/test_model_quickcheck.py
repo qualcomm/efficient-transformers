@@ -3874,6 +3874,53 @@ def test_dual_qpc_proxy_kwargs_are_component_aware():
     assert vision_kwargs["enable_proxy"] is True
 
 
+def test_causal_misclassified_vlm_preserves_proxy_component(monkeypatch):
+    from QEfficient.transformers.models import modeling_auto
+
+    config = Qwen3VLMoeConfig(
+        architectures=["FakeMisclassifiedVLM"],
+        text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+        vision_config=Qwen3VLMoeVisionConfig(depth=8),
+    )
+    captured = {}
+
+    class FakeMisclassifiedVLM(nn.Module):
+        def __init__(self, model_config):
+            super().__init__()
+            self.config = model_config
+
+    class FakeAutoClass:
+        @staticmethod
+        def from_pretrained(model_id, *args, **kwargs):
+            captured["hf_kwargs"] = kwargs
+            return FakeMisclassifiedVLM(kwargs["config"])
+
+    def fake_image_text_wrapper(model, **kwargs):
+        captured["wrapper_model"] = model
+        captured["wrapper_kwargs"] = kwargs
+        return SimpleNamespace(model=model, init_kwargs=kwargs)
+
+    monkeypatch.setattr(modeling_auto.QEFFAutoModelForCausalLM, "_hf_auto_class", FakeAutoClass)
+    monkeypatch.setitem(
+        modeling_auto.MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP,
+        "FakeMisclassifiedVLM",
+        fake_image_text_wrapper,
+    )
+
+    model = modeling_auto.QEFFAutoModelForCausalLM.from_pretrained(
+        "local-model",
+        config=config,
+        enable_proxy=True,
+        proxy_component="vision",
+        kv_offload=True,
+    )
+
+    assert captured["hf_kwargs"]["config"].text_config.num_hidden_layers == 16
+    assert captured["hf_kwargs"]["config"].vision_config.depth == 2
+    assert model.init_kwargs["enable_proxy"] is True
+    assert model.init_kwargs["proxy_component"] == "vision"
+
+
 def test_single_qpc_from_pretrained_preserves_config_without_duplicate_positional_arg(monkeypatch):
     from QEfficient.transformers.models.modeling_auto import _QEFFAutoModelForImageTextToTextSingleQPC
 

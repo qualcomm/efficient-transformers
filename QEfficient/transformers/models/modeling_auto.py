@@ -4402,6 +4402,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             validate_dynamo_export_requirements("weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
         if kwargs.pop("full_batch_size", None):
             continuous_batching = True
             warnings.warn(
@@ -4427,7 +4428,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         _resolve_torch_dtype(kwargs)
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
         if enable_proxy:
-            prepare_proxy_config(pretrained_model_name_or_path, kwargs)
+            prepare_proxy_config(pretrained_model_name_or_path, kwargs, proxy_component=proxy_component)
         if layerwise:
             warnings.warn(
                 "layerwise export is deprecated and will be removed in a future release. "
@@ -4459,6 +4460,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         # This is support models that should be classified to in a different auto class but transformers load them via this class
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
         kwargs["fp8_retain_weights"] = fp8_retain_weights
         if model.__class__.__name__ in MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP:
             return MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP[model.__class__.__name__](
