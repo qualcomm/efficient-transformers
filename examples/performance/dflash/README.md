@@ -299,11 +299,13 @@ prompt settings do not require recompiling QPCs.
 | `--image_url` | — | image URL for `--image` |
 | `--image_prompt` | — | prompt text for `--image` |
 | `--height` / `--width` | `354` / `536` | qwen3-vl only — compiled vision-encoder input resolution |
-| `--dflash-method` | `dflash` | select `dflash` or `dflash-2` |
+| `--dflash-method` | detected from draft config | optional `dflash` or `dflash-2` override |
 
 ## DFlash-2
 
-`basic_inference_vision.py --dflash-method dflash-2` compiles missing TLM and DLM QPCs automatically.
+`basic_inference_vision.py --model_name Qwen/Qwen3.8-27B` automatically selects
+the paired DFlash2 draft and compiles missing QPCs. Short model names also work.
+Use `--dflash-method dflash-2` (or `dflash2`) to select the technique explicitly.
 For Qwen VLMs, omitting `--prompt` uses the same default image/question as DFlash
 through the existing Qwen generation adapter. Use `--no-image` for the default
 coding prompt, or `--prompt "..."` for custom text.

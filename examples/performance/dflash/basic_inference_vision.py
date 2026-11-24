@@ -83,9 +83,9 @@ def parse_args():
     parser.add_argument(
         "--dflash-method",
         type=parse_dflash_method,
-        default="dflash",
+        default=None,
         metavar="{dflash,dflash-2}",
-        help="DFlash draft technique to compile and run (dflash2 is accepted as an alias).",
+        help="Draft technique (default: detected from the draft checkpoint; dflash2 is an alias).",
     )
     parser.add_argument(
         "--model_name",
@@ -504,13 +504,18 @@ def main():
         raise ValueError(f"No default TLM HF path for '{args.model_name}'. Pass --tlm_hf_path.")
 
     tlm_config = AutoConfig.from_pretrained(tlm_repo, trust_remote_code=True, token=args.hf_token)
+    config = AutoConfig.from_pretrained(dlm_repo, token=args.hf_token, trust_remote_code=True)
+    detected_method = "dflash-2" if "DFlash2DraftModel" in (getattr(config, "architectures", None) or []) else "dflash"
+    if args.dflash_method is not None and args.dflash_method != detected_method:
+        raise ValueError(f"The draft checkpoint uses {detected_method}; select --dflash-method {detected_method}.")
+    args.dflash_method = detected_method
+    logger.info(f"Draft technique: {args.dflash_method}")
     if args.dflash_method == "dflash-2":
         metrics, output_extra, tokenizer = _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size)
         if not args.compile_only:
             _print_results(tokenizer, metrics, output_extra, tlm_config.model_type)
         return
 
-    config = AutoConfig.from_pretrained(dlm_repo, token=args.hf_token, trust_remote_code=True)
     get_dlm_target_seq_len(get_dflash_block_size(config), args.prefill_seq_len, args.dlm_target_seq_len)
     is_qwen3vl = tlm_config.model_type in {"qwen3_vl", "qwen3_5", "qwen3_5_moe"}
     if args.disagg_tlm is None:

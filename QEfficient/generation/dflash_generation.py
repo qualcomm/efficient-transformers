@@ -179,8 +179,8 @@ def _run_spd_core(
     if "target_hidden" in getattr(dlm_session, "binding_index_map", {}):
         target_index = dlm_session.binding_index_map["target_hidden"]
         target_seq_len = int(dlm_session.bindings[target_index].dims[1])
-    if target_seq_len < block_size or target_seq_len % block_size or prompt_chunk_size % target_seq_len:
-        raise ValueError("DLM target length must be a multiple of block_size and divide the TLM prefill length.")
+    if target_seq_len < block_size or target_seq_len % block_size:
+        raise ValueError("DLM target length must be a positive multiple of block_size.")
 
     def run_dlm_prefill_block(hidden_states, position_ids, sub_start, sub_len):
         target_hidden = np.zeros((batch_size, target_seq_len, hidden_size), dtype=np.float32)
