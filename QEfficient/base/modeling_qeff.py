@@ -34,6 +34,7 @@ from QEfficient.base.onnx_transforms import (
     SplitTensorsTransform,
 )
 from QEfficient.base.pytorch_transforms import PytorchTransform
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.blocking.blocking_configurator import (
     build_gated_delta_config_for_transform,
     build_transformer_blocking_config_for_transform,
@@ -119,6 +120,7 @@ def _copy_onnx_external_data_files(source_onnx_path: Path, artifact_onnx_path: P
     those are resolved through ``AIC_EXTERNAL_DATA_ROOT``.
     """
     model = onnx.load(source_onnx_path, load_external_data=False)
+    copied_files = set()
     for tensor in onnx.external_data_helper._get_all_tensors(model):
         if tensor.data_location != onnx.TensorProto.EXTERNAL:
             continue
@@ -135,8 +137,12 @@ def _copy_onnx_external_data_files(source_onnx_path: Path, artifact_onnx_path: P
         if not source_path.is_file():
             raise FileNotFoundError(f"ONNX external data file not found at: {source_path}")
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        if source_path.resolve() != artifact_path.resolve():
+        source_path = source_path.resolve()
+        artifact_path = artifact_path.resolve()
+        copy_key = (source_path, artifact_path)
+        if source_path != artifact_path and copy_key not in copied_files:
             shutil.copy2(source_path, artifact_path)
+            copied_files.add(copy_key)
 
 
 def _weight_free_input_names(onnx_path: Path) -> set[str]:
@@ -1464,10 +1470,15 @@ class QEFFBaseModel(ABC):
         if num_cores is None:
             num_cores = constants.DEFAULT_AIC_NUM_CORES
         is_glm_moe_dsa = getattr(model_config, "model_type", None) == "glm_moe_dsa"
-        if blocking_config is not None or is_glm_moe_dsa:
+        has_existing_blocking_config = any(
+            getattr(module, "attn_blocking_config", None) is not None for module in self.model.modules()
+        )
+        if blocking_config is not None or is_glm_moe_dsa or has_existing_blocking_config:
             self.model, _ = BlockingAttentionTransform.apply(
                 self.model,
-                attn_blocking_config=blocking_config,
+                attn_blocking_config=(
+                    blocking_config if blocking_config is not None or is_glm_moe_dsa else AttentionBlockingConfig()
+                ),
                 qaic_config=qaic_config,
                 batch_size=bs,
                 seq_len=seq_len or 1,
@@ -1554,6 +1565,7 @@ class QEFFBaseModel(ABC):
             self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=AttentionBlockingConfig())
             self.hash_params.pop("blocking_kwargs", None)
         self.model, _ = FFNBlockingTransform.apply(self.model, qaic_config=qaic_config)
         if qaic_config is not None:
@@ -1832,8 +1844,9 @@ class QEFFBaseModel(ABC):
 
         compile_dir = qpc_path.with_name(qpc_path.name + "-" + compile_hash)
         qpc_path = compile_dir / "qpc"
+        programqpc_path = qpc_path / "programqpc.bin"
         if not artifacts:
-            if (qpc_path / "programqpc.bin").is_file():
+            if programqpc_path.is_file() and programqpc_path.stat().st_size > 0:
                 self.qpc_path = qpc_path
                 self.compile_artifacts_path = compile_dir
 
@@ -1968,6 +1981,9 @@ class QEFFBaseModel(ABC):
                     ]
                 )
             )
+        if not programqpc_path.is_file() or programqpc_path.stat().st_size == 0:
+            raise RuntimeError(f"QAIC compiler returned success without producing a non-empty QPC: {programqpc_path}")
+
         compile_time = time.perf_counter() - compile_start_time
         print(f"qaic-compile completed in {compile_time:.2f} seconds")
         # Dump JSON file with hashed parameters
