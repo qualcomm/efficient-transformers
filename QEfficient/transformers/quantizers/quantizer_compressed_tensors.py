@@ -697,6 +697,8 @@ class QEffCompressedTensorsConfig(CompressedTensorsConfig):
         sparsity_config=None,
         quant_method="compressed-tensors",
         run_compressed: bool = True,
+        dequantize: bool = False,
+        use_optimized_inference: bool = False,
         **kwargs,
     ):
         if is_compressed_tensors_available():
@@ -711,6 +713,8 @@ class QEffCompressedTensorsConfig(CompressedTensorsConfig):
 
         self.run_compressed = run_compressed
         assert self.run_compressed, "pack-quantized needs to have run_compressed set to True"
+        self.dequantize = dequantize or not self.run_compressed
+        self.use_optimized_inference = use_optimized_inference
 
         # parse from dict to load nested QuantizationScheme objects
         if config_groups or kv_cache_scheme:
@@ -746,6 +750,8 @@ class QEffCompressedTensorsConfig(CompressedTensorsConfig):
         quant_method="compressed-tensors",
         run_compressed: bool = False,
         scale_dtype: torch.dtype = torch.bfloat16,
+        dequantize: bool = False,
+        use_optimized_inference: bool = False,
         **kwargs,
     ):
         self.config_groups = config_groups
@@ -760,6 +766,10 @@ class QEffCompressedTensorsConfig(CompressedTensorsConfig):
         self.sparsity_config = None
 
         self.run_compressed = run_compressed
+        # Transformers' compressed-tensors quantizer reads these in post_init().
+        # Match its run_compressed -> dequantize behavior for packed checkpoints.
+        self.dequantize = dequantize or not self.run_compressed
+        self.use_optimized_inference = use_optimized_inference
         if scale_dtype not in _SUPPORTED_SCALE_DTYPES:
             raise ValueError(f"scale_dtype must be one of {_SUPPORTED_SCALE_DTYPES}, got {scale_dtype}")
         self.scale_dtype = scale_dtype
@@ -839,6 +849,8 @@ class QEffCompressedTensorsConfig(CompressedTensorsConfig):
         sparsity_config=None,
         quant_method="compressed-tensors",
         run_compressed: bool = None,
+        dequantize: bool = False,
+        use_optimized_inference: bool = False,
         **kwargs,
     ):
         if format == "pack-quantized":
@@ -852,6 +864,8 @@ class QEffCompressedTensorsConfig(CompressedTensorsConfig):
                 sparsity_config=sparsity_config,
                 quant_method=quant_method,
                 run_compressed=True if run_compressed is None else run_compressed,
+                dequantize=dequantize,
+                use_optimized_inference=use_optimized_inference,
                 **kwargs,
             )
         else:
@@ -865,6 +879,8 @@ class QEffCompressedTensorsConfig(CompressedTensorsConfig):
                 sparsity_config=sparsity_config,
                 quant_method=quant_method,
                 run_compressed=False if run_compressed is None else run_compressed,
+                dequantize=dequantize,
+                use_optimized_inference=use_optimized_inference,
                 **kwargs,
             )
 
