@@ -199,14 +199,23 @@ class TestQuantizationTransformImportability:
     def test_dp_context_scatter_and_gather_preserve_rows(self):
         from QEfficient.customop import ctx_gather_dp, ctx_scatter_dp
 
-        cache = torch.zeros(1, 2, 4, 3)
-        positions = torch.tensor([[[1], [3]]], dtype=torch.int32)
-        updates = torch.tensor([[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]]])
+        cache = torch.arange(2 * 3 * 5 * 4, dtype=torch.float32).reshape(2, 3, 5, 4)
+        positions = torch.tensor([[[1, 4], [0, 3], [2, 4]], [[4, 1], [3, 0], [1, 2]]], dtype=torch.int32)
+        updates = torch.arange(1, 2 * 3 * 2 * 4 + 1, dtype=torch.float32).reshape(2, 3, 2, 4)
 
         updated_cache = ctx_scatter_dp(cache, positions, updates)
         gathered = ctx_gather_dp(updated_cache, positions)
 
         torch.testing.assert_close(gathered, updates)
+        for batch_index in range(cache.shape[0]):
+            for data_parallel_index in range(cache.shape[1]):
+                untouched_positions = sorted(
+                    set(range(cache.shape[2])) - set(positions[batch_index, data_parallel_index].tolist())
+                )
+                torch.testing.assert_close(
+                    updated_cache[batch_index, data_parallel_index, untouched_positions],
+                    cache[batch_index, data_parallel_index, untouched_positions],
+                )
 
     def test_dp_cp_context_scatter_and_gather_preserve_global_slot_order(self):
         from QEfficient.customop import ctx_gather_dp_cp, ctx_scatter_dp_cp

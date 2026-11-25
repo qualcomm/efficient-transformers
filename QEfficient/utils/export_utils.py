@@ -54,6 +54,17 @@ from QEfficient.utils.torch_patches import (
 )
 
 logger = QEFFLogger.get_logger("INFRA")
+ONNX_SUBFUNCTION_VERSION = 4
+DEEPSEEK_WEIGHT_FREE_SUBFUNCTION_VERSION = 5
+
+
+def _onnx_subfunction_version(qeff_model) -> int:
+    has_export_transform = callable(getattr(qeff_model.model, "get_onnx_transforms_for_export", None))
+    if getattr(qeff_model, "_weight_free", False) and has_export_transform:
+        return DEEPSEEK_WEIGHT_FREE_SUBFUNCTION_VERSION
+    return ONNX_SUBFUNCTION_VERSION
+
+
 _EXPORT_FROM_COMPILE = ContextVar("export_from_compile", default=False)
 
 

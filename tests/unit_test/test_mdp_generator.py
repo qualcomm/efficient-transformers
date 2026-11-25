@@ -255,6 +255,62 @@ def test_intersection_skips_relocation_that_would_follow_consumer(tmp_path):
 class TestMdpLayerPartitionBounds:
     """Balanced layer allocation used by the ONNX MDP strategy."""
 
+    def test_deepseek_v4_retained_states_are_assigned_by_layer(self, tmp_path):
+        cache_names = [
+            "past_compressor_gate_buffer.0",
+            "past_sliding_window_kv.0",
+            "past_compressor_gate_buffer.5",
+            "past_sliding_window_kv.5",
+        ]
+        nodes = []
+        for layer_num in range(6):
+            nodes.append(
+                helper.make_node(
+                    "Identity",
+                    ["input"],
+                    [f"hidden_{layer_num}"],
+                    name=f"/model/layers.{layer_num}/Identity",
+                )
+            )
+            for cache_name in cache_names:
+                cache_layer = int(cache_name.rsplit(".", 1)[1])
+                if cache_layer == layer_num:
+                    nodes.append(
+                        helper.make_node(
+                            "Identity",
+                            [cache_name],
+                            [f"{cache_name}_RetainedState"],
+                            name=f"/model/layers.{layer_num}/{cache_name.rsplit('.', 1)[0]}",
+                        )
+                    )
+
+        graph = helper.make_graph(
+            nodes,
+            "deepseek_v4_mdp_graph",
+            inputs=[helper.make_tensor_value_info(name, TensorProto.FLOAT, [1]) for name in ["input", *cache_names]],
+            outputs=[
+                helper.make_tensor_value_info(name, TensorProto.FLOAT, [1])
+                for name in ["hidden_5", *(f"{cache_name}_RetainedState" for cache_name in cache_names)]
+            ],
+        )
+        onnx_path = tmp_path / "deepseek_v4_mdp.onnx"
+        onnx.save(helper.make_model(graph), onnx_path)
+
+        mdp_json = generate_disagg_mdp_partition_config(
+            onnx_path=str(onnx_path),
+            num_devices=2,
+            num_partitions=2,
+            num_layers=6,
+        )
+
+        assert all(name in mdp_json["partitions"][0]["nodeList"] for name in cache_names[:2])
+        assert all(name in mdp_json["partitions"][1]["nodeList"] for name in cache_names[2:])
+        for cache_name in cache_names:
+            cache_layer = int(cache_name.rsplit(".", 1)[1])
+            partition = mdp_json["partitions"][0 if cache_layer == 0 else 1]["nodeList"]
+            producer_name = f"/model/layers.{cache_layer}/{cache_name.rsplit('.', 1)[0]}"
+            assert producer_name in partition
+
     def test_generic_decoder_callsite_uses_model_layer_input(self):
         assert (
             _get_layer_num_from_inputs(

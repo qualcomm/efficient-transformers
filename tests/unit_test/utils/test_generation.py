@@ -185,6 +185,7 @@ class TestGenerationModuleImportability:
         from QEfficient.generation.cloud_infer import is_retained_state_name
 
         assert is_retained_state_name("repeated_subgraph0/past_key.0_InternalRetainedState")
+        assert is_retained_state_name("custom_cache_RetainedState")
 
     def test_vlm_generation_importable(self):
         import QEfficient.generation.vlm_generation
@@ -212,8 +213,11 @@ class TestGenerationModuleImportability:
         assert VisionLanguageGeneration is not None
 
 
-@pytest.mark.parametrize("name", ["indexer_key.0", "indexer_key.0_RetainedState"])
-def test_glm_indexer_cache_is_retained_state(name):
+@pytest.mark.parametrize(
+    "name",
+    ["indexer_key.0", "indexer_key.0_RetainedState", "index_key.0", "index_key.0_RetainedState"],
+)
+def test_indexer_cache_is_retained_state(name):
     assert is_retained_state_name(name)
 
 
