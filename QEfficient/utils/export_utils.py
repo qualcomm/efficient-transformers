@@ -439,7 +439,7 @@ def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
     return required_signatures, observed_signatures, Counter(observed_signatures), function_signatures
 
 
-def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
+def _proxy_subfunction_validation_classes(qeff_model) -> list[type[nn.Module]]:
     """Return component-layer classes that need repeated proxy subfunction calls."""
     model = qeff_model.model
     proxy_component = getattr(qeff_model, "_proxy_component", "language")
@@ -454,10 +454,10 @@ def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
                     f"get_qeff_vision_encoder failed for {model.__class__.__name__}: "
                     f"{type(exc).__name__}: {exc}. Falling back to model-level subfunction validation."
                 )
-        return set(get_decoder_layer_classes_for_export(model))
+        return get_decoder_layer_classes_for_export(model)
 
     if qeff_model.__class__.__name__ == "QEffVisionEncoderForTextImageToTextModel":
-        return set()
+        return []
 
     get_language_decoder = getattr(model, "get_qeff_language_decoder", None)
     if callable(get_language_decoder):
@@ -465,7 +465,7 @@ def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
             language_decoder = get_language_decoder()
             language_classes = get_decoder_layer_classes_for_export(language_decoder)
             if language_classes:
-                return set(language_classes)
+                return language_classes
         except Exception as exc:
             logger.warning(
                 f"get_qeff_language_decoder failed for {model.__class__.__name__}: "
@@ -473,14 +473,14 @@ def _proxy_subfunction_validation_classes(qeff_model) -> set[type[nn.Module]]:
             )
 
     submodule_classes = get_decoder_layer_classes_for_export(model)
-    return {cls for cls in submodule_classes if "vision" not in cls.__name__.lower()}
+    return [cls for cls in submodule_classes if "vision" not in cls.__name__.lower()]
 
 
-def _subfunction_target_classes(qeff_model) -> set[type[nn.Module]]:
+def _subfunction_target_classes(qeff_model) -> list[type[nn.Module]]:
     """Return module classes to export as ONNX subfunctions."""
     if getattr(qeff_model, "_enable_proxy", False):
         return _proxy_subfunction_validation_classes(qeff_model)
-    return set(get_decoder_layer_classes_for_export(qeff_model.model))
+    return get_decoder_layer_classes_for_export(qeff_model.model)
 
 
 def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:

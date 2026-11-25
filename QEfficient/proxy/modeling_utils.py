@@ -8,6 +8,7 @@
 """Configuration helpers for representative proxy stacks."""
 
 from collections import Counter
+from copy import copy
 
 from transformers import AutoConfig
 
@@ -27,6 +28,7 @@ _LAYER_INDEXED_SEQUENCE_ATTRIBUTES = {
     "intermediate_layers_indices",
     "out_indices",
 }
+_LAYER_INDEXED_ORDERED_SEQUENCE_ATTRIBUTES = {"intermediate_layers_indices", "out_indices"}
 _LAYER_INDEXED_SCALAR_ATTRIBUTES = {"vision_feature_layer"}
 _LAYER_COUNT_SCALAR_ATTRIBUTES = {"num_global_layers"}
 _LAYER_TYPE_SEQUENCE_ATTRIBUTES = {"fullatt_block_indexes"}
@@ -92,15 +94,39 @@ def _map_layer_index(layer_idx: int, original_num_layers: int, proxy_num_layers:
     return min(proxy_num_layers - 1, round(layer_idx * (proxy_num_layers - 1) / (original_num_layers - 1)))
 
 
-def _normalize_index_sequence(value, original_num_layers: int, proxy_num_layers: int):
+def _normalize_index_sequence(value, original_num_layers: int, proxy_num_layers: int, deduplicate: bool = True):
     mapped_values = []
     for layer_idx in value:
         mapped_idx = _map_layer_index(int(layer_idx), original_num_layers, proxy_num_layers)
-        if mapped_idx < proxy_num_layers and mapped_idx not in mapped_values:
+        if mapped_idx < proxy_num_layers and (not deduplicate or mapped_idx not in mapped_values):
             mapped_values.append(mapped_idx)
     if value and not mapped_values and proxy_num_layers > 0:
         mapped_values = [proxy_num_layers - 1]
     return _restore_sequence_type(value, mapped_values)
+
+
+def _map_hidden_state_selector(selector_idx: int, original_num_layers: int, proxy_num_layers: int) -> int:
+    original_num_hidden_states = original_num_layers + 1
+    proxy_num_hidden_states = proxy_num_layers + 1
+    if selector_idx < 0:
+        positive_idx = max(0, original_num_hidden_states + selector_idx)
+        mapped_idx = _map_layer_index(positive_idx, original_num_hidden_states, proxy_num_hidden_states)
+        return mapped_idx - proxy_num_hidden_states
+    return _map_layer_index(selector_idx, original_num_hidden_states, proxy_num_hidden_states)
+
+
+def _normalize_hidden_state_selector(value, original_num_layers: int, proxy_num_layers: int):
+    if isinstance(value, int):
+        return _map_hidden_state_selector(value, original_num_layers, proxy_num_layers)
+    if _is_int_sequence(value):
+        return _restore_sequence_type(
+            value,
+            [
+                _map_hidden_state_selector(int(selector_idx), original_num_layers, proxy_num_layers)
+                for selector_idx in value
+            ],
+        )
+    return value
 
 
 def _normalize_layer_type_sequence(value, original_num_layers: int, proxy_num_layers: int):
@@ -132,16 +158,21 @@ def _normalize_layer_indexed_metadata(
         is_probable_layer_sequence = _is_int_sequence(value) and (
             "layer" in attribute_lower or "index" in attribute_lower or "indices" in attribute_lower
         )
-        if _is_int_sequence(value) and attribute in _LAYER_TYPE_SEQUENCE_ATTRIBUTES:
+        if attribute in _LAYER_INDEXED_SCALAR_ATTRIBUTES:
+            setattr(config, attribute, _normalize_hidden_state_selector(value, original_num_layers, proxy_num_layers))
+        elif _is_int_sequence(value) and attribute in _LAYER_TYPE_SEQUENCE_ATTRIBUTES:
             setattr(config, attribute, _normalize_layer_type_sequence(value, original_num_layers, proxy_num_layers))
         elif _is_int_sequence(value) and (is_known_sequence or is_probable_layer_sequence):
             setattr(
                 config,
                 attribute,
-                _normalize_index_sequence(value, original_num_layers, proxy_num_layers),
+                _normalize_index_sequence(
+                    value,
+                    original_num_layers,
+                    proxy_num_layers,
+                    deduplicate=attribute not in _LAYER_INDEXED_ORDERED_SEQUENCE_ATTRIBUTES,
+                ),
             )
-        elif attribute in _LAYER_INDEXED_SCALAR_ATTRIBUTES and isinstance(value, int) and value >= 0:
-            setattr(config, attribute, _map_layer_index(value, original_num_layers, proxy_num_layers))
         elif attribute in _LAYER_COUNT_SCALAR_ATTRIBUTES and isinstance(value, int):
             setattr(config, attribute, min(value, proxy_num_layers))
 
@@ -155,6 +186,10 @@ def _get_layer_signature(config, layer_idx: int):
     elif getattr(config, "sliding_window", None) is not None and hasattr(config, "sliding_window_pattern"):
         pattern = config.sliding_window_pattern
         attention_type = "sliding_attention" if (layer_idx + 1) % pattern else "full_attention"
+        signature.append(("layer_type", attention_type))
+    elif _is_int_sequence(fullatt_block_indexes := getattr(config, "fullatt_block_indexes", None)):
+        fullatt_block_indexes = {int(fullatt_idx) for fullatt_idx in fullatt_block_indexes}
+        attention_type = "full_attention" if layer_idx in fullatt_block_indexes else "window_attention"
         signature.append(("layer_type", attention_type))
 
     num_experts = getattr(config, "num_experts", None) or getattr(config, "num_local_experts", 0)
@@ -190,6 +225,32 @@ def _rebuild_mlp_only_layers(config, pattern_horizon: int, proxy_num_layers: int
     config.mlp_only_layers = [
         layer_idx for layer_idx in range(proxy_num_layers) if layer_idx % pattern_horizon in mlp_only_layer_set
     ]
+
+
+def _get_reduced_vision_config(vision_config, original_num_layers: int, proxy_num_layers: int):
+    reduced_config = copy(vision_config)
+    for attribute in _VISION_LAYER_COUNT_ATTRIBUTES:
+        if hasattr(reduced_config, attribute):
+            setattr(reduced_config, attribute, proxy_num_layers)
+    _normalize_layer_indexed_metadata(reduced_config, original_num_layers, proxy_num_layers)
+    return reduced_config
+
+
+def _get_representative_vision_layer_count(
+    vision_config, original_num_layers: int, minimum_representative_layers: int
+) -> int:
+    if original_num_layers <= minimum_representative_layers:
+        return original_num_layers
+
+    required_signatures = {_get_layer_signature(vision_config, layer_idx) for layer_idx in range(original_num_layers)}
+    for proxy_num_layers in range(minimum_representative_layers, original_num_layers + 1):
+        proxy_config = _get_reduced_vision_config(vision_config, original_num_layers, proxy_num_layers)
+        signature_counts = Counter(
+            _get_layer_signature(proxy_config, layer_idx) for layer_idx in range(proxy_num_layers)
+        )
+        if all(signature_counts[signature] >= minimum_representative_layers for signature in required_signatures):
+            return proxy_num_layers
+    return original_num_layers
 
 
 def apply_proxy_layer_config(
@@ -265,7 +326,9 @@ def apply_vision_proxy_layer_config(
         proxy_num_layers = configured_num_layers
         logger.info("Proxy vision model uses caller-provided layer count: %d", proxy_num_layers)
     else:
-        proxy_num_layers = min(configured_num_layers, minimum_representative_layers)
+        proxy_num_layers = _get_representative_vision_layer_count(
+            vision_config, configured_num_layers, minimum_representative_layers
+        )
         logger.info("Proxy vision model uses %d of %d layers", proxy_num_layers, configured_num_layers)
 
     for attribute in _VISION_LAYER_COUNT_ATTRIBUTES:

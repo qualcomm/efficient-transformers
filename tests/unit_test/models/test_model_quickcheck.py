@@ -3781,6 +3781,7 @@ def test_vision_proxy_layer_config_normalizes_layer_indexed_metadata():
             fullatt_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7),
             cross_attention_layers=[0, 3, 7],
             intermediate_layers_indices=[1, 4, 7],
+            vision_feature_layer=-4,
             num_global_layers=4,
         )
     )
@@ -3792,20 +3793,30 @@ def test_vision_proxy_layer_config_normalizes_layer_indexed_metadata():
     assert config.vision_config.deepstack_visual_indexes == (0, 1)
     assert config.vision_config.fullatt_block_indexes == (0, 1)
     assert config.vision_config.cross_attention_layers == [0, 1]
-    assert config.vision_config.intermediate_layers_indices == [0, 1]
+    assert config.vision_config.intermediate_layers_indices == [0, 1, 1]
+    assert config.vision_config.vision_feature_layer == -2
     assert config.vision_config.num_global_layers == 2
 
-    explicit_config = SimpleNamespace(vision_config=SimpleNamespace(depth=8, deepstack_visual_indexes=[4, 7]))
+    explicit_config = SimpleNamespace(
+        vision_config=SimpleNamespace(depth=8, deepstack_visual_indexes=[4, 7], vision_feature_layer=[-4, -2])
+    )
     assert apply_vision_proxy_layer_config(explicit_config, num_hidden_layers=3) == 3
     assert explicit_config.vision_config.depth == 3
     assert explicit_config.vision_config.deepstack_visual_indexes == [1, 2]
+    assert explicit_config.vision_config.vision_feature_layer == [-2, -1]
+
+    mllama_style_config = SimpleNamespace(
+        vision_config=SimpleNamespace(depth=8, intermediate_layers_indices=[1, 3, 5, 7, 7])
+    )
+    assert apply_vision_proxy_layer_config(mllama_style_config) == 2
+    assert mllama_style_config.vision_config.intermediate_layers_indices == [0, 0, 1, 1, 1]
 
     qwen25_style_config = SimpleNamespace(
         vision_config=SimpleNamespace(depth=32, fullatt_block_indexes=(7, 15, 23, 31))
     )
-    assert apply_vision_proxy_layer_config(qwen25_style_config) == 2
-    assert qwen25_style_config.vision_config.depth == 2
-    assert qwen25_style_config.vision_config.fullatt_block_indexes == (1,)
+    assert apply_vision_proxy_layer_config(qwen25_style_config) == 6
+    assert qwen25_style_config.vision_config.depth == 6
+    assert qwen25_style_config.vision_config.fullatt_block_indexes == (1, 2, 4, 5)
 
 
 def test_vision_proxy_subfunction_signatures_ignore_language_layer_policy():
@@ -3827,6 +3838,21 @@ def test_vision_proxy_subfunction_signatures_ignore_language_layer_policy():
     assert required_signatures == {(("decoder", "default"),)}
     assert logical_signature_counts[(("decoder", "default"),)] == 2
 
+    qwen25_style_model = SimpleNamespace(
+        _proxy_component="vision",
+        model=SimpleNamespace(
+            config=SimpleNamespace(vision_config=SimpleNamespace(depth=2, fullatt_block_indexes=(1,)))
+        ),
+    )
+
+    required_signatures, _, logical_signature_counts, _ = _logical_proxy_signature_info(
+        qwen25_style_model, [node, node]
+    )
+
+    assert required_signatures == {(("layer_type", "window_attention"),), (("layer_type", "full_attention"),)}
+    assert logical_signature_counts[(("layer_type", "window_attention"),)] == 1
+    assert logical_signature_counts[(("layer_type", "full_attention"),)] == 1
+
 
 def test_vision_proxy_subfunction_setup_targets_vision_classes():
     from QEfficient.utils.export_utils import _subfunction_target_classes
@@ -3835,6 +3861,9 @@ def test_vision_proxy_subfunction_setup_targets_vision_classes():
         pass
 
     class LanguageLayer(nn.Module):
+        pass
+
+    class AlternateLanguageLayer(nn.Module):
         pass
 
     class VisionEncoder(nn.Module):
@@ -3846,13 +3875,13 @@ def test_vision_proxy_subfunction_setup_targets_vision_classes():
             return VisionEncoder()
 
         def get_submodules_for_export(self):
-            return {LanguageLayer}
+            return [LanguageLayer, LanguageLayer, AlternateLanguageLayer]
 
     proxy_model = SimpleNamespace(_enable_proxy=True, _proxy_component="vision", model=FullModel())
     default_model = SimpleNamespace(_enable_proxy=False, model=FullModel())
 
-    assert _subfunction_target_classes(proxy_model) == {VisionLayer}
-    assert _subfunction_target_classes(default_model) == {LanguageLayer}
+    assert _subfunction_target_classes(proxy_model) == [VisionLayer]
+    assert _subfunction_target_classes(default_model) == [LanguageLayer, LanguageLayer, AlternateLanguageLayer]
 
 
 def test_prepare_proxy_config_uses_image_text_component_selector():
