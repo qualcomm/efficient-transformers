@@ -140,7 +140,8 @@ Image-text models default to the same language proxy behavior. To reduce the
 vision stack instead, pass `proxy_component="vision"`; vision proxy mode keeps
 the language stack unchanged and does not replace language embeddings or the LM
 head. Homogeneous vision stacks use two representative layers by default, and
-`num_hidden_layers` can be used to request a specific reduced vision depth.
+`num_hidden_layers` can be used to request a specific reduced vision depth when
+that depth still preserves the model's required vision layer variants.
 
 ```Python
 from QEfficient import QEFFAutoModelForCausalLM
@@ -180,7 +181,6 @@ model = QEFFAutoModelForImageTextToText.from_pretrained(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     enable_proxy=True,
     proxy_component="vision",
-    num_hidden_layers=2,
     trust_remote_code=True,
 )
 ```
