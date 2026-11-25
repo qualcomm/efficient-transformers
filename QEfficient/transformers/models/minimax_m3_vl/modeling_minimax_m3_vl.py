@@ -1631,9 +1631,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
                 .permute(1, 0, 2, 3, 4, 5)
             )
             idx_k_all = (
-                self.k_proj(hidden_states)
-                .view(dp, batch_local, query_len, dp, hkv, dim)
-                .permute(1, 0, 2, 3, 4, 5)
+                self.k_proj(hidden_states).view(dp, batch_local, query_len, dp, hkv, dim).permute(1, 0, 2, 3, 4, 5)
             )
             q_lane_idx = (
                 torch.arange(dp, device=hidden_states.device)
@@ -1649,15 +1647,9 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             idx_k = torch.gather(idx_k_all, 3, k_lane_idx).squeeze(3).transpose(2, 3)
         else:
             idx_q = (
-                self.q_proj(hidden_states)
-                .view(dp, batch_local, query_len, num_index_heads, dim)
-                .permute(1, 0, 3, 2, 4)
+                self.q_proj(hidden_states).view(dp, batch_local, query_len, num_index_heads, dim).permute(1, 0, 3, 2, 4)
             )
-            idx_k = (
-                self.k_proj(hidden_states)
-                .view(dp, batch_local, query_len, hkv, dim)
-                .permute(1, 0, 3, 2, 4)
-            )
+            idx_k = self.k_proj(hidden_states).view(dp, batch_local, query_len, hkv, dim).permute(1, 0, 3, 2, 4)
         idx_q = self.q_norm(idx_q)
         idx_k = self.k_norm(idx_k)
         replicated_rope = return_core_candidates and cos_dp.ndim == 5
