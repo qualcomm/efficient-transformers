@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.markup import escape
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 from utils import (
+    DEFAULT_TEXT_PROMPT,
     MODEL_MAP,
     HostSelector,
     compile_dflash2_dlm_qpc,
@@ -56,8 +57,12 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, THIS_DIR)
 
 console = Console()
-IMAGE_PROMPT = "Can you Describe this image in detail?"
-IMAGE_URL = "https://wallup.net/wp-content/uploads/2017/03/28/351036-San_Francisco-USA-bridge-sunset-Golden_Gate_Bridge-lights.jpg"
+IMAGE_PROMPT = (
+    "The sums of the all the three numbers on each side of the triangle are equal. "
+    "Two numbers happened to be stained with ink. How much is the sum of these two numbers?"
+    "\n\nSolve the problem carefully. End with the final answer in \\boxed{}."
+)
+IMAGE_URL = "https://raw.githubusercontent.com/mathllm/MATH-V/a1f5cc3add200c0cd080fad463e500f44ef1fb41/images/8.jpg"
 
 
 def parse_device_list(value):
@@ -78,9 +83,9 @@ def parse_args():
     parser.add_argument(
         "--dflash-method",
         type=parse_dflash_method,
-        default="dflash",
+        default=None,
         metavar="{dflash,dflash-2}",
-        help="DFlash draft technique to compile and run (dflash2 is accepted as an alias).",
+        help="Draft technique (default: detected from the draft checkpoint; dflash2 is an alias).",
     )
     parser.add_argument(
         "--model_name",
@@ -90,8 +95,13 @@ def parse_args():
     )
     parser.add_argument("--tlm_hf_path", "--target-model", dest="tlm_hf_path", default=None)
     parser.add_argument("--dlm_hf_path", "--draft-model", dest="dlm_hf_path", default=None)
-    parser.add_argument("--prompt", default=None)
-    parser.add_argument("--image", action="store_true")
+    parser.add_argument("--prompt", default=None, help="Custom text-only prompt unless --image is also supplied.")
+    parser.add_argument(
+        "--image",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use the default image/question when no --prompt is supplied; --no-image uses the coding prompt.",
+    )
     parser.add_argument("--image_url", default=None)
     parser.add_argument("--image_prompt", default=None)
     thinking = parser.add_mutually_exclusive_group()
@@ -99,8 +109,8 @@ def parse_args():
         "--enable-thinking",
         "--enable_thinking",
         action="store_true",
-        default=None,
-        help="Enable thinking when supported; default: model chat-template setting.",
+        default=False,
+        help="Enable thinking when supported; disabled by default.",
     )
     thinking.add_argument("--disable-thinking", "--disable_thinking", dest="enable_thinking", action="store_false")
     parser.add_argument("--tlm_qpc", default=None)
@@ -153,7 +163,12 @@ def parse_args():
         default=True,
         help="Use MXINT8 retained KV-cache I/O for the DFlash-2 draft.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.image is None:
+        args.image = args.prompt is None
+    if args.prompt is None:
+        args.prompt = DEFAULT_TEXT_PROMPT
+    return args
 
 
 def _resolve_batch_size(batch_size):
@@ -170,7 +185,13 @@ def _resolve_batch_size(batch_size):
 
 def _get_mask_token_id(config):
     dflash_config = getattr(config, "dflash_config", None) or config.to_dict().get("dflash_config", {})
-    return dflash_config["mask_token_id"] if isinstance(dflash_config, dict) else dflash_config.mask_token_id
+    if isinstance(dflash_config, dict):
+        mask_token_id = dflash_config.get("mask_token_id", getattr(config, "mask_token_id", None))
+    else:
+        mask_token_id = dflash_config.mask_token_id
+    if mask_token_id is None:
+        raise ValueError("Draft config must provide mask_token_id.")
+    return mask_token_id
 
 
 def _dflash2_target_auto_class(config):
@@ -183,8 +204,16 @@ def _dflash2_target_auto_class(config):
 
 
 def _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size):
+    if args.image and tlm_config.model_type not in {"qwen3_vl", "qwen3_5", "qwen3_5_moe"}:
+        raise ValueError("DFlash-2 image inference currently supports Qwen VLM targets only.")
+    if args.disagg_tlm or args.tlm_prefill_qpc or args.tlm_prefill_devices:
+        raise ValueError("This DFlash-2 example uses a combined TLM QPC; omit the split-TLM options.")
+    if args.image and args.tlm_qpc and not args.vision_qpc:
+        raise ValueError("Reusing an image-capable TLM requires --vision_qpc as well as --tlm_qpc.")
     if args.image:
-        raise ValueError("The selected DFlash-2 model pair is text-only; omit --image.")
+        if args.height is not None and args.width is not None and args.height != args.width:
+            raise ValueError("The DFlash-2 compile helper requires equal --height and --width.")
+        args.height = args.width = args.height or args.width or 448
 
     meta = read_dflash2_meta(dlm_repo, args.hf_token)
     tlm_qpc = args.tlm_qpc or compile_dflash2_tlm_qpc(
@@ -195,15 +224,21 @@ def _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size):
         ctx_len=args.ctx_len,
         num_cores=args.tlm_cores,
         num_devices=len(args.tlm_devices),
+        vision_num_devices=len(args.vision_devices) if args.image else None,
         block_size=meta.block_size,
         mxfp6_matmul=args.precision == "fp6",
         mxint8_kv_cache=True,
         kv_offload=True,
-        lang_only=True,
+        lang_only=not args.image,
+        image_size=args.height if args.image else 56,
         mos=1,
         node_precision_info=True,
         hf_token=args.hf_token,
     )
+    vision_qpc = args.vision_qpc
+    if isinstance(tlm_qpc, dict):
+        vision_qpc = vision_qpc or tlm_qpc.get("vision_qpc_path")
+        tlm_qpc = tlm_qpc.get("lang_prefill_qpc_path") or tlm_qpc["lang_qpc_path"]
     dlm_qpc = args.dlm_qpc or compile_dflash2_dlm_qpc(
         tlm_repo,
         dlm_repo,
@@ -219,7 +254,7 @@ def _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size):
         hf_token=args.hf_token,
     )
     if args.compile_only:
-        print({"tlm_qpc": tlm_qpc, "dlm_qpc": dlm_qpc})
+        print({"tlm_qpc": tlm_qpc, "dlm_qpc": dlm_qpc, "vision_qpc": vision_qpc})
         return None, None, None
 
     logger.info(f"TLM qpc: {tlm_qpc}")
@@ -240,6 +275,24 @@ def _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size):
         dlm_session.set_buffers(
             {"selector_hidden": np.zeros((batch_size, meta.block_size, meta.selector_rank), dtype=np.float32)}
         )
+
+    if args.image:
+        processor = AutoProcessor.from_pretrained(tlm_repo, token=args.hf_token, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(dlm_repo, token=args.hf_token, trust_remote_code=True)
+        metrics, output_extra = _run_qwen3_vl(
+            args,
+            tokenizer,
+            processor,
+            tlm_config,
+            config,
+            dlm_session,
+            tlm_session,
+            prompt_chunk_size,
+            vision_qpc,
+            batch_size,
+            draft_selector=selector,
+        )
+        return metrics, output_extra, tokenizer
 
     messages = [{"role": "user", "content": args.prompt}]
     prompt_text = tokenizer.apply_chat_template(
@@ -355,6 +408,7 @@ def _run_qwen3_vl(
     vision_qpc,
     batch_size,
     tlm_prefill_session=None,
+    draft_selector=None,
 ):
     if processor is None:
         raise RuntimeError("Qwen3-VL requires a processor, which failed to load.")
@@ -396,6 +450,7 @@ def _run_qwen3_vl(
         batch_size=batch_size,
         tlm_prefill_session=tlm_prefill_session,
         enable_thinking=args.enable_thinking,
+        draft_selector=draft_selector,
     )
     return metrics, {"vision_encode_time_s": metrics.vision_prefill_time if args.image else None}
 
@@ -449,13 +504,18 @@ def main():
         raise ValueError(f"No default TLM HF path for '{args.model_name}'. Pass --tlm_hf_path.")
 
     tlm_config = AutoConfig.from_pretrained(tlm_repo, trust_remote_code=True, token=args.hf_token)
+    config = AutoConfig.from_pretrained(dlm_repo, token=args.hf_token, trust_remote_code=True)
+    detected_method = "dflash-2" if "DFlash2DraftModel" in (getattr(config, "architectures", None) or []) else "dflash"
+    if args.dflash_method is not None and args.dflash_method != detected_method:
+        raise ValueError(f"The draft checkpoint uses {detected_method}; select --dflash-method {detected_method}.")
+    args.dflash_method = detected_method
+    logger.info(f"Draft technique: {args.dflash_method}")
     if args.dflash_method == "dflash-2":
         metrics, output_extra, tokenizer = _run_dflash2(args, tlm_repo, dlm_repo, tlm_config, batch_size)
         if not args.compile_only:
             _print_results(tokenizer, metrics, output_extra, tlm_config.model_type)
         return
 
-    config = AutoConfig.from_pretrained(dlm_repo, token=args.hf_token, trust_remote_code=True)
     get_dlm_target_seq_len(get_dflash_block_size(config), args.prefill_seq_len, args.dlm_target_seq_len)
     is_qwen3vl = tlm_config.model_type in {"qwen3_vl", "qwen3_5", "qwen3_5_moe"}
     if args.disagg_tlm is None:

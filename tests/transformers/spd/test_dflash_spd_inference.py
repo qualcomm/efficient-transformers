@@ -85,7 +85,11 @@ def test_qwen_vision_inputs_reject_invalid_compiled_grid(grid):
 
 
 @pytest.mark.parametrize("lang_only", [True, False])
-def test_dflash2_target_helper_preserves_vision_paths(monkeypatch, lang_only):
+@pytest.mark.parametrize("node_precision_info", [True, False, "target_npi.yaml"])
+@pytest.mark.parametrize("supports_npi_generation", [True, False])
+def test_dflash2_target_helper_preserves_vision_paths(
+    monkeypatch, lang_only, node_precision_info, supports_npi_generation
+):
     from examples.performance.dflash import utils
 
     compile_calls = []
@@ -99,9 +103,16 @@ def test_dflash2_target_helper_preserves_vision_paths(monkeypatch, lang_only):
         return paths
 
     model = SimpleNamespace(dflash_tlm=True, model=SimpleNamespace(language_model=text_model), compile=compile_target)
+    if supports_npi_generation:
+        model.model.generate_npi_file = lambda path: "generated_npi.yaml"
     monkeypatch.setattr(utils, "read_dflash2_compile_meta", lambda *args: {"block_size": 8})
     monkeypatch.setattr(utils, "validate_dflash2_tlm_pair", lambda *args: SimpleNamespace())
-    monkeypatch.setattr(utils.QEFFAutoModelForImageTextToText, "from_pretrained", lambda *args, **kwargs: model)
+
+    def load_model(*args, **kwargs):
+        assert kwargs["continuous_batching"] is False
+        return model
+
+    monkeypatch.setattr(utils.QEFFAutoModelForImageTextToText, "from_pretrained", load_model)
     result = utils.compile_dflash2_tlm_qpc(
         "target",
         "draft",
@@ -113,6 +124,7 @@ def test_dflash2_target_helper_preserves_vision_paths(monkeypatch, lang_only):
         vision_num_devices=4,
         vision_num_cores=4,
         lang_only=lang_only,
+        node_precision_info=node_precision_info,
     )
     assert result == ("lang.qpc" if lang_only else {name: str(path) for name, path in paths.items()})
     assert compile_calls[0]["num_devices"] == 4
@@ -120,6 +132,36 @@ def test_dflash2_target_helper_preserves_vision_paths(monkeypatch, lang_only):
     assert compile_calls[0]["vision_num_devices"] == 4
     assert compile_calls[0]["vision_num_cores"] == 4
     assert compile_calls[0].get("skip_vision", False) is lang_only
+    assert compile_calls[0]["mxfp6_matmul"] and compile_calls[0]["mxint8_kv_cache"]
+    if node_precision_info is True and not supports_npi_generation:
+        assert "node_precision_info" not in compile_calls[0]
+    else:
+        assert compile_calls[0]["node_precision_info"] == node_precision_info
+
+
+def test_dflash2_draft_helper_preserves_precision_generation(monkeypatch):
+    from examples.performance.dflash import utils
+
+    calls = []
+
+    class DFlash2ForCausalLM:
+        pass
+
+    def compile_model(**kwargs):
+        calls.append(kwargs)
+        return "draft.qpc"
+
+    model = SimpleNamespace(model=DFlash2ForCausalLM(), compile=compile_model)
+    monkeypatch.setattr(utils, "inspect_dflash2_draft", lambda *args: 8)
+    monkeypatch.setattr(utils.QEFFAutoModelForCausalLM, "from_pretrained", lambda *args, **kwargs: model)
+    assert (
+        utils.compile_dflash2_dlm_qpc(
+            "target", "draft", ctx_len=4096, num_cores=4, num_devices=4, emit_selector_hidden=False
+        )
+        == "draft.qpc"
+    )
+    assert calls[0]["node_precision_info"] is True
+    assert calls[0]["mxfp6_matmul"] and calls[0]["mxint8_kv_cache"]
 
 
 @pytest.mark.parametrize("target_auto_class,kv_offload", [("causal_lm", True), ("image_text_to_text", False)])
@@ -158,6 +200,102 @@ def test_get_dflash_block_size_rejects_invalid_value(block_size, nested):
         config = {"dflash_config": config}
     with pytest.raises(ValueError, match="block_size >= 2"):
         utils.get_dflash_block_size(config)
+
+
+@pytest.mark.parametrize("prefill_seq_len,target_seq_len", [(408, 128), (408, 16), (128, 128), (80, 128)])
+def test_dlm_target_validation_accepts_partial_prefill_chunks(prefill_seq_len, target_seq_len, caplog):
+    from examples.performance.dflash import utils
+
+    session = SimpleNamespace(
+        binding_index_map={"target_hidden": 0}, bindings=[SimpleNamespace(dims=(1, target_seq_len, HIDDEN_SIZE))]
+    )
+    utils.validate_dlm_target_seq_len(session, 16, prefill_seq_len)
+    calls_per_chunk = (prefill_seq_len + target_seq_len - 1) // target_seq_len
+    assert f"prefill calls/chunk={calls_per_chunk}" in caplog.text
+
+
+@pytest.mark.parametrize("target_seq_len", [-1, 0, 8, 130])
+def test_dlm_target_validation_rejects_invalid_width(target_seq_len):
+    from examples.performance.dflash import utils
+
+    session = SimpleNamespace(
+        binding_index_map={"target_hidden": 0}, bindings=[SimpleNamespace(dims=(1, target_seq_len, HIDDEN_SIZE))]
+    )
+    with pytest.raises(ValueError, match="positive multiple of block_size"):
+        utils.validate_dlm_target_seq_len(session, 16, 408)
+
+
+def test_dlm_target_validation_preserves_requested_width_check():
+    from examples.performance.dflash import utils
+
+    session = SimpleNamespace(
+        binding_index_map={"target_hidden": 0}, bindings=[SimpleNamespace(dims=(1, 128, HIDDEN_SIZE))]
+    )
+    with pytest.raises(ValueError, match="128, but 256 was requested"):
+        utils.validate_dlm_target_seq_len(session, 16, 408, requested=256)
+
+
+@pytest.mark.parametrize("num_chunks", [1, 2])
+@pytest.mark.parametrize("last_chunk_valid_length", [1, 384, 401, 408])
+@pytest.mark.parametrize("target_seq_len", [16, 128])
+def test_gemma_vision_expanded_prefill_pads_partial_dlm_chunks(num_chunks, last_chunk_valid_length, target_seq_len):
+    prompt_chunk_size = 408
+    block_size = 16
+    padded_len = num_chunks * prompt_chunk_size
+    valid_len = (num_chunks - 1) * prompt_chunk_size + last_chunk_valid_length
+    position_ids = np.arange(padded_len).reshape(1, -1)
+    position_ids[:, valid_len:] = -1
+    calls = []
+
+    class DraftSession:
+        binding_index_map = {"target_hidden": 0}
+        bindings = [SimpleNamespace(dims=(1, target_seq_len, HIDDEN_SIZE))]
+
+        def set_buffers(self, buffers):
+            pass
+
+        def run(self, inputs):
+            calls.append({name: value.copy() for name, value in inputs.items()})
+            return {"logits": np.zeros((1, block_size, VOCAB_SIZE), dtype=np.float32)}
+
+    def prefill(start, end):
+        positions = position_ids[:, start:end]
+        hidden = np.broadcast_to(np.maximum(positions, 0)[:, :, None], (1, prompt_chunk_size, HIDDEN_SIZE))
+        return np.array([[5]]), hidden.astype(np.float32)
+
+    metrics = _run_spd_core(
+        input_ids=np.zeros((1, padded_len), dtype=np.int64),
+        flat_position_ids=position_ids,
+        tlm_prefill=prefill,
+        prepare_decode=lambda: None,
+        tlm_decode=lambda ids, positions: (
+            np.full((1, block_size), 7),
+            np.zeros((1, block_size, HIDDEN_SIZE), dtype=np.float32),
+        ),
+        dlm_session=DraftSession(),
+        mask_token_id=MASK_TOKEN_ID,
+        vocab_size=VOCAB_SIZE,
+        prompt_chunk_size=prompt_chunk_size,
+        block_size=block_size,
+        hidden_size=HIDDEN_SIZE,
+        generation_len=1,
+        max_iterations=1,
+        eos_token_ids=set(),
+        generated_ids=np.zeros((1, 1), dtype=np.int64),
+        metrics=SpecDecodingMetrics(block_size=block_size),
+    )
+    seen_positions = []
+    for call in calls:
+        assert call["target_hidden"].shape == (1, target_seq_len, HIDDEN_SIZE)
+        assert call["input_ids"].shape == (1, block_size)
+        positions = call["position_ids_target"][0]
+        valid = positions >= 0
+        seen_positions.extend(positions[valid])
+        np.testing.assert_array_equal(call["target_hidden"][0, valid, 0], positions[valid])
+        assert np.all(call["target_hidden"][0, ~valid] == 0)
+    np.testing.assert_array_equal(seen_positions, np.arange(valid_len))
+    np.testing.assert_array_equal(calls[-1]["position_ids"], np.arange(valid_len, valid_len + block_size)[None])
+    assert metrics.generated_ids == [7]
 
 
 @pytest.mark.parametrize("ctx_len", [4096, 8192])
@@ -223,6 +361,139 @@ def test_qwen35_vision_cli_accepts_long_context(monkeypatch, ctx_len, model_type
     monkeypatch.setattr(utils, "compile_qwen3vl_vlm_qpcs", stop_compile)
     with pytest.raises(ReachedCompilation):
         runpy.run_path(os.path.join(os.path.dirname(utils.__file__), "basic_inference_vision.py"), run_name="__main__")
+
+
+@pytest.mark.parametrize("model_name", ["Qwen3.8-27B", "Qwen/Qwen3.8-27B"])
+@pytest.mark.parametrize("method", [None, "dflash-2", "dflash2"])
+@pytest.mark.parametrize("image", [True, False])
+@pytest.mark.parametrize("reuse_qpcs", [True, False])
+def test_qwen38_example_selects_dflash2(monkeypatch, model_name, method, image, reuse_qpcs):
+    import io
+
+    from PIL import Image
+
+    from examples.performance.dflash import utils
+
+    monkeypatch.setitem(sys.modules, "utils", utils)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    namespace = runpy.run_path(os.path.join(os.path.dirname(utils.__file__), "basic_inference_vision.py"))
+    globals_ = namespace["main"].__globals__
+    draft_config = SimpleNamespace(
+        architectures=["DFlash2DraftModel"],
+        vocab_size=VOCAB_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        dflash_config={"block_size": BLOCK_SIZE, "mask_token_id": MASK_TOKEN_ID},
+        to_dict=lambda: {"block_size": BLOCK_SIZE},
+    )
+    target_config = SimpleNamespace(model_type="qwen3_5")
+    monkeypatch.setattr(
+        namespace["AutoConfig"],
+        "from_pretrained",
+        lambda repo, **kwargs: draft_config if repo.endswith("DFlash2") else target_config,
+    )
+    meta = SimpleNamespace(
+        block_size=BLOCK_SIZE,
+        mask_token_id=MASK_TOKEN_ID,
+        vocab_size=VOCAB_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        selector_top_k=1,
+    )
+    monkeypatch.setitem(globals_, "read_dflash2_meta", lambda *args: meta)
+    compile_calls = []
+
+    def compile_target(target, draft, **kwargs):
+        assert not reuse_qpcs
+        assert (target, draft) == ("Qwen/Qwen3.8-27B", "z-lab/Qwen3.8-27B-DFlash2")
+        assert kwargs["lang_only"] is (not image)
+        assert kwargs["mxint8_kv_cache"] and kwargs["mxfp6_matmul"]
+        compile_calls.append("target")
+        return {"lang_qpc_path": "target", "vision_qpc_path": "vision"}
+
+    def compile_draft(*args, **kwargs):
+        assert not reuse_qpcs
+        assert kwargs["emit_selector_hidden"] is False
+        assert kwargs["mxint8_kv_cache"] and kwargs["mxfp6_matmul"]
+        compile_calls.append("draft")
+        return "draft"
+
+    monkeypatch.setitem(globals_, "compile_dflash2_tlm_qpc", compile_target)
+    monkeypatch.setitem(globals_, "compile_dflash2_dlm_qpc", compile_draft)
+
+    class Tokenizer(_FakeTokenizer):
+        def apply_chat_template(self, messages, **kwargs):
+            assert kwargs["enable_thinking"] is False
+            return messages[0]["content"]
+
+    monkeypatch.setattr(namespace["AutoTokenizer"], "from_pretrained", lambda *args, **kwargs: Tokenizer())
+    monkeypatch.setattr(namespace["AutoProcessor"], "from_pretrained", lambda *args, **kwargs: object())
+    target = SimpleNamespace(
+        binding_index_map={"input_ids": 0, "logits": 1},
+        bindings=[SimpleNamespace(dims=(1, 128)), SimpleNamespace(dims=(1, 1))],
+        allowed_shapes=[
+            [(8, (1, 128)), (8, (1, 1))],
+            [(8, (1, 2 * BLOCK_SIZE)), (8, (1, BLOCK_SIZE))],
+        ],
+        input_names=["input_ids", "cache_commit"],
+    )
+    monkeypatch.setitem(globals_, "load_spd_sessions", lambda *args: (object(), target))
+    monkeypatch.setitem(globals_, "QAICInferenceSession", lambda qpc, devices: (qpc, devices))
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (4, 3)).save(image_bytes, format="PNG")
+    image_bytes.seek(0)
+
+    def download(url, **kwargs):
+        assert image and url == namespace["IMAGE_URL"]
+        return SimpleNamespace(raw=image_bytes)
+
+    monkeypatch.setattr(namespace["requests"], "get", download)
+    generation_calls = []
+
+    def generate(**kwargs):
+        generation_calls.append(kwargs)
+        assert kwargs["prompt_text"] == (namespace["IMAGE_PROMPT"] if image else utils.DEFAULT_TEXT_PROMPT)
+        if image:
+            assert kwargs["image"].mode == "RGB"
+            assert kwargs["compiled_height"] == kwargs["compiled_width"] == 448
+        assert kwargs.get("draft_selector") is None
+        metrics = SpecDecodingMetrics(block_size=BLOCK_SIZE)
+        metrics.vision_prefill_time = 0.0
+        return metrics
+
+    monkeypatch.setitem(globals_, "run_spd_inference_qwen3_vl", generate)
+    monkeypatch.setitem(globals_, "run_spd_inference_single", generate)
+    arguments = ["basic_inference_vision.py", "--model_name", model_name]
+    if method:
+        arguments.extend(["--dflash-method", method])
+    if not image:
+        arguments.append("--no-image")
+    if reuse_qpcs:
+        arguments.extend(["--tlm_qpc", "target", "--dlm_qpc", "draft"])
+        if image:
+            arguments.extend(["--vision_qpc", "vision"])
+    monkeypatch.setattr(sys, "argv", arguments)
+    namespace["main"]()
+    assert compile_calls == ([] if reuse_qpcs else ["target", "draft"])
+    assert len(generation_calls) == 1
+
+
+def test_qwen38_example_rejects_wrong_draft_method(monkeypatch):
+    from examples.performance.dflash import utils
+
+    monkeypatch.setitem(sys.modules, "utils", utils)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    namespace = runpy.run_path(os.path.join(os.path.dirname(utils.__file__), "basic_inference_vision.py"))
+    monkeypatch.setattr(
+        namespace["AutoConfig"],
+        "from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(architectures=["DFlash2DraftModel"]),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["basic_inference_vision.py", "--model_name", "Qwen/Qwen3.8-27B", "--dflash-method", "dflash"],
+    )
+    with pytest.raises(ValueError, match="draft checkpoint uses dflash-2"):
+        namespace["main"]()
 
 
 @pytest.mark.parametrize("sequence_lengths", [[], [16, 64]])
@@ -394,6 +665,7 @@ def test_qwen35_compile_preserves_dflash_metadata(monkeypatch, block_size, model
     def load_model(*args, **kwargs):
         assert kwargs["qaic_config"] == qaic_config
         assert kwargs["dtype"] == "float32"
+        assert kwargs["continuous_batching"] is False
         return SimpleNamespace(
             lang_model=SimpleNamespace(model=SimpleNamespace(language_model=text_model)), compile=compile_model
         )
@@ -818,10 +1090,136 @@ def test_dflash2_vision_cli_forwards_thinking_override(monkeypatch, thinking_fla
     args = namespace["parse_args"]()
     namespace["_run_dflash2"](args, "target", "draft", SimpleNamespace(model_type="qwen3_5"), 1)
 
-    expected = {"tokenize": False, "add_generation_prompt": True}
-    if thinking_flag is not None:
-        expected["enable_thinking"] = thinking_flag == "--enable-thinking"
+    expected = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        "enable_thinking": thinking_flag == "--enable-thinking",
+    }
     assert chat_kwargs == [expected]
+
+
+@pytest.mark.parametrize("script", ["basic_inference_text.py", "basic_inference_vision.py"])
+@pytest.mark.parametrize("thinking", [None, "--enable-thinking", "--disable-thinking"])
+def test_dflash_example_fixed_prompt_defaults(monkeypatch, script, thinking):
+    from examples.performance.dflash import utils
+
+    monkeypatch.setitem(sys.modules, "utils", utils)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    namespace = runpy.run_path(str(Path(utils.__file__).with_name(script)))
+    model_name = "Qwen3-4B" if script == "basic_inference_text.py" else "Qwen3.5-4B"
+    arguments = [script, "--model_name", model_name]
+    if thinking:
+        arguments.append(thinking)
+    monkeypatch.setattr(sys, "argv", arguments)
+    args = namespace["parse_args"]()
+    assert args.prompt == utils.DEFAULT_TEXT_PROMPT
+    assert args.enable_thinking is (thinking == "--enable-thinking")
+    if script == "basic_inference_vision.py":
+        assert args.image is True
+    monkeypatch.setattr(sys, "argv", [*arguments, "--prompt", "Custom prompt"])
+    custom = namespace["parse_args"]()
+    assert custom.prompt == "Custom prompt"
+    if script == "basic_inference_vision.py":
+        assert custom.image is False
+        monkeypatch.setattr(sys, "argv", [*arguments, "--no-image"])
+        text = namespace["parse_args"]()
+        assert text.image is False and text.prompt == utils.DEFAULT_TEXT_PROMPT
+        monkeypatch.setattr(sys, "argv", [*arguments, "--prompt", "Custom prompt", "--image"])
+        assert namespace["parse_args"]().image is True
+
+
+@pytest.mark.parametrize("method", ["dflash", "dflash-2"])
+@pytest.mark.parametrize("reuse_qpcs", [False, True])
+@pytest.mark.parametrize("image_flag", [None, "--image"])
+def test_dflash_vision_example_default_image(monkeypatch, method, reuse_qpcs, image_flag):
+    import io
+
+    from PIL import Image
+
+    from examples.performance.dflash import utils
+
+    config = SimpleNamespace(
+        architectures=["DFlash2DraftModel"] if method == "dflash-2" else [],
+        model_type="qwen3_5",
+        vocab_size=VOCAB_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        mask_token_id=MASK_TOKEN_ID,
+        to_dict=lambda: {"block_size": BLOCK_SIZE},
+    )
+    meta = SimpleNamespace(block_size=BLOCK_SIZE, selector_top_k=1)
+    target_calls = []
+
+    def compile_target(*args, **kwargs):
+        assert not reuse_qpcs
+        target_calls.append(kwargs)
+        if method == "dflash-2":
+            assert kwargs["lang_only"] is False and kwargs["image_size"] == 448
+            return {"lang_qpc_path": "target", "vision_qpc_path": "vision"}
+        return "target", "vision"
+
+    monkeypatch.setitem(sys.modules, "utils", utils)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    monkeypatch.setattr(utils.AutoConfig, "from_pretrained", lambda *a, **k: config)
+    monkeypatch.setattr(utils, "read_dflash2_meta", lambda *a: meta)
+    for name in ("compile_qwen3vl_vlm_qpcs", "compile_dflash2_tlm_qpc"):
+        monkeypatch.setattr(utils, name, compile_target)
+    draft = SimpleNamespace(
+        binding_index_map={"target_hidden": 0}, bindings=[SimpleNamespace(dims=(1, BLOCK_SIZE, HIDDEN_SIZE))]
+    )
+    monkeypatch.setattr(utils, "load_spd_sessions", lambda *a: (draft, _FakeCommitTLMSession(4)))
+    namespace = runpy.run_path(str(Path(utils.__file__).with_name("basic_inference_vision.py")))
+    globals_ = namespace["main"].__globals__
+    monkeypatch.setattr(namespace["AutoTokenizer"], "from_pretrained", lambda *a, **k: _FakeTokenizer())
+    monkeypatch.setattr(namespace["AutoProcessor"], "from_pretrained", lambda *a, **k: object())
+    monkeypatch.setitem(globals_, "QAICInferenceSession", lambda qpc, devices: (qpc, devices))
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (4, 3)).save(image_bytes, format="PNG")
+    image_bytes.seek(0)
+
+    def download(url, **kwargs):
+        assert url == namespace["IMAGE_URL"]
+        assert url.endswith("/a1f5cc3add200c0cd080fad463e500f44ef1fb41/images/8.jpg")
+        return SimpleNamespace(raw=image_bytes)
+
+    generation_calls = []
+
+    def generate(**kwargs):
+        generation_calls.append(kwargs)
+        assert kwargs["prompt_text"] == namespace["IMAGE_PROMPT"]
+        assert "stained with ink" in kwargs["prompt_text"]
+        assert kwargs["image"].mode == "RGB"
+        assert kwargs["compiled_height"] == kwargs["compiled_width"] == 448
+        assert kwargs["vision_session"] == ("vision", [0, 1, 2, 3])
+        assert kwargs["enable_thinking"] is False
+        assert kwargs["draft_selector"] is None
+        metrics = SpecDecodingMetrics(block_size=BLOCK_SIZE)
+        metrics.vision_prefill_time = 0.0
+        return metrics
+
+    monkeypatch.setattr(namespace["requests"], "get", download)
+    monkeypatch.setitem(globals_, "run_spd_inference_qwen3_vl", generate)
+    arguments = [
+        "basic_inference_vision.py",
+        "--model_name",
+        "Qwen3.8-27B",
+        "--dflash-method",
+        method,
+        "--no-disagg-tlm",
+        "--height",
+        "448",
+        "--width",
+        "448",
+        "--dlm_qpc",
+        "draft",
+    ]
+    if image_flag:
+        arguments.append(image_flag)
+    if reuse_qpcs:
+        arguments += ["--tlm_qpc", "target", "--vision_qpc", "vision"]
+    monkeypatch.setattr(sys, "argv", arguments)
+    namespace["main"]()
+    assert len(target_calls) == int(not reuse_qpcs)
+    assert len(generation_calls) == 1
 
 
 def test_dflash2_text_path_rejects_old_qwen35_verification_qpc():

@@ -2195,7 +2195,7 @@ def test_qwen3_5_dflash_ort_concatenated_commit(tmp_path, prompt_length, block_s
         with torch.no_grad():
             if not prefill:
                 # Test-only oracle: evaluate just the accepted prefix, with no
-                # live verification suffix, and compare every retained state.
+                # live verification suffix, and compare the usable retained state.
                 prefix_inputs = deepcopy(inputs)
                 prefix_inputs["position_ids"][..., block_size:] = -1
                 prefix_inputs["cache_commit"] = torch.ones(1, dtype=torch.int64)
@@ -2214,15 +2214,18 @@ def test_qwen3_5_dflash_ort_concatenated_commit(tmp_path, prompt_length, block_s
                 retained = actual[name + "_RetainedState"]
                 np.testing.assert_allclose(retained, expected.numpy(), atol=3e-4, rtol=3e-4)
                 if not prefill:
-                    np.testing.assert_allclose(
-                        retained, prefix_cache[layer_idx][state_idx].numpy(), atol=3e-4, rtol=3e-4
-                    )
-                    if accepted == 0:
-                        np.testing.assert_array_equal(retained, feed[name])
-                    elif qeff.model.config.text_config.layer_types[layer_idx] == "full_attention":
+                    prefix = prefix_cache[layer_idx][state_idx].numpy()
+                    if qeff.model.config.text_config.layer_types[layer_idx] == "full_attention":
+                        np.testing.assert_allclose(
+                            retained[:, :, :committed_length], prefix[:, :, :committed_length], atol=3e-4, rtol=3e-4
+                        )
                         untouched = np.ones(ctx_len, dtype=bool)
-                        untouched[committed_length - accepted : committed_length] = False
+                        untouched[committed_length - accepted : committed_length + block_size] = False
                         np.testing.assert_array_equal(retained[:, :, untouched], feed[name][:, :, untouched])
+                    else:
+                        np.testing.assert_allclose(retained, prefix, atol=3e-4, rtol=3e-4)
+                        if accepted == 0:
+                            np.testing.assert_array_equal(retained, feed[name])
 
 
 def _export_qwen_decoder_onnx(qeff_model, inputs, tmp_path, *, model_type: str, prefill_only: bool, layerwise: bool):

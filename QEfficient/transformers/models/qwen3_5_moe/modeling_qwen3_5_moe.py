@@ -653,12 +653,11 @@ class QEffQwen3_5MoeAttention(Qwen3_5MoeAttention):
             past_key_values is not None and blocking_config is not None and (blocking_config.mode != BlockingMode.NONE)
         )
 
-        if past_key_values is not None and dflash_commit_final is not None:
-            kv_layer = past_key_values.kv_layers[self.layer_idx]
-            previous_keys, previous_values = kv_layer.keys, kv_layer.values
-            commit_keys, commit_values = key_states, value_states
-            # Eager scatter mutates its input; verification needs a temporary cache.
-            kv_layer.keys, kv_layer.values = previous_keys.clone(), previous_values.clone()
+        # DFlash proposal KV can stay: causal masking hides the rejected suffix,
+        # and the next block overwrites it. Only recurrent state needs prefix commit.
+        # Use padding-aware scatter for DFlash even without continuous batching.
+        if past_key_values is not None and dflash_commit_final is not None and batch_index is None:
+            batch_index = torch.arange(hidden_states.shape[0], device=hidden_states.device).reshape(-1, 1)
 
         if use_blocking:
             attn_output, attn_weights = generic_blocked_attention_interface(
@@ -700,29 +699,6 @@ class QEffQwen3_5MoeAttention(Qwen3_5MoeAttention):
                 attention_mask,
                 scaling=self.scaling,
                 **kwargs,
-            )
-
-        if past_key_values is not None and dflash_commit_final is not None:
-            # Scatter only committed tokens into retained KV. Selecting across
-            # the full cache can requantize untouched MXINT8 request history.
-            text_positions = position_ids[0]
-            token_indices = torch.arange(text_positions.shape[1], device=position_ids.device)
-            commit_positions = torch.where(
-                dflash_commit_final.bool() | (token_indices < text_positions.shape[1] - dflash_chunk_size),
-                text_positions,
-                -1,
-            )
-            kv_layer.keys, kv_layer.values = previous_keys.clone(), previous_values.clone()
-            past_key_values.update(
-                commit_keys,
-                commit_values,
-                self.layer_idx,
-                {
-                    "batch_index": batch_index
-                    if batch_index is not None
-                    else torch.arange(previous_keys.shape[0], device=position_ids.device).reshape(-1, 1),
-                    "position_ids": commit_positions,
-                },
             )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()

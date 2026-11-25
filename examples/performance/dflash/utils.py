@@ -65,6 +65,23 @@ def _build_aliases(model_map):
 MODEL_ALIASES = _build_aliases(MODEL_MAP)
 
 
+DEFAULT_TEXT_PROMPT = '''Write a solution to the following problem and make sure that it passes the tests:
+```python
+from typing import List
+
+
+def has_close_elements(numbers: List[float], threshold: float) -> bool:
+    """ Check if in given list of numbers, are any two numbers closer to each other than
+    given threshold.
+    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)
+    False
+    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)
+    True
+    """
+
+```'''
+
+
 def load_spd_session(qpc: str, devices: list[int]):
     session = QAICInferenceSession(qpc, devices)
     session.skip_buffers(
@@ -309,10 +326,13 @@ def get_dlm_target_seq_len(block_size: int, prefill_seq_len: int, target_seq_len
 def validate_dlm_target_seq_len(dlm_session, block_size, prefill_seq_len, requested=None):
     index = dlm_session.binding_index_map["target_hidden"]
     width = int(dlm_session.bindings[index].dims[1])
-    get_dlm_target_seq_len(block_size, prefill_seq_len, width)
+    # Vision-expanded TLM chunks can end in a padded, partial DLM call.
+    if width < block_size or width % block_size:
+        raise ValueError("DLM QPC target length must be a positive multiple of block_size.")
     if requested is not None and requested != width:
         raise ValueError(f"DLM QPC target length is {width}, but {requested} was requested. Recompile the DLM.")
-    logger.info(f"DLM target length={width}, noise length={block_size}, prefill calls/chunk={prefill_seq_len // width}")
+    calls_per_chunk = (prefill_seq_len + width - 1) // width
+    logger.info(f"DLM target length={width}, noise length={block_size}, prefill calls/chunk={calls_per_chunk}")
 
 
 def _compile_tlm_phases(model, compile_kwargs, disagg_tlm):
@@ -572,6 +592,7 @@ def compile_qwen3vl_vlm_qpcs(
         trust_remote_code=True,
         dtype="float32",
         kv_offload=True,
+        continuous_batching=False,
         ignore_mismatched_sizes=True,
         token=hf_token,
         qaic_config=qaic_config,
@@ -1181,7 +1202,7 @@ def compile_dflash2_tlm_qpc(
     target_layer_offset: int = 0,
     target_absmax: float = 128.0,
     mos: int = 1,
-    node_precision_info: bool = True,
+    node_precision_info: bool | str = True,
     hf_token: str | None = None,
     local_files_only: bool = False,
     check_only: bool = False,
@@ -1215,6 +1236,7 @@ def compile_dflash2_tlm_qpc(
             dtype="float32",
             attn_implementation="eager",
             kv_offload=kv_offload,
+            continuous_batching=False,
             config=tlm_config,
             token=hf_token,
             qaic_config=qaic_config,
@@ -1253,9 +1275,11 @@ def compile_dflash2_tlm_qpc(
         "mxfp6_matmul": mxfp6_matmul,
         "mxint8_kv_cache": mxint8_kv_cache,
         "mos": mos,
-        "node_precision_info": node_precision_info,
         "dflash_block_size": block_size,
     }
+    # Older target runtimes otherwise turn True into an invalid bare compiler flag.
+    if node_precision_info is not True or hasattr(inner, "generate_npi_file"):
+        compile_kwargs["node_precision_info"] = node_precision_info
     if target_auto_class == "image_text_to_text":
         compile_kwargs.update(
             height=image_size,
