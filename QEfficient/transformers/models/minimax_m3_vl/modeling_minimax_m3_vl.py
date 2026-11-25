@@ -1876,8 +1876,7 @@ class QEffMiniMaxM3VLIndexer(MiniMaxM3VLIndexer):
             candidate_block_groups.append(device_topk_block_ids)
 
         if return_core_candidates:
-            past_key_values.index_keys[layer_idx] = index_key_cache
-            return torch.cat(core_score_groups, dim=0), torch.cat(core_block_groups, dim=0)
+            return torch.cat(core_score_groups, dim=0), torch.cat(core_block_groups, dim=0), index_key_cache
 
         candidate_scores = (
             torch.cat(candidate_score_groups, dim=0)
@@ -3424,10 +3423,10 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
         position_ids: torch.Tensor,
         blocking_config: AttentionBlockingConfig,
         indexer_position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> tuple[torch.Tensor, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the validated non-paged, single-token sparse decode graph."""
         indexer_cos, indexer_sin = indexer_position_embeddings or position_embeddings
-        core_topk_scores, core_topk_block_ids = self.indexer._select_blocks_dp(
+        core_topk_scores, core_topk_block_ids, index_key_cache = self.indexer._select_blocks_dp(
             hidden_states,
             position_ids,
             past_key_values,
@@ -3518,7 +3517,7 @@ class QEffMiniMaxM3VLAttention(MiniMaxM3VLAttention):
             .transpose(1, 2)
             .reshape(batch, query_len, -1)
         )
-        return self.o_proj(attn_output), None
+        return self.o_proj(attn_output), index_key_cache
 
     def _baseline_attention(
         self,
@@ -4564,7 +4563,7 @@ class QEffMiniMaxM3VLDecoderLayer(MiniMaxM3VLDecoderLayer):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, _ = self.self_attn(
+        hidden_states, updated_index_key = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
@@ -4577,6 +4576,8 @@ class QEffMiniMaxM3VLDecoderLayer(MiniMaxM3VLDecoderLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+        if updated_index_key is not None:
+            return hidden_states, updated_index_key
         return hidden_states
 
 
@@ -4723,7 +4724,7 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
             layer_indexer_position_embeddings = indexer_position_embeddings
             layer_attention = getattr(decoder_layer, "self_attn", None)
             layer_blocking_config = getattr(layer_attention, "attn_blocking_config", None)
-            if (
+            layer_uses_unified_decode = bool(
                 unified_position_embeddings is not None
                 and getattr(layer_attention, "indexer", None) is not None
                 and layer_attention._supports_unified_sparse_decode(
@@ -4734,10 +4735,11 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
                     kwargs.get("msa_indexer_block_table"),
                     kwargs.get("msa_attn_block_table"),
                 )
-            ):
+            )
+            if layer_uses_unified_decode:
                 layer_position_embeddings = unified_position_embeddings
                 layer_indexer_position_embeddings = unified_indexer_position_embeddings
-            hidden_states = decoder_layer(
+            layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
@@ -4747,6 +4749,11 @@ class QEffMiniMaxM3VLTextModel(MiniMaxM3VLTextModel):
                 indexer_position_embeddings=layer_indexer_position_embeddings,
                 **kwargs,
             )
+            if layer_uses_unified_decode:
+                hidden_states, updated_index_key = layer_outputs
+                past_key_values.index_keys[layer_attention.layer_idx] = updated_index_key
+            else:
+                hidden_states = layer_outputs
         hidden_states = self.norm(hidden_states)
 
         if use_legacy_cache:
