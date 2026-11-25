@@ -61,6 +61,14 @@ def _get_vision_config(config):
     return getattr(config, "vision_config", None) or config
 
 
+def _require_vision_proxy_config(config) -> None:
+    if getattr(config, "vision_config", None) is None:
+        raise ValueError(
+            "Vision proxy mode requires an image-text config with `vision_config`; "
+            f"got {config.__class__.__name__}. Use proxy_component='language' for language-only models."
+        )
+
+
 def _get_vision_num_layers(vision_config):
     for attribute in _VISION_LAYER_COUNT_ATTRIBUTES:
         if (num_layers := getattr(vision_config, attribute, None)) is not None:
@@ -109,11 +117,16 @@ def _normalize_layer_type_sequence(value, original_num_layers: int, proxy_num_la
     return mapped_values
 
 
-def _normalize_layer_indexed_metadata(config, original_num_layers: int, proxy_num_layers: int) -> None:
+def _normalize_layer_indexed_metadata(
+    config, original_num_layers: int, proxy_num_layers: int, skipped_attributes: set[str] | None = None
+) -> None:
     if config is None or original_num_layers < 1 or proxy_num_layers < 1:
         return
 
+    skipped_attributes = skipped_attributes or set()
     for attribute, value in vars(config).items():
+        if attribute in skipped_attributes:
+            continue
         attribute_lower = attribute.lower()
         is_known_sequence = attribute in _LAYER_INDEXED_SEQUENCE_ATTRIBUTES
         is_probable_layer_sequence = _is_int_sequence(value) and (
@@ -168,6 +181,17 @@ def _get_signature_horizon(config, configured_num_layers: int) -> int:
     return horizon
 
 
+def _rebuild_mlp_only_layers(config, pattern_horizon: int, proxy_num_layers: int) -> None:
+    mlp_only_layers = getattr(config, "mlp_only_layers", None)
+    if mlp_only_layers is None:
+        return
+
+    mlp_only_layer_set = set(mlp_only_layers)
+    config.mlp_only_layers = [
+        layer_idx for layer_idx in range(proxy_num_layers) if layer_idx % pattern_horizon in mlp_only_layer_set
+    ]
+
+
 def apply_proxy_layer_config(
     config, minimum_calls_per_layer_type: int = 2, num_hidden_layers: int | None = None
 ) -> int:
@@ -184,8 +208,9 @@ def apply_proxy_layer_config(
         raise ValueError("Proxy mode requires at least one language layer.")
     original_num_layers = original_num_layers or configured_num_layers
     if num_hidden_layers is not None:
+        _rebuild_mlp_only_layers(language_config, original_num_layers, num_hidden_layers)
         language_config.num_hidden_layers = num_hidden_layers
-        _normalize_layer_indexed_metadata(language_config, original_num_layers, num_hidden_layers)
+        _normalize_layer_indexed_metadata(language_config, original_num_layers, num_hidden_layers, {"mlp_only_layers"})
         logger.info("Proxy language model uses caller-provided layer count: %d", num_hidden_layers)
         return num_hidden_layers
 
@@ -206,15 +231,10 @@ def apply_proxy_layer_config(
             layer_types[layer_idx % len(layer_types)] for layer_idx in range(proxy_num_layers)
         ]
 
-    mlp_only_layers = getattr(language_config, "mlp_only_layers", None)
-    if mlp_only_layers is not None:
-        mlp_only_layer_set = set(mlp_only_layers)
-        language_config.mlp_only_layers = [
-            layer_idx for layer_idx in range(proxy_num_layers) if layer_idx % signature_horizon in mlp_only_layer_set
-        ]
+    _rebuild_mlp_only_layers(language_config, signature_horizon, proxy_num_layers)
 
     language_config.num_hidden_layers = proxy_num_layers
-    _normalize_layer_indexed_metadata(language_config, configured_num_layers, proxy_num_layers)
+    _normalize_layer_indexed_metadata(language_config, configured_num_layers, proxy_num_layers, {"mlp_only_layers"})
     logger.info(
         "Proxy language model uses %d of %d layers with at least %d calls for each of %d layer types",
         proxy_num_layers,
@@ -272,6 +292,7 @@ def prepare_proxy_config(pretrained_model_name_or_path, kwargs: dict, proxy_comp
         else:
             apply_proxy_layer_config(config, num_hidden_layers=explicit_num_hidden_layers)
     else:
+        _require_vision_proxy_config(config)
         if explicit_num_hidden_layers is None:
             apply_vision_proxy_layer_config(config)
         else:

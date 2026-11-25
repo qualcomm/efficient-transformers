@@ -63,6 +63,7 @@ from QEfficient.generation.vlm_generation import VisionLanguageGeneration
 from QEfficient.proxy.modeling_utils import (
     PROXY_COMPONENT_LANGUAGE,
     PROXY_COMPONENT_VISION,
+    _require_vision_proxy_config,
     normalize_proxy_component,
     prepare_proxy_config,
 )
@@ -505,10 +506,14 @@ class QEFFTransformersBase(QEFFBaseModel):
     _hf_auto_class: type
 
     def __init__(self, model: nn.Module, **kwargs) -> None:
+        enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
+        if enable_proxy and proxy_component == PROXY_COMPONENT_VISION:
+            _require_vision_proxy_config(model.config)
         _configure_proxy_for_model(
             self,
-            kwargs.pop("enable_proxy", False),
-            normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE)),
+            enable_proxy,
+            proxy_component,
         )
         if self.__class__ is not QEFFAutoModel:
             _disable_unsupported_weight_free(kwargs, self.__class__.__name__)
@@ -4230,10 +4235,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         model_class_name = model.__class__.__name__
         if not (model_class_name.endswith(("ForCausalLM", "LMHeadModel"))):
             raise TypeError(f"Required pytorch module for CausalLM or LMHeadModel, got {model_class_name}")
+        enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
+        if enable_proxy and proxy_component == PROXY_COMPONENT_VISION:
+            _require_vision_proxy_config(model.config)
         _configure_proxy_for_model(
             self,
-            kwargs.pop("enable_proxy", False),
-            normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE)),
+            enable_proxy,
+            proxy_component,
         )
 
         # TODO: remove from version 1.20

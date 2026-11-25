@@ -3633,6 +3633,30 @@ def test_proxy_layer_config_preserves_repeated_layer_types():
     mixed_qwen_moe_config = Qwen3MoeConfig(num_hidden_layers=16, decoder_sparse_step=2)
     assert apply_proxy_layer_config(mixed_qwen_moe_config) == 4
 
+    alternating_dense_moe_config = SimpleNamespace(
+        num_hidden_layers=16,
+        num_experts=8,
+        decoder_sparse_step=1,
+        mlp_only_layers=list(range(0, 16, 2)),
+        cross_attention_layers=[0, 15],
+    )
+    assert apply_proxy_layer_config(alternating_dense_moe_config) == 4
+    assert alternating_dense_moe_config.num_hidden_layers == 4
+    assert alternating_dense_moe_config.mlp_only_layers == [0, 2]
+    assert alternating_dense_moe_config.cross_attention_layers == [0, 3]
+
+    explicit_alternating_dense_moe_config = SimpleNamespace(
+        num_hidden_layers=16,
+        num_experts=8,
+        decoder_sparse_step=1,
+        mlp_only_layers=list(range(0, 16, 2)),
+        cross_attention_layers=[0, 15],
+    )
+    assert apply_proxy_layer_config(explicit_alternating_dense_moe_config, num_hidden_layers=4) == 4
+    assert explicit_alternating_dense_moe_config.num_hidden_layers == 4
+    assert explicit_alternating_dense_moe_config.mlp_only_layers == [0, 2]
+    assert explicit_alternating_dense_moe_config.cross_attention_layers == [0, 3]
+
     qwen3_5_moe_config = Qwen3_5MoeTextConfig(num_hidden_layers=16)
     qwen3_5_moe_config.num_hidden_layers = 2
     assert apply_proxy_layer_config(qwen3_5_moe_config) == 8
@@ -3857,6 +3881,13 @@ def test_prepare_proxy_config_uses_image_text_component_selector():
     assert language_kwargs["config"].text_config.num_hidden_layers == 2
     assert language_kwargs["config"].vision_config.depth == 8
 
+    causal_kwargs = {
+        "config": LlamaConfig(num_hidden_layers=16),
+        "proxy_component": "vision",
+    }
+    with pytest.raises(ValueError, match="vision_config"):
+        prepare_proxy_config("unused-local-config", causal_kwargs)
+
 
 def test_dual_qpc_proxy_kwargs_are_component_aware():
     from QEfficient.transformers.models.modeling_auto import _proxy_kwargs_for_component
@@ -3872,6 +3903,43 @@ def test_dual_qpc_proxy_kwargs_are_component_aware():
     vision_kwargs = _proxy_kwargs_for_component({"enable_proxy": True, "proxy_component": "vision"}, "vision")
     assert "enable_proxy" not in language_kwargs
     assert vision_kwargs["enable_proxy"] is True
+
+
+def test_causal_lm_direct_constructor_rejects_invalid_vision_proxy_component():
+    from transformers import LlamaForCausalLM
+
+    config = LlamaConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=2,
+        num_hidden_layers=2,
+        num_key_value_heads=2,
+        vocab_size=32,
+    )
+    with pytest.raises(ValueError, match="vision_config"):
+        QEFFAutoModelForCausalLM(
+            LlamaForCausalLM(config).eval(),
+            enable_proxy=True,
+            proxy_component="vision",
+        )
+
+
+def test_base_direct_constructor_rejects_invalid_vision_proxy_component():
+    from transformers import BertConfig, BertModel
+
+    config = BertConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=2,
+        num_hidden_layers=2,
+        vocab_size=32,
+    )
+    with pytest.raises(ValueError, match="vision_config"):
+        QEFFAutoModel(
+            BertModel(config).eval(),
+            enable_proxy=True,
+            proxy_component="vision",
+        )
 
 
 def test_causal_misclassified_vlm_preserves_proxy_component(monkeypatch):
