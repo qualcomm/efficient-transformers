@@ -29,6 +29,7 @@ _LAYER_INDEXED_SEQUENCE_ATTRIBUTES = {
     "out_indices",
 }
 _LAYER_INDEXED_ORDERED_SEQUENCE_ATTRIBUTES = {"intermediate_layers_indices", "out_indices"}
+_LAYER_INDEXED_TRUNCATED_SEQUENCE_ATTRIBUTES = {"cross_attention_layers", "cross_attn_layers"}
 _LAYER_INDEXED_SCALAR_ATTRIBUTES = {"vision_feature_layer"}
 _LAYER_COUNT_SCALAR_ATTRIBUTES = {"num_global_layers"}
 _LAYER_TYPE_SEQUENCE_ATTRIBUTES = {"fullatt_block_indexes"}
@@ -105,6 +106,12 @@ def _normalize_index_sequence(value, original_num_layers: int, proxy_num_layers:
     return _restore_sequence_type(value, mapped_values)
 
 
+def _truncate_index_sequence(value, proxy_num_layers: int):
+    return _restore_sequence_type(
+        value, [int(layer_idx) for layer_idx in value if 0 <= int(layer_idx) < proxy_num_layers]
+    )
+
+
 def _map_hidden_state_selector(selector_idx: int, original_num_layers: int, proxy_num_layers: int) -> int:
     original_num_hidden_states = original_num_layers + 1
     proxy_num_hidden_states = proxy_num_layers + 1
@@ -144,25 +151,28 @@ def _normalize_layer_type_sequence(value, original_num_layers: int, proxy_num_la
 
 
 def _normalize_layer_indexed_metadata(
-    config, original_num_layers: int, proxy_num_layers: int, skipped_attributes: set[str] | None = None
+    config,
+    original_num_layers: int,
+    proxy_num_layers: int,
+    skipped_attributes: set[str] | None = None,
+    truncated_attributes: set[str] | None = None,
 ) -> None:
     if config is None or original_num_layers < 1 or proxy_num_layers < 1:
         return
 
     skipped_attributes = skipped_attributes or set()
+    truncated_attributes = truncated_attributes or set()
     for attribute, value in vars(config).items():
         if attribute in skipped_attributes:
             continue
-        attribute_lower = attribute.lower()
         is_known_sequence = attribute in _LAYER_INDEXED_SEQUENCE_ATTRIBUTES
-        is_probable_layer_sequence = _is_int_sequence(value) and (
-            "layer" in attribute_lower or "index" in attribute_lower or "indices" in attribute_lower
-        )
-        if attribute in _LAYER_INDEXED_SCALAR_ATTRIBUTES:
+        if _is_int_sequence(value) and attribute in truncated_attributes:
+            setattr(config, attribute, _truncate_index_sequence(value, proxy_num_layers))
+        elif attribute in _LAYER_INDEXED_SCALAR_ATTRIBUTES:
             setattr(config, attribute, _normalize_hidden_state_selector(value, original_num_layers, proxy_num_layers))
         elif _is_int_sequence(value) and attribute in _LAYER_TYPE_SEQUENCE_ATTRIBUTES:
             setattr(config, attribute, _normalize_layer_type_sequence(value, original_num_layers, proxy_num_layers))
-        elif _is_int_sequence(value) and (is_known_sequence or is_probable_layer_sequence):
+        elif _is_int_sequence(value) and is_known_sequence:
             setattr(
                 config,
                 attribute,
@@ -271,7 +281,13 @@ def apply_proxy_layer_config(
     if num_hidden_layers is not None:
         _rebuild_mlp_only_layers(language_config, original_num_layers, num_hidden_layers)
         language_config.num_hidden_layers = num_hidden_layers
-        _normalize_layer_indexed_metadata(language_config, original_num_layers, num_hidden_layers, {"mlp_only_layers"})
+        _normalize_layer_indexed_metadata(
+            language_config,
+            original_num_layers,
+            num_hidden_layers,
+            {"mlp_only_layers"},
+            _LAYER_INDEXED_TRUNCATED_SEQUENCE_ATTRIBUTES,
+        )
         logger.info("Proxy language model uses caller-provided layer count: %d", num_hidden_layers)
         return num_hidden_layers
 
@@ -295,7 +311,13 @@ def apply_proxy_layer_config(
     _rebuild_mlp_only_layers(language_config, signature_horizon, proxy_num_layers)
 
     language_config.num_hidden_layers = proxy_num_layers
-    _normalize_layer_indexed_metadata(language_config, configured_num_layers, proxy_num_layers, {"mlp_only_layers"})
+    _normalize_layer_indexed_metadata(
+        language_config,
+        configured_num_layers,
+        proxy_num_layers,
+        {"mlp_only_layers"},
+        _LAYER_INDEXED_TRUNCATED_SEQUENCE_ATTRIBUTES,
+    )
     logger.info(
         "Proxy language model uses %d of %d layers with at least %d calls for each of %d layer types",
         proxy_num_layers,
@@ -336,7 +358,8 @@ def apply_vision_proxy_layer_config(
             setattr(vision_config, attribute, proxy_num_layers)
 
     _normalize_layer_indexed_metadata(vision_config, original_num_layers, proxy_num_layers)
-    _normalize_layer_indexed_metadata(config, original_num_layers, proxy_num_layers)
+    if config is not vision_config:
+        _normalize_layer_indexed_metadata(config, original_num_layers, proxy_num_layers)
     return proxy_num_layers
 
 

@@ -410,6 +410,18 @@ def _function_call_counts(onnx_model, function_ids: set[tuple[str, str]]) -> Cou
     return Counter(_node_function_id(node) for node in _decoder_function_call_nodes(onnx_model, function_ids))
 
 
+_VISION_MASK_ONLY_ATTENTION_SIGNATURES = {
+    (("layer_type", "window_attention"),),
+    (("layer_type", "full_attention"),),
+}
+
+
+def _allows_shared_vision_function_signature_mix(
+    proxy_component: str, signatures: set[tuple[tuple[str, str], ...]]
+) -> bool:
+    return proxy_component == "vision" and signatures.issubset(_VISION_MASK_ONLY_ATTENTION_SIGNATURES)
+
+
 def _logical_proxy_signature_info(qeff_model, decoder_call_nodes):
     """Return required and observed proxy signatures when model config supports them."""
     model_config = getattr(getattr(qeff_model, "model", None), "config", None)
@@ -532,7 +544,7 @@ def _validate_proxy_subfunction_calls(qeff_model, onnx_path) -> None:
     mixed_signature_functions = {
         _format_function_id(function_id): sorted(signatures)
         for function_id, signatures in function_signatures.items()
-        if len(signatures) > 1
+        if len(signatures) > 1 and not _allows_shared_vision_function_signature_mix(proxy_component, signatures)
     }
     unused_function_variants = {name: count for name, count in exact_function_variant_counts.items() if count == 0}
 

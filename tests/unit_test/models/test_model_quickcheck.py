@@ -3279,6 +3279,57 @@ def test_proxy_subfunction_validation_rejects_variant_reused_across_logical_sign
         _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
 
 
+def test_proxy_subfunction_validation_allows_shared_vision_attention_function(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyVisionEncoder:
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyModel:
+        config = SimpleNamespace(vision_config=SimpleNamespace(depth=6, fullatt_block_indexes=(1, 2, 4, 5)))
+
+        def get_qeff_vision_encoder(self):
+            return DummyVisionEncoder()
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        _proxy_component = "vision"
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid_0"]),
+            helper.make_node("DummyLayer", ["mid_0"], ["mid_1"]),
+            helper.make_node("DummyLayer", ["mid_1"], ["mid_2"]),
+            helper.make_node("DummyLayer", ["mid_2"], ["mid_3"]),
+            helper.make_node("DummyLayer", ["mid_3"], ["mid_4"]),
+            helper.make_node("DummyLayer", ["mid_4"], ["y"]),
+        ],
+        "proxy_subfunction_shared_vision_attention_function",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(graph, functions=[function], opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "shared_vision_attention_function.onnx"
+    onnx.save(model, onnx_path)
+
+    _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
 def test_proxy_subfunction_validation_rejects_unused_function_variant(tmp_path):
     from onnx import TensorProto, helper
 
@@ -3639,11 +3690,13 @@ def test_proxy_layer_config_preserves_repeated_layer_types():
         decoder_sparse_step=1,
         mlp_only_layers=list(range(0, 16, 2)),
         cross_attention_layers=[0, 15],
+        no_rope_layers=[0, 1] * 8,
     )
     assert apply_proxy_layer_config(alternating_dense_moe_config) == 4
     assert alternating_dense_moe_config.num_hidden_layers == 4
     assert alternating_dense_moe_config.mlp_only_layers == [0, 2]
-    assert alternating_dense_moe_config.cross_attention_layers == [0, 3]
+    assert alternating_dense_moe_config.cross_attention_layers == [0]
+    assert alternating_dense_moe_config.no_rope_layers == [0, 1] * 8
 
     explicit_alternating_dense_moe_config = SimpleNamespace(
         num_hidden_layers=16,
@@ -3651,11 +3704,20 @@ def test_proxy_layer_config_preserves_repeated_layer_types():
         decoder_sparse_step=1,
         mlp_only_layers=list(range(0, 16, 2)),
         cross_attention_layers=[0, 15],
+        no_rope_layers=[1, 0] * 8,
     )
     assert apply_proxy_layer_config(explicit_alternating_dense_moe_config, num_hidden_layers=4) == 4
     assert explicit_alternating_dense_moe_config.num_hidden_layers == 4
     assert explicit_alternating_dense_moe_config.mlp_only_layers == [0, 2]
-    assert explicit_alternating_dense_moe_config.cross_attention_layers == [0, 3]
+    assert explicit_alternating_dense_moe_config.cross_attention_layers == [0]
+    assert explicit_alternating_dense_moe_config.no_rope_layers == [1, 0] * 8
+
+    mllama_style_cross_attention_config = SimpleNamespace(
+        num_hidden_layers=16,
+        cross_attention_layers=[3, 8, 13],
+    )
+    assert apply_proxy_layer_config(mllama_style_cross_attention_config, num_hidden_layers=12) == 12
+    assert mllama_style_cross_attention_config.cross_attention_layers == [3, 8]
 
     qwen3_5_moe_config = Qwen3_5MoeTextConfig(num_hidden_layers=16)
     qwen3_5_moe_config.num_hidden_layers = 2
@@ -3796,6 +3858,10 @@ def test_vision_proxy_layer_config_normalizes_layer_indexed_metadata():
     assert config.vision_config.intermediate_layers_indices == [0, 1, 1]
     assert config.vision_config.vision_feature_layer == -2
     assert config.vision_config.num_global_layers == 2
+
+    direct_vision_config = SimpleNamespace(depth=8, deepstack_visual_indexes=[2, 5, 7])
+    assert apply_vision_proxy_layer_config(direct_vision_config) == 2
+    assert direct_vision_config.deepstack_visual_indexes == [0, 1]
 
     explicit_config = SimpleNamespace(
         vision_config=SimpleNamespace(depth=8, deepstack_visual_indexes=[4, 7], vision_feature_layer=[-4, -2])
