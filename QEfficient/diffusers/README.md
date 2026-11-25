@@ -46,6 +46,10 @@ pip install -U pip
 
 ### Install QEfficient
 
+Install QEfficient from the official `quic/efficient-transformers` repository or a wheel built from that source.
+Avoid `pip install qefficient` until maintainers confirm an official PyPI release under their control.
+For reproducible installs, pin the Git URL to a reviewed commit using `@<commit-sha>`.
+
 ```bash
 # Install from GitHub (includes diffusers support)
 pip install git+https://github.com/quic/efficient-transformers

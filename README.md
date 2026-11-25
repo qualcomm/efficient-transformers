@@ -106,6 +106,11 @@ For other models, there is comprehensive documentation to inspire upon the chang
 
 
 ## Quick Installation
+
+Install QEfficient from the official `quic/efficient-transformers` repository or a wheel built from that source,
+using the commands below. Avoid `pip install qefficient` until maintainers confirm an official PyPI release
+under their control. For reproducible installs, pin the Git URL to a reviewed commit using `@<commit-sha>`.
+
 ```bash
 
 # Create Python virtual env and activate it. (Recommended Python 3.12)
