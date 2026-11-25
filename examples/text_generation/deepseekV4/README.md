@@ -5,6 +5,13 @@ export, compile, and runtime entry point. By default it exports and compiles a
 one-token decode graph, then runs generation. Add `--prefill-only` to export
 and compile a prefill graph; prefill runs stop after compilation.
 
+The companion scripts are also kept here:
+
+- [`deepseek_v4_flash_parity.py`](deepseek_v4_flash_parity.py) compares HF and
+  QAIC logits for chunked prefill and decode using precompiled QPCs.
+- [`deepseek_v4_prefill_mad.py`](deepseek_v4_prefill_mad.py) compares saved HF
+  and QAIC prefill logits and reports mean absolute difference and top-1 match.
+
 Run the commands below from the repository root. Set `MODEL_DIR` to a local
 DeepSeek-V4-Flash checkpoint and set `HF_CACHE` and `ARTIFACT_ROOT` to writable
 directories:
