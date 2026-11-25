@@ -84,6 +84,7 @@ from QEfficient.transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     QEffDeepseekV4Attention,
     QEffDeepseekV4Cache,
     QEffDeepseekV4HashRouter,
+    QEffDeepseekV4HyperConnection,
     QEffDeepseekV4TopKRouter,
     QEffDeepseekV4UnweightedRMSNorm,
 )
@@ -153,6 +154,24 @@ def test_deepseek_v4_unweighted_rms_norm_uses_custom_op_mapping():
     assert transformed
     assert type(transformed_norm) is QEffDeepseekV4UnweightedRMSNorm
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_deepseek_v4_hyperconnection_projection_uses_model_dtype(dtype, monkeypatch):
+    config = _tiny_deepseek_v4_config()
+    hyperconnection = QEffDeepseekV4HyperConnection(config).to(dtype).eval()
+    linear_dtypes = []
+    original_linear = torch.nn.functional.linear
+
+    def capture_linear(input_tensor, weight, bias=None):
+        linear_dtypes.append((input_tensor.dtype, weight.dtype))
+        return original_linear(input_tensor, weight, bias)
+
+    monkeypatch.setattr(torch.nn.functional, "linear", capture_linear)
+    hidden_streams = torch.randn(1, 2, config.hc_mult, config.hidden_size, dtype=dtype)
+    hyperconnection(hidden_streams)
+
+    assert linear_dtypes == [(dtype, dtype)]
 
 
 @pytest.mark.parametrize("router_class", [QEffDeepseekV4TopKRouter, QEffDeepseekV4HashRouter])

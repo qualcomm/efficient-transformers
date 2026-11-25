@@ -2960,7 +2960,8 @@ class QEffDeepseekV4HyperConnection(DeepseekV4HyperConnection):
     def forward(self, hidden_streams: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hc = self.hc_mult
         flat = self.input_norm(hidden_streams.flatten(start_dim=2).float())
-        pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split([hc, hc, hc * hc], dim=-1)
+        projection = F.linear(flat.to(hidden_streams.dtype), self.fn.to(hidden_streams.dtype))
+        pre_w, post_w, comb_w = projection.float().split([hc, hc, hc * hc], dim=-1)
         pre_b, post_b, comb_b = self.base.split([hc, hc, hc * hc])
         pre_scale, post_scale, comb_scale = self.scale.unbind(0)
 
