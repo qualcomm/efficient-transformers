@@ -4431,7 +4431,11 @@ def test_qwen3_5_moe_dummy_inputs_follow_selected_vision_specialization():
         prefill_seq_len=32,
         ctx_len=4096,
         vision_specialization=vision_spec,
-        language_specialization={"comp_ctx_lengths": 64},
+        language_specialization={
+            "comp_ctx_lengths": 64,
+            "vision_batch_size": vision_spec["vision_batch_size"],
+            "vision_size": vision_spec["vision_size"] + 64,
+        },
         comp_ctx_lengths=[64, 128],
     )
 
@@ -4447,7 +4451,7 @@ def test_qwen3_5_moe_dummy_inputs_follow_selected_vision_specialization():
     )
     assert inputs["lang"]["vision_embeds"].shape == (
         vision_spec["vision_batch_size"],
-        vision_spec["vision_size"],
+        vision_spec["vision_size"] + 64,
         text_config.hidden_size,
     )
     assert inputs["lang"]["comp_ctx_lengths"].shape == (64,)

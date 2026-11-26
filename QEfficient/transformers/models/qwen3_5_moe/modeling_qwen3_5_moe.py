@@ -2736,9 +2736,19 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
 
         inputs_shapes["pixel_values"] = (grid_height, grid_width)
         inputs_shapes["image_grid_thw"] = (vision_batch_size, time, grid_h, grid_w)
+        language_vision_batch_size = int(
+            language_specialization.get("vision_batch_size", vision_batch_size)
+            if language_specialization is not None
+            else vision_batch_size
+        )
+        language_vision_size = int(
+            language_specialization.get("vision_size", vision_size)
+            if language_specialization is not None
+            else vision_size
+        )
         inputs_shapes["vision_embeds"] = (
-            vision_batch_size,
-            vision_size,
+            language_vision_batch_size,
+            language_vision_size,
             self.model.config.text_config.hidden_size,
         )
         inputs_shapes["image_idx"] = (1, 1)

@@ -3558,7 +3558,8 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
             _write_single_qpc_compile_runner_bundles(
                 self,
                 specializations=specializations,
-                continuous_batching=self.continuous_batching,
+                # Single-QPC image-text models do not support continuous batching.
+                continuous_batching=False,
                 weight_free=getattr(self, "_weight_free", False),
             )
         return compile_path

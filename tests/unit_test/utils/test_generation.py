@@ -2009,6 +2009,36 @@ def test_dual_qpc_compile_artifact_bundles_use_compiled_language_specializations
 
 
 @pytest.mark.cpu_only
+def test_single_qpc_compile_artifacts_uses_non_continuous_runner_inputs(monkeypatch):
+    """Single-QPC artifact compilation must not require an unsupported wrapper attribute."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import torch
+
+    from QEfficient.transformers.models import modeling_auto
+
+    specializations = [{"batch_size": 1, "seq_len": 4, "ctx_len": 32}]
+    write_bundles = MagicMock()
+    monkeypatch.setattr(modeling_auto, "_write_single_qpc_compile_runner_bundles", write_bundles)
+    family = SimpleNamespace(
+        config=SimpleNamespace(torch_dtype=torch.float32),
+        name_or_path="test-vlm",
+        get_output_names=lambda: [],
+        get_specializations=lambda **_: (specializations, {}),
+    )
+    model = object.__new__(modeling_auto._QEFFAutoModelForImageTextToTextSingleQPC)
+    model.model = family
+    model._compile = MagicMock(return_value="model.qpc")
+    model.ccl_enabled = False
+    model.comp_ctx_lengths_prefill = None
+    model.comp_ctx_lengths_decode = None
+
+    assert model.compile(onnx_path="model.onnx", prefill_seq_len=4, ctx_len=32, artifacts=True) == "model.qpc"
+    assert write_bundles.call_args.kwargs["continuous_batching"] is False
+
+
+@pytest.mark.cpu_only
 def test_graph_input_filter_selects_model_specific_vision_metadata(tmp_path):
     import onnx
     from onnx import TensorProto, helper
