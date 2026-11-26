@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # -----------------------------------------------------------------------------
+import math
 from typing import List
 
 import numpy as np
@@ -16,6 +17,36 @@ from QEfficient.utils import (
     get_sliding_window_shapes,
     padding_check_and_fix,
 )
+
+
+def build_block_table(
+    dp: int,
+    cp: int,
+    batch_size: int,
+    num_logical_pages: int,
+    generator: torch.Generator,
+    physical_pages: int | None = None,
+) -> torch.Tensor:
+    """Build a DP-major logical-to-physical page table."""
+    if batch_size % dp:
+        raise ValueError("batch_size must be divisible by dp")
+    batch_local = batch_size // dp
+    num_page_groups = math.ceil(num_logical_pages / cp)
+    required_pages = batch_local * num_page_groups
+    physical_pages = required_pages if physical_pages is None else int(physical_pages)
+    if physical_pages < required_pages:
+        raise ValueError(
+            f"physical page capacity ({physical_pages}) is smaller than the required logical entries "
+            f"({required_pages})."
+        )
+    table = torch.empty((dp, batch_local, num_page_groups), dtype=torch.int32)
+    for dp_idx in range(dp):
+        table[dp_idx] = torch.randperm(
+            physical_pages,
+            dtype=torch.int32,
+            generator=generator,
+        )[:required_pages].view(batch_local, num_page_groups)
+    return table
 
 
 class InputHandler:

@@ -22,38 +22,10 @@ import torch
 from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForImageTextToText
+from QEfficient.utils.config_utils import _build_minimax_qaic_config
+from QEfficient.utils.generate_inputs import build_block_table
 
 MODEL_ID = "MiniMaxAI/MiniMax-M3"
-
-
-def build_block_table(
-    dp: int,
-    cp: int,
-    batch_size: int,
-    num_logical_pages: int,
-    generator: torch.Generator,
-    physical_pages: int | None = None,
-) -> torch.Tensor:
-    """Build a DP-major logical-to-physical page table."""
-    if batch_size % dp:
-        raise ValueError("batch_size must be divisible by dp")
-    batch_local = batch_size // dp
-    num_page_groups = math.ceil(num_logical_pages / cp)
-    required_pages = batch_local * num_page_groups
-    physical_pages = required_pages if physical_pages is None else int(physical_pages)
-    if physical_pages < required_pages:
-        raise ValueError(
-            f"physical page capacity ({physical_pages}) is smaller than the required logical entries "
-            f"({required_pages})."
-        )
-    table = torch.empty((dp, batch_local, num_page_groups), dtype=torch.int32)
-    for dp_idx in range(dp):
-        table[dp_idx] = torch.randperm(
-            physical_pages,
-            dtype=torch.int32,
-            generator=generator,
-        )[:required_pages].view(batch_local, num_page_groups)
-    return table
 
 
 def print_page_layout(
@@ -115,47 +87,6 @@ def parse_device_ids(value: str) -> list[int]:
     if len(set(device_ids)) != len(device_ids):
         raise ValueError("device IDs must be unique")
     return device_ids
-
-
-def _build_qaic_config(
-    args: argparse.Namespace,
-    gqa_page_block_size: int,
-    indexer_page_block_size: int,
-    attn_page_block_size: int,
-) -> dict:
-    return {
-        "blocking_mode": "kv_minimax_dedicated",
-        "num_kv_blocks": args.num_kv_blocks,
-        "attn_dp": args.attn_dp,
-        "attn_cp": args.attn_cp,
-        "indexer_num_blocks": args.indexer_num_blocks,
-        "msa_num_kv_blocks": args.msa_num_kv_blocks,
-        "skip_kv": args.skip_kv,
-        "non_dynamic_cache": args.non_dynamic_cache,
-        "msa_indexer_dp": args.msa_indexer_dp,
-        "msa_indexer_cp": args.msa_indexer_cp,
-        "msa_attn_dp": args.msa_attn_dp,
-        "msa_attn_cp": args.msa_attn_cp,
-        "indexer_n_head": args.indexer_n_head,
-        "num_cores_per_device": args.num_cores,
-        "paged_kv": True,
-        "static_export_dims": args.static_export_dims,
-        "gqa_page_block_size": gqa_page_block_size,
-        "msa_indexer_page_block_size": indexer_page_block_size,
-        "msa_attn_page_block_size": attn_page_block_size,
-        "gqa_num_logical_pages": args.gqa_num_pages,
-        "msa_indexer_num_logical_pages": args.msa_indexer_num_logical_pages,
-        "msa_attn_num_logical_pages": args.msa_attn_num_logical_pages,
-        "gqa_physical_pages": args.gqa_physical_pages,
-        "msa_indexer_physical_pages": args.msa_indexer_physical_pages,
-        "msa_attn_physical_pages": args.msa_attn_physical_pages,
-        "moe_config": {
-            "flavour": "expert_parallel",
-            "expert_parallel_chunk_size": args.expert_parallel_chunk_size,
-            "cores_per_expert": args.cores_per_expert,
-            "tree_reduce": args.tree_reduce,
-        },
-    }
 
 
 def main() -> None:
@@ -438,7 +369,7 @@ def main() -> None:
         weight_free=True,
         **({"enable_proxy": True} if args.enable_proxy else {}),
     )
-    qaic_config = _build_qaic_config(args, gqa_page_block_size, indexer_page_block_size, attn_page_block_size)
+    qaic_config = _build_minimax_qaic_config(args, gqa_page_block_size, indexer_page_block_size, attn_page_block_size)
 
     t0 = time.perf_counter()
     qpc_paths = qeff_model.compile(
