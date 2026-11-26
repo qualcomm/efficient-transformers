@@ -1916,7 +1916,10 @@ def test_dual_qpc_compile_artifacts_write_vision_prefill_and_decode_bundles(tmp_
         }
 
     model = SimpleNamespace(
-        get_dummy_inputs=get_dummy_inputs,
+        # The auto wrapper owns components, while the family implementation
+        # owns get_dummy_inputs().  Keep this boundary in the fixture so a
+        # wrapper-level lookup cannot mask a production AttributeError.
+        model=SimpleNamespace(get_dummy_inputs=get_dummy_inputs),
         vision_model=SimpleNamespace(onnx_path=vision_path, compile_artifacts_path=vision_dir),
         lang_model=SimpleNamespace(onnx_path=language_path, compile_artifacts_path=language_dir),
     )
@@ -1948,6 +1951,61 @@ def test_dual_qpc_compile_artifacts_write_vision_prefill_and_decode_bundles(tmp_
         if entry["io-direction"] == "in"
     }
     assert prefill_inputs == {"input_ids", "position_ids", "comp_ctx_lengths"}
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("use_explicit_override", [False, True], ids=["prefill-only", "explicit-override"])
+def test_dual_qpc_compile_artifact_bundles_use_compiled_language_specializations(monkeypatch, use_explicit_override):
+    """Replay bundles must receive precisely the specializations sent to the QPC compiler."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import torch
+
+    from QEfficient.transformers.models import modeling_auto
+
+    vision_specialization = {"vision_batch_size": 1, "vision_size": 3}
+    prefill_specialization = {"batch_size": 1, "seq_len": 4, "ctx_len": 32}
+    decode_specialization = {"batch_size": 1, "seq_len": 1, "ctx_len": 32}
+    explicit_specialization = {"batch_size": 2, "seq_len": 4, "ctx_len": 64}
+    expected_language_specializations = [explicit_specialization] if use_explicit_override else [prefill_specialization]
+    write_bundles = MagicMock()
+    monkeypatch.setattr(modeling_auto, "_write_dual_qpc_compile_runner_bundles", write_bundles)
+
+    family = SimpleNamespace(
+        config=SimpleNamespace(model_type="test-vlm", torch_dtype=torch.float32),
+        name_or_path="test-vlm",
+        get_output_names=lambda **_: {"vision": [], "lang": []},
+        get_specializations=lambda **_: (
+            {"vision": [vision_specialization], "lang": [prefill_specialization, decode_specialization]},
+            {"specializations": [explicit_specialization]} if use_explicit_override else {},
+        ),
+    )
+    model = object.__new__(modeling_auto._QEffAutoModelForImageTextToTextDualQPC)
+    model.model = family
+    model.vision_model = SimpleNamespace(onnx_path="vision.onnx", _compile=MagicMock(return_value="vision.qpc"))
+    model.lang_model = SimpleNamespace(onnx_path="language.onnx", _compile=MagicMock(return_value="language.qpc"))
+    model.transform = MagicMock()
+    model.dflash_tlm = False
+    model.ccl_enabled = False
+    model.continuous_batching = False
+    model.comp_ctx_lengths_prefill = None
+    model.comp_ctx_lengths_decode = None
+
+    model.compile(
+        vision_onnx_path="vision.onnx",
+        lang_onnx_path="language.onnx",
+        prefill_only=True,
+        prefill_seq_len=4,
+        ctx_len=32,
+        artifacts=True,
+    )
+
+    assert model.lang_model._compile.call_args.kwargs["specializations"] == expected_language_specializations
+    assert write_bundles.call_args.kwargs["specializations"] == {
+        "vision": [vision_specialization],
+        "lang": expected_language_specializations,
+    }
 
 
 @pytest.mark.cpu_only

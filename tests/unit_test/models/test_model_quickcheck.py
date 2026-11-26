@@ -4454,6 +4454,47 @@ def test_qwen3_5_moe_dummy_inputs_follow_selected_vision_specialization():
     assert torch.count_nonzero(inputs["lang"]["comp_ctx_lengths"]) == 0
 
 
+@pytest.mark.parametrize(
+    ("weight_free", "batch_size"),
+    [(True, 1), (False, 4)],
+)
+def test_qwen3_5_moe_compile_runner_dummy_inputs_keep_selected_language_batch_size(weight_free, batch_size):
+    """Compile replay inputs must match the selected language specialization batch."""
+    from types import SimpleNamespace
+
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeForConditionalGeneration
+
+    text_config = SimpleNamespace(
+        hidden_size=16,
+        num_hidden_layers=0,
+        layer_types=[],
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+    )
+    config = SimpleNamespace(
+        torch_dtype=torch.float32,
+        text_config=text_config,
+        vision_config=SimpleNamespace(patch_size=16, temporal_patch_size=1),
+    )
+    model = QEffQwen3_5MoeForConditionalGeneration.__new__(QEffQwen3_5MoeForConditionalGeneration)
+    model.config = config
+    model.model = SimpleNamespace(config=config, language_model=SimpleNamespace(layers=[]))
+
+    inputs = model.get_dummy_inputs(
+        kv_offload=True,
+        batch_size=batch_size,
+        prefill_seq_len=8,
+        ctx_len=32,
+        language_specialization={"batch_size": batch_size, "seq_len": 8, "ctx_len": 32},
+        _runner_artifacts=True,
+        weight_free=weight_free,
+    )
+
+    assert inputs["lang"]["input_ids"].shape == (batch_size, 8)
+    assert inputs["lang"]["position_ids"].shape == (4, batch_size, 8)
+
+
 def test_qwen3_vl_moe_batch_index_boundary_reorders_inputs_and_outputs():
     from QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
         _batch_index_gather,

@@ -197,6 +197,7 @@ def _compile_dummy_inputs(
         ctx_len=specialization.get("ctx_len"),
         vision_specialization=vision_specialization,
         language_specialization=specialization,
+        _runner_artifacts=True,
         weight_free=weight_free,
     )
 
@@ -217,7 +218,7 @@ def _write_dual_qpc_compile_runner_bundles(
     if not skip_vision:
         for index, vision_specialization in enumerate(vision_specs):
             dummy_inputs = _compile_dummy_inputs(
-                model,
+                model.model,
                 specialization=language_specs[0] if language_specs else vision_specialization,
                 vision_specialization=vision_specialization,
                 continuous_batching=continuous_batching,
@@ -246,7 +247,7 @@ def _write_dual_qpc_compile_runner_bundles(
                 vision_specs[0] if vision_specs else None,
             )
             dummy_inputs = _compile_dummy_inputs(
-                model,
+                model.model,
                 specialization=language_specialization,
                 vision_specialization=compatible_vision,
                 continuous_batching=continuous_batching,
@@ -2610,13 +2611,16 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         compiler_options.pop("full_batch_size", None)
         self.qpc_paths = {}
         kw_spec = compiler_options.pop("specializations", None)
+        compiled_vision_specializations = []
+        compiled_language_specializations = []
         if not skip_vision:
+            compiled_vision_specializations = list(specializations["vision"])
             compiler_options_vision = compiler_options.copy()
             compiler_options_vision["node_precision_info"] = False
             vision_qpc_path = self.vision_model._compile(
                 onnx_path=self.vision_model.onnx_path,
                 compile_dir=compile_dir,
-                specializations=specializations["vision"],
+                specializations=compiled_vision_specializations,
                 specialization_module_name="Vision",
                 convert_to_fp16=_should_convert_to_fp16(target_dtype, compiler_options),
                 mxfp6_matmul=constants.VISION_MXFP6_MATMUL,
@@ -2660,32 +2664,32 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             if prefill_only:
                 if self.dflash_tlm and self.model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
                     # Prefill and block-sized verification share the chunk graph.
-                    specializations = []
+                    compiled_language_specializations = []
                     for spec in lang_specs:
-                        if spec not in specializations:
-                            specializations.append(spec)
+                        if spec not in compiled_language_specializations:
+                            compiled_language_specializations.append(spec)
                 elif self.comp_ctx_lengths_prefill is not None:
-                    specializations = lang_specs[: len(self.comp_ctx_lengths_prefill)]
+                    compiled_language_specializations = lang_specs[: len(self.comp_ctx_lengths_prefill)]
                 else:
-                    specializations = lang_specs[:1]
+                    compiled_language_specializations = lang_specs[:1]
                 qpc_key = "lang_prefill_qpc_path"
             elif prefill_seq_len == 1:
                 if self.comp_ctx_lengths_decode is not None:
-                    specializations = lang_specs[-len(self.comp_ctx_lengths_decode) :]
+                    compiled_language_specializations = lang_specs[-len(self.comp_ctx_lengths_decode) :]
                 else:
-                    specializations = lang_specs[-1:]
+                    compiled_language_specializations = lang_specs[-1:]
                 qpc_key = "lang_decode_qpc_path"
             else:
-                specializations = lang_specs
+                compiled_language_specializations = lang_specs
                 qpc_key = "lang_qpc_path"
 
             if kw_spec:
-                specializations = kw_spec
+                compiled_language_specializations = kw_spec
             lang_qpc_path = self.lang_model._compile(
                 onnx_path=self.lang_model.onnx_path,
                 compile_dir=compile_dir,
                 retained_state=True,
-                specializations=specializations,
+                specializations=compiled_language_specializations,
                 convert_to_fp16=_should_convert_to_fp16(target_dtype, compiler_options),
                 mxfp6_matmul=mxfp6_matmul,
                 mdp_ts_num_devices=num_devices,
@@ -2699,7 +2703,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         if artifacts:
             _write_dual_qpc_compile_runner_bundles(
                 self,
-                specializations={"vision": vision_specializations, "lang": language_specializations},
+                specializations={
+                    "vision": compiled_vision_specializations,
+                    "lang": compiled_language_specializations,
+                },
                 skip_vision=skip_vision,
                 skip_lang=skip_lang,
                 continuous_batching=self.continuous_batching,

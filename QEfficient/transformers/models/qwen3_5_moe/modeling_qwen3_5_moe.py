@@ -2671,6 +2671,7 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
         inputs_shapes = {}
         vision_specialization = kwargs.pop("vision_specialization", None)
         language_specialization = kwargs.pop("language_specialization", None)
+        runner_artifacts = kwargs.pop("_runner_artifacts", False)
         dummy_seq_len = int(kwargs.get("prefill_seq_len", 32))
         is_dflash = bool(getattr(self.model.language_model, "target_layer_ids", None))
         if is_dflash:
@@ -2682,7 +2683,9 @@ class QEffQwen3_5MoeForConditionalGeneration(Qwen3_5MoeForConditionalGeneration)
             chunk_size = getattr(self.model.language_model, "dflash_chunk_size", QWEN3_5_MOE_DFLASH_CHUNK_SIZE)
             dummy_seq_len = 2 * chunk_size
         bs = kwargs.get("batch_size", constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE)
-        if kwargs.get("weight_free", False):
+        if runner_artifacts and language_specialization is not None:
+            bs = int(language_specialization.get("batch_size", bs))
+        elif kwargs.get("weight_free", False):
             bs = max(2, bs)
         elif bs > 1:
             bs = 2
