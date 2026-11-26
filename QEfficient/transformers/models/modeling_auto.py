@@ -347,7 +347,17 @@ def _build_meta_model(hf_auto_class, pretrained_model_name_or_path, kwargs):
     config = kwargs.get("config", None)
     if config is None:
         config_kwargs = {
-            k: kwargs[k] for k in ("trust_remote_code", "revision", "token", "subfolder", "cache_dir") if k in kwargs
+            k: kwargs[k]
+            for k in (
+                "cache_dir",
+                "force_download",
+                "local_files_only",
+                "revision",
+                "subfolder",
+                "token",
+                "trust_remote_code",
+            )
+            if k in kwargs
         }
         config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **config_kwargs)
     torch_dtype = kwargs.get("torch_dtype", torch.float32)
@@ -361,6 +371,43 @@ def _build_meta_model(hf_auto_class, pretrained_model_name_or_path, kwargs):
     with init_empty_weights():
         model = hf_auto_class.from_config(config, torch_dtype=torch_dtype, attn_implementation=attn_implementation)
     return model
+
+
+def _apply_explicit_language_layer_count_override(
+    pretrained_model_name_or_path: str,
+    kwargs: dict,
+    explicit_num_hidden_layers: int | None,
+) -> None:
+    if explicit_num_hidden_layers is None:
+        return
+
+    from transformers import AutoConfig
+
+    kwargs.pop("num_hidden_layers", None)
+    config = kwargs.get("config")
+    if config is None:
+        config_kwargs = {
+            k: kwargs[k]
+            for k in (
+                "cache_dir",
+                "force_download",
+                "local_files_only",
+                "revision",
+                "subfolder",
+                "token",
+                "trust_remote_code",
+            )
+            if k in kwargs
+        }
+        config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **config_kwargs)
+
+    language_config = config
+    for config_name in ("text_config", "llm_config", "language_config"):
+        if nested_config := getattr(config, config_name, None):
+            language_config = nested_config
+            break
+    language_config.num_hidden_layers = int(explicit_num_hidden_layers)
+    kwargs["config"] = config
 
 
 def _compile_io_name(name: str, *, use_onnx_subfunctions: bool) -> str:
@@ -4436,8 +4483,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         _resolve_torch_dtype(kwargs)
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
+        explicit_num_hidden_layers = kwargs.get("num_hidden_layers")
         if enable_proxy:
             prepare_proxy_config(pretrained_model_name_or_path, kwargs, proxy_component=proxy_component)
+        else:
+            _apply_explicit_language_layer_count_override(
+                pretrained_model_name_or_path, kwargs, explicit_num_hidden_layers
+            )
         if layerwise:
             warnings.warn(
                 "layerwise export is deprecated and will be removed in a future release. "

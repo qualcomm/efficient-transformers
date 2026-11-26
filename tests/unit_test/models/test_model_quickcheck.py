@@ -4175,6 +4175,71 @@ def test_prepare_proxy_config_uses_image_text_component_selector():
         prepare_proxy_config("unused-local-config", causal_kwargs)
 
 
+def test_weight_free_causal_lm_applies_explicit_layer_count_without_proxy(monkeypatch):
+    from QEfficient.transformers.models import modeling_auto
+
+    captured = {}
+
+    class FakeConfig:
+        model_type = "fake"
+        architectures = ["FakeForCausalLM"]
+        quantization_config = None
+        hidden_size = 16
+        vocab_size = 32
+
+        def __init__(self, num_hidden_layers=8):
+            self.num_hidden_layers = num_hidden_layers
+            self.dtype = torch.float32
+            self.torch_dtype = torch.float32
+
+        def to_diff_dict(self):
+            return {
+                "hidden_size": self.hidden_size,
+                "num_hidden_layers": self.num_hidden_layers,
+                "vocab_size": self.vocab_size,
+            }
+
+    class FakeForCausalLM(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+    class FakeAutoClass:
+        @staticmethod
+        def from_config(config, **kwargs):
+            captured["config"] = config
+            captured["from_config_kwargs"] = kwargs
+            return FakeForCausalLM(config)
+
+    monkeypatch.setattr(modeling_auto.QEFFAutoModelForCausalLM, "_hf_auto_class", FakeAutoClass)
+    monkeypatch.setattr(modeling_auto, "validate_dynamo_export_requirements", lambda _: None)
+
+    qeff_model = modeling_auto.QEFFAutoModelForCausalLM.from_pretrained(
+        "unused-local-model",
+        config=FakeConfig(num_hidden_layers=8),
+        num_hidden_layers=4,
+        weight_free=True,
+        enable_proxy=False,
+    )
+
+    assert captured["config"].num_hidden_layers == 4
+    assert qeff_model.model.config.num_hidden_layers == 4
+    assert "num_hidden_layers" not in captured["from_config_kwargs"]
+
+
+def test_explicit_layer_count_override_updates_nested_language_config_without_proxy():
+    from QEfficient.transformers.models.modeling_auto import _apply_explicit_language_layer_count_override
+
+    config = SimpleNamespace(text_config=SimpleNamespace(num_hidden_layers=8), vision_config=SimpleNamespace(depth=8))
+    kwargs = {"config": config, "num_hidden_layers": 4}
+
+    _apply_explicit_language_layer_count_override("unused-local-model", kwargs, 4)
+
+    assert kwargs["config"].text_config.num_hidden_layers == 4
+    assert kwargs["config"].vision_config.depth == 8
+    assert "num_hidden_layers" not in kwargs
+
+
 def test_dual_qpc_proxy_kwargs_are_component_aware():
     from QEfficient.transformers.models.modeling_auto import _proxy_kwargs_for_component
 
