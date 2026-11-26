@@ -30,7 +30,6 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
 )
 
 from QEfficient.customop import (
-    CompressedAttnFunc,
     CtxGather1DFunc,
     V4CtxScatter1DFunc,
     ctx_gather_blocked_kv,
@@ -40,10 +39,10 @@ from QEfficient.customop import (
     ctx_scatter,
     ctx_scatter_dp,
     ctx_scatter_dp_cp,
+    ctx_scatter_dp_masked,
     ctx_scatter_folded_rows,
 )
-from QEfficient.customop.rms_norm import CustomRMSNormAIC, CustomRMSNormFunc
-from QEfficient.customop.utils import select_interface
+from QEfficient.customop.rms_norm import CustomRMSNormAIC
 from QEfficient.transformers.moe import (
     MoEProfile,
     MoEWeights,
@@ -62,18 +61,7 @@ def _nonnegative_integer_floor_div(position: torch.Tensor, divisor: int) -> torc
     """Divide nonnegative position/index tensors using integer floor division."""
     if divisor < 1:
         raise ValueError(f"divisor must be positive, got {divisor}")
-    if torch.onnx.is_in_onnx_export():
-        position_int32 = position.to(torch.int32)
-        divisor_tensor = torch.full((), divisor, dtype=torch.int32, device=position.device)
-        quotient = torch.onnx.ops.symbolic(
-            "Div",
-            (position_int32, divisor_tensor),
-            dtype=torch.int32,
-            shape=position.shape,
-        )
-        return quotient.to(position.dtype)
-    else:
-        return torch.div(position, divisor, rounding_mode="floor")
+    return torch.div(position, divisor, rounding_mode="floor")
 
 
 def _sliding_window_context_indices(
@@ -104,6 +92,62 @@ def _folded_sliding_window_context_indices(
     offsets = torch.arange(sliding_window, device=position_ids.device, dtype=torch.int32).view(1, -1)
     absolute_indices = offsets + position + 1 - sliding_window
     return torch.remainder(absolute_indices, sliding_window), absolute_indices >= 0
+
+
+def _cp_rope_kv_feature_shards(
+    tensor: torch.Tensor,
+    cosine: torch.Tensor,
+    sine: torch.Tensor,
+    cp: int,
+    rotary_dim: int,
+) -> torch.Tensor:
+    batch_local, dp, sequence_length, head_dim = tensor.shape
+    if cp < 1 or head_dim % cp:
+        raise ValueError("RoPE feature width must divide evenly across CP rows.")
+    width = head_dim // cp
+    if width % 2 or rotary_dim < 0 or rotary_dim > head_dim or rotary_dim % 2:
+        raise ValueError("RoPE feature shards must preserve rotary pairs.")
+
+    cosine, sine = cosine.to(tensor.dtype), sine.to(tensor.dtype)
+    feature_rows = tensor.reshape(batch_local, dp, sequence_length, cp, width).permute(0, 1, 3, 2, 4)
+    coefficient_rows = cosine.reshape(batch_local, dp, cp, sequence_length, rotary_dim // 2)
+    sine_rows = sine.reshape(batch_local, dp, cp, sequence_length, rotary_dim // 2)
+    rotary_start = head_dim - rotary_dim
+    rotated_rows = []
+    for cp_row in range(cp):
+        shard_start = cp_row * width
+        shard_end = shard_start + width
+        overlap_start = max(shard_start, rotary_start)
+        overlap_end = min(shard_end, head_dim)
+        row = feature_rows[:, :, cp_row]
+        if overlap_start >= overlap_end:
+            rotated_rows.append(row)
+            continue
+
+        local_start = overlap_start - shard_start
+        local_end = overlap_end - shard_start
+        coefficient_start = (overlap_start - rotary_start) // 2
+        coefficient_end = (overlap_end - rotary_start) // 2
+        if local_start % 2 or local_end % 2 or coefficient_end - coefficient_start != (local_end - local_start) // 2:
+            raise ValueError("RoPE feature shards must preserve rotary pairs.")
+
+        pairs = row[..., local_start:local_end].reshape(
+            batch_local, dp, sequence_length, (local_end - local_start) // 2, 2
+        )
+        even, odd = pairs[..., 0], pairs[..., 1]
+        row_cosine = coefficient_rows[:, :, cp_row, :, coefficient_start:coefficient_end]
+        row_sine = sine_rows[:, :, cp_row, :, coefficient_start:coefficient_end]
+        rotated = (
+            torch.stack(
+                (even * row_cosine - odd * row_sine, odd * row_cosine + even * row_sine),
+                dim=-1,
+            )
+            .flatten(-2)
+            .to(tensor.dtype)
+        )
+        rotated_rows.append(torch.cat((row[..., :local_start], rotated, row[..., local_end:]), dim=-1))
+
+    return torch.stack(rotated_rows, dim=2).permute(0, 1, 3, 2, 4).reshape_as(tensor)
 
 
 class QEffSlidingCacheLayer(CacheLayerMixin):
@@ -206,10 +250,12 @@ class QEffSlidingCacheLayer(CacheLayerMixin):
             self.sliding_window_kv = ctx_scatter_folded_rows(
                 self.sliding_window_kv,
                 torch.remainder(position_ids, self.sliding_window).to(torch.int32),
-                key_states,
+                key_states.to(self.sliding_window_kv.dtype),
             )
         else:
-            self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, position_ids, key_states)
+            self.sliding_window_kv = ctx_scatter(
+                self.sliding_window_kv, position_ids, key_states.to(self.sliding_window_kv.dtype)
+            )
         self.cumulative_length += key_states.shape[2]
 
         invalid_index = torch.iinfo(torch.int32).max if _is_export_capture() else 0
@@ -279,12 +325,16 @@ class QEffHCACacheLayer(CacheLayerMixin):
         self.cumulative_length = cumulative_length
         self.compressor_entry_count = compressor_entry_count
         self._attention_dp = int(getattr(config, "qeff_hca_attention_dp", 1))
+        self._attention_cp = int(getattr(config, "qeff_hca_attention_cp", 1))
         self._compressed_kv_cp = int(getattr(config, "qeff_hca_compressed_kv_cp", 1))
         self._attention_blocks = int(getattr(config, "qeff_hca_attn_blocks", 1))
         self._folded_row_cache = bool(getattr(config, "qeff_hca_folded_row_cache", False))
         self.prefill_only = bool(getattr(config, "qeff_hca_prefill_only", False))
+        self._uses_cp_layout = not self.prefill_only and self._attention_cp > 1
         self.max_cache_len = (
-            actual_compressed_kv.shape[2] * self.compression_size
+            actual_compressed_kv.shape[2] * self._attention_cp * self.compression_size
+            if self._uses_cp_layout
+            else actual_compressed_kv.shape[2] * self.compression_size
             if self._folded_row_cache or self.prefill_only
             else sliding_window_kv.shape[2]
         )
@@ -298,6 +348,10 @@ class QEffHCACacheLayer(CacheLayerMixin):
     @property
     def uses_dp_layout(self) -> bool:
         return not self.prefill_only and self._attention_dp > 1
+
+    @property
+    def uses_cp_layout(self) -> bool:
+        return self._uses_cp_layout
 
     @property
     def uses_folded_row_cache(self) -> bool:
@@ -325,6 +379,43 @@ class QEffHCACacheLayer(CacheLayerMixin):
             raise ValueError("HCA compressed-cache capacity must be divisible by qeff_hca_compressed_kv_cp.")
         if (capacity // self.compressed_kv_cp) % self.attention_blocks:
             raise ValueError("HCA CP-way slot count must be divisible by qeff_hca_attn_blocks.")
+        if self.uses_cp_layout:
+            if config.num_key_value_heads != 1:
+                raise NotImplementedError("HCA CP cache layout currently requires one key/value head.")
+            if self._attention_cp != self.compressed_kv_cp:
+                raise ValueError("HCA attention CP and compressed-KV CP must match.")
+            batch_local, rows, local_width, _ = self.sliding_window_kv.shape
+            if rows % self.attention_dp:
+                raise ValueError("HCA CP cache rows must be divisible by qeff_hca_attention_dp.")
+            expected_rows = self.attention_dp * self._attention_cp
+            if rows != expected_rows:
+                raise ValueError(f"HCA CP cache row count must be {expected_rows}, got {rows}.")
+            if self.sliding_window % self._attention_cp:
+                raise ValueError("HCA sliding window must be divisible by qeff_hca_attention_cp.")
+            if local_width != self.sliding_window // self._attention_cp:
+                raise ValueError("HCA CP local-KV width does not match the contiguous slot partition.")
+            batch_size = batch_local * self.attention_dp
+            capacity = (self.max_cache_len + self.compression_size - 1) // self.compression_size
+            common_prefix = (batch_local, expected_rows)
+            expected = {
+                "sliding_window_kv": (*common_prefix, local_width, config.head_dim),
+                "compressor_kv_buffer": (*common_prefix, self.compression_size, config.head_dim),
+                "compressor_gate_buffer": (*common_prefix, self.compression_size, config.head_dim),
+                "actual_compressed_kv": (*common_prefix, capacity // self._attention_cp, config.head_dim),
+            }
+            if capacity % self._attention_cp:
+                raise ValueError("HCA compressed-cache capacity must be divisible by qeff_hca_attention_cp.")
+            for name, shape in expected.items():
+                tensor = getattr(self, name)
+                if tuple(tensor.shape) != shape:
+                    raise ValueError(f"{name} must have shape {shape}, got {tuple(tensor.shape)}.")
+                if tensor.device != self.device or tensor.dtype != self.dtype:
+                    raise ValueError("All QEff HCA cache tensors must have the same device and dtype.")
+            if not 0 <= self.cumulative_length <= self.max_cache_len:
+                raise ValueError("cumulative_length is outside the cache capacity.")
+            if not 0 <= self.compressor_entry_count <= capacity:
+                raise ValueError("compressor_entry_count is outside the compressed cache capacity.")
+            return
         if self.uses_dp_layout:
             if config.num_key_value_heads != 1:
                 raise NotImplementedError("HCA DP cache layout currently requires one key/value head.")
@@ -405,6 +496,8 @@ class QEffHCACacheLayer(CacheLayerMixin):
 
     @property
     def max_batch_size(self) -> int:
+        if self.uses_cp_layout:
+            return self.sliding_window_kv.shape[0] * self.attention_dp
         if not self.uses_dp_layout:
             return self.sliding_window_kv.shape[0]
         if self.uses_folded_row_cache:
@@ -420,6 +513,8 @@ class QEffHCACacheLayer(CacheLayerMixin):
         return tensor.reshape(self.max_batch_size, *tensor.shape[2:])
 
     def as_batch_major(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.uses_cp_layout:
+            return tensor
         if not self.uses_dp_layout:
             return tensor
         if tensor is self.sliding_window_kv and self.uses_folded_row_cache:
@@ -427,6 +522,16 @@ class QEffHCACacheLayer(CacheLayerMixin):
         return self._from_dp_layout(tensor).unsqueeze(1)
 
     def _select_batch(self, tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        if self.uses_cp_layout:
+            cp = self._attention_cp
+            rows = self.attention_dp * cp
+            grouped = tensor.reshape(tensor.shape[0], self.attention_dp, cp, *tensor.shape[2:])
+            selected = grouped.reshape(self.max_batch_size, cp, *tensor.shape[2:]).index_select(
+                0, indices.to(tensor.device)
+            )
+            if selected.shape[0] % self.attention_dp:
+                raise ValueError("HCA CP cache batch size must remain divisible by qeff_hca_attention_dp.")
+            return selected.reshape(selected.shape[0] // self.attention_dp, rows, *tensor.shape[2:])
         if not self.uses_dp_layout:
             return tensor.index_select(0, indices.to(tensor.device))
         if tensor is self.sliding_window_kv and self.uses_folded_row_cache:
@@ -492,20 +597,21 @@ class QEffHCACacheLayer(CacheLayerMixin):
         self._previous_length = self.cumulative_length
         self._last_position_ids = position_ids
         scatter_positions = position_ids
+        cache_key_states = key_states.to(self.sliding_window_kv.dtype)
         if self.uses_folded_row_cache:
             self.sliding_window_kv = ctx_scatter_folded_rows(
                 self.sliding_window_kv,
                 torch.remainder(scatter_positions, self.sliding_window).to(torch.int32),
-                key_states,
+                cache_key_states,
             )
         elif self.uses_dp_layout:
             self.sliding_window_kv = ctx_scatter_dp(
                 self.sliding_window_kv,
                 self._to_dp_layout(scatter_positions),
-                self._to_dp_layout(key_states[:, 0]),
+                self._to_dp_layout(cache_key_states[:, 0]),
             )
         else:
-            self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, key_states)
+            self.sliding_window_kv = ctx_scatter(self.sliding_window_kv, scatter_positions, cache_key_states)
         self.cumulative_length += key_states.shape[2]
 
         projected_kv = cache_kwargs.get("compressor_kv")
@@ -521,23 +627,23 @@ class QEffHCACacheLayer(CacheLayerMixin):
                 self.compressor_kv_buffer = ctx_scatter_dp(
                     self.compressor_kv_buffer,
                     self._to_dp_layout(buffer_positions),
-                    self._to_dp_layout(projected_kv),
+                    self._to_dp_layout(projected_kv.to(self.compressor_kv_buffer.dtype)),
                 )
                 self.compressor_gate_buffer = ctx_scatter_dp(
                     self.compressor_gate_buffer,
                     self._to_dp_layout(buffer_positions),
-                    self._to_dp_layout(projected_gate),
+                    self._to_dp_layout(projected_gate.to(self.compressor_gate_buffer.dtype)),
                 )
             else:
                 self.compressor_kv_buffer = ctx_scatter(
                     self.compressor_kv_buffer,
                     buffer_positions,
-                    projected_kv.unsqueeze(1),
+                    projected_kv.to(self.compressor_kv_buffer.dtype).unsqueeze(1),
                 )
                 self.compressor_gate_buffer = ctx_scatter(
                     self.compressor_gate_buffer,
                     buffer_positions,
-                    projected_gate.unsqueeze(1),
+                    projected_gate.to(self.compressor_gate_buffer.dtype).unsqueeze(1),
                 )
 
         context_length = cache_kwargs.get("context_length")
@@ -689,7 +795,7 @@ class QEffHCACacheLayer(CacheLayerMixin):
     def reset(self) -> None:
         self.sliding_window_kv.zero_()
         self.compressor_kv_buffer.zero_()
-        self.compressor_gate_buffer.zero_()
+        self.compressor_gate_buffer.fill_(-1.0e4 if self.uses_cp_layout else 0.0)
         self.actual_compressed_kv.zero_()
         self.cumulative_length = 0
         self.compressor_entry_count = 0
@@ -725,12 +831,7 @@ class QEffCSACacheLayer(CacheLayerMixin):
         config: DeepseekV4Config,
         local_kv_cache: torch.Tensor,
         compressed_kv_cache: torch.Tensor,
-        compressor_kv_state: torch.Tensor,
-        compressor_score_state: torch.Tensor,
-        indexer_kv_cache: torch.Tensor,
-        indexer_kv_state: torch.Tensor,
-        indexer_score_state: torch.Tensor,
-        *,
+        *states: torch.Tensor,
         cumulative_length: int = 0,
         compressor_entry_count: int = 0,
         indexer_entry_count: int = 0,
@@ -739,27 +840,42 @@ class QEffCSACacheLayer(CacheLayerMixin):
         self.sliding_window = config.sliding_window
         self.compression_size = config.compress_rates["compressed_sparse_attention"]
         self.local_kv_cache = local_kv_cache
-        self.compressor_kv_state = compressor_kv_state
-        self.compressor_score_state = compressor_score_state
         self.compressed_kv_cache = compressed_kv_cache
-        self.indexer_kv_state = indexer_kv_state
-        self.indexer_score_state = indexer_score_state
-        self.indexer_kv_cache = indexer_kv_cache
         self.cumulative_length = cumulative_length
         self.compressor_entry_count = compressor_entry_count
         self.indexer_entry_count = indexer_entry_count
         self._attention_dp = int(getattr(config, "qeff_csa_attention_dp", 1))
+        self._attention_cp = int(getattr(config, "qeff_csa_attention_cp", 1))
         self._indexer_cp = int(getattr(config, "qeff_csa_indexer_cp", 1))
-        self._indexer_num_kv_blocks = int(getattr(config, "qeff_csa_num_kv_blocks", 0))
+        self._indexer_num_kv_blocks = int(getattr(config, "qeff_csa_num_kv_blocks", 1))
         self._indexer_attention_cores = int(getattr(config, "qeff_csa_indexer_attention_cores", 1))
         self._folded_row_cache = bool(getattr(config, "qeff_csa_folded_row_cache", False))
+        self._uses_cp_layout = not self.prefill_only and self._attention_cp > 1
+        if len(states) == 3:
+            self.indexer_kv_cache, self.comp_state, self.idx_state = states
+        elif len(states) == 5:
+            (
+                compressor_kv_state,
+                compressor_score_state,
+                self.indexer_kv_cache,
+                indexer_kv_state,
+                indexer_score_state,
+            ) = states
+            self.comp_state = torch.cat((compressor_kv_state, compressor_score_state), dim=-1)
+            self.idx_state = torch.cat((indexer_kv_state, indexer_score_state), dim=-1)
+        else:
+            raise ValueError("CSA cache layers require five benchmark bindings or seven legacy split tensors.")
         self.max_cache_len = (
             compressed_kv_cache.shape[1] * self.compression_size
             if self.prefill_only
             else (
-                compressed_kv_cache.shape[2] * self.compression_size
-                if self._folded_row_cache
-                else local_kv_cache.shape[2]
+                compressed_kv_cache.shape[2] * self._attention_cp * self.compression_size
+                if self._uses_cp_layout
+                else (
+                    compressed_kv_cache.shape[2] * self.compression_size
+                    if self._folded_row_cache
+                    else local_kv_cache.shape[2]
+                )
             )
         )
         self.is_initialized = True
@@ -769,16 +885,17 @@ class QEffCSACacheLayer(CacheLayerMixin):
             expected = (
                 (local_kv_cache, (local_kv_cache.shape[0], self.sliding_window, config.head_dim)),
                 (compressed_kv_cache, (local_kv_cache.shape[0], compressed_kv_cache.shape[1], config.head_dim)),
-                (compressor_kv_state, (local_kv_cache.shape[0], 2 * self.compression_size, 2 * config.head_dim)),
-                (compressor_score_state, (local_kv_cache.shape[0], 2 * self.compression_size, 2 * config.head_dim)),
                 (
-                    indexer_kv_cache,
+                    self.comp_state,
+                    (local_kv_cache.shape[0], 2 * self.compression_size, 4 * config.head_dim),
+                ),
+                (
+                    self.indexer_kv_cache,
                     (local_kv_cache.shape[0], compressed_kv_cache.shape[1], config.index_head_dim),
                 ),
-                (indexer_kv_state, (local_kv_cache.shape[0], 2 * self.compression_size, 2 * config.index_head_dim)),
                 (
-                    indexer_score_state,
-                    (local_kv_cache.shape[0], 2 * self.compression_size, 2 * config.index_head_dim),
+                    self.idx_state,
+                    (local_kv_cache.shape[0], 2 * self.compression_size, 4 * config.index_head_dim),
                 ),
             )
             for tensor, shape in expected:
@@ -789,7 +906,11 @@ class QEffCSACacheLayer(CacheLayerMixin):
 
     @property
     def uses_dp_layout(self) -> bool:
-        return self._attention_dp > 1
+        return not self.prefill_only and self._attention_dp > 1
+
+    @property
+    def uses_cp_layout(self) -> bool:
+        return self._uses_cp_layout
 
     @property
     def uses_folded_row_cache(self) -> bool:
@@ -798,6 +919,42 @@ class QEffCSACacheLayer(CacheLayerMixin):
     @property
     def attention_dp(self) -> int:
         return self._attention_dp
+
+    @property
+    def attention_cp(self) -> int:
+        return self._attention_cp
+
+    @property
+    def compressor_kv_state(self) -> torch.Tensor:
+        return self.comp_state[..., : 2 * self.local_kv_cache.shape[-1]]
+
+    @compressor_kv_state.setter
+    def compressor_kv_state(self, value: torch.Tensor) -> None:
+        self.comp_state = torch.cat((value, self.compressor_score_state), dim=-1)
+
+    @property
+    def compressor_score_state(self) -> torch.Tensor:
+        return self.comp_state[..., 2 * self.local_kv_cache.shape[-1] :]
+
+    @compressor_score_state.setter
+    def compressor_score_state(self, value: torch.Tensor) -> None:
+        self.comp_state = torch.cat((self.compressor_kv_state, value), dim=-1)
+
+    @property
+    def indexer_kv_state(self) -> torch.Tensor:
+        return self.idx_state[..., : 2 * self.indexer_kv_cache.shape[-1]]
+
+    @indexer_kv_state.setter
+    def indexer_kv_state(self, value: torch.Tensor) -> None:
+        self.idx_state = torch.cat((value, self.indexer_score_state), dim=-1)
+
+    @property
+    def indexer_score_state(self) -> torch.Tensor:
+        return self.idx_state[..., 2 * self.indexer_kv_cache.shape[-1] :]
+
+    @indexer_score_state.setter
+    def indexer_score_state(self, value: torch.Tensor) -> None:
+        self.idx_state = torch.cat((self.indexer_kv_state, value), dim=-1)
 
     @property
     def indexer_cp(self) -> int:
@@ -816,6 +973,79 @@ class QEffCSACacheLayer(CacheLayerMixin):
         return self._indexer_attention_cores
 
     def _validate_state(self, config: DeepseekV4Config) -> None:
+        if self.uses_cp_layout:
+            if self.compression_size != 4:
+                raise NotImplementedError("CSA CP cache layout currently requires compression ratio 4.")
+            if config.num_key_value_heads != 1:
+                raise NotImplementedError("CSA CP cache layout currently requires one key/value head.")
+            if self._attention_dp < 1 or self._attention_cp < 1 or self._indexer_cp < 1:
+                raise ValueError("CSA DP and CP degrees must be positive.")
+            if self._attention_cp & (self._attention_cp - 1) or self._indexer_cp & (self._indexer_cp - 1):
+                raise ValueError("CSA attention and indexer CP degrees must be powers of two.")
+            if self.local_kv_cache.ndim != 4:
+                raise ValueError("CSA CP local KV must have shape [batch_local, rows, slots_per_cp, head_dim].")
+            batch_local, attention_rows, local_width, _ = self.local_kv_cache.shape
+            if attention_rows != self._attention_dp * self._attention_cp:
+                raise ValueError("CSA local KV row count must equal attention_dp * attention_cp.")
+            if self.sliding_window % self._attention_cp or local_width != self.sliding_window // self._attention_cp:
+                raise ValueError("CSA local KV width must equal sliding_window // attention_cp.")
+            batch_size = batch_local * self._attention_dp
+            capacity = (self.max_cache_len + self.compression_size - 1) // self.compression_size
+            if self._indexer_num_kv_blocks < 1 or self._indexer_attention_cores < 1:
+                raise ValueError("CSA indexer block and core counts must be positive.")
+            if capacity % self._attention_cp or capacity % self._indexer_cp:
+                raise ValueError("CSA compressed-cache capacity must be divisible by both CP degrees.")
+            if self.compressed_kv_cache.shape != (
+                batch_local,
+                self._attention_dp * self._attention_cp,
+                capacity // self._attention_cp,
+                config.head_dim,
+            ):
+                raise ValueError("CSA compressed KV shape does not match attention CP rows.")
+            if self.indexer_kv_cache.shape != (
+                batch_local,
+                self._attention_dp * self._indexer_cp,
+                capacity // self._indexer_cp,
+                config.index_head_dim,
+            ):
+                raise ValueError("CSA indexer KV shape does not match indexer CP rows.")
+            if self.comp_state.shape != (
+                batch_local,
+                self._attention_dp * self._attention_cp,
+                2 * self.compression_size,
+                4 * config.head_dim,
+            ):
+                raise ValueError("CSA packed compressor state has an incompatible shape.")
+            if self.idx_state.shape != (
+                batch_local,
+                self._attention_dp * self._indexer_cp,
+                2 * self.compression_size,
+                4 * config.index_head_dim,
+            ):
+                raise ValueError("CSA packed indexer state has an incompatible shape.")
+            indexer_slots_per_block = capacity // self._indexer_cp // self._indexer_num_kv_blocks
+            if (capacity // self._indexer_cp) % self._indexer_num_kv_blocks:
+                raise ValueError("CSA CP-local indexer slots must be divisible by num_kv_blocks.")
+            if capacity // self._indexer_cp < config.index_topk:
+                raise ValueError("CSA index_topk must not exceed CP-local indexer capacity.")
+            if indexer_slots_per_block % self._indexer_attention_cores:
+                raise ValueError("CSA indexer block width must be divisible by its attention-core count.")
+            for tensor in (
+                self.local_kv_cache,
+                self.compressed_kv_cache,
+                self.indexer_kv_cache,
+                self.comp_state,
+                self.idx_state,
+            ):
+                if tensor.device != self.device or tensor.dtype != self.dtype:
+                    raise ValueError("All QEff CSA cache tensors must have the same device and dtype.")
+            if not 0 <= self.cumulative_length <= self.max_cache_len:
+                raise ValueError("cumulative_length is outside the cache capacity.")
+            if not 0 <= self.compressor_entry_count <= capacity or not 0 <= self.indexer_entry_count <= capacity:
+                raise ValueError("CSA compressor entry count is outside the compressed-cache capacity.")
+            if batch_size < 1:
+                raise ValueError("CSA CP cache batch size must be positive.")
+            return
         if self.uses_dp_layout:
             if self.uses_folded_row_cache:
                 if self.local_kv_cache.ndim != 4 or self.local_kv_cache.shape[0] != 1:
@@ -857,12 +1087,10 @@ class QEffCSACacheLayer(CacheLayerMixin):
             )
             expected = {
                 "local_kv_cache": sliding_window_shape,
-                "compressor_kv_state": (*common_prefix, banked, 2 * config.head_dim),
-                "compressor_score_state": (*common_prefix, banked, 2 * config.head_dim),
                 "compressed_kv_cache": (*common_prefix, capacity, config.head_dim),
-                "indexer_kv_state": (*common_prefix, banked, 2 * config.index_head_dim),
-                "indexer_score_state": (*common_prefix, banked, 2 * config.index_head_dim),
                 "indexer_kv_cache": indexer_compressed_shape,
+                "comp_state": (*common_prefix, banked, 4 * config.head_dim),
+                "idx_state": (*common_prefix, banked, 4 * config.index_head_dim),
             }
         else:
             if self.indexer_cp != 1:
@@ -870,12 +1098,10 @@ class QEffCSACacheLayer(CacheLayerMixin):
             common_prefix = (batch, 1)
             expected = {
                 "local_kv_cache": (batch, config.num_key_value_heads, self.max_cache_len, config.head_dim),
-                "compressor_kv_state": (*common_prefix, banked, 2 * config.head_dim),
-                "compressor_score_state": (*common_prefix, banked, 2 * config.head_dim),
                 "compressed_kv_cache": (*common_prefix, capacity, config.head_dim),
-                "indexer_kv_state": (*common_prefix, banked, 2 * config.index_head_dim),
-                "indexer_score_state": (*common_prefix, banked, 2 * config.index_head_dim),
                 "indexer_kv_cache": (*common_prefix, capacity, config.index_head_dim),
+                "comp_state": (*common_prefix, banked, 4 * config.head_dim),
+                "idx_state": (*common_prefix, banked, 4 * config.index_head_dim),
             }
         for name, shape in expected.items():
             tensor = getattr(self, name)
@@ -890,6 +1116,8 @@ class QEffCSACacheLayer(CacheLayerMixin):
     def max_batch_size(self) -> int:
         if self.prefill_only:
             return self.local_kv_cache.shape[0]
+        if self.uses_cp_layout:
+            return self.local_kv_cache.shape[0] * self.attention_dp
         return (
             self.local_kv_cache.shape[1]
             if self.uses_folded_row_cache
@@ -906,6 +1134,8 @@ class QEffCSACacheLayer(CacheLayerMixin):
 
     def as_batch_major(self, tensor: torch.Tensor) -> torch.Tensor:
         """Expose DP retained states to existing DeepSeek attention math."""
+        if self.uses_cp_layout:
+            return tensor
         if not self.uses_dp_layout:
             return tensor
         if tensor is self.local_kv_cache and self.uses_folded_row_cache:
@@ -920,6 +1150,15 @@ class QEffCSACacheLayer(CacheLayerMixin):
         return self._from_dp_layout(tensor).unsqueeze(1)
 
     def _select_batch(self, tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        if self.uses_cp_layout:
+            cp = tensor.shape[1] // self.attention_dp
+            grouped = tensor.reshape(tensor.shape[0], self.attention_dp, cp, *tensor.shape[2:])
+            selected = grouped.reshape(self.max_batch_size, cp, *tensor.shape[2:]).index_select(
+                0, indices.to(tensor.device)
+            )
+            if selected.shape[0] % self.attention_dp:
+                raise ValueError("CSA CP cache batch size must remain divisible by qeff_csa_attention_dp.")
+            return selected.reshape(selected.shape[0] // self.attention_dp, self.attention_dp * cp, *tensor.shape[2:])
         if not self.uses_dp_layout:
             return tensor.index_select(0, indices.to(tensor.device))
         if tensor is self.local_kv_cache and self.uses_folded_row_cache:
@@ -1005,9 +1244,9 @@ class QEffCSACacheLayer(CacheLayerMixin):
         buffer_positions = torch.remainder(entry_positions, 2) * self.compression_size + torch.remainder(
             position_ids, self.compression_size
         )
-        for prefix, kv_state_name, score_state_name, expected_dim in (
-            ("compressor", "compressor_kv_state", "compressor_score_state", self.compressor_kv_state.shape[-1]),
-            ("indexer", "indexer_kv_state", "indexer_score_state", self.indexer_kv_state.shape[-1]),
+        for prefix, packed_state_name, expected_dim in (
+            ("compressor", "comp_state", self.compressor_kv_state.shape[-1]),
+            ("indexer", "idx_state", self.indexer_kv_state.shape[-1]),
         ):
             projected_kv = cache_kwargs.get(f"{prefix}_kv")
             projected_gate = cache_kwargs.get(f"{prefix}_gate")
@@ -1018,35 +1257,22 @@ class QEffCSACacheLayer(CacheLayerMixin):
             expected_shape = (self.max_batch_size, 1, expected_dim)
             if tuple(projected_kv.shape) != expected_shape or projected_gate.shape != projected_kv.shape:
                 raise ValueError(f"Decode-only {prefix} projections must both have shape {expected_shape}.")
+            packed_updates = torch.cat((projected_kv, projected_gate), dim=-1)
             if self.uses_dp_layout:
                 setattr(
                     self,
-                    kv_state_name,
+                    packed_state_name,
                     ctx_scatter_dp(
-                        getattr(self, kv_state_name),
+                        getattr(self, packed_state_name),
                         self._to_dp_layout(buffer_positions),
-                        self._to_dp_layout(projected_kv),
-                    ),
-                )
-                setattr(
-                    self,
-                    score_state_name,
-                    ctx_scatter_dp(
-                        getattr(self, score_state_name),
-                        self._to_dp_layout(buffer_positions),
-                        self._to_dp_layout(projected_gate),
+                        self._to_dp_layout(packed_updates),
                     ),
                 )
             else:
                 setattr(
                     self,
-                    kv_state_name,
-                    ctx_scatter(getattr(self, kv_state_name), buffer_positions, projected_kv.unsqueeze(1)),
-                )
-                setattr(
-                    self,
-                    score_state_name,
-                    ctx_scatter(getattr(self, score_state_name), buffer_positions, projected_gate.unsqueeze(1)),
+                    packed_state_name,
+                    ctx_scatter(getattr(self, packed_state_name), buffer_positions, packed_updates.unsqueeze(1)),
                 )
 
         context_length = cache_kwargs.get("context_length")
@@ -1120,18 +1346,13 @@ class QEffCSACacheLayer(CacheLayerMixin):
         return self.as_batch_major(getattr(self, compressed_attr))
 
     def reset(self) -> None:
-        for name in (
-            "local_kv_cache",
-            "compressor_kv_state",
-            "compressor_score_state",
-            "compressed_kv_cache",
-            "indexer_kv_state",
-            "indexer_score_state",
-            "indexer_kv_cache",
-        ):
-            getattr(self, name).zero_()
-        self.compressor_score_state.fill_(float("-inf"))
-        self.indexer_score_state.fill_(float("-inf"))
+        self.local_kv_cache.zero_()
+        self.compressed_kv_cache.zero_()
+        self.indexer_kv_cache.zero_()
+        self.comp_state.zero_()
+        self.comp_state[..., 2 * self.local_kv_cache.shape[-1] :].fill_(float("-inf"))
+        self.idx_state.zero_()
+        self.idx_state[..., 2 * self.indexer_kv_cache.shape[-1] :].fill_(float("-inf"))
         self.cumulative_length = 0
         self.compressor_entry_count = 0
         self.indexer_entry_count = 0
@@ -1139,12 +1360,10 @@ class QEffCSACacheLayer(CacheLayerMixin):
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         for name in (
             "local_kv_cache",
-            "compressor_kv_state",
-            "compressor_score_state",
             "compressed_kv_cache",
-            "indexer_kv_state",
-            "indexer_score_state",
             "indexer_kv_cache",
+            "comp_state",
+            "idx_state",
         ):
             setattr(self, name, self._select_batch(getattr(self, name), beam_idx))
 
@@ -1153,31 +1372,11 @@ class QEffCSACacheLayer(CacheLayerMixin):
             raise NotImplementedError("QEffCSACache does not support cropping fixed retained state.")
 
     def batch_repeat_interleave(self, repeats: int) -> None:
-        for name in (
-            "local_kv_cache",
-            "compressor_kv_state",
-            "compressor_score_state",
-            "compressed_kv_cache",
-            "indexer_kv_state",
-            "indexer_score_state",
-            "indexer_kv_cache",
-        ):
-            tensor = getattr(self, name)
-            source_batch_size = tensor.shape[0] * self.attention_dp if self.uses_dp_layout else tensor.shape[0]
-            indices = torch.arange(source_batch_size, device=self.device).repeat_interleave(repeats)
-            setattr(self, name, self._select_batch(tensor, indices))
+        indices = torch.arange(self.max_batch_size, device=self.device).repeat_interleave(repeats)
+        self.reorder_cache(indices)
 
     def batch_select_indices(self, indices: torch.Tensor) -> None:
-        for name in (
-            "local_kv_cache",
-            "compressor_kv_state",
-            "compressor_score_state",
-            "compressed_kv_cache",
-            "indexer_kv_state",
-            "indexer_score_state",
-            "indexer_kv_cache",
-        ):
-            setattr(self, name, self._select_batch(getattr(self, name), indices))
+        self.reorder_cache(indices)
 
 
 def qeff_apply_rotary_pos_emb(
@@ -1187,6 +1386,7 @@ def qeff_apply_rotary_pos_emb(
     unsqueeze_dim: int = 1,
 ) -> torch.Tensor:
     """Apply interleaved RoPE using export-friendly, explicitly bounded indexing."""
+    cos, sin = cos.to(x.dtype), sin.to(x.dtype)
     cos = cos.unsqueeze(-1).expand(-1, -1, -1, 2).flatten(-2)
     sin = sin.unsqueeze(-1).expand(-1, -1, -1, 2).flatten(-2)
     cos = cos.unsqueeze(unsqueeze_dim)
@@ -1202,7 +1402,7 @@ def qeff_apply_rotary_pos_emb(
     rope_even = rope_pairs.select(dim=rope_pairs.dim() - 1, index=0)
     rope_odd = rope_pairs.select(dim=rope_pairs.dim() - 1, index=1)
     rotated_half = torch.stack((-rope_odd, rope_even), dim=-1).flatten(-2)
-    rotated = ((rope.float() * cos) + (rotated_half.float() * sin)).to(x.dtype)
+    rotated = ((rope * cos) + (rotated_half * sin)).to(x.dtype)
     return torch.cat((nope, rotated), dim=x.dim() - 1)
 
 
@@ -1257,9 +1457,94 @@ class QEffDeepseekV4RotaryEmbedding(DeepseekV4RotaryEmbedding):
 class QEffDeepseekV4Attention(DeepseekV4Attention):
     """DeepSeek V4 sliding/HCA/CSA attention using fixed-capacity QEff cache state."""
 
+    def __qeff_init__(self) -> None:
+        self._hca_cp_enabled = (
+            self.layer_type == "heavily_compressed_attention"
+            and not bool(getattr(self.config, "qeff_hca_prefill_only", False))
+            and int(getattr(self.config, "qeff_hca_attention_cp", 1)) > 1
+        )
+        if self._hca_cp_enabled and not hasattr(self, "hca_cp_cos_rows"):
+            cp = int(self.config.qeff_hca_attention_cp)
+            dp = int(getattr(self.config, "qeff_hca_attention_dp", 1))
+            ratio = self.compressor.compress_rate
+            position_offset = ratio - 1
+            max_seq_len = int(
+                getattr(self.config, "qeff_hca_cache_ctx_len", None)
+                or getattr(self.config, "max_seq_len_cached", None)
+                or self.config.max_position_embeddings
+            )
+            rotary = self.compressor.rotary_emb
+            inv_freq = getattr(rotary, "compress_inv_freq")
+            if inv_freq.device.type == "meta":
+                with torch.device("cpu"):
+                    rotary = DeepseekV4RotaryEmbedding(self.config)
+                inv_freq = getattr(rotary, "compress_inv_freq")
+            positions = torch.arange(-position_offset, max_seq_len, dtype=torch.float32, device=inv_freq.device)
+            frequencies = positions.unsqueeze(-1) * inv_freq.float().unsqueeze(0)
+            rows = dp * cp
+            self.register_buffer(
+                "hca_cp_cos_rows",
+                frequencies.cos().unsqueeze(0).unsqueeze(0).repeat(1, rows, 1, 1),
+                persistent=False,
+            )
+            self.register_buffer(
+                "hca_cp_sin_rows",
+                frequencies.sin().unsqueeze(0).unsqueeze(0).repeat(1, rows, 1, 1),
+                persistent=False,
+            )
+            self.hca_cp_position_offset = position_offset
+            self.hca_cp_row_count = rows
+
+        self._csa_cp_enabled = (
+            self.layer_type == "compressed_sparse_attention"
+            and not bool(getattr(self.config, "qeff_csa_prefill_only", False))
+            and int(getattr(self.config, "qeff_csa_attention_cp", 1)) > 1
+        )
+        if self._csa_cp_enabled and not hasattr(self, "csa_cp_cos_rows"):
+            dp = int(getattr(self.config, "qeff_csa_attention_dp", 1))
+            csa_cp = int(self.config.qeff_csa_attention_cp)
+            indexer_cp = int(getattr(self.config, "qeff_csa_indexer_cp", 1))
+            max_seq_len = int(
+                getattr(self.config, "qeff_csa_cache_ctx_len", None)
+                or getattr(self.config, "max_seq_len_cached", None)
+                or self.config.max_position_embeddings
+            )
+            rotary = self.compressor.rotary_emb
+            inv_freq = getattr(rotary, "compress_inv_freq")
+            if inv_freq.device.type == "meta":
+                with torch.device("cpu"):
+                    rotary = DeepseekV4RotaryEmbedding(self.config)
+                inv_freq = getattr(rotary, "compress_inv_freq")
+            positions = torch.arange(-1, max_seq_len, dtype=torch.float32, device=inv_freq.device)
+            frequencies = positions.unsqueeze(-1) * inv_freq.float().unsqueeze(0)
+            self.csa_cp_position_offset = 1
+            self.csa_cp_row_counts = {}
+            for cp in sorted({csa_cp, indexer_cp}):
+                rows = dp * cp
+                self.register_buffer(
+                    f"csa_cp_cos_rows_{cp}",
+                    frequencies.cos().unsqueeze(0).unsqueeze(0).repeat(1, rows, 1, 1),
+                    persistent=False,
+                )
+                self.register_buffer(
+                    f"csa_cp_sin_rows_{cp}",
+                    frequencies.sin().unsqueeze(0).unsqueeze(0).repeat(1, rows, 1, 1),
+                    persistent=False,
+                )
+                self.csa_cp_row_counts[cp] = rows
+            projections = (
+                self.q_a_proj,
+                self.kv_proj,
+                self.compressor.kv_proj,
+                self.compressor.gate_proj,
+                self.compressor.indexer.kv_proj,
+                self.compressor.indexer.gate_proj,
+            )
+            self.csa_cp_projection_widths = tuple(projection.out_features for projection in projections)
+
     @staticmethod
     def _csa_prefill_scatter(data: torch.Tensor, positions: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
-        return V4CtxScatter1DFunc.apply(data, positions.to(torch.int32), updates)
+        return V4CtxScatter1DFunc.apply(data, positions.to(torch.int32), updates.to(data.dtype))
 
     @staticmethod
     def _csa_prefill_gather(data: torch.Tensor, indices: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -1300,8 +1585,8 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         num_tiles = (capacity + tile_size - 1) // tile_size
         top_k = min(index_topk, capacity)
         topk_per_tile = max(topk_per_tile, (top_k + num_tiles - 1) // num_tiles)
-        causal_threshold = (
-            torch.floor(position_ids.float() * (1.0 / compression_rate)).to(position_ids.dtype).unsqueeze(-1)
+        causal_threshold = _nonnegative_integer_floor_div(position_ids.to(torch.int32) + 1, compression_rate).unsqueeze(
+            -1
         )
 
         candidate_scores = []
@@ -1309,7 +1594,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         for tile_start in range(0, capacity, tile_size):
             tile_end = min(tile_start + tile_size, capacity)
             tile_cache = indexer_kv_cache[:, tile_start:tile_end]
-            tile_scores = torch.einsum("bshd,btd->bsht", q_index.float(), tile_cache.float()).relu()
+            tile_scores = torch.einsum("bshd,btd->bsht", q_index, tile_cache.to(q_index.dtype)).relu()
             tile_scores = (tile_scores * index_weights.unsqueeze(-1)).sum(dim=2)
             tile_indices = torch.arange(tile_start, tile_end, device=indexer_kv_cache.device).view(1, 1, -1)
             tile_scores = tile_scores.masked_fill(tile_indices >= causal_threshold, -3.0e4)
@@ -1328,13 +1613,43 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         selected = torch.gather(candidate_indices, dim=-1, index=selection)
         return selected, selected < causal_threshold
 
+    def _csa_prefill_attend_joint(
+        self,
+        query: torch.Tensor,
+        local_states: torch.Tensor,
+        local_valid: torch.Tensor,
+        compressed_kv_cache: torch.Tensor,
+        topk: torch.Tensor,
+        compressed_valid: torch.Tensor,
+        cosine: torch.Tensor,
+        sine: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, sequence_length, heads, _ = query.shape
+        top_k = topk.shape[-1]
+        gathered_compressed = self._csa_prefill_gather(
+            compressed_kv_cache,
+            topk.reshape(batch_size, -1),
+            compressed_valid.reshape(batch_size, -1),
+        ).reshape(batch_size, sequence_length, top_k, -1)
+        gathered_local = local_states.unsqueeze(1).expand(-1, sequence_length, -1, -1)
+        key_values = torch.cat((gathered_local, gathered_compressed), dim=2).to(query.dtype)
+        valid = torch.cat((local_valid, compressed_valid), dim=-1)
+        scores = torch.einsum("bshd,bstd->bsht", query, key_values) * self.scaling
+        scores = torch.where(valid.unsqueeze(2), scores, torch.full_like(scores, -3.0e4))
+        sinks = self.sinks.view(1, 1, heads, 1).to(scores.dtype)
+        maximum = torch.maximum(scores.max(dim=-1, keepdim=True).values, sinks)
+        exponentials = torch.exp(scores - maximum)
+        sink_exponential = torch.exp(sinks - maximum)
+        probabilities = exponentials / (exponentials.sum(dim=-1, keepdim=True) + sink_exponential)
+        output = torch.einsum("bsht,bstd->bshd", probabilities, key_values).to(key_values.dtype)
+        return self._csa_prefill_rotate(output, cosine, sine, inverse=True, sequence_major=True)
+
     def _csa_prefill_update(
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         kv_cache: torch.Tensor,
-        kv_state: torch.Tensor,
-        score_state: torch.Tensor,
+        packed_state: torch.Tensor,
         *,
         kv_proj: nn.Module,
         gate_proj: nn.Module,
@@ -1343,23 +1658,37 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         rotary_emb: DeepseekV4RotaryEmbedding,
         head_dim: int,
         pos0: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         ratio = self.compressor.compress_rate
         batch_size = hidden_states.shape[0]
-        kv_all = kv_proj(hidden_states).float()
+        kv_all = kv_proj(hidden_states)
         slots = torch.remainder(position_ids, ratio).to(torch.long)
-        score_all = gate_proj(hidden_states).float() + F.embedding(slots, position_bias)
+        score_all = gate_proj(hidden_states) + F.embedding(slots, position_bias)
         write_positions = ratio + slots
-        kv_state = self._csa_prefill_scatter(kv_state, write_positions, kv_all.to(kv_state.dtype))
-        score_state = self._csa_prefill_scatter(score_state, write_positions, score_all.to(score_state.dtype))
+        packed_state = self._csa_prefill_scatter(
+            packed_state, write_positions, torch.cat((kv_all, score_all), dim=-1).to(packed_state.dtype)
+        )
+        kv_state = packed_state[..., : 2 * head_dim].to(hidden_states.dtype)
+        score_state = packed_state[..., 2 * head_dim :].to(hidden_states.dtype)
 
         lead_full = (ratio - pos0 % ratio) % ratio
         lead = lead_full if 0 < lead_full <= hidden_states.shape[1] else 0
         full_blocks = (hidden_states.shape[1] - lead) // ratio
 
         if lead > 0:
-            pooled_kv = torch.cat((kv_state[:, :ratio, :head_dim], kv_state[:, ratio:, head_dim:]), dim=1)
-            pooled_score = torch.cat((score_state[:, :ratio, :head_dim], score_state[:, ratio:, head_dim:]), dim=1)
+            previous_valid = (position_ids[:, :1].to(torch.int32) >= ratio).unsqueeze(-1)
+            previous_kv = torch.where(
+                previous_valid,
+                kv_state[:, :ratio, :head_dim],
+                torch.zeros_like(kv_state[:, :ratio, :head_dim]),
+            )
+            previous_score = torch.where(
+                previous_valid,
+                score_state[:, :ratio, :head_dim],
+                torch.full_like(score_state[:, :ratio, :head_dim], float("-inf")),
+            )
+            pooled_kv = torch.cat((previous_kv, kv_state[:, ratio:, head_dim:]), dim=1)
+            pooled_score = torch.cat((previous_score, score_state[:, ratio:, head_dim:]), dim=1)
             compressed = (pooled_kv * pooled_score.float().softmax(dim=1).to(pooled_kv.dtype)).sum(dim=1, keepdim=True)
             compressed = norm(compressed.to(hidden_states.dtype))
             block_start = (pos0 // ratio) * ratio
@@ -1374,18 +1703,18 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             kv_cache = self._csa_prefill_scatter(kv_cache, cache_positions, compressed)
             shifted_kv = kv_state[:, ratio:].clone()
             shifted_score = score_state[:, ratio:].clone()
-            kv_state = torch.cat((shifted_kv, shifted_kv), dim=1)
-            score_state = torch.cat((shifted_score, shifted_score), dim=1)
+            shifted_state = torch.cat((shifted_kv, shifted_score), dim=-1)
+            packed_state = torch.cat((shifted_state, shifted_state), dim=1)
 
         if full_blocks > 0:
             block_hidden = hidden_states[:, lead : lead + full_blocks * ratio].reshape(
                 batch_size, full_blocks, ratio, -1
             )
-            block_kv = kv_proj(block_hidden).float()
+            block_kv = kv_proj(block_hidden)
             block_slots = (
                 torch.arange(ratio, device=hidden_states.device).view(1, 1, -1).expand(batch_size, full_blocks, -1)
             )
-            block_score = gate_proj(block_hidden).float() + F.embedding(block_slots, position_bias)
+            block_score = gate_proj(block_hidden) + F.embedding(block_slots, position_bias)
             pooled_kv = torch.cat((block_kv[..., :head_dim], block_kv[..., head_dim:]), dim=2)
             pooled_score = torch.cat((block_score[..., :head_dim], block_score[..., head_dim:]), dim=2)
             compressed = norm(
@@ -1398,13 +1727,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             cache_positions = _nonnegative_integer_floor_div(block_starts, ratio).view(1, -1).expand(batch_size, -1)
             kv_cache = self._csa_prefill_scatter(kv_cache, cache_positions, compressed)
             last_slots = torch.arange(ratio, device=hidden_states.device).view(1, -1).expand(batch_size, -1)
-            last_kv = block_kv[:, -1].to(kv_state.dtype)
-            last_score = block_score[:, -1].to(score_state.dtype)
-            kv_state = self._csa_prefill_scatter(kv_state, last_slots, last_kv)
-            kv_state = self._csa_prefill_scatter(kv_state, last_slots + ratio, last_kv)
-            score_state = self._csa_prefill_scatter(score_state, last_slots, last_score)
-            score_state = self._csa_prefill_scatter(score_state, last_slots + ratio, last_score)
-        return kv_cache, kv_state, score_state
+            last_packed = torch.cat((block_kv[:, -1], block_score[:, -1]), dim=-1).to(packed_state.dtype)
+            write_positions = torch.cat((last_slots, last_slots + ratio), dim=1)
+            write_updates = torch.cat((last_packed, last_packed), dim=1)
+            packed_state = self._csa_prefill_scatter(packed_state, write_positions, write_updates)
+        return kv_cache, packed_state
 
     def _swa_prefill_forward(
         self,
@@ -1448,11 +1775,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         cache_layer.sliding_window_kv = ctx_scatter_folded_rows(
             cache_layer.sliding_window_kv,
             torch.remainder(position_ids, self.sliding_window).to(torch.int32),
-            kv,
+            kv.to(cache_layer.sliding_window_kv.dtype),
         )
         cache_layer.cumulative_length += sequence_length
         grouped = attention_output.reshape(batch_size, sequence_length, self.config.o_groups, -1)
-        return self.o_b_proj(self.o_a_proj(grouped).flatten(2))
+        return self.o_b_proj(self.o_a_proj(grouped.to(self.o_a_proj.weight.dtype)).flatten(2))
 
     def _csa_prefill_forward(
         self,
@@ -1482,11 +1809,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         local_kv_cache = cache_layer.local_kv_cache
         compressed_kv_cache = cache_layer.compressed_kv_cache
-        compressor_kv_state = cache_layer.compressor_kv_state
-        compressor_score_state = cache_layer.compressor_score_state
         indexer_kv_cache = cache_layer.indexer_kv_cache
-        indexer_kv_state = cache_layer.indexer_kv_state
-        indexer_score_state = cache_layer.indexer_score_state
+        compressor_state = cache_layer.comp_state
+        indexer_state = cache_layer.idx_state
         indexer = self.compressor.indexer
         chunk_outputs = []
         for start in range(0, sequence_length, q_block_size):
@@ -1515,12 +1840,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             local_kv_cache = self._csa_prefill_scatter(
                 local_kv_cache, torch.remainder(position_chunk, self.sliding_window), kv_chunk
             )
-            compressed_kv_cache, compressor_kv_state, compressor_score_state = self._csa_prefill_update(
+            compressed_kv_cache, compressor_state = self._csa_prefill_update(
                 hidden_chunk,
                 position_chunk,
                 compressed_kv_cache,
-                compressor_kv_state,
-                compressor_score_state,
+                compressor_state,
                 kv_proj=self.compressor.kv_proj,
                 gate_proj=self.compressor.gate_proj,
                 position_bias=self.compressor.position_bias,
@@ -1529,12 +1853,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 head_dim=self.head_dim,
                 pos0=start,
             )
-            indexer_kv_cache, indexer_kv_state, indexer_score_state = self._csa_prefill_update(
+            indexer_kv_cache, indexer_state = self._csa_prefill_update(
                 hidden_chunk,
                 position_chunk,
                 indexer_kv_cache,
-                indexer_kv_state,
-                indexer_score_state,
+                indexer_state,
                 kv_proj=indexer.kv_proj,
                 gate_proj=indexer.gate_proj,
                 position_bias=indexer.position_bias,
@@ -1554,7 +1877,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 sequence_major=True,
             )
             index_weights = (
-                indexer.scorer.weights_proj(hidden_chunk).float()
+                indexer.scorer.weights_proj(hidden_chunk)
                 * indexer.scorer.softmax_scale
                 * indexer.scorer.weights_scaling
             )
@@ -1569,53 +1892,30 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
             local_states = torch.cat((carry_kv, kv_chunk), dim=1)
             local_valid = torch.cat((carry_query_valid, in_chunk_valid), dim=-1)
-            local_scores = torch.einsum("bhsd,btd->bhst", query_chunk.float(), local_states.float()) * self.scaling
-            local_masked_logit = local_scores[:, :, :1, :1].sum() * 0.0 - 3.0e4
-            local_scores = torch.where(local_valid.unsqueeze(1), local_scores, local_masked_logit)
-            sinks = self.sinks.view(1, self.num_heads, 1, 1).float()
-            stable_max = torch.maximum(local_scores.max(dim=-1, keepdim=True).values, sinks)
-            local_probs = torch.exp(local_scores - stable_max)
-            local_probs = local_probs / (local_probs.sum(dim=-1, keepdim=True) + torch.exp(sinks - stable_max))
-            local_output = torch.einsum("bhst,btd->bhsd", local_probs, local_states.float()).to(local_states.dtype)
-            local_output = self._csa_prefill_rotate(
-                local_output.transpose(1, 2), cos[:, start:end], sin[:, start:end], inverse=True, sequence_major=True
-            ).transpose(1, 2)
-
-            compressed_parts = []
-            scale = query_chunk[:, :1, :1, :1].sum() * 0.0 + self.scaling
-            masked_logit = scale * 0.0 - 3.0e4
+            joint_parts = []
             for sub_start in range(0, chunk_length, gather_sub_block_size):
                 sub_end = min(sub_start + gather_sub_block_size, chunk_length)
-                selected_sub = selected[:, sub_start:sub_end]
-                valid_sub = selected_valid[:, sub_start:sub_end]
-                compressed_output = CompressedAttnFunc.apply(
-                    compressed_kv_cache,
-                    selected_sub.to(torch.int32),
-                    valid_sub,
+                joint_output = self._csa_prefill_attend_joint(
                     query_chunk[:, :, sub_start:sub_end].transpose(1, 2),
-                    scale,
-                    masked_logit,
-                ).transpose(1, 2)
-                compressed_output = self._csa_prefill_rotate(
-                    compressed_output.transpose(1, 2),
+                    local_states,
+                    local_valid[:, sub_start:sub_end],
+                    compressed_kv_cache,
+                    selected[:, sub_start:sub_end],
+                    selected_valid[:, sub_start:sub_end],
                     cos[:, start + sub_start : start + sub_end],
                     sin[:, start + sub_start : start + sub_end],
-                    inverse=True,
-                    sequence_major=True,
-                ).transpose(1, 2)
-                compressed_parts.append(compressed_output)
-            chunk_outputs.append(local_output + torch.cat(compressed_parts, dim=2))
+                )
+                joint_parts.append(joint_output.transpose(1, 2))
+            chunk_outputs.append(torch.cat(joint_parts, dim=2))
 
         cache_layer.local_kv_cache = local_kv_cache
         cache_layer.compressed_kv_cache = compressed_kv_cache
-        cache_layer.compressor_kv_state = compressor_kv_state
-        cache_layer.compressor_score_state = compressor_score_state
         cache_layer.indexer_kv_cache = indexer_kv_cache
-        cache_layer.indexer_kv_state = indexer_kv_state
-        cache_layer.indexer_score_state = indexer_score_state
+        cache_layer.comp_state = compressor_state
+        cache_layer.idx_state = indexer_state
         attention_output = torch.cat(chunk_outputs, dim=2).transpose(1, 2)
         grouped = attention_output.reshape(batch_size, sequence_length, self.config.o_groups, -1)
-        return self.o_b_proj(self.o_a_proj(grouped).flatten(2))
+        return self.o_b_proj(self.o_a_proj(grouped.to(self.o_a_proj.weight.dtype)).flatten(2))
 
     def _hca_prefill_forward(
         self,
@@ -1644,12 +1944,14 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         local_kv_cache = cache_layer.sliding_window_kv
         compressed_kv_cache = cache_layer.actual_compressed_kv
-        compressor_state = torch.zeros(
-            batch_size,
-            ratio,
-            self.head_dim,
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+        compressor_state = cache_layer.compressor_kv_buffer[:, 0]
+        compressor_score_state = cache_layer.compressor_gate_buffer[:, 0]
+        state_slots = torch.arange(ratio, device=hidden_states.device).view(1, -1)
+        initial_state_valid = state_slots < torch.remainder(position_ids[:, :1], ratio)
+        compressor_score_state = torch.where(
+            initial_state_valid.unsqueeze(-1),
+            compressor_score_state,
+            torch.full_like(compressor_score_state, -1.0e4),
         )
         chunk_outputs = []
         for start in range(0, sequence_length, q_block_size):
@@ -1679,14 +1981,12 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             local_kv_cache = ctx_scatter(
                 local_kv_cache,
                 torch.remainder(position_chunk, self.sliding_window),
-                kv_chunk.unsqueeze(1),
+                kv_chunk.to(local_kv_cache.dtype).unsqueeze(1),
             )
 
-            kv_all = self.compressor.kv_proj(hidden_chunk).float()
+            kv_all = self.compressor.kv_proj(hidden_chunk)
             slots = torch.remainder(position_chunk, ratio).to(torch.long)
-            score_all = self.compressor.gate_proj(hidden_chunk).float() + F.embedding(
-                slots, self.compressor.position_bias
-            )
+            score_all = self.compressor.gate_proj(hidden_chunk) + F.embedding(slots, self.compressor.position_bias)
             lead_full = (ratio - start % ratio) % ratio
             lead = lead_full if 0 < lead_full <= chunk_length else 0
             full_blocks = (chunk_length - lead) // ratio
@@ -1695,12 +1995,16 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 compressor_state = self._csa_prefill_scatter(
                     compressor_state, lead_slots, kv_all[:, :lead].to(compressor_state.dtype)
                 )
-                lead_score_state = self._csa_prefill_scatter(
-                    torch.zeros_like(compressor_state), lead_slots, score_all[:, :lead].to(compressor_state.dtype)
+                compressor_score_state = self._csa_prefill_scatter(
+                    compressor_score_state,
+                    lead_slots,
+                    score_all[:, :lead].to(compressor_score_state.dtype),
                 )
-                compressed = (
-                    compressor_state * lead_score_state.float().softmax(dim=1).to(compressor_state.dtype)
-                ).sum(dim=1, keepdim=True)
+                pooling_state = compressor_state.to(hidden_states.dtype)
+                pooling_scores = compressor_score_state.to(hidden_states.dtype)
+                softmax_dtype = torch.float16 if hidden_states.dtype == torch.bfloat16 else hidden_states.dtype
+                compressor_weights = pooling_scores.to(softmax_dtype).softmax(dim=1).to(hidden_states.dtype)
+                compressed = (pooling_state * compressor_weights).sum(dim=1, keepdim=True)
                 compressed = self.compressor.kv_norm(compressed.to(hidden_states.dtype))
                 compressed_positions = torch.full(
                     (batch_size, 1), start // ratio * ratio, dtype=position_ids.dtype, device=position_ids.device
@@ -1714,24 +2018,22 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 compressed_kv_cache = ctx_scatter(
                     compressed_kv_cache,
                     torch.full((batch_size, 1), start // ratio, dtype=position_ids.dtype, device=position_ids.device),
-                    compressed.unsqueeze(1),
+                    compressed.to(compressed_kv_cache.dtype).unsqueeze(1),
                 )
             if full_blocks > 0:
                 block_hidden = hidden_chunk[:, lead : lead + full_blocks * ratio].reshape(
                     batch_size, full_blocks, ratio, -1
                 )
-                block_kv = self.compressor.kv_proj(block_hidden).float()
+                block_kv = self.compressor.kv_proj(block_hidden)
                 block_slots = (
                     torch.arange(ratio, device=hidden_states.device).view(1, 1, -1).expand(batch_size, full_blocks, -1)
                 )
-                block_score = self.compressor.gate_proj(block_hidden).float() + F.embedding(
+                block_score = self.compressor.gate_proj(block_hidden) + F.embedding(
                     block_slots, self.compressor.position_bias
                 )
-                compressed = self.compressor.kv_norm(
-                    (block_kv * block_score.float().softmax(dim=2).to(block_kv.dtype))
-                    .sum(dim=2)
-                    .to(hidden_states.dtype)
-                )
+                softmax_dtype = torch.float16 if hidden_states.dtype == torch.bfloat16 else hidden_states.dtype
+                block_weights = block_score.to(softmax_dtype).softmax(dim=2).to(hidden_states.dtype)
+                compressed = self.compressor.kv_norm((block_kv * block_weights).sum(dim=2))
                 block_starts = start + lead + torch.arange(full_blocks, device=hidden_states.device) * ratio
                 compressed_positions = block_starts.view(1, -1).expand(batch_size, -1)
                 compressed_cos, compressed_sin = self.compressor.rotary_emb(
@@ -1743,27 +2045,45 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 compressed_kv_cache = ctx_scatter(
                     compressed_kv_cache,
                     _nonnegative_integer_floor_div(block_starts, ratio).view(1, -1).expand(batch_size, -1),
-                    compressed.unsqueeze(1),
+                    compressed.to(compressed_kv_cache.dtype).unsqueeze(1),
                 )
                 last_slots = torch.arange(ratio, device=hidden_states.device).view(1, -1).expand(batch_size, -1)
                 compressor_state = self._csa_prefill_scatter(
                     compressor_state, last_slots, block_kv[:, -1].to(compressor_state.dtype)
                 )
+                compressor_score_state = self._csa_prefill_scatter(
+                    compressor_score_state, last_slots, block_score[:, -1].to(compressor_score_state.dtype)
+                )
+
+            trailing_start = lead + full_blocks * ratio
+            if trailing_start < chunk_length:
+                trailing_slots = slots[:, trailing_start:]
+                compressor_state = self._csa_prefill_scatter(
+                    compressor_state,
+                    trailing_slots,
+                    kv_all[:, trailing_start:].to(compressor_state.dtype),
+                )
+                compressor_score_state = self._csa_prefill_scatter(
+                    compressor_score_state,
+                    trailing_slots,
+                    score_all[:, trailing_start:].to(compressor_score_state.dtype),
+                )
 
             local_states = torch.cat((carry_kv, kv_chunk), dim=1)
             local_valid = torch.cat((carry_query_valid, in_chunk_valid), dim=-1)
-            local_scores = torch.einsum("bshd,btd->bsht", query_chunk.float(), local_states.float()) * self.scaling
+            local_states = local_states.to(query_chunk.dtype)
+            local_scores = torch.einsum("bshd,btd->bsht", query_chunk, local_states) * self.scaling
             local_scores = torch.where(
                 local_valid.unsqueeze(2),
                 local_scores,
                 -3.0e4,
             )
-            sinks = self.sinks.view(1, 1, self.num_heads, 1).float()
+            sinks = self.sinks.view(1, 1, self.num_heads, 1).to(local_scores.dtype)
             causal_threshold = _nonnegative_integer_floor_div(position_chunk[:, :1] + 1, ratio)
             running_max = torch.maximum(local_scores.amax(dim=-1), sinks.squeeze(-1))
             local_exp = torch.exp(local_scores - running_max.unsqueeze(-1))
             running_sum = local_exp.sum(dim=-1) + torch.exp(sinks.squeeze(-1) - running_max)
-            running_output = torch.einsum("bsht,btd->bshd", local_exp, local_states.float())
+            running_output = torch.einsum("bsht,btd->bshd", local_exp, local_states)
             slot_ids = torch.arange(compressed_kv_cache.shape[2], device=hidden_states.device)
             for compressed_start in range(0, compressed_kv_cache.shape[2], compressed_block_size):
                 compressed_end = min(compressed_start + compressed_block_size, compressed_kv_cache.shape[2])
@@ -1773,7 +2093,8 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 safe_indices = torch.where(tile_valid, tile_indices, torch.zeros_like(tile_indices)).to(torch.int32)
                 gathered = ctx_gather_blocked_kv(compressed_kv_cache, safe_indices.unsqueeze(1))[:, 0]
                 gathered = torch.where(tile_valid.unsqueeze(-1), gathered, torch.zeros_like(gathered))
-                compressed_scores = torch.einsum("bshd,bkd->bshk", query_chunk.float(), gathered.float()) * self.scaling
+                gathered = gathered.to(query_chunk.dtype)
+                compressed_scores = torch.einsum("bshd,bkd->bshk", query_chunk, gathered) * self.scaling
                 compressed_scores = torch.where(
                     tile_valid.view(batch_size, 1, 1, -1),
                     compressed_scores,
@@ -1784,7 +2105,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 previous_scale = torch.exp(running_max - next_max)
                 exp_scores = torch.exp(compressed_scores - next_max.unsqueeze(-1))
                 running_output = running_output * previous_scale.unsqueeze(-1) + torch.einsum(
-                    "bshk,bkd->bshd", exp_scores, gathered.float()
+                    "bshk,bkd->bshd", exp_scores, gathered
                 )
                 running_sum = running_sum * previous_scale + exp_scores.sum(dim=-1)
                 running_max = next_max
@@ -1796,11 +2117,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         cache_layer.sliding_window_kv = local_kv_cache
         cache_layer.actual_compressed_kv = compressed_kv_cache
-        cache_layer.compressor_kv_buffer = cache_layer.compressor_kv_buffer.clone()
-        cache_layer.compressor_gate_buffer = cache_layer.compressor_gate_buffer.clone()
+        cache_layer.compressor_kv_buffer = compressor_state.unsqueeze(1)
+        cache_layer.compressor_gate_buffer = compressor_score_state.unsqueeze(1)
         attention_output = torch.cat(chunk_outputs, dim=1)
         grouped = attention_output.reshape(batch_size, sequence_length, self.config.o_groups, -1)
-        return self.o_b_proj(self.o_a_proj(grouped).flatten(2))
+        return self.o_b_proj(self.o_a_proj(grouped.to(self.o_a_proj.weight.dtype)).flatten(2))
 
     def _attention_forward(
         self,
@@ -1810,6 +2131,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         compressed_key: torch.Tensor | None = None,
         compressed_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = key.to(query.dtype)
+        if compressed_key is not None:
+            compressed_key = compressed_key.to(query.dtype)
+
         def repeat_key_states(states: torch.Tensor) -> torch.Tensor:
             batch, num_kv_heads, key_length, head_dim = states.shape
             states = states[:, :, None, :, :].expand(
@@ -1830,7 +2155,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 attn_logits,
             )
 
-        sinks = self.sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
+        sinks = self.sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1).to(attn_logits.dtype)
         compressed_states = None
         compressed_logits = None
         logit_parts = [attn_logits, sinks]
@@ -1847,7 +2172,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         combined_logits = torch.cat(logit_parts, dim=-1)
         combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
-        probabilities = F.softmax(combined_logits.float(), dim=-1)
+        probabilities = F.softmax(combined_logits, dim=-1)
         probability_parts = probabilities.split(tuple(logits.shape[-1] for logits in logit_parts), dim=-1)
         attn_weights = probability_parts[0]
         attn_weights = F.dropout(
@@ -1864,6 +2189,807 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             ).to(compressed_states.dtype)
             attn_output = attn_output + torch.matmul(compressed_weights, compressed_states)
         return attn_output.transpose(1, 2).contiguous(), attn_weights
+
+    @staticmethod
+    def _hca_cp_expand_rows(tensor: torch.Tensor, cp: int) -> torch.Tensor:
+        batch_local, dp = tensor.shape[:2]
+        return (
+            tensor.unsqueeze(2)
+            .expand(batch_local, dp, cp, *tensor.shape[2:])
+            .reshape(batch_local, dp * cp, *tensor.shape[2:])
+        )
+
+    def _hca_cp_lookup_rope(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_local, rows, sequence_length = positions.shape
+        indices = (
+            (positions.to(torch.int32) + self.hca_cp_position_offset)
+            .transpose(0, 1)
+            .reshape(1, rows, batch_local * sequence_length)
+        )
+        cosine = ctx_gather_dp(self.hca_cp_cos_rows, indices)
+        sine = ctx_gather_dp(self.hca_cp_sin_rows, indices)
+        rotary_factor = self.config.rope_parameters["compress"].get("partial_rotary_factor", 1.0)
+        head_dim = int(self.config.head_dim * rotary_factor)
+        half_dim = head_dim // 2
+        return (
+            cosine.reshape(rows, batch_local, sequence_length, half_dim).transpose(0, 1),
+            sine.reshape(rows, batch_local, sequence_length, half_dim).transpose(0, 1),
+        )
+
+    def _hca_cp_rotate_rows(
+        self,
+        tensor: torch.Tensor,
+        cosine: torch.Tensor,
+        sine: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        rotary_factor = self.config.rope_parameters["compress"].get("partial_rotary_factor", 1.0)
+        rotary_dim = int(tensor.shape[-1] * rotary_factor)
+        lead = tensor.shape[-1] - rotary_dim
+        rope = tensor[..., lead:]
+        pairs = rope.reshape(*rope.shape[:-1], rotary_dim // 2, 2)
+        cosine, sine = cosine.to(tensor.dtype), sine.to(tensor.dtype)
+        even = pairs[..., 0]
+        odd = pairs[..., 1]
+        if inverse:
+            sine = -sine
+        if tensor.ndim == 5:
+            cosine = cosine.unsqueeze(2)
+            sine = sine.unsqueeze(2)
+        rotated = torch.stack((even * cosine - odd * sine, odd * cosine + even * sine), dim=-1)
+        rotated = rotated.flatten(-2).to(tensor.dtype)
+        if lead:
+            rotated = torch.cat((tensor[..., :lead], rotated), dim=-1)
+        return rotated
+
+    def _hca_cp_rope_heads(
+        self,
+        tensor: torch.Tensor,
+        positions: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        batch_local, dp, heads, sequence_length, head_dim = tensor.shape
+        cp = int(self.config.qeff_hca_attention_cp)
+        if heads % cp:
+            raise ValueError("HCA query heads must be divisible by qeff_hca_attention_cp.")
+        rows = dp * cp
+        head_rows = tensor.reshape(batch_local, rows, heads // cp, sequence_length, head_dim)
+        position_rows = self._hca_cp_expand_rows(positions, cp)
+        cosine, sine = self._hca_cp_lookup_rope(position_rows)
+        cosine = cosine.to(device=tensor.device)
+        sine = sine.to(device=tensor.device)
+        rotated = self._hca_cp_rotate_rows(head_rows, cosine, sine, inverse=inverse)
+        return rotated.reshape_as(tensor)
+
+    def _hca_cp_rope_kv(self, tensor: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        cp = int(self.config.qeff_hca_attention_cp)
+        head_dim = tensor.shape[-1]
+        rotary_factor = self.config.rope_parameters["compress"].get("partial_rotary_factor", 1.0)
+        rope_dim = int(head_dim * rotary_factor)
+        position_rows = self._hca_cp_expand_rows(positions, cp)
+        cosine, sine = self._hca_cp_lookup_rope(position_rows)
+        cosine = cosine.to(device=tensor.device)
+        sine = sine.to(device=tensor.device)
+        return _cp_rope_kv_feature_shards(tensor, cosine, sine, cp, rope_dim)
+
+    def _hca_cp_scatter_local(
+        self,
+        cache: torch.Tensor,
+        key_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_local, dp, sequence_length, _ = key_states.shape
+        cp = int(self.config.qeff_hca_attention_cp)
+        rows = dp * cp
+        local_width = cache.shape[2]
+        cp_ids = torch.arange(cp, device=positions.device, dtype=torch.int32).view(1, 1, cp, 1)
+        slots = torch.remainder(positions, self.sliding_window).unsqueeze(2)
+        addresses = slots - cp_ids * local_width
+        valid = (addresses >= 0) & (addresses < local_width)
+        safe_addresses = torch.where(valid, addresses, torch.zeros_like(addresses)).reshape(
+            batch_local, rows, sequence_length
+        )
+        block_ids = torch.arange(batch_local, device=positions.device, dtype=torch.int32).view(batch_local, 1, 1)
+        block_ids = block_ids.expand(batch_local, rows, sequence_length)
+        valid = valid.reshape(batch_local, rows, sequence_length)
+        block_ids = torch.where(valid, block_ids, torch.full_like(block_ids, torch.iinfo(torch.int32).max))
+        updates = key_states.unsqueeze(2).expand(batch_local, dp, cp, sequence_length, key_states.shape[-1])
+        updates = updates.reshape(batch_local, rows, sequence_length, key_states.shape[-1])
+        return ctx_scatter_dp_masked(cache, block_ids, safe_addresses, updates.to(cache.dtype))
+
+    def _hca_cp_compress(
+        self,
+        cache_layer: QEffHCACacheLayer,
+        position: dict[str, torch.Tensor],
+        projected_kv: torch.Tensor,
+        projected_gate: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cp = int(self.config.qeff_hca_attention_cp)
+        position_dp = position["position"]
+        batch_local, dp, sequence_length = position_dp.shape
+        kv_rows = self._hca_cp_expand_rows(projected_kv.reshape(batch_local, dp, sequence_length, self.head_dim), cp)
+        score_rows = self._hca_cp_expand_rows(
+            projected_gate.reshape(batch_local, dp, sequence_length, self.head_dim), cp
+        )
+        state_positions = self._hca_cp_expand_rows(position["offset"], cp)
+        state_batch_ids = torch.arange(batch_local, device=state_positions.device, dtype=torch.int32).view(
+            batch_local, 1, 1
+        )
+        state_batch_ids = state_batch_ids.expand(batch_local, dp * cp, sequence_length)
+        cache_layer.compressor_kv_buffer = ctx_scatter_dp_masked(
+            cache_layer.compressor_kv_buffer,
+            state_batch_ids,
+            state_positions,
+            kv_rows.to(cache_layer.dtype),
+        )
+        cache_layer.compressor_gate_buffer = ctx_scatter_dp_masked(
+            cache_layer.compressor_gate_buffer,
+            state_batch_ids,
+            state_positions,
+            score_rows.to(cache_layer.dtype),
+        )
+        kv_state = cache_layer.compressor_kv_buffer.to(dtype)
+        score_state = cache_layer.compressor_gate_buffer.to(dtype)
+        softmax_dtype = torch.float16 if dtype == torch.bfloat16 else dtype
+        weights = score_state.to(softmax_dtype).softmax(dim=2).to(dtype)
+        pooled = (kv_state * weights).sum(dim=2, keepdim=True)
+        pooled = self.compressor.kv_norm(pooled.to(dtype))
+        compressed_positions = self._hca_cp_expand_rows(position["compressed_position"], cp)
+        cosine, sine = self._hca_cp_lookup_rope(compressed_positions)
+        cosine = cosine.to(device=pooled.device)
+        sine = sine.to(device=pooled.device)
+        pooled = self._hca_cp_rotate_rows(pooled, cosine, sine)
+
+        cp_ids = torch.arange(cp, device=position_dp.device, dtype=torch.int32).view(1, 1, cp)
+        cp_ids = cp_ids.expand(batch_local, dp, cp).reshape(batch_local, dp * cp, 1)
+        owner = cp_ids == self._hca_cp_expand_rows(position["compressed_owner"], cp)
+        slot = self._hca_cp_expand_rows(position["compressed_slot"], cp)
+        block_ids = torch.arange(batch_local, device=position_dp.device, dtype=torch.int32).view(batch_local, 1, 1)
+        block_ids = block_ids.expand(batch_local, dp * cp, sequence_length)
+        block_ids = torch.where(owner, block_ids, torch.full_like(block_ids, torch.iinfo(torch.int32).max))
+        cache_layer.actual_compressed_kv = ctx_scatter_dp_masked(
+            cache_layer.actual_compressed_kv,
+            block_ids,
+            slot,
+            pooled.to(cache_layer.actual_compressed_kv.dtype),
+        )
+        if not _is_export_capture():
+            complete = position["complete"].to(torch.bool)
+            completed_groups = position["group"][complete]
+            if completed_groups.numel():
+                cache_layer.compressor_entry_count = max(
+                    cache_layer.compressor_entry_count, int(completed_groups.max().item()) + 1
+                )
+        return cache_layer.actual_compressed_kv, cache_layer.compressor_kv_buffer, cache_layer.compressor_gate_buffer
+
+    def _hca_cp_attend_core(
+        self,
+        query: torch.Tensor,
+        key_values: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_local, rows, heads, sequence_length, head_dim = query.shape
+        cores = int(getattr(self.config, "qeff_hca_attention_cores", 1))
+        if cores < 1 or heads % cores:
+            raise ValueError("HCA query heads must be divisible by qeff_hca_attention_cores.")
+        query_core = query.reshape(batch_local, rows, cores, heads // cores * sequence_length, head_dim)
+        key_values = torch.where(valid.unsqueeze(-1), key_values, torch.zeros_like(key_values))
+        key_values_core = key_values.unsqueeze(2).repeat(1, 1, cores, 1, 1)
+        valid_core = valid.unsqueeze(2).repeat(1, 1, cores, 1)
+        key_values_core = key_values_core.to(query_core.dtype)
+        scores = torch.matmul(query_core, key_values_core.transpose(-1, -2)) * self.scaling
+        scores = scores.masked_fill(~valid_core.unsqueeze(3), MIN_MASKED_ATTENTION_VALUE)
+        maxima = scores.max(dim=-1).values
+        exponentials = torch.exp(scores - maxima.unsqueeze(-1))
+        exponentials = torch.where(valid_core.unsqueeze(3), exponentials, torch.zeros_like(exponentials))
+        sums = exponentials.sum(dim=-1)
+        outputs = torch.matmul(exponentials.to(key_values_core.dtype), key_values_core)
+        return (
+            maxima.view(batch_local, rows, heads, sequence_length),
+            sums.view(batch_local, rows, heads, sequence_length),
+            outputs.view(batch_local, rows, heads, sequence_length, head_dim),
+        )
+
+    def _hca_cp_merge_attention(
+        self,
+        part_max: torch.Tensor,
+        part_sum: torch.Tensor,
+        part_output: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_local, _, heads, sequence_length, head_dim = part_output.shape
+        dp = int(getattr(self.config, "qeff_hca_attention_dp", 1))
+        cp = int(self.config.qeff_hca_attention_cp)
+        batch_size = batch_local * dp
+        part_max = part_max.reshape(batch_size, cp, heads, sequence_length)
+        part_sum = part_sum.reshape(batch_size, cp, heads, sequence_length)
+        part_output = part_output.reshape(batch_size, cp, heads, sequence_length, head_dim)
+        sinks = self.sinks.view(1, heads, 1).expand(batch_size, -1, sequence_length).to(part_max.dtype)
+        global_max = torch.maximum(part_max.max(dim=1).values, sinks)
+        part_weights = torch.exp(part_max - global_max.unsqueeze(1))
+        denominator = (part_weights * part_sum).sum(dim=1) + torch.exp(sinks - global_max)
+        heads_per_owner = heads // cp
+        weighted_output = (part_weights.unsqueeze(-1) * part_output).reshape(
+            batch_local, dp, cp, cp, heads_per_owner, sequence_length, head_dim
+        )
+        owner_rows = weighted_output.permute(0, 1, 3, 2, 4, 5, 6).reshape(
+            batch_local, dp * cp, cp, heads_per_owner, sequence_length, head_dim
+        )
+        reduce_input = owner_rows.permute(0, 1, 3, 4, 5, 2).reshape(
+            batch_local, dp * cp, heads_per_owner * sequence_length * head_dim, cp
+        )
+        ones = torch.ones((cp, 1), dtype=part_output.dtype, device=part_output.device)
+        merged = torch.matmul(reduce_input, ones).reshape(batch_size, heads, sequence_length, head_dim)
+        return (merged / denominator.unsqueeze(-1)).reshape(batch_local, dp, heads, sequence_length, head_dim)
+
+    def _hca_cp_attention(
+        self,
+        query: torch.Tensor,
+        local_cache: torch.Tensor,
+        compressed_cache: torch.Tensor,
+        compressed_valid: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_local, dp, heads, sequence_length, head_dim = query.shape
+        cp = int(self.config.qeff_hca_attention_cp)
+        rows = dp * cp
+        query_rows = query.unsqueeze(2).expand(batch_local, dp, cp, heads, sequence_length, head_dim)
+        query_rows = query_rows.reshape(batch_local, rows, heads, sequence_length, head_dim)
+        local_slots = local_cache.shape[2]
+        slot_ids = torch.arange(cp * local_slots, device=positions.device, dtype=torch.int32).view(1, 1, -1)
+        local_valid = (slot_ids <= positions[:, :, -1:]).reshape(batch_local, rows, local_slots)
+        key_values = torch.cat((local_cache, compressed_cache), dim=2)
+        valid = torch.cat((local_valid, compressed_valid), dim=2)
+        part_max, part_sum, part_output = self._hca_cp_attend_core(query_rows, key_values, valid)
+        merged = self._hca_cp_merge_attention(part_max, part_sum, part_output)
+        return self._hca_cp_rope_heads(merged.to(query.dtype), positions, inverse=True)
+
+    def _hca_cp_decode_forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        cache_layer: QEffHCACacheLayer,
+    ) -> torch.Tensor:
+        if hidden_states.shape[1] != 1:
+            raise ValueError("HCA CP decode requires query length 1.")
+        batch, sequence_length, _ = hidden_states.shape
+        dp = cache_layer.attention_dp
+        cp = int(self.config.qeff_hca_attention_cp)
+        batch_local = batch // dp
+        position_ids_int32 = position_ids.to(torch.int32)
+        positions = position_ids_int32.reshape(batch_local, dp, sequence_length)
+        group = _nonnegative_integer_floor_div(positions, cache_layer.compression_size).to(torch.int32)
+        offset = torch.remainder(positions, cache_layer.compression_size).to(torch.int32)
+        complete = offset == cache_layer.compression_size - 1
+        metadata = {
+            "position": positions,
+            "group": group,
+            "offset": offset,
+            "complete": complete,
+            "ready": group + complete.to(torch.int32),
+            "compressed_owner": torch.remainder(group, cp),
+            "compressed_slot": _nonnegative_integer_floor_div(group, cp).to(torch.int32),
+            "compressed_position": positions + 1 - cache_layer.compression_size,
+            "local_write": torch.remainder(positions, cache_layer.sliding_window).to(torch.int32),
+        }
+
+        fused_weight = torch.cat(
+            (
+                self.q_a_proj.weight,
+                self.kv_proj.weight,
+                self.compressor.kv_proj.weight,
+                self.compressor.gate_proj.weight,
+            ),
+            dim=0,
+        )
+        q_a, local_kv, compressor_kv, compressor_gate = F.linear(hidden_states, fused_weight).split(
+            (
+                self.q_a_proj.out_features,
+                self.kv_proj.out_features,
+                self.compressor.kv_proj.out_features,
+                self.compressor.gate_proj.out_features,
+            ),
+            dim=-1,
+        )
+        q_residual = self.q_a_norm(q_a)
+        query = self.q_b_proj(q_residual).view(batch_local, dp, sequence_length, self.num_heads, self.head_dim)
+        query = query.permute(0, 1, 3, 2, 4)
+        query = self._hca_cp_rope_heads(self.q_b_norm(query), positions)
+        local_kv = self.kv_norm(local_kv).reshape(batch_local, dp, sequence_length, self.head_dim)
+        local_kv = self._hca_cp_rope_kv(local_kv, positions)
+        cache_layer.sliding_window_kv = self._hca_cp_scatter_local(cache_layer.sliding_window_kv, local_kv, positions)
+
+        slots = metadata["offset"].reshape(batch, sequence_length).long()
+        compressor_score = compressor_gate + F.embedding(slots, self.compressor.position_bias)
+        self._hca_cp_compress(
+            cache_layer,
+            metadata,
+            compressor_kv,
+            compressor_score,
+            hidden_states.dtype,
+        )
+
+        rows = dp * cp
+        cp_ids = torch.arange(cp, device=position_ids.device, dtype=torch.int32).view(1, 1, cp)
+        cp_ids = cp_ids.expand(batch_local, dp, cp).reshape(batch_local, rows, 1)
+        slot_ids = torch.arange(
+            cache_layer.actual_compressed_kv.shape[2], device=position_ids.device, dtype=torch.int32
+        ).view(1, 1, -1)
+        compressed_global_ids = slot_ids * cp + cp_ids
+        compressed_valid = compressed_global_ids < self._hca_cp_expand_rows(metadata["ready"], cp)
+        attention_output = self._hca_cp_attention(
+            query,
+            cache_layer.sliding_window_kv,
+            cache_layer.actual_compressed_kv,
+            compressed_valid,
+            positions,
+        )
+        cache_layer.cumulative_length += sequence_length
+        grouped = attention_output.transpose(2, 3).reshape(batch, sequence_length, self.config.o_groups, -1)
+        return self.o_b_proj(self.o_a_proj(grouped.to(self.o_a_proj.weight.dtype)).flatten(2))
+
+    @staticmethod
+    def _csa_cp_expand_rows(tensor: torch.Tensor, cp: int) -> torch.Tensor:
+        batch_local, dp = tensor.shape[:2]
+        return (
+            tensor.unsqueeze(2)
+            .expand(batch_local, dp, cp, *tensor.shape[2:])
+            .reshape(batch_local, dp * cp, *tensor.shape[2:])
+        )
+
+    def _csa_cp_lookup_rope(self, positions: torch.Tensor, cp: int) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_local, rows, sequence_length = positions.shape
+        indices = (
+            (positions.to(torch.int32) + self.csa_cp_position_offset)
+            .transpose(0, 1)
+            .reshape(1, rows, batch_local * sequence_length)
+        )
+        cosine = ctx_gather_dp(getattr(self, f"csa_cp_cos_rows_{cp}"), indices)
+        sine = ctx_gather_dp(getattr(self, f"csa_cp_sin_rows_{cp}"), indices)
+        half_dim = cosine.shape[-1]
+        return (
+            cosine.reshape(rows, batch_local, sequence_length, half_dim).transpose(0, 1),
+            sine.reshape(rows, batch_local, sequence_length, half_dim).transpose(0, 1),
+        )
+
+    def _csa_cp_rotate_rows(
+        self,
+        tensor: torch.Tensor,
+        cosine: torch.Tensor,
+        sine: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        rotary_dim = int(
+            self.config.head_dim * self.config.rope_parameters["compress"].get("partial_rotary_factor", 1.0)
+        )
+        lead = tensor.shape[-1] - rotary_dim
+        if lead < 0:
+            raise ValueError("CSA RoPE dimension exceeds the tensor feature width.")
+        rope = tensor[..., lead:]
+        pairs = rope.reshape(*rope.shape[:-1], rotary_dim // 2, 2)
+        cosine, sine = cosine.to(tensor.dtype), sine.to(tensor.dtype)
+        even, odd = pairs[..., 0], pairs[..., 1]
+        if inverse:
+            sine = -sine
+        if tensor.ndim == 5:
+            cosine, sine = cosine.unsqueeze(2), sine.unsqueeze(2)
+        rotated = torch.stack((even * cosine - odd * sine, odd * cosine + even * sine), dim=-1)
+        rotated = rotated.flatten(-2).to(tensor.dtype)
+        return torch.cat((tensor[..., :lead], rotated), dim=-1) if lead else rotated
+
+    def _csa_cp_rope_heads(
+        self,
+        tensor: torch.Tensor,
+        positions: torch.Tensor,
+        cp: int,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        batch_local, dp, heads, sequence_length, head_dim = tensor.shape
+        if heads % cp:
+            raise ValueError("CSA query heads must be divisible by their RoPE CP degree.")
+        rows = dp * cp
+        head_rows = tensor.reshape(batch_local, rows, heads // cp, sequence_length, head_dim)
+        position_rows = self._csa_cp_expand_rows(positions, cp)
+        cosine, sine = self._csa_cp_lookup_rope(position_rows, cp)
+        cosine = cosine.to(device=tensor.device)
+        sine = sine.to(device=tensor.device)
+        rotated = self._csa_cp_rotate_rows(head_rows, cosine, sine, inverse=inverse)
+        return rotated.reshape_as(tensor)
+
+    def _csa_cp_rope_kv(self, tensor: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        cp = int(self.config.qeff_csa_attention_cp)
+        rotary_dim = int(
+            self.config.head_dim * self.config.rope_parameters["compress"].get("partial_rotary_factor", 1.0)
+        )
+        position_rows = self._csa_cp_expand_rows(positions, cp)
+        cosine, sine = self._csa_cp_lookup_rope(position_rows, cp)
+        cosine = cosine.to(device=tensor.device)
+        sine = sine.to(device=tensor.device)
+        return _cp_rope_kv_feature_shards(tensor, cosine, sine, cp, rotary_dim)
+
+    def _csa_cp_position_metadata(self, position_ids: torch.Tensor, dp: int) -> dict[str, torch.Tensor]:
+        ratio = self.compressor.compress_rate
+        batch_local, sequence_length = position_ids.shape[0] // dp, position_ids.shape[1]
+        position = position_ids.to(torch.int32).reshape(batch_local, dp, sequence_length)
+        group = _nonnegative_integer_floor_div(position, ratio).to(torch.int32)
+        offset = torch.remainder(position, ratio).to(torch.int32)
+        complete = offset == ratio - 1
+        return {
+            "position": position,
+            "group": group,
+            "offset": offset,
+            "complete": complete,
+            "ready": group + complete.to(torch.int32),
+            "write": ratio + offset,
+            "compressed_position": group * ratio,
+            "previous_valid": group > 0,
+            "local_write": torch.remainder(position, self.sliding_window).to(torch.int32),
+        }
+
+    def _csa_cp_fold_metadata(self, metadata: dict[str, torch.Tensor], cp: int) -> dict[str, torch.Tensor]:
+        folded = {
+            name: self._csa_cp_expand_rows(metadata[name], cp)
+            for name in (
+                "position",
+                "group",
+                "offset",
+                "complete",
+                "ready",
+                "write",
+                "compressed_position",
+                "previous_valid",
+            )
+        }
+        batch_local, dp = metadata["position"].shape[:2]
+        cp_ids = torch.arange(cp, device=metadata["position"].device, dtype=torch.int32)
+        cp_ids = cp_ids.view(1, 1, cp, 1).expand(batch_local, dp, cp, 1).reshape(batch_local, dp * cp, 1)
+        folded["cp_ids"] = cp_ids
+        folded["compressed_owner"] = self._csa_cp_expand_rows(torch.remainder(metadata["group"], cp), cp)
+        folded["compressed_slot"] = self._csa_cp_expand_rows(
+            _nonnegative_integer_floor_div(metadata["group"], cp).to(torch.int32), cp
+        )
+        numerator = folded["ready"] + cp - 1 - cp_ids
+        nonnegative_numerator = torch.where(numerator >= 0, numerator, torch.zeros_like(numerator))
+        folded["local_limit"] = _nonnegative_integer_floor_div(nonnegative_numerator, cp)
+        folded["write_valid"] = folded["complete"] & (cp_ids == folded["compressed_owner"])
+        return folded
+
+    def _csa_cp_scatter_rows(
+        self,
+        cache: torch.Tensor,
+        positions: torch.Tensor,
+        updates: torch.Tensor,
+        valid: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_local, rows, sequence_length = positions.shape
+        block_ids = torch.arange(batch_local, device=positions.device, dtype=torch.int32).view(batch_local, 1, 1)
+        block_ids = block_ids.expand(batch_local, rows, sequence_length)
+        if valid is not None:
+            block_ids = torch.where(valid, block_ids, torch.full_like(block_ids, torch.iinfo(torch.int32).max))
+        return ctx_scatter_dp_masked(cache, block_ids, positions.to(torch.int32), updates.to(cache.dtype))
+
+    def _csa_cp_scatter_local(
+        self,
+        cache: torch.Tensor,
+        key_states: torch.Tensor,
+        metadata: dict[str, torch.Tensor],
+        cp_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        cp = int(self.config.qeff_csa_attention_cp)
+        local_width = cache.shape[2]
+        slots = self._csa_cp_expand_rows(metadata["local_write"], cp)
+        addresses = slots - cp_ids * local_width
+        valid = (addresses >= 0) & (addresses < local_width)
+        safe_addresses = torch.where(valid, addresses, torch.zeros_like(addresses))
+        batch_local, dp, sequence_length, dim = key_states.shape
+        updates = key_states.unsqueeze(2).expand(batch_local, dp, cp, sequence_length, dim)
+        updates = updates.reshape(batch_local, dp * cp, sequence_length, dim)
+        return self._csa_cp_scatter_rows(cache, safe_addresses, updates, valid)
+
+    def _csa_cp_compress(
+        self,
+        cache: torch.Tensor,
+        packed_state: torch.Tensor,
+        projected_kv: torch.Tensor,
+        projected_gate: torch.Tensor,
+        row_position: dict[str, torch.Tensor],
+        position_bias: torch.Tensor,
+        norm: nn.Module,
+        dim: int,
+        cp: int,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ratio = self.compressor.compress_rate
+        batch_local, rows = packed_state.shape[:2]
+        dp = int(self.config.qeff_csa_attention_dp)
+        sequence_length = projected_kv.shape[1]
+        kv = self._csa_cp_expand_rows(projected_kv.reshape(batch_local, dp, sequence_length, -1), cp)
+        gate = self._csa_cp_expand_rows(projected_gate.reshape(batch_local, dp, sequence_length, -1), cp)
+        score = gate + F.embedding(row_position["offset"].long(), position_bias)
+        packed_updates = torch.cat((kv, score), dim=-1).to(packed_state.dtype)
+        packed_state = self._csa_cp_scatter_rows(packed_state, row_position["write"], packed_updates)
+        kv_state, score_state = packed_state[..., : 2 * dim], packed_state[..., 2 * dim :]
+        pooled_kv = torch.cat((kv_state[:, :, :ratio, :dim], kv_state[:, :, ratio:, dim:]), dim=2).to(dtype)
+        pooled_score = torch.cat((score_state[:, :, :ratio, :dim], score_state[:, :, ratio:, dim:]), dim=2).to(dtype)
+        previous_valid = row_position["previous_valid"].unsqueeze(-1)
+        previous_kv = torch.where(previous_valid, pooled_kv[:, :, :ratio], torch.zeros_like(pooled_kv[:, :, :ratio]))
+        previous_score = torch.where(
+            previous_valid, pooled_score[:, :, :ratio], torch.full_like(pooled_score[:, :, :ratio], float("-inf"))
+        )
+        pooled_kv = torch.cat((previous_kv, pooled_kv[:, :, ratio:]), dim=2)
+        pooled_score = torch.cat((previous_score, pooled_score[:, :, ratio:]), dim=2)
+        softmax_dtype = torch.float16 if dtype == torch.bfloat16 else dtype
+        pooled_weights = pooled_score.to(softmax_dtype).softmax(dim=2).to(dtype)
+        pooled = (pooled_kv * pooled_weights).sum(dim=2, keepdim=True)
+        pooled = norm(pooled.to(dtype))
+        compressed_position = row_position["compressed_position"]
+        cosine, sine = self._csa_cp_lookup_rope(compressed_position, cp)
+        cosine = cosine.to(device=pooled.device)
+        sine = sine.to(device=pooled.device)
+        pooled = self._csa_cp_rotate_rows(pooled, cosine, sine)
+        cache = self._csa_cp_scatter_rows(cache, row_position["compressed_slot"], pooled, row_position["write_valid"])
+        current = packed_state[:, :, ratio:]
+        shifted = torch.cat((current, current), dim=2)
+        complete = row_position["complete"].unsqueeze(-1)
+        packed_state = torch.where(complete, shifted, packed_state)
+        return cache, packed_state
+
+    def _csa_cp_indexer_inputs(
+        self, q_residual: torch.Tensor, hidden: torch.Tensor, position: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        indexer = self.compressor.indexer
+        dp = int(self.config.qeff_csa_attention_dp)
+        cp = int(self.config.qeff_csa_indexer_cp)
+        batch_local, _, sequence_length = position["position"].shape
+        q = (
+            indexer.q_b_proj(q_residual)
+            .view(batch_local, dp, sequence_length, indexer.num_heads, indexer.head_dim)
+            .permute(0, 1, 3, 2, 4)
+        )
+        position_rows = position["position"].reshape(batch_local, dp, cp, sequence_length)[:, :, 0, :]
+        q = self._csa_cp_rope_heads(q, position_rows, cp)
+        q_rows = self._csa_cp_expand_rows(q, cp).permute(0, 1, 3, 2, 4)
+        hidden_rows = (
+            hidden.reshape(batch_local, dp, sequence_length, -1)
+            .unsqueeze(2)
+            .expand(batch_local, dp, cp, sequence_length, hidden.shape[-1])
+            .reshape(batch_local, dp * cp, sequence_length, hidden.shape[-1])
+        )
+        scores = indexer.scorer.weights_proj(hidden_rows)
+        scores = scores * indexer.scorer.softmax_scale * indexer.scorer.weights_scaling
+        return q_rows, scores
+
+    def _csa_cp_topk(
+        self,
+        q_rows: torch.Tensor,
+        weights: torch.Tensor,
+        indexer_cache: torch.Tensor,
+        position: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        indexer = self.compressor.indexer
+        dp = int(self.config.qeff_csa_attention_dp)
+        cp = int(self.config.qeff_csa_indexer_cp)
+        batch_local, rows, sequence_length = q_rows.shape[:3]
+        local_slots = indexer_cache.shape[2]
+        if indexer.index_topk > local_slots:
+            raise ValueError("CSA index_topk must not exceed CP-local indexer capacity.")
+        blocks = int(getattr(self.config, "qeff_csa_num_kv_blocks", 1))
+        if local_slots % blocks:
+            raise ValueError("CSA CP-local indexer slots must be divisible by qeff_csa_num_kv_blocks.")
+        block_width = local_slots // blocks
+        candidate_scores = []
+        for block in range(blocks):
+            start = block * block_width
+            keys = indexer_cache[:, :, start : start + block_width].to(q_rows.dtype)
+            head_scores = torch.matmul(q_rows, keys.unsqueeze(2).transpose(-1, -2))
+            candidate_scores.append((F.relu(head_scores) * weights.unsqueeze(-1)).sum(dim=-2))
+        scores = torch.cat(candidate_scores, dim=-1)
+        local_ids = torch.arange(local_slots, device=scores.device, dtype=torch.int32).view(1, 1, 1, local_slots)
+        scores = scores.masked_fill(local_ids >= position["local_limit"].unsqueeze(-1), float("-inf"))
+        local_scores, selected = torch.topk(scores, k=indexer.index_topk, dim=-1)
+        global_ids = selected.to(torch.int32) * cp + position["cp_ids"].unsqueeze(-1)
+        local_k = indexer.index_topk
+        global_scores = local_scores.reshape(batch_local, dp, cp, sequence_length, local_k)
+        global_scores = global_scores.permute(0, 1, 3, 2, 4).reshape(batch_local, dp, sequence_length, cp * local_k)
+        global_ids = global_ids.reshape(batch_local, dp, cp, sequence_length, local_k)
+        global_ids = global_ids.permute(0, 1, 3, 2, 4).reshape(batch_local, dp, sequence_length, cp * local_k)
+        return torch.gather(global_ids, -1, torch.topk(global_scores, k=indexer.index_topk, dim=-1).indices)
+
+    def _csa_cp_gather_compressed(
+        self,
+        cache: torch.Tensor,
+        topk: torch.Tensor,
+        valid: torch.Tensor,
+        cp_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        dp = int(self.config.qeff_csa_attention_dp)
+        cp = int(self.config.qeff_csa_attention_cp)
+        batch_local, _, _, dim = cache.shape
+        indices = topk.to(torch.int32).reshape(batch_local, dp, -1)
+        addresses = _nonnegative_integer_floor_div(indices, cp).to(torch.int32)
+        owners = torch.remainder(indices, cp).to(torch.int32)
+        addresses = self._csa_cp_expand_rows(addresses, cp)
+        owners = self._csa_cp_expand_rows(owners, cp)
+        live = self._csa_cp_expand_rows(valid.reshape(batch_local, dp, -1), cp) & (owners == cp_ids)
+        safe = torch.where(live, addresses, torch.zeros_like(addresses))
+        gathered = ctx_gather_dp(cache, safe)
+        return torch.where(live.unsqueeze(-1), gathered, torch.zeros_like(gathered)), live
+
+    def _csa_cp_local_kv(self, cache: torch.Tensor, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        dp = int(self.config.qeff_csa_attention_dp)
+        cp = int(self.config.qeff_csa_attention_cp)
+        batch_local, _, _ = positions.shape
+        local_width = cache.shape[2]
+        slots = torch.arange(cp * local_width, device=positions.device, dtype=torch.int32).view(1, 1, -1)
+        valid = slots <= positions[:, :, -1:]
+        valid = valid.reshape(batch_local, dp * cp, local_width)
+        return torch.where(valid.unsqueeze(-1), cache, torch.zeros_like(cache)), valid
+
+    def _csa_cp_attention_core(
+        self, query: torch.Tensor, key_values: torch.Tensor, valid: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_local, rows, heads, sequence_length, head_dim = query.shape
+        cores = int(getattr(self.config, "qeff_csa_attention_cores", 1))
+        if cores < 1 or heads % cores:
+            raise ValueError("CSA query heads must be divisible by qeff_csa_attention_cores.")
+        query_core = query.reshape(batch_local, rows, cores, heads // cores * sequence_length, head_dim)
+        key_values = torch.where(valid.unsqueeze(-1), key_values, torch.zeros_like(key_values))
+        key_core = key_values.unsqueeze(2).repeat(1, 1, cores, 1, 1)
+        valid_core = valid.unsqueeze(2).repeat(1, 1, cores, 1)
+        key_core = key_core.to(query_core.dtype)
+        scores = torch.matmul(query_core, key_core.transpose(-1, -2)) * self.scaling
+        scores = scores.masked_fill(~valid_core.unsqueeze(3), MIN_MASKED_ATTENTION_VALUE)
+        maxima = scores.max(dim=-1).values
+        exponentials = torch.exp(scores - maxima.unsqueeze(-1))
+        exponentials = torch.where(valid_core.unsqueeze(3), exponentials, torch.zeros_like(exponentials))
+        sums = exponentials.sum(dim=-1)
+        outputs = torch.matmul(exponentials.to(key_core.dtype), key_core)
+        return (
+            maxima.reshape(batch_local, rows, heads, sequence_length),
+            sums.reshape(batch_local, rows, heads, sequence_length),
+            outputs.reshape(batch_local, rows, heads, sequence_length, head_dim),
+        )
+
+    def _csa_cp_merge_attention(self, maxima: torch.Tensor, sums: torch.Tensor, outputs: torch.Tensor) -> torch.Tensor:
+        batch_local, _, heads, sequence_length, head_dim = outputs.shape
+        dp = int(self.config.qeff_csa_attention_dp)
+        cp = int(self.config.qeff_csa_attention_cp)
+        batch = batch_local * dp
+        maxima = maxima.reshape(batch, cp, heads, sequence_length)
+        sums = sums.reshape(batch, cp, heads, sequence_length)
+        outputs = outputs.reshape(batch, cp, heads, sequence_length, head_dim)
+        sinks = self.sinks.view(1, heads, 1).expand(batch, -1, sequence_length).to(maxima.dtype)
+        global_max = torch.maximum(maxima.max(dim=1).values, sinks)
+        weights = torch.exp(maxima - global_max.unsqueeze(1))
+        denominator = (weights * sums).sum(dim=1) + torch.exp(sinks - global_max)
+        if heads % cp:
+            raise ValueError("CSA attention heads must be divisible by qeff_csa_attention_cp.")
+        heads_per_cp = heads // cp
+        weighted = (weights.unsqueeze(-1) * outputs).reshape(
+            batch_local, dp, cp, cp, heads_per_cp, sequence_length, head_dim
+        )
+        owner_rows = weighted.permute(0, 1, 3, 2, 4, 5, 6).reshape(
+            batch_local, dp * cp, cp, heads_per_cp, sequence_length, head_dim
+        )
+        reduction = owner_rows.permute(0, 1, 3, 4, 5, 2).reshape(
+            batch_local, dp * cp, heads_per_cp * sequence_length * head_dim, cp
+        )
+        ones = torch.ones((cp, 1), dtype=outputs.dtype, device=outputs.device)
+        merged = torch.matmul(reduction, ones).reshape(batch, heads, sequence_length, head_dim)
+        return (merged / denominator.unsqueeze(-1)).reshape(batch_local, dp, heads, sequence_length, head_dim)
+
+    def _csa_cp_attention(
+        self,
+        query: torch.Tensor,
+        local_cache: torch.Tensor,
+        compressed_cache: torch.Tensor,
+        topk: torch.Tensor,
+        compressed_valid: torch.Tensor,
+        positions: torch.Tensor,
+        cp_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        cp = int(self.config.qeff_csa_attention_cp)
+        query_rows = self._csa_cp_expand_rows(query, cp)
+        local_kv, local_valid = self._csa_cp_local_kv(local_cache, positions)
+        compressed_kv, compressed_valid = self._csa_cp_gather_compressed(
+            compressed_cache, topk, compressed_valid, cp_ids
+        )
+        key_values = torch.cat((local_kv, compressed_kv), dim=2)
+        valid = torch.cat((local_valid, compressed_valid), dim=2)
+        maxima, sums, outputs = self._csa_cp_attention_core(query_rows, key_values, valid)
+        merged = self._csa_cp_merge_attention(maxima, sums, outputs)
+        return self._csa_cp_rope_heads(merged.to(query.dtype), positions, cp, inverse=True)
+
+    def _csa_cp_decode_forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        cache_layer: QEffCSACacheLayer,
+    ) -> torch.Tensor:
+        if hidden_states.shape[1] != 1:
+            raise ValueError("CSA CP decode requires query length 1.")
+        batch, sequence_length, _ = hidden_states.shape
+        dp = cache_layer.attention_dp
+        attention_cp = cache_layer.attention_cp
+        indexer_cp = cache_layer.indexer_cp
+        batch_local = batch // dp
+        metadata = self._csa_cp_position_metadata(position_ids, dp)
+        attention_position = self._csa_cp_fold_metadata(metadata, attention_cp)
+        indexer_position = (
+            attention_position if attention_cp == indexer_cp else self._csa_cp_fold_metadata(metadata, indexer_cp)
+        )
+        fused_weight = torch.cat(
+            (
+                self.q_a_proj.weight,
+                self.kv_proj.weight,
+                self.compressor.kv_proj.weight,
+                self.compressor.gate_proj.weight,
+                self.compressor.indexer.kv_proj.weight,
+                self.compressor.indexer.gate_proj.weight,
+            ),
+            dim=0,
+        )
+        projected = F.linear(hidden_states, fused_weight).split(self.csa_cp_projection_widths, dim=-1)
+        q_a, local_kv, compressor_kv, compressor_gate, indexer_kv, indexer_gate = projected
+        q_residual = self.q_a_norm(q_a)
+        query = self.q_b_proj(q_residual).view(batch_local, dp, sequence_length, self.num_heads, self.head_dim)
+        query = query.permute(0, 1, 3, 2, 4)
+        query = self._csa_cp_rope_heads(self.q_b_norm(query), metadata["position"], attention_cp)
+        local_kv = self.kv_norm(local_kv).reshape(batch_local, dp, sequence_length, self.head_dim)
+        local_kv = self._csa_cp_rope_kv(local_kv, metadata["position"])
+        cache_layer.local_kv_cache = self._csa_cp_scatter_local(
+            cache_layer.local_kv_cache, local_kv, metadata, attention_position["cp_ids"]
+        )
+        cache_layer.compressed_kv_cache, cache_layer.comp_state = self._csa_cp_compress(
+            cache_layer.compressed_kv_cache,
+            cache_layer.comp_state,
+            compressor_kv,
+            compressor_gate,
+            attention_position,
+            self.compressor.position_bias,
+            self.compressor.kv_norm,
+            self.head_dim,
+            attention_cp,
+            hidden_states.dtype,
+        )
+        cache_layer.indexer_kv_cache, cache_layer.idx_state = self._csa_cp_compress(
+            cache_layer.indexer_kv_cache,
+            cache_layer.idx_state,
+            indexer_kv,
+            indexer_gate,
+            indexer_position,
+            self.compressor.indexer.position_bias,
+            self.compressor.indexer.kv_norm,
+            self.compressor.indexer.head_dim,
+            indexer_cp,
+            hidden_states.dtype,
+        )
+        if not _is_export_capture():
+            completed_groups = metadata["group"][metadata["complete"]]
+            if completed_groups.numel():
+                entry_count = int(completed_groups.max().item()) + 1
+                cache_layer.compressor_entry_count = max(cache_layer.compressor_entry_count, entry_count)
+                cache_layer.indexer_entry_count = max(cache_layer.indexer_entry_count, entry_count)
+        q_index, indexer_weights = self._csa_cp_indexer_inputs(q_residual, hidden_states, indexer_position)
+        topk = self._csa_cp_topk(q_index, indexer_weights, cache_layer.indexer_kv_cache, indexer_position)
+        topk = topk.reshape(batch, sequence_length, -1)
+        valid = topk < metadata["ready"].reshape(batch, sequence_length, 1)
+        attention_output = self._csa_cp_attention(
+            query,
+            cache_layer.local_kv_cache,
+            cache_layer.compressed_kv_cache,
+            topk,
+            valid,
+            metadata["position"],
+            attention_position["cp_ids"],
+        )
+        cache_layer.cumulative_length += sequence_length
+        grouped = attention_output.transpose(2, 3).reshape(batch, sequence_length, self.config.o_groups, -1)
+        return self.o_b_proj(self.o_a_proj(grouped.to(self.o_a_proj.weight.dtype)).flatten(2))
 
     def _csa_blocked_indexer_topk(
         self,
@@ -1908,9 +3034,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             indexer.head_dim,
         ).permute(0, 1, 3, 2, 4)
         prepared_weights = (
-            indexer.scorer.weights_proj(hidden_states).float()
-            * indexer.scorer.softmax_scale
-            * indexer.scorer.weights_scaling
+            indexer.scorer.weights_proj(hidden_states) * indexer.scorer.softmax_scale * indexer.scorer.weights_scaling
         ).view(
             batch_local,
             layer.attention_dp,
@@ -1927,9 +3051,10 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 block_width,
                 indexer.head_dim,
             )
-            query_blocks = prepared_q.permute(0, 1, 3, 2, 4).float()
+            query_blocks = prepared_q.permute(0, 1, 3, 2, 4)
+            blocked_cache = blocked_cache.to(query_blocks.dtype)
             head_scores = (
-                query_blocks.unsqueeze(2).unsqueeze(3).unsqueeze(-2) * blocked_cache.float().unsqueeze(4).unsqueeze(5)
+                query_blocks.unsqueeze(2).unsqueeze(3).unsqueeze(-2) * blocked_cache.unsqueeze(4).unsqueeze(5)
             ).sum(dim=-1)
             scores = (torch.relu(head_scores) * prepared_weights.unsqueeze(2).unsqueeze(3).unsqueeze(-1)).sum(dim=-2)[
                 :, :, :, :, 0
@@ -1970,7 +3095,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
         folded_batch = batch_local * layer.attention_dp
         raw_tile_scores = torch.einsum(
             "bhd,bcgntd->bhcgnt",
-            prepared_q[:, :, :, 0].reshape(folded_batch, indexer.num_heads, indexer.head_dim).float(),
+            prepared_q[:, :, :, 0].reshape(folded_batch, indexer.num_heads, indexer.head_dim),
             tiled_cache.reshape(
                 folded_batch,
                 cp,
@@ -1978,7 +3103,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 attention_cores,
                 tokens_per_core,
                 indexer.head_dim,
-            ).float(),
+            ).to(prepared_q.dtype),
         ).relu()
         tile_scores = (
             (
@@ -2064,6 +3189,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 raise ValueError("Attention source length must be divisible by its block count.")
             tile_size = key_length // parts
             tiled_states = states[:, 0].view(batch_local, attention_dp, parts, tile_size, head_dim)
+            tiled_states = tiled_states.to(query.dtype)
             tiled_valid = valid.view(batch_local, attention_dp, parts, tile_size)
             query_dp = query.view(
                 batch_local,
@@ -2071,9 +3197,9 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 query.shape[1],
                 query.shape[2],
                 query.shape[3],
-            ).float()
+            )
             query_folded = query_dp.reshape(batch_local, attention_dp, 1, -1, head_dim)
-            scores = torch.matmul(query_folded, tiled_states.float().transpose(-1, -2)) * self.scaling
+            scores = torch.matmul(query_folded, tiled_states.transpose(-1, -2)) * self.scaling
             scores = scores.masked_fill(~tiled_valid[:, :, :, None, :], -3.0e4)
             maximum = scores.max(dim=-1).values
             all_masked = ~tiled_valid.any(dim=-1)[:, :, :, None]
@@ -2085,7 +3211,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 torch.zeros_like(exponentials),
             )
             sums = exponentials.sum(dim=-1)
-            output = torch.matmul(exponentials.to(tiled_states.dtype), tiled_states).float()
+            output = torch.matmul(exponentials.to(tiled_states.dtype), tiled_states)
             sums = torch.where(all_masked, torch.zeros_like(sums), sums)
             output = torch.where(all_masked.unsqueeze(-1), torch.zeros_like(output), output)
             num_heads = query.shape[1]
@@ -2122,7 +3248,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 -1,
                 query.shape[-2],
             )
-            .float()
+            .to(maximum.dtype)
         )
         global_maximum = torch.maximum(maximum.max(dim=3).values, sinks)
         weights = torch.exp(maximum - global_maximum.unsqueeze(3))
@@ -2135,7 +3261,8 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             query.shape[2],
             query.shape[3],
         )
-        local_scores = torch.matmul(query.float(), key.transpose(2, 3).float()) * self.scaling
+        key = key.to(query.dtype)
+        local_scores = torch.matmul(query, key.transpose(2, 3)) * self.scaling
         local_scores = local_scores.masked_fill(attention_mask, MIN_MASKED_ATTENTION_VALUE)
         global_maximum = global_maximum.view(query.shape[0], query.shape[1], query.shape[2])
         denominator = denominator.view(query.shape[0], query.shape[1], query.shape[2])
@@ -2178,6 +3305,26 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             if not isinstance(layer, QEffHCACacheLayer):
                 raise TypeError("HCA prefill requires a QEffHCACacheLayer.")
             return self._hca_prefill_forward(hidden_states, position_embeddings, position_ids, layer), None
+        if (
+            self.layer_type == "heavily_compressed_attention"
+            and past_key_values is not None
+            and isinstance(past_key_values.layers[self.layer_idx], QEffHCACacheLayer)
+            and past_key_values.layers[self.layer_idx].uses_cp_layout
+        ):
+            return (
+                self._hca_cp_decode_forward(hidden_states, position_ids, past_key_values.layers[self.layer_idx]),
+                None,
+            )
+        if (
+            self.layer_type == "compressed_sparse_attention"
+            and past_key_values is not None
+            and isinstance(past_key_values.layers[self.layer_idx], QEffCSACacheLayer)
+            and past_key_values.layers[self.layer_idx].uses_cp_layout
+        ):
+            return (
+                self._csa_cp_decode_forward(hidden_states, position_ids, past_key_values.layers[self.layer_idx]),
+                None,
+            )
         if hidden_states.shape[1] != 1:
             raise ValueError("QEff attention is decode-only and requires query length 1.")
 
@@ -2237,12 +3384,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
             weighted_gate = compressor_gate_buffer + self.compressor.position_bias.view(
                 1, 1, layer.compression_size, -1
             )
-            compressed = self.compressor.kv_norm(
-                torch.einsum(
-                    "bhrd->bhd",
-                    compressor_kv_buffer * weighted_gate.float().softmax(dim=2).to(layer.dtype),
-                )
-            ).to(layer.dtype)
+            pooling_kv = compressor_kv_buffer.to(hidden_states.dtype)
+            pooling_gate = weighted_gate.to(hidden_states.dtype)
+            softmax_dtype = torch.float16 if hidden_states.dtype == torch.bfloat16 else hidden_states.dtype
+            pooling_weights = pooling_gate.to(softmax_dtype).softmax(dim=2).to(hidden_states.dtype)
+            compressed = self.compressor.kv_norm(torch.einsum("bhrd->bhd", pooling_kv * pooling_weights))
             entry_positions = _nonnegative_integer_floor_div(position_ids, layer.compression_size)
             rope_positions = entry_positions * layer.compression_size
             comp_cos, comp_sin = self.compressor.rotary_emb(
@@ -2313,12 +3459,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                         ],
                         dim=2,
                     )
-                    compressed = norm(
-                        torch.einsum(
-                            "bpnd->bpd",
-                            pooled_kv * pooled_gate.float().softmax(dim=2).to(pooled_kv.dtype),
-                        )
-                    ).to(pooled_kv.dtype)
+                    pooling_kv = pooled_kv.to(hidden_states.dtype)
+                    pooling_gate = pooled_gate.to(hidden_states.dtype)
+                    softmax_dtype = torch.float16 if hidden_states.dtype == torch.bfloat16 else hidden_states.dtype
+                    pooling_weights = pooling_gate.to(softmax_dtype).softmax(dim=2).to(hidden_states.dtype)
+                    compressed = norm(torch.einsum("bpnd->bpd", pooling_kv * pooling_weights))
                     compressed = compressed.reshape(hidden_states.shape[0], head_dim)
                     rope_positions = entry_positions * ratio
                     comp_cos, comp_sin = rotary(
@@ -2356,9 +3501,11 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
                 )
                 new_kv[:, ratio:] = current_kv[..., head_dim:]
                 new_gate[:, ratio:] = current_gate[..., head_dim:]
-                compressed = norm(
-                    torch.einsum("brd->bd", new_kv * new_gate.float().softmax(dim=1).to(new_kv.dtype))
-                ).to(new_kv.dtype)
+                pooling_kv = new_kv.to(hidden_states.dtype)
+                pooling_gate = new_gate.to(hidden_states.dtype)
+                softmax_dtype = torch.float16 if hidden_states.dtype == torch.bfloat16 else hidden_states.dtype
+                pooling_weights = pooling_gate.to(softmax_dtype).softmax(dim=1).to(hidden_states.dtype)
+                compressed = norm(torch.einsum("brd->bd", pooling_kv * pooling_weights))
                 rope_positions = entry_positions * ratio
                 comp_cos, comp_sin = rotary(
                     compressed,
@@ -2473,7 +3620,7 @@ class QEffDeepseekV4Attention(DeepseekV4Attention):
 
         attn_output = qeff_apply_rotary_pos_emb(attn_output.transpose(1, 2), cos, -sin).transpose(1, 2)
         grouped = attn_output.reshape(*input_shape, self.config.o_groups, -1)
-        grouped = self.o_a_proj(grouped).flatten(2)
+        grouped = self.o_a_proj(grouped.to(self.o_a_proj.weight.dtype)).flatten(2)
         output = self.o_b_proj(grouped)
         return output, attn_weights
 
@@ -2488,6 +3635,13 @@ class QEffDeepseekV4Cache(Cache):
         "actual_compressed_kv",
     )
     _CSA_STATE_NAMES = (
+        "local_kv_cache",
+        "compressed_kv_cache",
+        "indexer_kv_cache",
+        "comp_state",
+        "idx_state",
+    )
+    _CSA_LEGACY_SPLIT_STATE_NAMES = (
         "local_kv_cache",
         "compressed_kv_cache",
         "compressor_kv_state",
@@ -2535,10 +3689,12 @@ class QEffDeepseekV4Cache(Cache):
                     )
                 )
             elif layer_type == "compressed_sparse_attention":
-                if len(states) != len(cls._CSA_STATE_NAMES):
-                    raise ValueError("CSA cache layers require seven retained-state tensors.")
                 ratio = config.compress_rates[layer_type]
                 entry_count = cumulative_length // ratio
+                if len(states) not in (len(cls._CSA_STATE_NAMES), len(cls._CSA_LEGACY_SPLIT_STATE_NAMES)):
+                    raise ValueError(
+                        "CSA cache layers require five benchmark bindings or seven legacy split-state tensors."
+                    )
                 layers.append(
                     QEffCSACacheLayer(
                         config,
@@ -2564,11 +3720,9 @@ class QEffDeepseekV4Cache(Cache):
                     (
                         layer.local_kv_cache,
                         layer.compressed_kv_cache,
-                        layer.compressor_kv_state,
-                        layer.compressor_score_state,
                         layer.indexer_kv_cache,
-                        layer.indexer_kv_state,
-                        layer.indexer_score_state,
+                        layer.comp_state,
+                        layer.idx_state,
                     )
                 )
                 continue
@@ -2625,9 +3779,40 @@ class QEffDeepseekV4Cache(Cache):
                     )
                     continue
                 attention_dp = int(getattr(config, "qeff_hca_attention_dp", 1))
+                attention_cp = int(getattr(config, "qeff_hca_attention_cp", 1))
                 folded_row_cache = bool(getattr(config, "qeff_hca_folded_row_cache", False))
                 compressed_kv_cp = int(getattr(config, "qeff_hca_compressed_kv_cp", 1))
                 attention_blocks = int(getattr(config, "qeff_hca_attn_blocks", 1))
+                if attention_cp > 1:
+                    if batch_size % attention_dp:
+                        raise ValueError("batch_size must be divisible by qeff_hca_attention_dp.")
+                    if config.num_key_value_heads != 1:
+                        raise NotImplementedError("HCA CP cache layout currently requires one key/value head.")
+                    if attention_cp != compressed_kv_cp:
+                        raise ValueError("HCA attention CP and compressed-KV CP must match.")
+                    if config.sliding_window % attention_cp:
+                        raise ValueError("HCA sliding window must be divisible by qeff_hca_attention_cp.")
+                    if capacity % attention_cp:
+                        raise ValueError("HCA compressed-cache capacity must be divisible by qeff_hca_attention_cp.")
+                    if (capacity // attention_cp) % attention_blocks:
+                        raise ValueError("HCA CP-way slot count must be divisible by qeff_hca_attn_blocks.")
+                    batch_local = batch_size // attention_dp
+                    rows = attention_dp * attention_cp
+                    layers.append(
+                        (
+                            torch.zeros(
+                                batch_local,
+                                rows,
+                                config.sliding_window // attention_cp,
+                                config.head_dim,
+                                **common,
+                            ),
+                            torch.zeros(batch_local, rows, ratio, config.head_dim, **common),
+                            torch.full((batch_local, rows, ratio, config.head_dim), -1.0e4, **common),
+                            torch.zeros(batch_local, rows, capacity // attention_cp, config.head_dim, **common),
+                        )
+                    )
+                    continue
                 if attention_dp > 1:
                     if batch_size % attention_dp:
                         raise ValueError("batch_size must be divisible by qeff_hca_attention_dp.")
@@ -2663,21 +3848,75 @@ class QEffDeepseekV4Cache(Cache):
                 )
                 continue
             if bool(getattr(config, "qeff_csa_prefill_only", False)):
+                comp_state = torch.zeros(batch_size, 2 * ratio, 4 * config.head_dim, **common)
+                idx_state = torch.zeros(batch_size, 2 * ratio, 4 * config.index_head_dim, **common)
                 layers.append(
                     (
                         torch.zeros(batch_size, config.sliding_window, config.head_dim, **common),
                         torch.zeros(batch_size, capacity, config.head_dim, **common),
-                        torch.zeros(batch_size, 2 * ratio, 2 * config.head_dim, **common),
-                        torch.full((batch_size, 2 * ratio, 2 * config.head_dim), float("-inf"), **common),
                         torch.zeros(batch_size, capacity, config.index_head_dim, **common),
-                        torch.zeros(batch_size, 2 * ratio, 2 * config.index_head_dim, **common),
-                        torch.full((batch_size, 2 * ratio, 2 * config.index_head_dim), float("-inf"), **common),
+                        comp_state,
+                        idx_state,
                     )
                 )
                 continue
             banked = 2 * ratio
             attention_dp = int(getattr(config, "qeff_csa_attention_dp", 1))
+            attention_cp = int(getattr(config, "qeff_csa_attention_cp", 1))
             indexer_cp = int(getattr(config, "qeff_csa_indexer_cp", 1))
+            if attention_cp > 1:
+                if attention_dp < 1 or indexer_cp < 1:
+                    raise ValueError("CSA DP and CP degrees must be positive.")
+                if attention_cp & (attention_cp - 1) or indexer_cp & (indexer_cp - 1):
+                    raise ValueError("CSA attention and indexer CP degrees must be powers of two.")
+                if batch_size % attention_dp:
+                    raise ValueError("batch_size must be divisible by qeff_csa_attention_dp.")
+                if config.num_key_value_heads != 1:
+                    raise NotImplementedError("CSA CP cache layout currently requires one key/value head.")
+                if config.sliding_window % attention_cp:
+                    raise ValueError("CSA sliding window must be divisible by qeff_csa_attention_cp.")
+                if capacity % attention_cp or capacity % indexer_cp:
+                    raise ValueError("CSA compressed-cache capacity must be divisible by both CP degrees.")
+                num_kv_blocks = int(getattr(config, "qeff_csa_num_kv_blocks", 1))
+                if num_kv_blocks < 1 or (capacity // indexer_cp) % num_kv_blocks:
+                    raise ValueError("CSA CP-local indexer slots must be divisible by num_kv_blocks.")
+                batch_local = batch_size // attention_dp
+                compressor_state = torch.zeros(
+                    batch_local, attention_dp * attention_cp, banked, 4 * config.head_dim, **common
+                )
+                compressor_state[..., 2 * config.head_dim :].fill_(float("-inf"))
+                indexer_state = torch.zeros(
+                    batch_local, attention_dp * indexer_cp, banked, 4 * config.index_head_dim, **common
+                )
+                indexer_state[..., 2 * config.index_head_dim :].fill_(float("-inf"))
+                layers.append(
+                    (
+                        torch.zeros(
+                            batch_local,
+                            attention_dp * attention_cp,
+                            config.sliding_window // attention_cp,
+                            config.head_dim,
+                            **common,
+                        ),
+                        torch.zeros(
+                            batch_local,
+                            attention_dp * attention_cp,
+                            capacity // attention_cp,
+                            config.head_dim,
+                            **common,
+                        ),
+                        torch.zeros(
+                            batch_local,
+                            attention_dp * indexer_cp,
+                            capacity // indexer_cp,
+                            config.index_head_dim,
+                            **common,
+                        ),
+                        compressor_state,
+                        indexer_state,
+                    )
+                )
+                continue
             if attention_dp > 1:
                 if batch_size % attention_dp:
                     raise ValueError("batch_size must be divisible by qeff_csa_attention_dp.")
@@ -2689,6 +3928,10 @@ class QEffDeepseekV4Cache(Cache):
                     raise ValueError("CSA compressed-cache capacity must be divisible by qeff_csa_indexer_cp.")
                 batch_local = batch_size // attention_dp
                 folded_row_cache = bool(getattr(config, "qeff_csa_folded_row_cache", False))
+                comp_state = torch.zeros(batch_local, attention_dp, banked, 4 * config.head_dim, **common)
+                comp_state[..., 2 * config.head_dim :].fill_(float("-inf"))
+                idx_state = torch.zeros(batch_local, attention_dp, banked, 4 * config.index_head_dim, **common)
+                idx_state[..., 2 * config.index_head_dim :].fill_(float("-inf"))
                 layers.append(
                     (
                         (
@@ -2697,29 +3940,25 @@ class QEffDeepseekV4Cache(Cache):
                             else torch.zeros(batch_local, attention_dp, ctx_len, config.head_dim, **common)
                         ),
                         torch.zeros(batch_local, attention_dp, capacity, config.head_dim, **common),
-                        torch.zeros(batch_local, attention_dp, banked, 2 * config.head_dim, **common),
-                        torch.full((batch_local, attention_dp, banked, 2 * config.head_dim), float("-inf"), **common),
                         torch.zeros(batch_local, attention_dp, capacity, config.index_head_dim, **common),
-                        torch.zeros(batch_local, attention_dp, banked, 2 * config.index_head_dim, **common),
-                        torch.full(
-                            (batch_local, attention_dp, banked, 2 * config.index_head_dim),
-                            float("-inf"),
-                            **common,
-                        ),
+                        comp_state,
+                        idx_state,
                     )
                 )
                 continue
             if indexer_cp != 1:
                 raise ValueError("qeff_csa_indexer_cp requires qeff_csa_attention_dp > 1.")
+            comp_state = torch.zeros(batch_size, 1, banked, 4 * config.head_dim, **common)
+            comp_state[..., 2 * config.head_dim :].fill_(float("-inf"))
+            idx_state = torch.zeros(batch_size, 1, banked, 4 * config.index_head_dim, **common)
+            idx_state[..., 2 * config.index_head_dim :].fill_(float("-inf"))
             layers.append(
                 (
                     sliding,
                     torch.zeros(batch_size, 1, capacity, config.head_dim, **common),
-                    torch.zeros(batch_size, 1, banked, 2 * config.head_dim, **common),
-                    torch.full((batch_size, 1, banked, 2 * config.head_dim), float("-inf"), **common),
                     torch.zeros(batch_size, 1, capacity, config.index_head_dim, **common),
-                    torch.zeros(batch_size, 1, banked, 2 * config.index_head_dim, **common),
-                    torch.full((batch_size, 1, banked, 2 * config.index_head_dim), float("-inf"), **common),
+                    comp_state,
+                    idx_state,
                 )
             )
         return tuple(layers)
@@ -2813,24 +4052,22 @@ class QEffDeepseekV4MLP(DeepseekV4MLP):
 
 
 class QEffDeepseekV4RMSNorm(CustomRMSNormAIC):
-    """DeepSeek V4 RMSNorm with Hugging Face-compatible dtype rounding."""
+    """DeepSeek V4 RMSNorm computed in the activation dtype."""
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        unit_weight = torch.ones_like(self.weight, dtype=torch.float32)
-        normalized = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)(
-            hidden_states.float(), unit_weight, self.variance_epsilon
+        return (
+            self.weight.to(hidden_states.dtype)
+            * hidden_states
+            * torch.rsqrt(hidden_states.square().mean(-1, keepdim=True) + self.variance_epsilon)
         )
-        return self.weight * normalized.to(input_dtype)
 
 
 class QEffDeepseekV4UnweightedRMSNorm(DeepseekV4UnweightedRMSNorm):
-    """DeepSeek V4 unweighted RMSNorm with Hugging Face-compatible dtype rounding."""
+    """DeepSeek V4 unweighted RMSNorm computed in the activation dtype."""
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        variance = hidden_states.float().square().mean(-1, keepdim=True)
-        return hidden_states * torch.rsqrt(variance + self.eps).to(input_dtype)
+        variance = hidden_states.square().mean(-1, keepdim=True)
+        return hidden_states * torch.rsqrt(variance + self.eps)
 
 
 def _deepseek_v4_clamped_swiglu_mlp(
@@ -3117,7 +4354,8 @@ class QEffDeepseekV4ForCausalLM(DeepseekV4ForCausalLM):
         ]
 
     def get_dummy_pkv_cache(self, config: DeepseekV4Config, batch_size: int, ctx_len: int):
-        dtype = next(self.parameters()).dtype
+        cache_dtype = getattr(config, "qeff_kv_cache_type", None)
+        dtype = getattr(torch, cache_dtype) if cache_dtype is not None else next(self.parameters()).dtype
         return QEffDeepseekV4Cache.get_dummy_cache(config, batch_size, ctx_len, dtype)
 
     def get_onnx_past_key_value_names(self, layer_idx: int, layer_state: tuple[torch.Tensor, ...]) -> list[str]:
@@ -3127,7 +4365,11 @@ class QEffDeepseekV4ForCausalLM(DeepseekV4ForCausalLM):
         elif layer_type == "heavily_compressed_attention":
             state_names = QEffDeepseekV4Cache._HCA_STATE_NAMES
         elif layer_type == "compressed_sparse_attention":
-            state_names = QEffDeepseekV4Cache._CSA_STATE_NAMES
+            state_names = (
+                QEffDeepseekV4Cache._CSA_STATE_NAMES
+                if len(layer_state) == len(QEffDeepseekV4Cache._CSA_STATE_NAMES)
+                else QEffDeepseekV4Cache._CSA_LEGACY_SPLIT_STATE_NAMES
+            )
         else:
             raise ValueError(f"Unsupported DeepSeek V4 attention layer type: {layer_type}")
         if len(layer_state) != len(state_names):

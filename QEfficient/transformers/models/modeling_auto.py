@@ -373,6 +373,8 @@ def _compile_io_name(name: str, *, use_onnx_subfunctions: bool) -> str:
             "k_pe",
             "sliding_window_kv",
             "local_kv_cache",
+            "comp_state",
+            "idx_state",
             "compressor_kv_buffer",
             "compressor_gate_buffer",
             "compressor_kv_state",
@@ -4688,6 +4690,24 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if cache_ctx_len is not None and cache_ctx_len < 1:
             raise ValueError("cache_ctx_len must be at least 1.")
 
+        deepseek_v4_cp_b1 = (
+            dynamo
+            and not self.continuous_batching
+            and bs == 1
+            and getattr(self.model.config, "model_type", None) == "deepseek_v4"
+            and prefill_only is not True
+            and (
+                (
+                    int(getattr(self.model.config, "qeff_hca_attention_cp", 1)) > 1
+                    and "heavily_compressed_attention" in getattr(self.model.config, "layer_types", ())
+                )
+                or (
+                    int(getattr(self.model.config, "qeff_csa_attention_cp", 1)) > 1
+                    and "compressed_sparse_attention" in getattr(self.model.config, "layer_types", ())
+                )
+            )
+        )
+
         # GLM weight-free Dynamo export declares batch_size with a minimum of 2.
         if dynamo and getattr(self.model.config, "model_type", None) == "glm_moe_dsa":
             bs = max(2, bs)
@@ -4705,7 +4725,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
 
         # TODO: Remove this hack ##################
-        if dynamo:
+        if dynamo and not deepseek_v4_cp_b1:
             # torch.export requires example inputs to satisfy dynamic_shapes min=2; gpt_oss non-CB keeps bs=1.
             bs = max(2, bs)
         ###########################################
@@ -4972,6 +4992,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 csa_prefill_layout = layer_type == "compressed_sparse_attention" and bool(
                     getattr(self.model.config, "qeff_csa_prefill_only", False)
                 )
+                csa_cp_layout = (
+                    layer_type == "compressed_sparse_attention"
+                    and not csa_prefill_layout
+                    and int(getattr(self.model.config, "qeff_csa_attention_cp", 1)) > 1
+                )
                 hca_prefill_layout = layer_type == "heavily_compressed_attention" and bool(
                     getattr(self.model.config, "qeff_hca_prefill_only", False)
                 )
@@ -4980,7 +5005,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     and not hca_prefill_layout
                     and int(getattr(self.model.config, "qeff_hca_attention_dp", 1)) > 1
                 )
-                parallel_layout = csa_dp_layout or hca_dp_layout
+                hca_cp_layout = (
+                    layer_type == "heavily_compressed_attention"
+                    and not hca_prefill_layout
+                    and int(getattr(self.model.config, "qeff_hca_attention_cp", 1)) > 1
+                )
+                parallel_layout = csa_dp_layout or csa_cp_layout or hca_dp_layout or hca_cp_layout
                 folded_row_cache = (
                     bool(getattr(self.model.config, "qeff_sliding_folded_row_cache", True))
                     if layer_type == "sliding_attention"
@@ -4999,10 +5029,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                     elif not parallel_layout:
                         state_axes[0] = "full_batch_size" if self.continuous_batching else "batch_size"
                     if state_name.startswith("local_kv_cache"):
-                        if not csa_prefill_layout and not folded_row_cache:
+                        if not csa_prefill_layout and not folded_row_cache and not csa_cp_layout:
                             state_axes[2] = "ctx_len"
                     elif "sliding_window_kv" in state_name:
-                        if not folded_row_cache and not hca_prefill_layout:
+                        if not folded_row_cache and not hca_prefill_layout and not hca_cp_layout:
                             state_axes[2] = "ctx_len"
                     elif state_name.startswith(("compressed_kv_cache", "indexer_kv_cache")):
                         if csa_prefill_layout:
@@ -5012,7 +5042,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                                 state_name.startswith("indexer_kv_cache")
                                 and int(getattr(self.model.config, "qeff_csa_indexer_cp", 1)) > 1
                             )
-                            if not cp_tiled_indexer_cache:
+                            if not (cp_tiled_indexer_cache or csa_cp_layout):
                                 state_axes[2] = f"compressed_ctx_len_{layer_idx}"
                     elif "actual_" in state_name:
                         cp_tiled_indexer_cache = (
@@ -5021,7 +5051,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                         )
                         if hca_prefill_layout:
                             state_axes[2] = f"compressed_ctx_len_{layer_idx}"
-                        elif not (cp_tiled_indexer_cache or hca_dp_layout):
+                        elif not (cp_tiled_indexer_cache or hca_dp_layout or hca_cp_layout):
                             state_axes[2] = f"compressed_ctx_len_{layer_idx}"
                     dynamic_axes[state_name] = state_axes
                     output_names.append(f"{state_name}_RetainedState")
@@ -5268,6 +5298,16 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if hasattr(self.model, "prepare_export_dynamic_axes"):
             dynamic_axes = self.model.prepare_export_dynamic_axes(dynamic_axes)
 
+        if deepseek_v4_cp_b1:
+            dynamic_axes = {
+                input_name: {
+                    axis: dimension
+                    for axis, dimension in axes.items()
+                    if dimension not in {"batch_size", "full_batch_size"}
+                }
+                for input_name, axes in dynamic_axes.items()
+            }
+
         try:
             if is_glm_moe_dsa:
                 self.model._qeff_export_with_cache_outputs = True
@@ -5484,6 +5524,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         num_cores: int = 16,  # FIXME: Make this mandatory arg
         mxfp6_matmul: bool = False,
         mxint8_kv_cache: bool = False,
+        kv_cache_type: str | None = None,
         num_speculative_tokens: int | list[int] | None = None,
         prefill_only: bool | None = None,
         use_onnx_subfunctions: bool = False,
@@ -5531,6 +5572,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             Use MXFP6 compression for weights. Default is False.
         mxint8_kv_cache : bool, optional
             Use MXINT8 compression for KV cache. Default is False.
+        kv_cache_type : str, optional
+            Floating-point precision for retained cache I/O (``float16`` or ``bfloat16``).
+            Defaults to the model dtype when not specified.
         num_speculative_tokens : int or list[int], optional
             Proposal length(s) for Speculative Decoding Target Language Model.
             A plain int K is treated as ``[K]`` (backward compatible).
@@ -5837,8 +5881,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 raise ValueError("dflash_target_seq_len must be a positive integer.")
             specializations = [dict(spec, target_seq_len=target_seq_len) for spec in specializations]
 
+        if kv_cache_type not in (None, "float16", "bfloat16"):
+            raise ValueError("kv_cache_type must be 'float16' or 'bfloat16'.")
+        if mxint8_kv_cache and kv_cache_type is not None:
+            raise ValueError("kv_cache_type cannot be set when mxint8_kv_cache is enabled.")
         target_dtype = getattr(self.model.config, "torch_dtype", torch.float32)
-        kv_cache_dtype = "mxint8" if mxint8_kv_cache else CUSTOM_IO_DTYPE_MAP[target_dtype]
+        kv_cache_dtype = "mxint8" if mxint8_kv_cache else kv_cache_type or CUSTOM_IO_DTYPE_MAP[target_dtype]
         # --- Compilation ---
         # When a KV-cache prefix is requested, the exported buffers are named
         # past_key.{i}_<prefix> (input) and past_key.{i}_<prefix>_RetainedState (output); the custom_io

@@ -642,6 +642,8 @@ class RenameFunctionOutputsTransform(BaseOnnxTransform):
                                 "past_indexer_kv_cache.",
                                 "past_indexer_kv_state.",
                                 "past_indexer_score_state.",
+                                "past_comp_state.",
+                                "past_idx_state.",
                             ):
                                 if not base.startswith(token):
                                     continue
@@ -673,7 +675,7 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         frozenset({"conv_state", "recurrent_state"}),
     )
     _V4_CACHE_INPUT_RE = re.compile(
-        r"^(past_(?:sliding_window_kv|local_kv_cache|compressed_kv_cache|compressor_kv_state|"
+        r"^(past_(?:sliding_window_kv|local_kv_cache|compressed_kv_cache|comp_state|idx_state|compressor_kv_state|"
         r"compressor_score_state|indexer_kv_cache|indexer_kv_state|indexer_score_state|"
         r"compressor_kv_buffer|compressor_gate_buffer|actual_compressed_kv)\.\d+)"
         r"(?:_(?:Internal)?RetainedState)?$"

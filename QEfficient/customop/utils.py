@@ -68,6 +68,19 @@ def ctx_scatter_dp(data: torch.Tensor, position_ids: torch.Tensor, updates: torc
     return select_interface(CtxScatterDPFunc.apply, torch.ops.qefficient.ctx_scatter_dp)(data, position_ids, updates)
 
 
+def ctx_scatter_dp_masked(
+    data: torch.Tensor,
+    block_id: torch.Tensor,
+    position_ids: torch.Tensor,
+    updates: torch.Tensor,
+) -> torch.Tensor:
+    from QEfficient.customop.ctx_scatter_gather import CtxScatterDPMaskedFunc
+
+    return select_interface(CtxScatterDPMaskedFunc.apply, torch.ops.qefficient.ctx_scatter_dp_masked)(
+        data, block_id, position_ids, updates
+    )
+
+
 def ctx_scatter_folded_rows(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     from QEfficient.customop.ctx_scatter_gather import CtxScatterFoldedRowsFunc
 

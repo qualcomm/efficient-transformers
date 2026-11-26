@@ -103,6 +103,62 @@ def test_intersection_relocates_top_level_node_to_compiler_partition(tmp_path):
 
 
 @pytest.mark.cpu_only
+def test_intersection_repair_restores_onnx_dependency_order(tmp_path, monkeypatch):
+    """Compiler-guided relocations retain ONNX dependency order within each partition."""
+    onnx_path = _save_dependency_graph(
+        tmp_path / "dependency_order.onnx",
+        [
+            helper.make_node("Identity", ["input"], ["middle"], name="/Producer"),
+            helper.make_node("Identity", ["middle"], ["output"], name="/Consumer"),
+        ],
+    )
+    model = onnx.load(onnx_path)
+    model.graph.input.append(helper.make_tensor_value_info("past_idx_state.4", TensorProto.FLOAT, [1]))
+    model.graph.node.append(
+        helper.make_node(
+            "Identity",
+            ["past_idx_state.4"],
+            ["past_idx_state.4_RetainedState"],
+            name="/model/layers.4/retained_state",
+        )
+    )
+    model.graph.output.append(helper.make_tensor_value_info("past_idx_state.4_RetainedState", TensorProto.FLOAT, [1]))
+    onnx.save(model, onnx_path)
+    qeff_mdp = _mdp(
+        ["/Producer"],
+        ["/Consumer", "/model/layers.4/retained_state", "past_idx_state.4", "past_idx_state.4_RetainedState"],
+    )
+    monkeypatch.setattr(mdp_generator_module, "generate_disagg_mdp_partition_config", lambda **kwargs: qeff_mdp)
+
+    compiler_dump_path = tmp_path / "compiler_dump.json"
+    compiler_dump_path.write_text(
+        json.dumps(
+            {
+                "partitions": [
+                    {"nodeList": ["/Consumer", "/Producer"]},
+                    {"nodeList": ["/model/layers.4/retained_state"]},
+                ]
+            }
+        )
+    )
+
+    mdp_json = generate_disagg_mdp_intersection_config(
+        onnx_path=str(onnx_path),
+        compiler_dump_path=str(compiler_dump_path),
+        num_devices=2,
+        num_partitions=2,
+        num_layers=2,
+    )
+
+    assert mdp_json["partitions"][0]["nodeList"] == ["/Producer", "/Consumer"]
+    assert "past_idx_state.4_RetainedState" in mdp_json["partitions"][1]["nodeList"]
+    assert "past_idx_state.4" in mdp_json["partitions"][1]["nodeList"]
+    selected_nodes = {name for partition in mdp_json["partitions"] for name in partition["nodeList"]}
+    assert precheck_and_autofix_mdp_partition_order(str(onnx_path), mdp_json, protected_nodes=selected_nodes) == 0
+    assert _find_mdp_partition_order_violations(str(onnx_path), mdp_json) == []
+
+
+@pytest.mark.cpu_only
 def test_intersection_preserves_scoped_and_unscoped_nodes_selected_by_compiler(tmp_path):
     onnx_path = _save_dependency_graph(
         tmp_path / "dual_scoped_alias.onnx",
@@ -243,6 +299,7 @@ class TestMdpLayerPartitionBounds:
             "past_sliding_window_kv.0",
             "past_compressor_gate_buffer.5",
             "past_sliding_window_kv.5",
+            "past_idx_state.4",
         ]
         nodes = []
         for layer_num in range(6):
@@ -292,6 +349,7 @@ class TestMdpLayerPartitionBounds:
             partition = mdp_json["partitions"][0 if cache_layer == 0 else 1]["nodeList"]
             producer_name = f"/model/layers.{cache_layer}/{cache_name.rsplit('.', 1)[0]}"
             assert producer_name in partition
+            assert f"{cache_name}_RetainedState" in partition
 
     def test_generic_decoder_callsite_uses_model_layer_input(self):
         assert (
@@ -397,8 +455,6 @@ def test_intersection_precheck_does_not_reorder_protected_nodes(tmp_path):
         output_names=("output", "independent"),
     )
     mdp_json = _mdp(["/Consumer", "/Independent", "/Producer"])
-    original_node_lists = [list(partition["nodeList"]) for partition in mdp_json["partitions"]]
-
     assert _find_mdp_partition_order_violations(str(onnx_path), mdp_json) == [("/Consumer", "/Producer")]
 
     changed = precheck_and_autofix_mdp_partition_order(
@@ -406,7 +462,9 @@ def test_intersection_precheck_does_not_reorder_protected_nodes(tmp_path):
     )
 
     assert changed == 0
-    assert [partition["nodeList"] for partition in mdp_json["partitions"]] == original_node_lists
+    assert [partition["nodeList"] for partition in mdp_json["partitions"]] == [
+        ["/Consumer", "/Independent", "/Producer"]
+    ]
 
 
 @pytest.mark.cpu_only

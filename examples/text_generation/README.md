@@ -314,3 +314,52 @@ This script demonstrates:
 By default, exported models and QPC files are stored in `~/.cache/qeff_cache`. Customize this with:
 - `QEFF_HOME`: Primary cache directory
 - `XDG_CACHE_HOME`: Alternative cache location
+
+### DeepSeek V4 B1 HCA CP microbenchmark
+
+`deepseek_v4_flash_decode_micro_benmark.py` defaults to batch size 1, DP1, 16
+devices and four cores. Both HCA and CSA attention/indexer use CP16 decode,
+matching the standalone benchmark resource layout. HCA retains four separate
+bindings. CSA always uses five bindings, in order: `local_kv_cache`,
+`compressed_kv_cache`, `indexer_kv_cache`, `comp_state`, `idx_state`. Their
+shapes vary between prefill and decode. KV starts at zero and packed gates at
+`-inf`; subsequent decode calls feed back retained outputs without
+reinitializing them.
+
+Override `--hca-attention-cp` and `--hca-compressed-kv-cp` together. The HCA
+sliding window and compressed-cache capacity must divide evenly across CP, and
+the query-head count must divide across CP and `--num-cores`.
+
+For CSA, `--attn-cp` and `--indexer-cp` set separate context-parallel layouts.
+Both CP degrees must be powers of two; the window, compressed capacity,
+attention heads and indexer heads must divide according to their respective CP
+degree. The same five-state ABI applies to prefill, CP1/DP decode, and CP decode;
+older seven-state inputs are accepted and converted on import.
+
+Example four-layer export/compile invocation:
+
+```bash
+python examples/text_generation/deepseek_v4_flash_decode_micro_benmark.py \
+  --artifact-root /tmp/deepseek-v4-hca-b1-cp16 \
+  --batch-size 1 --ctx-len 262144 --num-hidden-layers 4 \
+  --device-group 0..15 --attn-dp 1 --hca-attention-cp 16 \
+  --hca-compressed-kv-cp 16 --hca-attn-blocks 4 \
+  --num-cores 4 --hw-version ai100 --split-model-io --compile-only
+```
+
+CSA CP decode uses the same QEff example with explicit attention and indexer
+CP degrees:
+
+```bash
+python examples/text_generation/deepseek_v4_flash_decode_micro_benmark.py \
+  --artifact-root /tmp/deepseek-v4-csa-b1-cp16 \
+  --batch-size 1 --ctx-len 262144 --num-hidden-layers 4 \
+  --device-group 0..15 --attn-dp 1 --attn-cp 16 --indexer-cp 16 \
+  --num-kv-blocks 1 --num-cores 4 --hw-version ai100 \
+  --split-model-io --compile-only
+```
+
+This compiles a four-layer QEff model specialization, with both CSA and HCA
+CP16 when those layers occur in the selected layers. It does not reproduce the
+standalone attention microbenchmark's late-position timing invocation or
+latency result.

@@ -506,9 +506,9 @@ def generate_disagg_mdp_partition_config(
     inlined_functions = {f.name for f in model.functions} - non_inlined_functions
     local_functions = {f.name: f for f in model.functions}
 
-    # The compiler MDP dump includes retained-state graph inputs, layer-scoped
-    # initializers (for example Qwen linear-attention's `_ones_lower`), and
-    # weight-free MoE expert tensors as partitionable names. They are graph
+    # The compiler MDP dump includes retained-state graph inputs and outputs,
+    # layer-scoped initializers (for example Qwen linear-attention's `_ones_lower`),
+    # and weight-free MoE expert tensors as partitionable names. They are graph
     # values rather than NodeProto entries, so collect them explicitly.
     external_values_by_layer: Dict[int, List[str]] = {}
     for graph_input in model.graph.input:
@@ -519,6 +519,10 @@ def generate_disagg_mdp_partition_config(
             external_values_by_layer.setdefault(int(match.group(1)), []).append(graph_input.name)
         elif layer_num is not None and is_moe_expert_weight:
             external_values_by_layer.setdefault(layer_num, []).append(graph_input.name)
+    for graph_output in model.graph.output:
+        match = _RETAINED_STATE_NAME_RE.match(graph_output.name)
+        if match:
+            external_values_by_layer.setdefault(int(match.group(1)), []).append(graph_output.name)
     for initializer in model.graph.initializer:
         layer_num = _get_layer_num(initializer.name)
         if layer_num is not None:
@@ -896,9 +900,14 @@ def generate_disagg_mdp_intersection_config(
                 compiler_nodes.add(name)
 
     logger.info(f"Compiler dump: {len(compiler_nodes)} unique node names")
+    model = onnx.load(onnx_path, load_external_data=False)
+    retained_state_values = {
+        graph_value.name
+        for graph_value in (*model.graph.input, *model.graph.output)
+        if _RETAINED_STATE_NAME_RE.match(graph_value.name)
+    }
 
     if qaic_config and qaic_config.get("target_layer_ids"):
-        model = onnx.load(onnx_path, load_external_data=False)
         partition_bounds = _layer_partition_bounds(num_layers, num_partitions)
         node_partitions = {
             name: index for index, part in enumerate(qeff_mdp["partitions"]) for name in part["nodeList"]
@@ -958,7 +967,7 @@ def generate_disagg_mdp_intersection_config(
     total_kept = 0
     total_dropped = 0
     for part in qeff_mdp["partitions"]:
-        kept = [name for name in part["nodeList"] if name in compiler_nodes]
+        kept = [name for name in part["nodeList"] if name in compiler_nodes or name in retained_state_values]
         dropped = len(part["nodeList"]) - len(kept)
         total_kept += len(kept)
         total_dropped += dropped
@@ -985,6 +994,14 @@ def generate_disagg_mdp_intersection_config(
         compiler_dump=dump,
         compiler_dump_path=str(dump_path),
     )
+
+    node_rank = {node.name: index for index, node in enumerate(model.graph.node) if node.name}
+    for partition in mdp_json["partitions"]:
+        node_list = partition["nodeList"]
+        known_positions = [index for index, name in enumerate(node_list) if name in node_rank]
+        ordered_known_nodes = sorted((node_list[index] for index in known_positions), key=node_rank.__getitem__)
+        for index, name in zip(known_positions, ordered_known_nodes):
+            node_list[index] = name
 
     logger.info(
         f"Intersection: {total_kept} nodes kept, {total_dropped} dropped "

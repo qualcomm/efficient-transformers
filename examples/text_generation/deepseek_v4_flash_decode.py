@@ -50,10 +50,24 @@ TARGETED_HEAD_OUTPUTS = (
     "/lm_head/MatMul_output_0",
 )
 HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
-MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+SUPPORTED_MODEL_DTYPES = ("float32", "float16", "bfloat16")
+
+
+def resolve_model_dtype(model_dtype: str | None, configured_dtype: torch.dtype | str | None) -> torch.dtype:
+    """Resolve the requested dtype, defaulting to the checkpoint configuration."""
+    dtype_name = model_dtype or configured_dtype or "float16"
+    dtype_name = str(dtype_name).removeprefix("torch.")
+    if dtype_name not in SUPPORTED_MODEL_DTYPES:
+        raise ValueError(f"Unsupported model dtype {dtype_name!r}; expected one of {SUPPORTED_MODEL_DTYPES}.")
+    return getattr(torch, dtype_name)
 
 
 def parse_device_group(value: str) -> list[int]:
+    if ".." in value:
+        first, last = (int(device_id) for device_id in value.split("..", maxsplit=1))
+        if last < first:
+            raise argparse.ArgumentTypeError("device-group range must be in ascending order")
+        return list(range(first, last + 1))
     return [int(device_id) for device_id in value.strip("[]").split(",") if device_id.strip()]
 
 
@@ -264,9 +278,15 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--artifact-root", type=Path, default=Path(DEFAULT_ARTIFACT_ROOT))
     parser.add_argument(
         "--model-dtype",
-        choices=tuple(MODEL_DTYPES),
-        default="float16",
-        help="Model and ONNX export dtype.",
+        choices=SUPPORTED_MODEL_DTYPES,
+        default=None,
+        help="Model and ONNX export dtype; defaults to the checkpoint configuration.",
+    )
+    parser.add_argument(
+        "--kv-cache-type",
+        choices=("float16", "bfloat16"),
+        default="bfloat16",
+        help="Floating-point dtype for retained KV-cache I/O (default: bfloat16).",
     )
     parser.add_argument("--ctx-len", type=int, default=512)
     parser.add_argument("--prefill-seq-len", type=int, default=128)
@@ -279,6 +299,11 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
         "--use-onnx-subfunctions",
         action="store_true",
         help="Export repeated decoder blocks as ONNX subfunctions.",
+    )
+    parser.add_argument(
+        "--split-model-io",
+        action="store_true",
+        help="Compile retained cache inputs and outputs as split model I/O.",
     )
     parser.add_argument(
         "--mdp-num-partitions",
@@ -300,6 +325,7 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--device-group", type=parse_device_group, default=[i for i in range(4)])
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--attn-dp", type=int, default=None, help="Folded decode attention data-parallel rows.")
+    parser.add_argument("--attn-cp", type=int, default=1, help="CSA attention context-parallel rows.")
     parser.add_argument("--indexer-cp", type=int, default=1, help="CSA indexer compressed-cache context parallelism.")
     parser.add_argument(
         "--csa-prefill-attn-gather-sub-qc",
@@ -330,6 +356,12 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
         type=int,
         default=1,
         help="HCA compressed-KV context-parallel degree.",
+    )
+    parser.add_argument(
+        "--hca-attention-cp",
+        type=int,
+        default=1,
+        help="HCA attention CP rows; greater than one enables benchmark-style CP-only attention.",
     )
     parser.add_argument(
         "--hca-attn-blocks",
@@ -382,7 +414,10 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
     indexer_cp = args.indexer_cp
     num_kv_blocks = args.num_kv_blocks
     attention_cores = HW_CORES_PER_DEVICE[args.hw_version]
+    compile_cores = args.num_cores
+    csa_attention_cp = getattr(args, "attn_cp", 1)
     hca_compressed_kv_cp = args.hca_compressed_kv_cp
+    hca_attention_cp = getattr(args, "hca_attention_cp", 1)
     hca_attn_blocks = args.hca_attn_blocks or attention_cores
     if attention_dp < 1:
         raise ValueError("attn_dp must be at least 1.")
@@ -392,8 +427,12 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
         raise ValueError("num_kv_blocks must be at least 1.")
     if hca_compressed_kv_cp < 1:
         raise ValueError("hca_compressed_kv_cp must be at least 1.")
+    if hca_attention_cp < 1:
+        raise ValueError("hca_attention_cp must be at least 1.")
     if hca_attn_blocks < 1:
         raise ValueError("hca_attn_blocks must be at least 1.")
+    if csa_attention_cp < 1:
+        raise ValueError("attn_cp must be at least 1.")
     if args.batch_size % attention_dp:
         raise ValueError("batch_size must be divisible by attn_dp.")
 
@@ -404,10 +443,23 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
             csa_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
             if csa_capacity % indexer_cp:
                 raise ValueError("CSA compressed-cache capacity must be divisible by indexer_cp.")
+            if csa_attention_cp > 1:
+                if csa_attention_cp & (csa_attention_cp - 1) or indexer_cp & (indexer_cp - 1):
+                    raise ValueError("CSA attention and indexer CP degrees must be powers of two.")
+                if csa_capacity % csa_attention_cp:
+                    raise ValueError("CSA compressed-cache capacity must be divisible by attn_cp.")
+                if config.sliding_window % csa_attention_cp:
+                    raise ValueError("CSA sliding_window must be divisible by attn_cp.")
+                if config.num_attention_heads % csa_attention_cp:
+                    raise ValueError("CSA query heads must be divisible by attn_cp.")
+                if config.index_n_heads % indexer_cp:
+                    raise ValueError("CSA indexer heads must be divisible by indexer_cp.")
+                if compile_cores < 1 or config.num_attention_heads % compile_cores:
+                    raise ValueError("CSA query heads must be divisible by num_cores.")
             csa_slots_per_cp = csa_capacity // indexer_cp
             if csa_slots_per_cp % num_kv_blocks:
                 raise ValueError("CSA CP-way slot count must be divisible by num_kv_blocks.")
-            if (csa_slots_per_cp // num_kv_blocks) % attention_cores:
+            if (csa_slots_per_cp // num_kv_blocks) % compile_cores:
                 raise ValueError("CSA KV-block width must be divisible by the hardware attention-core count.")
         if layer_type == "heavily_compressed_attention":
             hca_capacity = (args.ctx_len + config.compress_rates[layer_type] - 1) // config.compress_rates[layer_type]
@@ -415,10 +467,23 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
                 raise ValueError("HCA compressed-cache capacity must be divisible by hca_compressed_kv_cp.")
             if (hca_capacity // hca_compressed_kv_cp) % hca_attn_blocks:
                 raise ValueError("HCA CP-way slot count must be divisible by hca_attn_blocks.")
+            if hca_attention_cp > 1:
+                if hca_attention_cp != hca_compressed_kv_cp:
+                    raise ValueError("hca_attention_cp must match hca_compressed_kv_cp.")
+                if config.sliding_window % hca_attention_cp:
+                    raise ValueError("HCA sliding_window must be divisible by hca_attention_cp.")
+                if config.num_attention_heads % hca_attention_cp:
+                    raise ValueError("HCA query heads must be divisible by hca_attention_cp.")
+                attention_cores = getattr(args, "num_cores", attention_cores)
+                if config.num_attention_heads % attention_cores:
+                    raise ValueError("HCA query heads must be divisible by num_cores.")
     config.qeff_csa_attention_dp = attention_dp
     config.qeff_csa_indexer_cp = indexer_cp
     config.qeff_csa_num_kv_blocks = num_kv_blocks
-    config.qeff_csa_indexer_attention_cores = attention_cores
+    config.qeff_csa_attention_cp = csa_attention_cp
+    config.qeff_csa_attention_cores = compile_cores
+    config.qeff_csa_cache_ctx_len = args.ctx_len
+    config.qeff_csa_indexer_attention_cores = compile_cores
     config.qeff_csa_folded_row_cache = True
     csa_prefill_attn_gather_sub_qc = getattr(args, "csa_prefill_attn_gather_sub_qc", None)
     if csa_prefill_attn_gather_sub_qc is not None:
@@ -430,12 +495,16 @@ def configure_qeff_parallel_layout(config, args: argparse.Namespace) -> None:
     if csa_prefill_indexer_topk_per_block is not None:
         config.qeff_csa_prefill_indexer_topk_per_block = csa_prefill_indexer_topk_per_block
     config.qeff_hca_attention_dp = attention_dp
+    config.qeff_hca_attention_cp = hca_attention_cp
+    config.qeff_hca_attention_cores = getattr(args, "num_cores", attention_cores)
+    config.qeff_hca_cache_ctx_len = args.ctx_len
     config.qeff_hca_compressed_kv_cp = hca_compressed_kv_cp
     config.qeff_hca_attn_blocks = hca_attn_blocks
-    config.qeff_hca_folded_row_cache = True
+    config.qeff_hca_folded_row_cache = hca_attention_cp == 1
     print(
         "Folded decode layout: "
         f"batch_size={args.batch_size}, attn_dp={attention_dp}, indexer_cp={indexer_cp}, "
+        f"attn_cp={csa_attention_cp}, "
         f"num_kv_blocks={num_kv_blocks}, "
         f"hw_version={args.hw_version}, hca_compressed_kv_cp={hca_compressed_kv_cp}, "
         f"hca_attn_blocks={hca_attn_blocks}, csa_capacity={csa_capacity}, hca_capacity={hca_capacity}"
@@ -454,7 +523,8 @@ def main(defaults: dict[str, object] | None = None) -> None:
         raise ValueError("num_hidden_layers must be at least 1.")
     if not args.device_group:
         raise ValueError("device_group must contain at least one QAIC device ID.")
-    if not args.prefill_only and args.batch_size % len(args.device_group):
+    cp_decode = not args.prefill_only and (getattr(args, "hca_attention_cp", 1) > 1 or getattr(args, "attn_cp", 1) > 1)
+    if not args.prefill_only and not cp_decode and args.batch_size % len(args.device_group):
         raise ValueError("DeepSeek V4 Flash decode requires batch_size to be divisible by the device-group size.")
     if args.mdp_num_partitions < 1:
         raise ValueError("mdp_num_partitions must be at least 1.")
@@ -490,6 +560,9 @@ def main(defaults: dict[str, object] | None = None) -> None:
     )
     if args.num_hidden_layers > config.num_hidden_layers:
         raise ValueError(f"num_hidden_layers cannot exceed the checkpoint's {config.num_hidden_layers} layers.")
+    model_dtype = resolve_model_dtype(args.model_dtype, config.torch_dtype)
+    config.torch_dtype = model_dtype
+    config.qeff_kv_cache_type = args.kv_cache_type
     config.num_hidden_layers = args.num_hidden_layers
     config.layer_types = config.layer_types[: args.num_hidden_layers]
     config.mlp_layer_types = config.mlp_layer_types[: args.num_hidden_layers]
@@ -513,7 +586,6 @@ def main(defaults: dict[str, object] | None = None) -> None:
         local_files_only=args.local_files_only,
         weight_free=True,
     )
-    model_dtype = MODEL_DTYPES[args.model_dtype]
     qeff_model.model.to(dtype=model_dtype)
     qeff_model.model.config.torch_dtype = model_dtype
     qeff_model.model.eval()
@@ -583,11 +655,12 @@ def main(defaults: dict[str, object] | None = None) -> None:
         "aic_hw_version": args.hw_version,
         "prefill_only": args.prefill_only,
         "use_onnx_subfunctions": args.use_onnx_subfunctions,
-        "mxint8_kv_cache": False,
+        "kv_cache_type": args.kv_cache_type,
         "mxfp6_matmul": True,
         "user_tiled": True,
         "qaic_config": qaic_config,
         "dynamo": True,
+        "split_model_io": args.split_model_io,
     }
     if npi_path is not None:
         compile_kwargs["node_precision_info"] = str(npi_path)

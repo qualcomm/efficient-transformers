@@ -28,6 +28,7 @@ from QEfficient.customop.ctx_scatter_gather import (  # noqa: E402
     CtxScatter3DInt,
     CtxScatterDP,
     CtxScatterDPCP,
+    CtxScatterDPMasked,
     CtxScatterFoldedRows,
     CtxScatterPagedAttention,
     M3CtxScatter,
@@ -268,6 +269,28 @@ def ctx_scatter_dp_op(data: torch.Tensor, position_ids: torch.Tensor, updates: t
 
 @ctx_scatter_dp_op.register_fake
 def _(data: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(data)
+
+
+@torch.library.custom_op("qefficient::ctx_scatter_dp_masked", mutates_args=())
+def ctx_scatter_dp_masked_op(
+    data: torch.Tensor,
+    block_id: torch.Tensor,
+    position_ids: torch.Tensor,
+    updates: torch.Tensor,
+) -> torch.Tensor:
+    result = data.clone()
+    valid = block_id != torch.iinfo(torch.int32).max
+    safe_batch = torch.where(valid, block_id, torch.zeros_like(block_id)).long()
+    row_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+    safe_position = torch.where(valid, position_ids, torch.zeros_like(position_ids)).long()
+    current = result[safe_batch, row_idx, safe_position]
+    result[safe_batch, row_idx, safe_position] = torch.where(valid.unsqueeze(-1), updates, current)
+    return result
+
+
+@ctx_scatter_dp_masked_op.register_fake
+def _(data: torch.Tensor, block_id: torch.Tensor, position_ids: torch.Tensor, updates: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(data)
 
 
@@ -823,6 +846,7 @@ DYNAMO_CUSTOM_OP_TABLE = {
     torch.ops.qefficient.ctx_scatter_3d.default: get_dynamo_onnxscript_func(CtxScatter3D),
     torch.ops.qefficient.ctx_chunk_scatter_batch.default: get_dynamo_onnxscript_func(CtxChunkScatterBatch),
     torch.ops.qefficient.ctx_scatter_dp.default: get_dynamo_onnxscript_func(CtxScatterDP),
+    torch.ops.qefficient.ctx_scatter_dp_masked.default: get_dynamo_onnxscript_func(CtxScatterDPMasked),
     torch.ops.qefficient.ctx_scatter_folded_rows.default: get_dynamo_onnxscript_func(CtxScatterFoldedRows),
     torch.ops.qefficient.ctx_scatter_dp_cp.default: get_dynamo_onnxscript_func(CtxScatterDPCP),
     torch.ops.qefficient.ctx_scatter_cb.default: get_dynamo_onnxscript_func(CtxScatterCB),

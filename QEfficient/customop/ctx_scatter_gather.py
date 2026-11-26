@@ -67,8 +67,8 @@ def CtxScatterPagedAttention(
     seq_len = ops.Gather(ops.Shape(position_ids), [1])
 
     # Expanded shape to create indices
-    zero = ops.Constant(value_ints=[0])
-    one = ops.Constant(value_ints=[1])
+    zero = ops.Constant(value_int=0)
+    one = ops.Constant(value_int=1)
     exp_shape = ops.Concat(num_blocks, num_heads, seq_len, one, axis=0)
 
     # Create indices
@@ -186,6 +186,70 @@ class CtxScatterDPFunc(torch.autograd.Function):
     @staticmethod
     def symbolic(g: torch.Graph, data: torch.Value, position_ids: torch.Value, updates: torch.Value) -> torch.Value:
         return g.onnxscript_op(CtxScatterDP, data, position_ids, updates).setTypeAs(data)
+
+
+@qeff_custom_op("com.qualcomm.cloud", 1)
+def CtxScatterDPMasked(
+    data: onnxscript.FLOAT,
+    block_id: onnxscript.INT32,
+    position_ids: onnxscript.INT32,
+    updates: onnxscript.FLOAT,
+) -> onnxscript.FLOAT:
+    update_shape = ops.Shape(updates)
+    batch_local = ops.Gather(update_shape, [0])
+    data_parallel = ops.Gather(update_shape, [1])
+    seq_len = ops.Gather(update_shape, [2])
+    zero = ops.Constant(value_int=0)
+    one = ops.Constant(value_int=1)
+    one_shape = ops.Constant(value_ints=[1])
+    zero_scalar = ops.Cast(ops.Constant(value_int=0), to=onnxscript.INT32.dtype)
+    invalid_index = ops.Cast(ops.Constant(value_int=2147483647), to=onnxscript.INT32.dtype)
+    exp_shape = ops.Concat(batch_local, data_parallel, seq_len, one_shape, axis=0)
+    row_limit = ops.Squeeze(data_parallel, [0])
+    row_idx = ops.Expand(ops.Unsqueeze(ops.Range(zero, row_limit, one), [0, 2, 3]), exp_shape)
+    valid = ops.Not(ops.Equal(block_id, invalid_index))
+    safe_block = ops.Where(valid, block_id, zero_scalar)
+    safe_position = ops.Where(valid, position_ids, zero_scalar)
+    indices = ops.Concat(
+        ops.Unsqueeze(ops.Cast(safe_block, to=onnxscript.INT64.dtype), [-1]),
+        ops.Cast(row_idx, to=onnxscript.INT64.dtype),
+        ops.Unsqueeze(ops.Cast(safe_position, to=onnxscript.INT64.dtype), [-1]),
+        axis=3,
+    )
+    current = ops.GatherND(data, indices)
+    return ops.ScatterND(data, indices, ops.Where(ops.Unsqueeze(valid, [3]), updates, current))
+
+
+class CtxScatterDPMaskedFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        data: torch.Tensor,
+        block_id: torch.Tensor,
+        position_ids: torch.Tensor,
+        updates: torch.Tensor,
+    ) -> torch.Tensor:
+        result = data.clone()
+        valid = block_id != torch.iinfo(torch.int32).max
+        safe_batch = torch.where(valid, block_id, torch.zeros_like(block_id)).long()
+        row_idx = torch.arange(data.shape[1], device=data.device).view(1, -1, 1)
+        safe_position = torch.where(valid, position_ids, torch.zeros_like(position_ids)).long()
+        current = result[safe_batch, row_idx, safe_position]
+        result[safe_batch, row_idx, safe_position] = torch.where(valid.unsqueeze(-1), updates, current)
+        return result
+
+    @staticmethod
+    def setup_context(ctx, inputs, outputs):
+        pass
+
+    @staticmethod
+    def symbolic(
+        g: torch.Graph,
+        data: torch.Value,
+        block_id: torch.Value,
+        position_ids: torch.Value,
+        updates: torch.Value,
+    ) -> torch.Value:
+        return g.onnxscript_op(CtxScatterDPMasked, data, block_id, position_ids, updates).setTypeAs(data)
 
 
 @qeff_custom_op("com.qualcomm.cloud", 1)

@@ -72,6 +72,7 @@ from QEfficient.customop.utils import (
     ctx_scatter_cb_3d,
     ctx_scatter_dp,
     ctx_scatter_dp_cp,
+    ctx_scatter_dp_masked,
     ctx_scatter_folded_rows,
 )
 
@@ -118,6 +119,7 @@ __all__ = [
     "ctx_scatter",
     "ctx_scatter_3d",
     "ctx_scatter_dp",
+    "ctx_scatter_dp_masked",
     "ctx_scatter_folded_rows",
     "ctx_scatter_dp_cp",
     "ctx_scatter_3d_generalized",
