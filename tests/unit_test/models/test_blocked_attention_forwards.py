@@ -467,10 +467,13 @@ class TestSkipKvBreakPreserved:
 @pytest.mark.parametrize(("dp", "cp"), [(1, 2), (2, 1), (2, 2)], ids=["cp", "dp", "cp-dp"])
 def test_headpar_cpdp_native_gqa_matches_causal_attention(dp, cp):
     """CP/DP compact-cache headpar preserves native-GQA decode results."""
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeDynamicCache
+
     torch.manual_seed(0)
     batch, hkv, n_rep, ctx_len, head_dim = 2 * dp, 2, 3, 8, 4
     num_heads = hkv * n_rep
-    cache = QEffDynamicCache()
+    cache = object.__new__(QEffQwen3_5MoeDynamicCache)
+    cache.kv_layers = [QEffDynamicLayer()]
     full_keys = torch.empty(batch, hkv, ctx_len, head_dim)
     full_values = torch.empty_like(full_keys)
 

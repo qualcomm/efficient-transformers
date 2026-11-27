@@ -26,10 +26,11 @@ import torch
 from torch import nn
 
 from QEfficient.blocking import attention_blocking
-from QEfficient.blocking.attention_blocking import BlockingMode
+from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1, BlockingMode
 from QEfficient.blocking.blocking_configurator import (
     build_transformer_blocking_config_for_transform,
     get_compact_headpar_specialization_dims,
+    validate_headpar_cpdp_layout,
 )
 from QEfficient.transformers.models.pytorch_transforms import (
     BlockingAttentionTransform,
@@ -628,6 +629,24 @@ def test_compact_headpar_specialization_dims_are_local_cache_dimensions():
 def test_compact_headpar_specialization_dims_reject_invalid_local_shapes(qaic_config, batch_size, ctx_len, error):
     with pytest.raises(ValueError, match=error):
         get_compact_headpar_specialization_dims(qaic_config, batch_size=batch_size, ctx_len=ctx_len)
+
+
+@pytest.mark.parametrize(
+    "cache_layout, error",
+    [
+        pytest.param(HEADPAR_CPDP_LAYOUT_GQA_V1, None, id="compact-gqa"),
+        pytest.param(None, "gqa_v1", id="unsupported-cache-layout"),
+    ],
+)
+def test_cpdp_headpar_requires_compact_gqa_cache_layout(cache_layout, error):
+    """Only models that declare the compact GQA cache contract may use CP/DP headpar."""
+    qaic_config = {"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4}
+
+    if error is None:
+        validate_headpar_cpdp_layout(qaic_config, cache_layout)
+    else:
+        with pytest.raises(ValueError, match=error):
+            validate_headpar_cpdp_layout(qaic_config, cache_layout)
 
 
 @pytest.mark.dynamo

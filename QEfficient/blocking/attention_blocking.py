@@ -128,6 +128,9 @@ class BlockingMode(str, Enum):
                 raise ValueError(f"BlockingMode.{mode.name} requires {missing_mla} to be set in mla_kwargs")
 
 
+HEADPAR_CPDP_LAYOUT_GQA_V1 = "gqa_v1"
+
+
 @dataclass
 class AttentionBlockingConfig:
     mode: BlockingMode = BlockingMode.NONE
@@ -551,10 +554,16 @@ def generic_blocked_attention_interface(
                     query = query + cache_dependency.to(dtype=query.dtype) * 0
         elif past_key_value is not None:
             use_kv_blocked = _uses_blocked_kv_cache(mode) and supports_blocked_kv(past_key_value)
-            uses_compact_headpar_cache = mode == BlockingMode.KV_HEADPAR and (
+            requests_headpar_cpdp = mode == BlockingMode.KV_HEADPAR and (
                 int(blocking_config.attn_dp or 1) > 1 or int(blocking_config.attn_cp or 1) > 1
             )
-            if uses_compact_headpar_cache:
+            cache_layout = getattr(past_key_value, "headpar_cpdp_cache_layout", None)
+            if requests_headpar_cpdp and cache_layout != HEADPAR_CPDP_LAYOUT_GQA_V1:
+                raise ValueError(
+                    "CP/DP kv_headpar requires a cache that supports the "
+                    f"{HEADPAR_CPDP_LAYOUT_GQA_V1!r} compact GQA layout."
+                )
+            if requests_headpar_cpdp:
                 if not hasattr(past_key_value, "write_only_headpar_cpdp"):
                     raise TypeError("CP/DP kv_headpar requires a cache with compact GQA KV support.")
                 past_key_value.write_only_headpar_cpdp(

@@ -5301,7 +5301,7 @@ def test_qwen3_5_moe_cpdp_headpar_uses_compact_full_attention_retained_states():
 
     conv_state, recurrent_state = specs["past_key_values"][0]
     past_key, past_value = specs["past_key_values"][1]
-    assert conv_state.shape == (4, 8, 4)
+    assert conv_state.shape == (4, 4, 8)
     assert recurrent_state.shape == (4, 2, 4, 6)
     assert past_key.shape == (2, 16, 4, 8)
     assert past_value.shape == (2, 16, 4, 8)

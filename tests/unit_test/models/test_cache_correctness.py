@@ -347,10 +347,12 @@ class TestQEffDynamicLayerCorrectness:
 @pytest.mark.cache
 def test_qwen3_5_moe_cache_delegates_cpdp_headpar_cache_io():
     """Qwen3.5-MoE must expose the CP/DP compact-cache APIs used by blocked attention."""
+    from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1
     from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeDynamicCache
 
     cache = object.__new__(QEffQwen3_5MoeDynamicCache)
     cache.kv_layers = [QEffDynamicLayer()]
+    assert cache.headpar_cpdp_cache_layout == HEADPAR_CPDP_LAYOUT_GQA_V1
     keys = torch.arange(4, dtype=torch.float32).reshape(1, 1, 1, 4)
     values = keys + 10
 

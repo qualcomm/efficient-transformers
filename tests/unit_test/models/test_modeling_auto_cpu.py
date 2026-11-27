@@ -46,7 +46,7 @@ from transformers import (
 )
 
 import QEfficient.transformers.models.modeling_auto as modeling_auto
-from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
+from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1, AttentionBlockingConfig, BlockingMode
 from QEfficient.transformers.models.modeling_auto import (
     MultimodalUtilityMixin,
     QEFFAutoModel,
@@ -468,7 +468,10 @@ class TestQEFFAutoModelForCausalLMLogic:
     def test_build_prefill_specialization_adds_compact_headpar_dimensions(self):
         """CP/DP headpar specs include the local dimensions used by compact KV cache inputs."""
         qeff = object.__new__(QEFFAutoModelForCausalLM)
-        qeff.model = SimpleNamespace(qaic_config={"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4})
+        qeff.model = SimpleNamespace(
+            headpar_cpdp_cache_layout=HEADPAR_CPDP_LAYOUT_GQA_V1,
+            qaic_config={"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4},
+        )
         qeff.continuous_batching = False
         qeff.dflash_tlm = False
         qeff.is_tlm = False
@@ -623,6 +626,7 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
     def test_compile_syncs_qaic_config_before_compact_headpar_specialization(self, tmp_path, monkeypatch):
         """Compile-only QAIC configuration drives compact CP/DP cache specializations."""
         model, _ = make_tiny_gpt2()
+        model.headpar_cpdp_cache_layout = HEADPAR_CPDP_LAYOUT_GQA_V1
         qeff = QEFFAutoModelForCausalLM(model)
         onnx_path = tmp_path / "model.onnx"
         onnx_path.write_bytes(b"fake")
@@ -653,6 +657,28 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
         specialization = captured_kwargs["specializations"][0]
         assert specialization["local_batch_size"] == 1
         assert specialization["local_ctx_len"] == 32
+
+    def test_compile_rejects_cpdp_headpar_without_compact_gqa_cache_layout(self, tmp_path):
+        """Generic caches must not be compiled with Qwen's compact CP/DP GQA specialization."""
+        model, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model)
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"fake")
+
+        with pytest.raises(ValueError, match="gqa_v1"):
+            qeff.compile(
+                onnx_path=str(onnx_path),
+                compile_dir=str(tmp_path),
+                prefill_seq_len=1,
+                ctx_len=128,
+                batch_size=2,
+                qaic_config={
+                    "blocking_mode": "kv_headpar",
+                    "num_kv_blocks": 2,
+                    "attn_dp": 2,
+                    "attn_cp": 4,
+                },
+            )
 
     @pytest.mark.parametrize(
         ("compile_kwargs", "expected_graph_names"),

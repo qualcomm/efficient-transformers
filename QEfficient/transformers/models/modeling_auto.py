@@ -35,8 +35,11 @@ from QEfficient.base.modeling_qeff import (
     reject_legacy_moe_prefill_packed_chunk_size,
 )
 from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTransform
-from QEfficient.blocking.attention_blocking import BlockingMode
-from QEfficient.blocking.blocking_configurator import get_compact_headpar_specialization_dims
+from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1, BlockingMode
+from QEfficient.blocking.blocking_configurator import (
+    get_compact_headpar_specialization_dims,
+    validate_headpar_cpdp_layout,
+)
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DeepseekV4CheckpointTransform,
     DtypeConversionCheckpointTransform,
@@ -4651,6 +4654,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         )
         kwargs["enable_chunking"] = enable_chunking
         qaic_config = kwargs.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        validate_headpar_cpdp_layout(
+            qaic_config,
+            getattr(self.model, "headpar_cpdp_cache_layout", None),
+        )
         if qaic_config is not None:
             # Model hooks that determine cache shapes and dynamic axes read this
             # state, matching the MiniMax distributed-cache lifecycle.
@@ -5415,13 +5422,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 spec["full_batch_exec_size"] = full_batch_size
             else:
                 spec["full_batch_exec_size"] = exec_batch_size
-        spec.update(
-            get_compact_headpar_specialization_dims(
-                self.model.qaic_config,
-                batch_size=spec["batch_size"],
-                ctx_len=spec["ctx_len"],
+        if getattr(self.model, "headpar_cpdp_cache_layout", None) == HEADPAR_CPDP_LAYOUT_GQA_V1:
+            spec.update(
+                get_compact_headpar_specialization_dims(
+                    self.model.qaic_config,
+                    batch_size=spec["batch_size"],
+                    ctx_len=spec["ctx_len"],
+                )
             )
-        )
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
             or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
@@ -5503,13 +5511,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             spec["full_batch_size"] = kv_cache_batch_size
         else:
             spec["batch_size"] = kv_cache_batch_size
-        spec.update(
-            get_compact_headpar_specialization_dims(
-                self.model.qaic_config,
-                batch_size=spec["batch_size"],
-                ctx_len=spec["ctx_len"],
+        if getattr(self.model, "headpar_cpdp_cache_layout", None) == HEADPAR_CPDP_LAYOUT_GQA_V1:
+            spec.update(
+                get_compact_headpar_specialization_dims(
+                    self.model.qaic_config,
+                    batch_size=spec["batch_size"],
+                    ctx_len=spec["ctx_len"],
+                )
             )
-        )
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
             or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
@@ -5641,6 +5650,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if artifacts:
             compiler_options["artifacts"] = True
         qaic_config = compiler_options.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        validate_headpar_cpdp_layout(
+            qaic_config,
+            getattr(self.model, "headpar_cpdp_cache_layout", None),
+        )
         if qaic_config is not None:
             # Keep compile-only overrides visible to cache-shape and
             # specialization hooks before any export or specialization work.

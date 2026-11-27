@@ -1354,9 +1354,6 @@ class QEffDynamicCache(Cache):
         """
         return self.layers[layer_idx].read_only_blocked_kv(start_index, end_index, cache_kwargs)
 
-    def read_only_headpar_cpdp(self, start_index, end_index, layer_idx, cache_kwargs):
-        return self.layers[layer_idx].read_only_headpar_cpdp(start_index, end_index, cache_kwargs)
-
     def read_only_blocked_K(self, start_index, end_index, layer_idx, cache_kwargs):
         """
         Reads the `key_states` and `value_states` for the layer `layer_idx`.
@@ -1498,10 +1495,6 @@ class QEffDynamicCache(Cache):
         """
         self.append_new_layers(layer_idx)
         return self.layers[layer_idx].write_only(key_states, value_states, cache_kwargs)
-
-    def write_only_headpar_cpdp(self, key_states, value_states, layer_idx, cache_kwargs):
-        self.append_new_layers(layer_idx)
-        return self.layers[layer_idx].write_only_headpar_cpdp(key_states, value_states, cache_kwargs)
 
     def write_only_batch(self, key_states, value_states, layer_idx, cache_kwargs):
         """

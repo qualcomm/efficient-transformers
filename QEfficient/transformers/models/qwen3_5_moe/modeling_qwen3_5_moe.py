@@ -44,6 +44,7 @@ except ImportError:
     create_recurrent_attention_mask = None
 
 from QEfficient.blocking.attention_blocking import (
+    HEADPAR_CPDP_LAYOUT_GQA_V1,
     AttentionBlockingConfig,
     BlockingMode,
     blocked_gdn_decode_forward,
@@ -164,6 +165,8 @@ class QEffQwen3_5MoeDynamicCache(Cache):
     channel-last convolution state ``[batch, conv_kernel, conv_dim]`` and
     recurrent state ``[batch, value_heads, key_dim, value_dim]``.
     """
+
+    headpar_cpdp_cache_layout = HEADPAR_CPDP_LAYOUT_GQA_V1
 
     def __init__(self, config):
         super().__init__(layers=[])
@@ -1741,6 +1744,8 @@ class QEffQwen3_5MoeTextModel(Qwen3_5MoeTextModel):
 
 
 class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
+    headpar_cpdp_cache_layout = HEADPAR_CPDP_LAYOUT_GQA_V1
+
     def get_submodules_for_export(self) -> Type[nn.Module]:
         specialized_classes = {
             QEffQwen3_5MoeLinearAttentionDecoderLayer,
