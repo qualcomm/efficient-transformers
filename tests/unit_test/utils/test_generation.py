@@ -1864,6 +1864,44 @@ def test_runner_metadata_excludes_weight_free_constant_inputs(tmp_path):
 
 
 @pytest.mark.cpu_only
+def test_runner_bundle_excludes_sparse_initializer_inputs(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation import runner_io
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    activation = helper.make_tensor_value_info("activation", TensorProto.FLOAT, [1, 2])
+    sparse_weight = helper.make_tensor_value_info("sparse_weight", TensorProto.FLOAT, [2, 2])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["activation", "sparse_weight"], ["output"])],
+        "sparse_initializer_runner",
+        [activation, sparse_weight],
+        [output],
+    )
+    values = helper.make_tensor("sparse_weight", TensorProto.FLOAT, [2], [1.0, 1.0])
+    indices = helper.make_tensor("sparse_weight_indices", TensorProto.INT64, [2, 2], [0, 0, 1, 1])
+    graph.sparse_initializer.append(helper.make_sparse_tensor(values, indices, [2, 2]))
+    onnx_path = tmp_path / "sparse-initializer.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"activation"}
+    assert runner_metadata.required_host_input_names == {"activation"}
+
+    io_dir = runner_io.write_runner_io_bundle(
+        runner_metadata=runner_metadata,
+        specialization={"batch_size": 1, "seq_len": 1},
+        host_inputs={"activation": np.array([[1.0, 2.0]], dtype=np.float32)},
+    )
+    io_entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    runtime_inputs = {entry["map-to"] for entry in io_entries if entry["io-direction"] == "in"}
+    assert runtime_inputs == {"activation"}
+
+
+@pytest.mark.cpu_only
 @pytest.mark.parametrize(
     ("shape_op", "shape_op_attributes", "output_shape"),
     [

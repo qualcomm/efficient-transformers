@@ -326,6 +326,7 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
 
 def _runtime_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[str]:
     initializer_names = {initializer.name for initializer in graph.initializer}
+    initializer_names.update(initializer.values.name for initializer in graph.sparse_initializer)
     retained_inputs = _retained_input_names(graph)
     shape_only_inputs = _shape_only_input_names(graph)
 
