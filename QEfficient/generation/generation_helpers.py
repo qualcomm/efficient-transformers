@@ -17,6 +17,7 @@ import onnx
 import yaml
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from QEfficient.exporter.weight_free.weight_spec import load_weight_spec, resolve_weight_spec_path
 from QEfficient.utils.logging_utils import QEFFLogger
 
 logger = QEFFLogger.get_logger("INFRA")
@@ -203,17 +204,139 @@ def _resolve_output_shape(
     return shape
 
 
-def _required_host_input_names(graph: onnx.GraphProto) -> set[str]:
+def _weight_free_input_names(onnx_path: Path) -> set[str]:
+    """Return the input names that refer to constants in a weight-free model."""
+    weight_spec_path = resolve_weight_spec_path(onnx_path)
+    if not weight_spec_path.is_file():
+        return set()
+    return {spec_input.name for spec_input in load_weight_spec(weight_spec_path).inputs}
+
+
+def _retained_input_names(graph: onnx.GraphProto) -> set[str]:
     retained_inputs = set()
     for output in graph.output:
         for suffix in ("_InternalRetainedState", "_RetainedState"):
             if output.name.endswith(suffix):
                 retained_inputs.add(output.name[: -len(suffix)])
+    return retained_inputs
+
+
+def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
+    """Return inputs whose downstream paths only use tensor metadata at Shape nodes."""
+    input_names = {graph_input.name for graph_input in graph.input}
+    shape_only_unary_ops = {"Cast", "Identity", "Transpose", "Flatten"}
+    consumers: Dict[int, Dict[str, List[onnx.NodeProto]]] = {}
+    graph_outputs_by_id: Dict[int, set[str]] = {}
+    captures: Dict[int, Dict[str, List[onnx.GraphProto]]] = {}
+
+    def index_graph(current_graph: onnx.GraphProto) -> set[str]:
+        graph_key = id(current_graph)
+        graph_consumers: Dict[str, List[onnx.NodeProto]] = {}
+        graph_outputs = {output.name for output in current_graph.output}
+        graph_captures: Dict[str, List[onnx.GraphProto]] = {}
+        local_definitions = {graph_input.name for graph_input in current_graph.input}
+        local_definitions.update(initializer.name for initializer in current_graph.initializer)
+        local_definitions.update(
+            output_name for node in current_graph.node for output_name in node.output if output_name
+        )
+        free_uses: set[str] = set()
+
+        for node in current_graph.node:
+            distinct_input_names = {input_name for input_name in node.input if input_name}
+            for input_name in distinct_input_names:
+                graph_consumers.setdefault(input_name, []).append(node)
+                free_uses.add(input_name)
+
+            for attribute in node.attribute:
+                if attribute.type == onnx.AttributeProto.GRAPH:
+                    nested_graphs = (attribute.g,)
+                elif attribute.type == onnx.AttributeProto.GRAPHS:
+                    nested_graphs = attribute.graphs
+                else:
+                    continue
+
+                for nested_graph in nested_graphs:
+                    nested_free_uses = index_graph(nested_graph)
+                    for name in nested_free_uses:
+                        graph_captures.setdefault(name, []).append(nested_graph)
+                    free_uses.update(nested_free_uses)
+
+        free_uses.update(graph_outputs)
+        free_uses.difference_update(local_definitions)
+        consumers[graph_key] = graph_consumers
+        graph_outputs_by_id[graph_key] = graph_outputs
+        captures[graph_key] = graph_captures
+        return free_uses
+
+    index_graph(graph)
+    memo: Dict[Tuple[int, str], Tuple[bool, bool]] = {}
+
+    def visit_value(
+        current_graph: onnx.GraphProto,
+        value_name: str,
+        visiting: set[Tuple[int, str]],
+    ) -> Tuple[bool, bool]:
+        value_key = (id(current_graph), value_name)
+        graph_key = value_key[0]
+        if value_key in memo:
+            return memo[value_key]
+        if value_name in graph_outputs_by_id[graph_key]:
+            memo[value_key] = (True, False)
+            return memo[value_key]
+        if value_key in visiting:
+            return True, False
+        visiting.add(value_key)
+        has_use = False
+        all_paths_end_at_shape = True
+
+        for node in consumers[graph_key].get(value_name, ()):
+            has_use = True
+            is_standard_onnx_node = node.domain in ("", "ai.onnx")
+            if is_standard_onnx_node and node.op_type == "Shape":
+                pass
+            elif is_standard_onnx_node and node.op_type in shape_only_unary_ops and len(node.input) == 1:
+                output_names = [output_name for output_name in node.output if output_name]
+                if not output_names:
+                    all_paths_end_at_shape = False
+                for output_name in output_names:
+                    output_has_use, output_paths_end_at_shape = visit_value(current_graph, output_name, visiting)
+                    if not output_has_use or not output_paths_end_at_shape:
+                        all_paths_end_at_shape = False
+            else:
+                all_paths_end_at_shape = False
+
+        for nested_graph in captures[graph_key].get(value_name, ()):
+            nested_has_use, nested_paths_end_at_shape = visit_value(nested_graph, value_name, visiting)
+            if nested_has_use:
+                has_use = True
+                if not nested_paths_end_at_shape:
+                    all_paths_end_at_shape = False
+
+        visiting.remove(value_key)
+        memo[value_key] = (has_use, has_use and all_paths_end_at_shape)
+        return memo[value_key]
+
+    shape_only_inputs = set()
+    for input_name in input_names:
+        has_use, paths_end_at_shape = visit_value(graph, input_name, set())
+        if has_use and paths_end_at_shape:
+            shape_only_inputs.add(input_name)
+    return shape_only_inputs
+
+
+def _runtime_input_names(graph: onnx.GraphProto, onnx_path: Path) -> set[str]:
     initializer_names = {initializer.name for initializer in graph.initializer}
+    initializer_names.update(initializer.values.name for initializer in graph.sparse_initializer)
+    retained_inputs = _retained_input_names(graph)
+    shape_only_inputs = _shape_only_input_names(graph)
+
+    weight_free_inputs = _weight_free_input_names(onnx_path)
     return {
         graph_input.name
         for graph_input in graph.input
-        if graph_input.name not in retained_inputs and graph_input.name not in initializer_names
+        if graph_input.name not in initializer_names
+        and graph_input.name not in weight_free_inputs
+        and (graph_input.name in retained_inputs or graph_input.name not in shape_only_inputs)
     }
 
 
@@ -230,6 +353,11 @@ class RunnerMetadata:
     output_names: set[str]
     custom_io_precisions: Dict[str, str]
     custom_io_item_sizes: Dict[str, int]
+    runtime_input_names: Optional[set[str]] = None
+
+    def __post_init__(self) -> None:
+        if self.runtime_input_names is None:
+            self.runtime_input_names = _runtime_input_names(self.graph, self.onnx_path)
 
     @classmethod
     def from_paths(cls, onnx_path: Union[str, Path], compile_dir: Union[str, Path]) -> "RunnerMetadata":
@@ -241,16 +369,18 @@ class RunnerMetadata:
         model = onnx.load(str(onnx_path), load_external_data=False)
         graph = model.graph
         custom_io_precisions, custom_io_item_sizes = _custom_io_maps(compile_dir)
+        runtime_input_names = _runtime_input_names(graph, onnx_path)
         return cls(
             onnx_path=onnx_path,
             compile_dir=compile_dir,
             model=model,
             graph=graph,
             input_names={graph_input.name for graph_input in graph.input},
-            required_host_input_names=_required_host_input_names(graph),
+            required_host_input_names=runtime_input_names - _retained_input_names(graph),
             output_names={output.name for output in graph.output},
             custom_io_precisions=custom_io_precisions,
             custom_io_item_sizes=custom_io_item_sizes,
+            runtime_input_names=runtime_input_names,
         )
 
 
@@ -323,7 +453,7 @@ def _filter_graph_inputs(
         name: np.asarray(value)
         for inputs in input_groups
         for name, value in inputs.items()
-        if name in runner_metadata.input_names
+        if name in runner_metadata.runtime_input_names
     }
 
 
@@ -341,6 +471,8 @@ def _add_cross_qpc_placeholders(
         "mxint8": np.int8,
     }
     for graph_input in graph.input:
+        if graph_input.name not in runner_metadata.runtime_input_names:
+            continue
         if graph_input.name in host_inputs or graph_input.name.startswith("past_"):
             continue
         if not any(token in graph_input.name for token in ("vision_embeds", "deepstack_features")):

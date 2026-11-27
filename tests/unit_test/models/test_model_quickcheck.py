@@ -765,6 +765,57 @@ def test_deepseek_v4_decode_compile_uses_all_fp16_retained_states(tmp_path, monk
         )
 
 
+@pytest.mark.llm_model
+def test_causal_lm_manual_compile_uses_exported_onnx_io(tmp_path, monkeypatch):
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+        torch_dtype=torch.float32,
+    )
+    torch.manual_seed(0)
+    hf_model = AutoModelForCausalLM.from_config(config, **MODEL_KWARGS).eval()
+    qeff_model = QEFFAutoModelForCausalLM(hf_model)
+    onnx_path = _exported_onnx_path(qeff_model.export(tmp_path / "causal_lm", prefill_seq_len=1, dynamo=False))
+    onnx_graph = onnx.load(onnx_path, load_external_data=False).graph
+    input_specs = {value.name: value for value in onnx_graph.input}
+    output_specs = {value.name: value for value in onnx_graph.output}
+
+    assert {"input_ids", "position_ids"} <= input_specs.keys()
+    assert "logits" in output_specs
+    retained_state_inputs = {name for name in input_specs if name.startswith("past_")}
+    retained_state_outputs = {name for name in output_specs if name.endswith("_RetainedState")}
+    assert retained_state_inputs
+    assert {name.removesuffix("_RetainedState") for name in retained_state_outputs} == retained_state_inputs
+    for output_name in retained_state_outputs:
+        input_name = output_name.removesuffix("_RetainedState")
+        assert input_specs[input_name].type.tensor_type.elem_type == onnx.TensorProto.FLOAT
+        assert output_specs[output_name].type.tensor_type.elem_type == onnx.TensorProto.FLOAT
+
+    captured = {}
+
+    def fake_compile(**kwargs):
+        captured.update(kwargs)
+        return tmp_path / "qpc"
+
+    monkeypatch.setattr(qeff_model, "_compile", fake_compile)
+    qeff_model.compile(
+        onnx_path=str(onnx_path),
+        compile_dir=str(tmp_path / "manual-compile"),
+        prefill_seq_len=1,
+        ctx_len=16,
+        prefill_only=False,
+    )
+
+    assert captured["onnx_path"] == str(onnx_path)
+    assert captured["retained_state"] is True
+    assert captured["custom_io"] == {name: "float16" for name in retained_state_inputs | retained_state_outputs}
+
+
 CAUSAL_RUNTIME_MODEL_IDS = {
     "gpt2": "hf-internal-testing/tiny-random-GPT2LMHeadModel",
     "codegen": "hf-internal-testing/tiny-random-CodeGenForCausalLM",
