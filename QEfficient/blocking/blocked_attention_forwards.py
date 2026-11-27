@@ -1035,6 +1035,7 @@ def blocked_kv_attention_forward_headpar_offline(
         key_5d = k_block.view(batch_size, num_kv_heads, split, split_block_len, head_dim)
         attn_weights_block = torch.matmul(query_5d, key_5d.transpose(-1, -2)) * scaling
 
+        invalid_attn_mask = None
         if pad_len > 0:
             chunk_start = torch.arange(split, device=query.device) * split_block_len
             valid_in_chunk = kv_len_block - chunk_start
@@ -1048,6 +1049,7 @@ def blocked_kv_attention_forward_headpar_offline(
                 device=attn_weights_block.device,
             )
             attn_weights_block = torch.where(pad_mask, masked_tensor, attn_weights_block)
+            invalid_attn_mask = pad_mask
 
         # Absolute KV positions for this block.
         #
@@ -1063,17 +1065,26 @@ def blocked_kv_attention_forward_headpar_offline(
         abs_kv_pos = start_index + split_idx * split_block_len + kv_idx
 
         causal_mask = abs_kv_pos > q_pos
+        invalid_attn_mask = causal_mask if invalid_attn_mask is None else (invalid_attn_mask | causal_mask)
 
         masked_tensor = torch.full_like(
             attn_weights_block,
-            HEADPAR_MASKED_ATTENTION_VALUE,
+            MIN_MASKED_ATTENTION_VALUE,
             dtype=attn_weights_block.dtype,
             device=attn_weights_block.device,
         )
-        attn_weights_block = torch.where(causal_mask, masked_tensor, attn_weights_block)
+        attn_weights_block = torch.where(invalid_attn_mask, masked_tensor, attn_weights_block)
 
         max_block = attn_weights_block.max(dim=-1).values
-        exp_block = torch.exp(attn_weights_block - max_block.unsqueeze(-1))
+        all_invalid = invalid_attn_mask.all(dim=-1)
+        exp_max_block = torch.where(all_invalid, torch.zeros_like(max_block), max_block)
+        exp_block = torch.exp(attn_weights_block - exp_max_block.unsqueeze(-1))
+        exp_block = torch.where(invalid_attn_mask, torch.zeros_like(exp_block), exp_block)
+        max_block = torch.where(
+            all_invalid,
+            torch.full_like(max_block, MIN_MASKED_ATTENTION_VALUE),
+            max_block,
+        )
         if skip_kv and _is_export_or_trace():
             skip_future_4d = skip_future.reshape(1, 1, 1, 1)
             max_block = torch.where(
@@ -1098,12 +1109,16 @@ def blocked_kv_attention_forward_headpar_offline(
     sum_stacked = torch.stack(sum_blocks)
     out_stacked = torch.stack(out_blocks)
     block_max = max_stacked.max(dim=0).values
-    block_weight = torch.exp(max_stacked - block_max.unsqueeze(0))
+    block_all_invalid = (max_stacked == MIN_MASKED_ATTENTION_VALUE).all(dim=0)
+    block_max_for_exp = torch.where(block_all_invalid, torch.zeros_like(block_max), block_max)
+    block_weight = torch.exp(max_stacked - block_max_for_exp.unsqueeze(0))
     block_sum = (block_weight * sum_stacked).sum(dim=0)
     block_out = (block_weight.unsqueeze(-1) * out_stacked).sum(dim=0)
 
     split_max = block_max.max(dim=2).values
-    split_weight = torch.exp(block_max - split_max.unsqueeze(2))
+    split_all_invalid = (block_max == MIN_MASKED_ATTENTION_VALUE).all(dim=2)
+    split_max_for_exp = torch.where(split_all_invalid, torch.zeros_like(split_max), split_max)
+    split_weight = torch.exp(block_max - split_max_for_exp.unsqueeze(2))
     split_sum = (split_weight * block_sum).sum(dim=2)
     split_out = (split_weight.unsqueeze(-1) * block_out).sum(dim=2)
 
