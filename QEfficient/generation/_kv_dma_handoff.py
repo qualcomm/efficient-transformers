@@ -67,7 +67,9 @@ def is_retained_state_name(name: str) -> bool:
         "indexer_key.",
         "index_key.",
     )
-    return base_name.startswith(retained_state_prefixes)
+    return base_name.startswith(retained_state_prefixes) or base_name.endswith(
+        ("_RetainedState", "_InternalRetainedState")
+    )
 
 
 class KvDmaHandoff:

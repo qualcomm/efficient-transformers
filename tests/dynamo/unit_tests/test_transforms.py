@@ -1217,3 +1217,10 @@ def test_ctx_scatter_gather_dynamo_translation_table_complete():
 
     missing = [name for name, op in required_ctx_ops.items() if op not in DYNAMO_CUSTOM_OP_TABLE]
     assert not missing
+
+
+def test_csa_joint_attention_custom_op_is_not_registered_without_implementation():
+    from QEfficient.customop import dynamo_ops
+
+    assert hasattr(dynamo_ops, "DYNAMO_CUSTOM_OP_TABLE")
+    assert not hasattr(torch.ops.qefficient, "csa_joint_attention")

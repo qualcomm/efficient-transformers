@@ -28,6 +28,8 @@ def json_serializable(obj):
         return {"name": obj.__name__, "min": _json_dim_bound(obj.min), "max": _json_dim_bound(obj.max)}
     if obj.__class__.__name__ == "IntInfinity":
         return str(obj)
+    if obj.__class__.__name__ == "_DerivedDim":
+        return str(obj)
     if obj.__class__.__name__ == "_DimHint":
         return str(obj)
     if obj.__class__.__name__ == "_DimHintType":

@@ -16,6 +16,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient import QEFFAutoModelForImageTextToText
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.utils.config_utils import _build_minimax_qaic_config
 
 MODEL_ID = "MiniMaxAI/MiniMax-M3"
 
@@ -46,66 +47,6 @@ def _expand_batch(inputs, batch_size: int):
 
 def _parse_device_group(device_ids: str) -> list[int]:
     return [int(device_id) for device_id in device_ids.strip("[]").split(",") if device_id.strip()]
-
-
-def _build_qaic_config(
-    *,
-    msa_indexer_dp: int,
-    msa_indexer_cp: int,
-    msa_attn_dp: int,
-    msa_attn_cp: int,
-    indexer_n_head: int,
-    indexer_prefill_parallel: bool,
-    indexer_q_chunk: int | None,
-    indexer_q_size: int | None,
-    indexer_num_blocks: int | None,
-    msa_num_kv_blocks: int | None,
-    num_cores: int,
-    msa_q_chunk: int,
-    expert_parallel_chunk_size: int,
-    cores_per_expert: int,
-    tree_reduce: bool,
-    head_block_size: int,
-    num_kv_blocks: int,
-    num_q_blocks: int,
-    n_rep_chunk: int,
-    ctx_len: int,
-    static_export_dims: bool = False,
-) -> dict:
-    """Build the MiniMax blocking config for prefill."""
-    qaic_config = {
-        "blocking_mode": "prefill_online",
-        "head_block_size": head_block_size,
-        "num_kv_blocks": num_kv_blocks,
-        "num_q_blocks": num_q_blocks,
-        "n_rep_chunk": n_rep_chunk,
-        "ctx_len": ctx_len,
-        "msa_indexer_dp": msa_indexer_dp,
-        "msa_indexer_cp": msa_indexer_cp,
-        "msa_attn_dp": msa_attn_dp,
-        "msa_attn_cp": msa_attn_cp,
-        "indexer_n_head": indexer_n_head,
-        "indexer_prefill_parallel": indexer_prefill_parallel,
-        "num_cores_per_device": num_cores,
-        "msa_q_chunk": msa_q_chunk,
-        "moe_config": {
-            "flavour": "expert_parallel",
-            "expert_parallel_chunk_size": expert_parallel_chunk_size,
-            "cores_per_expert": cores_per_expert,
-            "tree_reduce": tree_reduce,
-        },
-    }
-    if static_export_dims:
-        qaic_config["static_export_dims"] = True
-    if indexer_q_chunk is not None:
-        qaic_config["indexer_q_chunk"] = indexer_q_chunk
-    if indexer_q_size is not None:
-        qaic_config["indexer_q_size"] = indexer_q_size
-    if indexer_num_blocks is not None:
-        qaic_config["indexer_num_blocks"] = indexer_num_blocks
-    if msa_num_kv_blocks is not None:
-        qaic_config["msa_num_kv_blocks"] = msa_num_kv_blocks
-    return qaic_config
 
 
 def _update_retained_cache_inputs(inputs: dict, outputs: dict, num_layers: int) -> None:
@@ -342,8 +283,6 @@ def main():
         os.environ["QEFF_EXPORT_PROFILE"] = "cprofile" if args.profile_export == "cprofile" else "1"
 
     execution_batch_size = args.batch_size * math.lcm(args.msa_indexer_dp, args.msa_attn_dp)
-    num_q_blocks = max(1, math.ceil(args.prefill_seq_len / args.q_block_size))
-    n_rep_chunk = args.q_block_chunk // args.q_block_size
     config = AutoConfig.from_pretrained(args.model_id)
     model_dtype = getattr(torch, args.dtype)
     config.dtype = model_dtype
@@ -390,29 +329,7 @@ def main():
         node_precision_info=True,
         retain_full_kv=True,
         split_model_io=True,
-        qaic_config=_build_qaic_config(
-            msa_indexer_dp=args.msa_indexer_dp,
-            msa_indexer_cp=args.msa_indexer_cp,
-            msa_attn_dp=args.msa_attn_dp,
-            msa_attn_cp=args.msa_attn_cp,
-            indexer_n_head=args.indexer_n_head,
-            indexer_prefill_parallel=args.indexer_prefill_parallel,
-            indexer_q_chunk=args.indexer_q_chunk,
-            indexer_q_size=args.indexer_q_size,
-            indexer_num_blocks=args.indexer_num_blocks,
-            msa_num_kv_blocks=args.msa_num_kv_blocks,
-            num_cores=args.num_cores,
-            msa_q_chunk=args.msa_q_chunk,
-            expert_parallel_chunk_size=args.expert_parallel_chunk_size,
-            cores_per_expert=args.cores_per_expert,
-            tree_reduce=args.tree_reduce,
-            head_block_size=args.q_head_block_chunk,
-            num_kv_blocks=args.num_kv_blocks,
-            num_q_blocks=num_q_blocks,
-            n_rep_chunk=n_rep_chunk,
-            ctx_len=args.ctx_len,
-            static_export_dims=args.static_export_dims,
-        ),
+        qaic_config=_build_minimax_qaic_config(args, prefill=True),
         **compiler_options,
     )
     if args.export_only:
