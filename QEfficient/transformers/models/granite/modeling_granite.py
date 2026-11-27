@@ -417,8 +417,8 @@ class QEffGraniteForCausalLM(GraniteForCausalLM):
         ```python
         >>> from transformers import AutoTokenizer, GraniteForCausalLM
 
-        >>> model = GraniteForCausalLM.from_pretrained("meta-granite/Granite-2-7b-hf")
-        >>> tokenizer = AutoTokenizer.from_pretrained("meta-granite/Granite-2-7b-hf")
+        >>> model = GraniteForCausalLM.from_pretrained("ibm-granite/granite-3.1-2b-instruct")
+        >>> tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.1-2b-instruct")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
         >>> inputs = tokenizer(prompt, return_tensors="pt")
@@ -426,7 +426,6 @@ class QEffGraniteForCausalLM(GraniteForCausalLM):
         >>> # Generate
         >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (

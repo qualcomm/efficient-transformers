@@ -25,11 +25,12 @@ import torch
 from onnx import TensorProto, helper
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
-from QEfficient.base.modeling_qeff import generate_mdp_compiler_dump
+from QEfficient.base.modeling_qeff import _normalize_retained_state_inputs, generate_mdp_compiler_dump
 from QEfficient.compile.mdp_generator import (
     _get_layer_num_from_inputs,
     _layer_partition_bounds,
     generate_disagg_mdp_intersection_config,
+    generate_disagg_mdp_partition_config,
 )
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 
@@ -133,6 +134,57 @@ class TestQEFFBaseModelProperties:
         qeff = QEFFAutoModelForCausalLM(model)
         # GPT2 config has architectures attribute
         assert qeff.model_architecture is not None or qeff.model_architecture is None
+
+
+@pytest.mark.cpu_only
+def test_subfunction_retained_state_passthrough_is_written(tmp_path):
+    state_name = "past_compressor_gate_buffer.5"
+    retained_name = f"{state_name}_RetainedState"
+    function = helper.make_function(
+        "qeff.test",
+        "CustomRMSNorm",
+        [state_name],
+        [state_name],
+        [],
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
+    node = helper.make_node(
+        "CustomRMSNorm",
+        [state_name],
+        [retained_name],
+        domain="qeff.test",
+        name="/model/layers.5/CustomRMSNorm",
+    )
+    graph = helper.make_graph(
+        [node],
+        "retained_state_passthrough",
+        [helper.make_tensor_value_info(state_name, TensorProto.FLOAT, [1, 2])],
+        [helper.make_tensor_value_info(retained_name, TensorProto.FLOAT, [1, 2])],
+    )
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 18), helper.make_opsetid("qeff.test", 1)],
+        functions=[function],
+    )
+
+    _normalize_retained_state_inputs(model)
+
+    assert [node.op_type for node in model.functions[0].node] == ["Constant", "Constant", "Gather", "ScatterND"]
+    assert model.functions[0].output == [f"{state_name}_QEffRetainedState"]
+    onnx.checker.check_model(model)
+
+    onnx_path = tmp_path / "retained_state_passthrough.onnx"
+    onnx.save(model, onnx_path)
+    mdp_json = generate_disagg_mdp_partition_config(
+        onnx_path=str(onnx_path),
+        num_devices=2,
+        num_partitions=2,
+        num_layers=6,
+        num_cores=4,
+    )
+    partition_one_nodes = mdp_json["partitions"][1]["nodeList"]
+    assert state_name in partition_one_nodes
+    assert node.name in partition_one_nodes
 
 
 @pytest.mark.cpu_only
@@ -271,6 +323,27 @@ class TestQEFFBaseModelHashParams:
 @pytest.mark.cpu_only
 class TestQEFFBaseModelTransformBlocking:
     """Tests for QEFFBaseModel.transform() attention blocking behavior."""
+
+    def test_transform_clears_existing_blocking_config_when_blocking_is_disabled(self):
+        from QEfficient.blocking.attention_blocking import BlockingMode
+
+        model, _ = make_tiny_llama()
+        qeff = QEFFAutoModelForCausalLM(model)
+
+        qeff.transform(
+            ctx_len=CTX_LEN,
+            seq_len=SEQ_LEN,
+            bs=1,
+            qaic_config={"blocking_mode": "kv", "num_kv_blocks": 2},
+        )
+        blocking_config = _get_any_attn_blocking_config(qeff.model)
+        assert blocking_config.mode == BlockingMode.KV
+
+        qeff.transform(ctx_len=CTX_LEN, seq_len=SEQ_LEN, bs=1)
+
+        blocking_config = _get_any_attn_blocking_config(qeff.model)
+        assert blocking_config.mode == BlockingMode.NONE
+        assert "blocking_kwargs" not in qeff.hash_params
 
     @pytest.mark.parametrize(
         "blocking_mode", ["kv", "kv_paged", "q", "qkv", "qkv_paged", "hq", "hkv", "hkv_paged", "hqkv", "hqkv_paged"]
@@ -849,6 +922,41 @@ class TestMdpCompileIntegration:
         compile_dir = tmp_path / "compile_out"
         compile_dir.mkdir(parents=True, exist_ok=True)
         return tmp_path, onnx_path, compile_dir
+
+    def test_compile_rejects_empty_programqpc(self, compile_workspace):
+        _, onnx_path, compile_dir = compile_workspace
+        model_hf, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model_hf)
+
+        def _write_empty_qpc(command, **kwargs):
+            binary_dir = next(
+                Path(argument.split("=", 1)[1]) for argument in command if argument.startswith("-aic-binary-dir=")
+            )
+            binary_dir.mkdir(parents=True, exist_ok=True)
+            (binary_dir / "programqpc.bin").touch()
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=b"", stderr=b"")
+
+        with (
+            patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_write_empty_qpc),
+            pytest.raises(RuntimeError, match="non-empty QPC"),
+        ):
+            qeff._compile(onnx_path=str(onnx_path), compile_dir=str(compile_dir))
+
+    def test_compile_rebuilds_empty_cached_programqpc(self, compile_workspace):
+        _, onnx_path, compile_dir = compile_workspace
+        model_hf, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model_hf)
+        compile_kwargs = {"onnx_path": str(onnx_path), "compile_dir": str(compile_dir)}
+
+        with patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_fake_subprocess_run):
+            qeff._compile(**compile_kwargs)
+        (qeff.qpc_path / "programqpc.bin").write_bytes(b"")
+
+        with patch("QEfficient.base.modeling_qeff.subprocess.run", side_effect=_fake_subprocess_run) as compile_mock:
+            qeff._compile(**compile_kwargs)
+
+        assert compile_mock.call_count == 1
+        assert (qeff.qpc_path / "programqpc.bin").stat().st_size > 0
 
     def _run_mdp_compile(
         self,

@@ -200,6 +200,13 @@ def _run_quantizer_for_wf(qeff_model, target_dtype: torch.dtype):
             qeff_model._weight_free_embedded_buffers = preserved_buffers
             return qeff_model
 
+        if quant_type == "fp8" and getattr(qeff_model.model.config, "model_type", None) == "deepseek_v4":
+            preserved_buffers = _preserve_non_persistent_buffers(qeff_model.model)
+            qeff_model.model = qeff_model.model.to(dtype=target_dtype)
+            qeff_model.model.to_empty(device="meta")
+            qeff_model._weight_free_embedded_buffers = preserved_buffers
+            return qeff_model
+
         quantizer_cls = QEFF_AUTO_QUANTIZER_MAPPING.get(quant_type) if quant_type else None
         if quantizer_cls is None:
             raise NotImplementedError(

@@ -34,6 +34,7 @@ from QEfficient.base.onnx_transforms import (
     SplitTensorsTransform,
 )
 from QEfficient.base.pytorch_transforms import PytorchTransform
+from QEfficient.blocking.attention_blocking import AttentionBlockingConfig
 from QEfficient.blocking.blocking_configurator import (
     build_gated_delta_config_for_transform,
     build_transformer_blocking_config_for_transform,
@@ -119,6 +120,7 @@ def _copy_onnx_external_data_files(source_onnx_path: Path, artifact_onnx_path: P
     those are resolved through ``AIC_EXTERNAL_DATA_ROOT``.
     """
     model = onnx.load(source_onnx_path, load_external_data=False)
+    copied_files = set()
     for tensor in onnx.external_data_helper._get_all_tensors(model):
         if tensor.data_location != onnx.TensorProto.EXTERNAL:
             continue
@@ -135,8 +137,12 @@ def _copy_onnx_external_data_files(source_onnx_path: Path, artifact_onnx_path: P
         if not source_path.is_file():
             raise FileNotFoundError(f"ONNX external data file not found at: {source_path}")
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        if source_path.resolve() != artifact_path.resolve():
+        source_path = source_path.resolve()
+        artifact_path = artifact_path.resolve()
+        copy_key = (source_path, artifact_path)
+        if source_path != artifact_path and copy_key not in copied_files:
             shutil.copy2(source_path, artifact_path)
+            copied_files.add(copy_key)
 
 
 def _weight_free_input_names(onnx_path: Path) -> set[str]:
@@ -335,12 +341,71 @@ def _normalize_retained_state_inputs(model: onnx.ModelProto) -> None:
         input_names.remove(old_name)
         input_names.add(new_name)
 
-    node_outputs = {name for node in model.graph.node for name in node.output}
+    functions_by_name = {function.name: function for function in model.functions}
+    producer_by_output = {
+        output_name: (node, output_idx)
+        for node in model.graph.node
+        for output_idx, output_name in enumerate(node.output)
+        if output_name
+    }
+    node_outputs = set(producer_by_output)
     for output in model.graph.output:
-        if not output.name.endswith(("_RetainedState", "_InternalRetainedState")) or output.name in node_outputs:
+        if not output.name.endswith(("_RetainedState", "_InternalRetainedState")):
             continue
         suffix = "_InternalRetainedState" if output.name.endswith("_InternalRetainedState") else "_RetainedState"
         input_name = output.name[: -len(suffix)]
+        if output.name in node_outputs:
+            producer, output_idx = producer_by_output[output.name]
+            function = functions_by_name.get(producer.op_type)
+            if function is None or output_idx >= len(function.output):
+                continue
+            try:
+                input_idx = list(function.input).index(function.output[output_idx])
+            except ValueError:
+                continue
+            if input_idx >= len(producer.input) or producer.input[input_idx] != input_name:
+                continue
+            passthrough_name = f"{function.output[output_idx]}_QEffRetainedState"
+            function_values = set(function.input) | set(function.output)
+            function_values.update(value for node in function.node for value in (*node.input, *node.output) if value)
+            while passthrough_name in function_values:
+                passthrough_name = f"{passthrough_name}_"
+            gather_indices = f"{passthrough_name}_gather_indices"
+            scatter_indices = f"{passthrough_name}_scatter_indices"
+            gathered_value = f"{passthrough_name}_gathered"
+            function.node.extend(
+                [
+                    onnx.helper.make_node(
+                        "Constant",
+                        [],
+                        [gather_indices],
+                        value=onnx.helper.make_tensor(f"{gather_indices}_value", onnx.TensorProto.INT64, [1], [0]),
+                        name=f"retained_state_gather_indices_{output_idx}",
+                    ),
+                    onnx.helper.make_node(
+                        "Constant",
+                        [],
+                        [scatter_indices],
+                        value=onnx.helper.make_tensor(f"{scatter_indices}_value", onnx.TensorProto.INT64, [1, 1], [0]),
+                        name=f"retained_state_scatter_indices_{output_idx}",
+                    ),
+                    onnx.helper.make_node(
+                        "Gather",
+                        [function.output[output_idx], gather_indices],
+                        [gathered_value],
+                        axis=0,
+                        name=f"retained_state_gather_{output_idx}",
+                    ),
+                    onnx.helper.make_node(
+                        "ScatterND",
+                        [function.output[output_idx], scatter_indices, gathered_value],
+                        [passthrough_name],
+                        name=f"retained_state_scatter_{output_idx}",
+                    ),
+                ]
+            )
+            function.output[output_idx] = passthrough_name
+            continue
         if input_name in input_names:
             model.graph.node.append(onnx.helper.make_node("Identity", [input_name], [output.name]))
             node_outputs.add(output.name)
@@ -1018,6 +1083,16 @@ class QEFFBaseModel(ABC):
 
             onnx_transforms = OnnxTransformPipeline(transforms=active_transforms)
             model, transformed = onnx_transforms.apply(model, **transform_kwargs)
+            export_transforms = []
+            get_export_transforms = getattr(self.model, "get_onnx_transforms_for_export", None)
+            if self._weight_free and getattr(self, "_use_onnx_subfunctions", False) and callable(get_export_transforms):
+                for transform in get_export_transforms():
+                    if transform.apply(model, weight_spec_path=export_result.weight_spec_path):
+                        export_transforms.append(transform.__name__)
+
+            restore_dynamic_cache_axes = getattr(self.model, "restore_onnx_dynamic_cache_axes", None)
+            if dynamo and callable(restore_dynamic_cache_axes):
+                restore_dynamic_cache_axes(model, dynamic_axes)
 
             if getattr(self.model.config, "model_type", None) in {
                 "minimax_m3_vl",
@@ -1464,10 +1539,15 @@ class QEFFBaseModel(ABC):
         if num_cores is None:
             num_cores = constants.DEFAULT_AIC_NUM_CORES
         is_glm_moe_dsa = getattr(model_config, "model_type", None) == "glm_moe_dsa"
-        if blocking_config is not None or is_glm_moe_dsa:
+        has_existing_blocking_config = any(
+            getattr(module, "attn_blocking_config", None) is not None for module in self.model.modules()
+        )
+        if blocking_config is not None or is_glm_moe_dsa or has_existing_blocking_config:
             self.model, _ = BlockingAttentionTransform.apply(
                 self.model,
-                attn_blocking_config=blocking_config,
+                attn_blocking_config=(
+                    blocking_config if blocking_config is not None or is_glm_moe_dsa else AttentionBlockingConfig()
+                ),
                 qaic_config=qaic_config,
                 batch_size=bs,
                 seq_len=seq_len or 1,
@@ -1554,6 +1634,7 @@ class QEFFBaseModel(ABC):
             self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)
             self.hash_params["blocking_kwargs"] = blocking_config
         else:
+            self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=AttentionBlockingConfig())
             self.hash_params.pop("blocking_kwargs", None)
         self.model, _ = FFNBlockingTransform.apply(self.model, qaic_config=qaic_config)
         if qaic_config is not None:
@@ -1832,8 +1913,9 @@ class QEFFBaseModel(ABC):
 
         compile_dir = qpc_path.with_name(qpc_path.name + "-" + compile_hash)
         qpc_path = compile_dir / "qpc"
+        programqpc_path = qpc_path / "programqpc.bin"
         if not artifacts:
-            if (qpc_path / "programqpc.bin").is_file():
+            if programqpc_path.is_file() and programqpc_path.stat().st_size > 0:
                 self.qpc_path = qpc_path
                 self.compile_artifacts_path = compile_dir
 
@@ -1968,6 +2050,9 @@ class QEFFBaseModel(ABC):
                     ]
                 )
             )
+        if not programqpc_path.is_file() or programqpc_path.stat().st_size == 0:
+            raise RuntimeError(f"QAIC compiler returned success without producing a non-empty QPC: {programqpc_path}")
+
         compile_time = time.perf_counter() - compile_start_time
         print(f"qaic-compile completed in {compile_time:.2f} seconds")
         # Dump JSON file with hashed parameters

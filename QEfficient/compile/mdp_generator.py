@@ -24,7 +24,7 @@ _LAYER_NAME_RE = re.compile(r"(?:^|[/.])layers\.(\d+)(?=$|[/.])")
 _GPT2_LAYER_NAME_RE = re.compile(r"(?:^|/)h\.(\d+)(?=$|/)")
 _SUBFUNCTION_LAYER_NAME_RE = re.compile(r"(?:^|/)layer_(\d+)(?=$|/)")
 _RETAINED_STATE_NAME_RE = re.compile(
-    r"^(?:past_key|past_value|compressed_kv|k_pe|conv_state|recurrent_state|indexer_key|index_key)\.(\d+)(?:_|$)"
+    r"^(?:past_[a-z0-9_]+|compressed_kv|k_pe|conv_state|recurrent_state|indexer_key|index_key)\.(\d+)(?:_|$)"
 )
 
 
@@ -43,7 +43,21 @@ class MdpStrategy(str, Enum):
 
 def _is_decoder_layer_callsite(node_name: str) -> bool:
     """Return True for decoder layer callsite names that must never be dropped."""
-    return "/language_model/layers." in node_name
+    return "/language_model/layers." in node_name or "/model/layers." in node_name
+
+
+def _same_node_computation(node: onnx.NodeProto, peer: onnx.NodeProto) -> bool:
+    """Return whether two differently named ONNX nodes compute the same outputs."""
+    node_attributes = tuple(sorted((attribute.name, attribute.SerializeToString()) for attribute in node.attribute))
+    peer_attributes = tuple(sorted((attribute.name, attribute.SerializeToString()) for attribute in peer.attribute))
+    return (
+        node.op_type == peer.op_type
+        and node.domain == peer.domain
+        and getattr(node, "overload", "") == getattr(peer, "overload", "")
+        and tuple(node.input) == tuple(peer.input)
+        and node_attributes == peer_attributes
+        and tuple(bool(output) for output in node.output) == tuple(bool(output) for output in peer.output)
+    )
 
 
 def _drop_mdp_nodes_inplace(mdp_json: Dict[str, Any], nodes_to_drop: Set[str]) -> int:
@@ -134,6 +148,8 @@ def _drop_alias_prone_top_level_nodes(
             continue
         language_model_peer = f"/language_model{node_name}"
         if language_model_peer not in name_to_node:
+            continue
+        if not _same_node_computation(name_to_node[node_name], name_to_node[language_model_peer]):
             continue
         top_rank = node_rank.get(node_name)
         peer_rank = node_rank.get(language_model_peer)
@@ -474,6 +490,15 @@ def generate_disagg_mdp_partition_config(
     graph_input_names: Set[str] = {inp.name for inp in model.graph.input}
     initializer_names: Set[str] = {init.name for init in model.graph.initializer}
     external_names: Set[str] = graph_input_names | initializer_names
+    input_only_nodes = {
+        node.name
+        for node in model.graph.node
+        if node.name
+        and node.input
+        and _get_layer_num(node.name) is None
+        and _get_layer_num_from_inputs(list(node.input)) is None
+        and all(not input_name or input_name in external_names for input_name in node.input)
+    }
 
     output_to_node: Dict[str, str] = {}
     for node in model.graph.node:
@@ -531,6 +556,24 @@ def generate_disagg_mdp_partition_config(
     current_layer_partition = 0
     seen_first_layer = False
     emitted_external_value_layers: Set[int] = set()
+    node_layer_by_name: Dict[str, int] = {}
+    consumer_layers_by_value: Dict[str, Set[int]] = {}
+    for node in reversed(model.graph.node):
+        if not node.name:
+            continue
+        layer_num = _get_layer_num(node.name)
+        if layer_num is None:
+            layer_num = _get_layer_num_from_inputs(list(node.input))
+        if layer_num is None:
+            downstream_layers = {layer for value in node.output for layer in consumer_layers_by_value.get(value, ())}
+            if downstream_layers:
+                layer_num = min(downstream_layers)
+        if layer_num is None:
+            continue
+        node_layer_by_name[node.name] = layer_num
+        for node_input in node.input:
+            if node_input:
+                consumer_layers_by_value.setdefault(node_input, set()).add(layer_num)
 
     for node in model.graph.node:
         if not node.name:
@@ -538,12 +581,10 @@ def generate_disagg_mdp_partition_config(
         if node.name in folded_nodes:
             continue
 
-        layer_num = _get_layer_num(node.name)
-        if layer_num is None:
-            # GPT-OSS/Dynamo repeated-subgraph callsites have generic names,
-            # while their model-layer parameter inputs retain ``layers.N``.
-            layer_num = _get_layer_num_from_inputs(list(node.input))
-        if layer_num is not None:
+        layer_num = node_layer_by_name.get(node.name)
+        if node.name in input_only_nodes:
+            partition_idx = 0
+        elif layer_num is not None:
             seen_first_layer = True
             partition_idx = bisect.bisect_right(partition_bounds, layer_num)
             current_layer_partition = partition_idx

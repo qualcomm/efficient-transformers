@@ -568,16 +568,23 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
             token_key_states, token_value_states = key_states, value_states
 
         if use_blocking:
-            if (
+            use_mm_bidirectional_mask = (
                 mm_token_type_ids is not None
                 and hidden_states.shape[1] != 1
                 and self.sliding_window is not None
                 and getattr(self.config, "use_bidirectional_attention", None) == "vision"
-            ):
+                and self.layer_type == "sliding_attention"
+            )
+            if use_mm_bidirectional_mask:
+                mask_target_length = (
+                    blocking_config.ctx_len
+                    if blocking_config.mode == BlockingMode.PREFILL_ONLINE and blocking_config.ctx_len is not None
+                    else key_states.shape[-2]
+                )
                 attention_mask = _build_bidirectional_vision_attention_mask(
                     position_ids=position_ids,
                     mm_token_type_ids=mm_token_type_ids,
-                    target_length=key_states.shape[-2],
+                    target_length=mask_target_length,
                     dtype=query_states.dtype,
                     sliding_window=self.sliding_window,
                 )
@@ -603,6 +610,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
                 past_seen_tokens=past_seen_tokens,
                 sliding_window=self.sliding_window,
                 prefill_only=blocking_config.mode.is_prefill,
+                skip_kv=False if use_mm_bidirectional_mask else None,
             )
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
@@ -644,6 +652,7 @@ class QEffGemma4TextAttention(Gemma4TextAttention):
             and hidden_states.shape[1] != 1
             and self.sliding_window is not None
             and getattr(self.config, "use_bidirectional_attention", None) == "vision"
+            and self.layer_type == "sliding_attention"
         ):
             attention_mask = _build_bidirectional_vision_attention_mask(
                 position_ids=position_ids,
@@ -826,6 +835,7 @@ class QEffGemma4TextModel(Gemma4TextModel):
                 and inputs_embeds.shape[1] != 1
                 and layer_type == "sliding_attention"
                 and getattr(self.config, "use_bidirectional_attention", None) == "vision"
+                and layer_type == "sliding_attention"
             )
             if isinstance(attention_mask, dict):
                 layer_attention_mask = attention_mask[layer_type]
@@ -1207,7 +1217,7 @@ class QEffGemma4ForCausalLM(Gemma4ForCausalLM):
             else:
                 hidden_states = hidden_states[:, -1:, :]
 
-        logits = self.model.lm_head(hidden_states)
+        logits = self.lm_head(hidden_states)
         if self.config.final_logit_softcapping is not None:
             logits = logits / self.config.final_logit_softcapping
             logits = torch.tanh(logits)
@@ -1646,7 +1656,6 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         **kwargs,
     ):
         seq_len = kwargs.get("prefill_seq_len", None)
-        cache_seq_len = kwargs.get("ctx_len", None)
         bs = kwargs.get("batch_size", None)
         if seq_len is None:
             seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
@@ -1655,7 +1664,6 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
             # A one-token dummy cache constrains the dynamically annotated
             # KV-cache lengths to 1 during torch.export.
             seq_len = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
-        cache_seq_len = int(cache_seq_len) if cache_seq_len is not None else seq_len
         if bs is None:
             bs = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
         bs = int(bs)
@@ -1695,7 +1703,7 @@ class QEffGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
             "past_key_values": self.get_dummy_pkv_cache(
                 config=self.model.language_model.config,
                 batch_size=fbs if continuous_batching else bs,
-                seq_len=cache_seq_len,
+                seq_len=seq_len,
             ),
         }
         if continuous_batching:
