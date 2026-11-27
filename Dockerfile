@@ -30,7 +30,7 @@ WORKDIR /app/qefficient-library
 
 # Install the required Python packages
 
-RUN pip install torch==2.0.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu --no-deps
+RUN pip install torch==2.0.0+cpu --index-url https://download.pytorch.org/whl/cpu --no-deps
 RUN pip install datasets==2.17.0 fsspec==2023.10.0 multidict==6.0.5 sentencepiece --no-deps
 
 RUN python3.12 -m pip install .
