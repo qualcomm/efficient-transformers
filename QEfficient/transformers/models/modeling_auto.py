@@ -407,6 +407,10 @@ def _apply_explicit_language_layer_count_override(
             language_config = nested_config
             break
     language_config.num_hidden_layers = int(explicit_num_hidden_layers)
+    if "layer_types" in kwargs:
+        language_config.layer_types = kwargs.pop("layer_types")
+    if "use_cache" in kwargs:
+        language_config.use_cache = kwargs.pop("use_cache")
     kwargs["config"] = config
 
 
@@ -4456,6 +4460,9 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         if weight_free:
             validate_dynamo_export_requirements("weight_free=True")
+
+        if kwargs.get("finite_adapters", False):
+            raise TypeError("finite_adapters is only supported through QEffAutoPeftModelForCausalLM")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
         proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
