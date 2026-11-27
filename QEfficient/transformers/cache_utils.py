@@ -242,6 +242,9 @@ class QEffDynamicLayer(CacheLayerMixin):
 
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
 
+        # GatherND safety: HMX issue
+        ctx_indices = torch.where(ctx_indices >= k_out.shape[2], 0, ctx_indices)
+
         if batch_index is not None:
             k_out = ctx_gather_blocked_kv_cb(k_out, batch_index, ctx_indices)
         else:
@@ -359,6 +362,9 @@ class QEffDynamicLayer(CacheLayerMixin):
         invalid_idx_value = InvalidIndexProvider._get_invalid_idx_value()
 
         ctx_indices = torch.where(invalid_mask, invalid_idx_value, ctx_indices)
+        
+        # GatherND safety: HMX issue
+        ctx_indices = torch.where(ctx_indices >= v_out.shape[2], 0, ctx_indices)
 
         if batch_index is not None:
             v_out = ctx_gather_blocked_kv_cb(v_out, batch_index, ctx_indices)
