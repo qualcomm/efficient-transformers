@@ -222,9 +222,9 @@ def _retained_input_names(graph: onnx.GraphProto) -> set[str]:
 
 
 def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
-    """Return inputs whose downstream paths only preserve values until Shape nodes."""
+    """Return inputs whose downstream paths only use tensor metadata at Shape nodes."""
     input_names = {graph_input.name for graph_input in graph.input}
-    shape_preserving_ops = {"Cast", "Identity"}
+    shape_only_unary_ops = {"Cast", "Identity", "Transpose", "Flatten"}
     consumers: Dict[int, Dict[str, List[onnx.NodeProto]]] = {}
     graph_outputs_by_id: Dict[int, set[str]] = {}
     captures: Dict[int, Dict[str, List[onnx.GraphProto]]] = {}
@@ -291,9 +291,10 @@ def _shape_only_input_names(graph: onnx.GraphProto) -> set[str]:
 
         for node in consumers[graph_key].get(value_name, ()):
             has_use = True
-            if node.op_type == "Shape":
+            is_standard_onnx_node = node.domain in ("", "ai.onnx")
+            if is_standard_onnx_node and node.op_type == "Shape":
                 pass
-            elif node.op_type in shape_preserving_ops and len(node.input) == 1:
+            elif is_standard_onnx_node and node.op_type in shape_only_unary_ops and len(node.input) == 1:
                 output_names = [output_name for output_name in node.output if output_name]
                 if not output_names:
                     all_paths_end_at_shape = False

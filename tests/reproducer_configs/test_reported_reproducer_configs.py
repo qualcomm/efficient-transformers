@@ -14,7 +14,8 @@ Flow
 2. Developers add the exact reproducer config before fixing a bug, then run
    the same config after the fix before merge.
 3. Active scenarios run the real QEfficient software stage named by ``stage``:
-   import/install, model download, model export, model compile, or inference.
+   import/install, model download, model export, model compile, inference, or
+   CPU-only runner I/O bundle creation.
 4. Prefer tiny-random or 2/4-layer reductions of the same architecture. If a
    reduced model cannot reproduce the bug, keep the official model card and run
    it with ``QEFF_REPRODUCER_RUN_FULL_MODELS=1``.
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import json
 import os
 import re
 import sys
@@ -50,8 +52,10 @@ except ImportError:  # pragma: no cover - Linux CI has fcntl.
 
 pytestmark = pytest.mark.reproducer
 
-Stage = Literal["import_install", "download", "export", "compile", "inference"]
-ModelAPI = Literal["causal_lm", "image_text_to_text", "wan_t2v", "wan_i2v", "replicate_kv_heads", "embedding"]
+Stage = Literal["import_install", "download", "export", "compile", "inference", "runner_io"]
+ModelAPI = Literal[
+    "causal_lm", "image_text_to_text", "wan_t2v", "wan_i2v", "replicate_kv_heads", "embedding", "runner_io_bundle"
+]
 
 
 # Scenario entries are immutable so pytest parametrization cannot mutate reporter-derived options.
@@ -99,7 +103,7 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 58
+EXPECTED_SCENARIO_COUNT = 59
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
         "retain_full_kv",
@@ -187,6 +191,15 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
         source_model_card="large gated Hugging Face checkpoints",
         tiny_model_id=None,
         summary="hf_transfer must be enabled before transformers import",
+    ),
+    RegressionScenario(
+        name="runner-io-shape-only-transpose-flatten",
+        stage="runner_io",
+        source_model_card="synthetic ONNX runner I/O graph",
+        tiny_model_id=None,
+        summary="shape-only Transpose and Flatten inputs must not be required from the host",
+        model_api="runner_io_bundle",
+        config={"shape_only_ops": ("Transpose", "Flatten")},
     ),
     RegressionScenario(
         name="cloud-export-hf-token",
@@ -1743,6 +1756,62 @@ def _run_model_inference_test(scenario: RegressionScenario, tmp_path: Path) -> N
     _record_result(scenario, "PASSED", "generation returned output IDs")
 
 
+# Runner I/O reproductions use a synthetic ONNX graph and require no accelerator.
+def _run_runner_io_bundle_test(scenario: RegressionScenario, tmp_path: Path) -> None:
+    """Verify artifacts-mode runner inputs exclude values consumed only by Shape."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation import runner_io
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
+    shape_op_specs = {
+        "Transpose": ("shape_only_transpose", "transposed", "transpose_shape", [1, 3, 2], {"perm": [0, 2, 1]}),
+        "Flatten": ("shape_only_flatten", "flattened", "flatten_shape", [1, 6], {"axis": 1}),
+    }
+    inputs = [input_ids]
+    nodes = [helper.make_node("Identity", ["input_ids"], ["logits"])]
+    outputs = [helper.make_tensor_value_info("logits", TensorProto.INT64, [1, 1])]
+    for shape_op in scenario.config["shape_only_ops"]:
+        input_name, transformed_name, shape_name, output_shape, attributes = shape_op_specs[shape_op]
+        inputs.append(helper.make_tensor_value_info(input_name, TensorProto.FLOAT, [1, 2, 3]))
+        nodes.extend(
+            [
+                helper.make_node(shape_op, [input_name], [transformed_name], **attributes),
+                helper.make_node("Shape", [transformed_name], [shape_name]),
+            ]
+        )
+        outputs.append(helper.make_tensor_value_info(shape_name, TensorProto.INT64, [len(output_shape)]))
+    graph = helper.make_graph(
+        nodes,
+        "runner_io_shape_only_inputs",
+        inputs,
+        outputs,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+
+    scenario_dir = tmp_path / scenario.name
+    scenario_dir.mkdir(parents=True)
+    onnx_path = scenario_dir / "model.onnx"
+    onnx.save(model, onnx_path)
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, scenario_dir)
+    io_dir = runner_io.write_runner_io_bundle(
+        runner_metadata=runner_metadata,
+        specialization={"batch_size": 1, "seq_len": 1},
+        host_inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+    )
+
+    assert runner_metadata.runtime_input_names == {"input_ids"}
+    io_entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    runtime_inputs = {entry["map-to"] for entry in io_entries if entry["io-direction"] == "in"}
+    assert runtime_inputs == {"input_ids"}
+    assert (io_dir / "data" / "input_ids.raw").is_file()
+    _record_result(scenario, "PASSED", "runner bundle contains only required host inputs")
+
+
 # Parametrized entrypoint for import/install-stage reported regressions.
 @pytest.mark.reproducer
 @pytest.mark.parametrize("scenario", _params_for("import_install"))
@@ -1783,6 +1852,12 @@ def test_inference_reproducer(scenario: RegressionScenario, tmp_path: Path) -> N
     _run_with_verdict(scenario, _run_model_inference_test, tmp_path)
 
 
+@pytest.mark.parametrize("scenario", _params_for("runner_io"))
+def test_runner_io_reproducer(scenario: RegressionScenario, tmp_path: Path) -> None:
+    """Run CPU-only runner-bundle reproductions against synthetic ONNX graphs."""
+    _run_with_verdict(scenario, _run_runner_io_bundle_test, tmp_path)
+
+
 # Catalog guard prevents future edits from dropping reported configs silently.
 def test_all_reported_configs_are_represented() -> None:
     """Ensure the reported-regression catalog remains complete and unique.
@@ -1819,7 +1894,7 @@ def test_active_scenarios_are_real_stage_verdicts() -> None:
     for scenario in SCENARIOS:
         if scenario.skip_reason:
             continue
-        if scenario.stage not in {"import_install"}:
+        if scenario.stage not in {"import_install", "runner_io"}:
             assert scenario.tiny_model_id or scenario.official_model_id
         combined = {
             **scenario.config,

@@ -1864,6 +1864,88 @@ def test_runner_metadata_excludes_weight_free_constant_inputs(tmp_path):
 
 
 @pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    ("shape_op", "shape_op_attributes", "output_shape"),
+    [
+        ("Transpose", {"perm": [0, 2, 1]}, [1, 3, 2]),
+        ("Flatten", {"axis": 1}, [1, 6]),
+    ],
+)
+def test_runner_bundle_excludes_shape_only_inputs_after_unary_shape_ops(
+    tmp_path, shape_op, shape_op_attributes, output_shape
+):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation import runner_io
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
+    shape_only = helper.make_tensor_value_info("shape_only", TensorProto.FLOAT, [1, 2, 3])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Identity", ["input_ids"], ["logits"]),
+            helper.make_node(shape_op, ["shape_only"], ["transformed"], **shape_op_attributes),
+            helper.make_node("Shape", ["transformed"], ["shape_output"]),
+        ],
+        f"shape_only_{shape_op.lower()}_input",
+        [input_ids, shape_only],
+        [
+            helper.make_tensor_value_info("logits", TensorProto.INT64, [1, 1]),
+            helper.make_tensor_value_info("shape_output", TensorProto.INT64, [len(output_shape)]),
+        ],
+    )
+    onnx_path = tmp_path / f"shape-only-{shape_op.lower()}.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"input_ids"}
+    assert runner_metadata.required_host_input_names == {"input_ids"}
+
+    io_dir = runner_io.write_runner_io_bundle(
+        runner_metadata=runner_metadata,
+        specialization={"batch_size": 1, "seq_len": 1},
+        host_inputs={"input_ids": np.array([[1]], dtype=np.int64)},
+    )
+    io_entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    runtime_inputs = {entry["map-to"] for entry in io_entries if entry["io-direction"] == "in"}
+    assert runtime_inputs == {"input_ids"}
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    ("custom_op_type", "follow_with_standard_shape"),
+    [("Transpose", True), ("Shape", False)],
+)
+def test_runner_metadata_keeps_inputs_consumed_by_custom_domain_name_collisions(
+    tmp_path, custom_op_type, follow_with_standard_shape
+):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    source = helper.make_tensor_value_info("source", TensorProto.FLOAT, [1, 2, 3])
+    nodes = [helper.make_node(custom_op_type, ["source"], ["custom_output"], domain="com.example")]
+    if follow_with_standard_shape:
+        nodes.append(helper.make_node("Shape", ["custom_output"], ["graph_output"]))
+        output = helper.make_tensor_value_info("graph_output", TensorProto.INT64, [3])
+    else:
+        output = helper.make_tensor_value_info("custom_output", TensorProto.INT64, [3])
+    graph = helper.make_graph(nodes, "custom_domain_name_collision", [source], [output])
+    model = helper.make_model(graph)
+    model.opset_import.append(helper.make_opsetid("com.example", 1))
+    onnx_path = tmp_path / f"custom-domain-{custom_op_type.lower()}.onnx"
+    onnx.save(model, onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"source"}
+    assert runner_metadata.required_host_input_names == {"source"}
+
+
+@pytest.mark.cpu_only
 def test_runner_metadata_excludes_shape_only_inputs_but_keeps_mixed_uses(tmp_path):
     import onnx
     from onnx import TensorProto, helper
@@ -1903,6 +1985,33 @@ def test_runner_metadata_excludes_shape_only_inputs_but_keeps_mixed_uses(tmp_pat
 
     assert runner_metadata.runtime_input_names == {"mixed_use", "graph_output"}
     assert runner_metadata.required_host_input_names == {"mixed_use", "graph_output"}
+
+
+@pytest.mark.cpu_only
+def test_runner_metadata_keeps_shape_parameter_inputs_as_runtime_inputs(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata
+
+    data = helper.make_tensor_value_info("data", TensorProto.FLOAT, [2, 3])
+    shape_parameter = helper.make_tensor_value_info("shape_parameter", TensorProto.INT64, [2])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Reshape", ["data", "shape_parameter"], ["reshaped"]),
+            helper.make_node("Shape", ["reshaped"], ["shape_output"]),
+        ],
+        "shape_parameter_remains_runtime",
+        [data, shape_parameter],
+        [helper.make_tensor_value_info("shape_output", TensorProto.INT64, [2])],
+    )
+    onnx_path = tmp_path / "shape-parameter.onnx"
+    onnx.save(helper.make_model(graph), onnx_path)
+
+    runner_metadata = RunnerMetadata.from_paths(onnx_path, tmp_path)
+
+    assert runner_metadata.runtime_input_names == {"data", "shape_parameter"}
+    assert runner_metadata.required_host_input_names == {"data", "shape_parameter"}
 
 
 @pytest.mark.cpu_only
