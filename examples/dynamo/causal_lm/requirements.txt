@@ -14,6 +14,6 @@ torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.28.0%2Bcpu-cp31
 torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.28.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl ; python_version=='3.12' and platform_machine=='x86_64'
 
 # Additional dynamo dependencies
-accelerate==1.9.0
+accelerate==1.10.1
 compressed-tensors==0.17.0
 onnxscript==0.6.2
