@@ -204,6 +204,9 @@ def load_model_and_tokenizer(args=None, qaic_config: dict | None = None):
                 str(checkpoint_dir),
                 config=config,
                 weight_free=True,
+                # The tiny fixture has separate per-expert source tensors;
+                # export through the prepared stacked-expert checkpoint.
+                use_original_checkpoint=False,
                 dtype=dtype,
                 qaic_config=qaic_config,
                 trust_remote_code=True,
@@ -228,6 +231,7 @@ def load_model_and_tokenizer(args=None, qaic_config: dict | None = None):
         args.model_id,
         config=config,
         weight_free=args.weight_free,
+        use_original_checkpoint=args.weight_free,
         dtype=dtype,
         qaic_config=qaic_config,
         trust_remote_code=True,

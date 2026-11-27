@@ -281,22 +281,22 @@ class TestQEFFTransformersBase:
         qeff_model = QEFFAutoModelForCausalLM(make_tiny_llama()[0], weight_free=True)
 
         assert qeff_model._weight_free is True
-        assert qeff_model._use_original_checkpoint is True
+        assert qeff_model._use_original_checkpoint is False
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
 
     @pytest.mark.parametrize(
         ("weight_free", "use_original_checkpoint", "expected"),
         [
             pytest.param(False, None, False, id="regular"),
-            pytest.param(True, None, True, id="weight-free-default"),
+            pytest.param(True, None, False, id="weight-free-default"),
             pytest.param(True, False, False, id="explicit-converted-checkpoint"),
             pytest.param(True, True, True, id="explicit-original-checkpoint"),
         ],
     )
-    def test_causal_lm_weight_free_defaults_to_original_checkpoint(
+    def test_causal_lm_weight_free_preserves_original_checkpoint_opt_in(
         self, monkeypatch, weight_free, use_original_checkpoint, expected
     ):
-        """Weight-free CausalLM export should use source safetensors unless opted out."""
+        """Weight-free CausalLM export uses source safetensors only when requested."""
 
         def fake_init(self, _model, **kwargs):
             self._weight_free = kwargs["weight_free"]
