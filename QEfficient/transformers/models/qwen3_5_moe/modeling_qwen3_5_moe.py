@@ -1724,6 +1724,7 @@ class QEffQwen3_5MoeVisionModel(Qwen3_5MoeVisionModel):
 class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
     num_query_blocks = 44
     num_key_value_blocks = 4
+    head_block_size = 4  # 16 heads / 4 = 4 head-groups of 4 heads each
 
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
@@ -1777,63 +1778,87 @@ class QEffQwen3_5MoeVisionAttention(Qwen3_5MoeVisionAttention):
         key_value_block_starts = [
             (-(-i * sequence_length) // self.num_key_value_blocks) for i in range(self.num_key_value_blocks)
         ]
-        output_blocks = []
 
-        for query_block_index in range(self.num_query_blocks):
-            query_start = query_block_starts[query_block_index]
-            query_end = (
-                sequence_length
-                if query_block_index == self.num_query_blocks - 1
-                else query_block_starts[query_block_index + 1]
-            )
-            query_block = q[:, query_start:query_end, :]
-            query_block_length = query_end - query_start
+        # Head blocking: slice q/k/v along the heads dimension into groups of
+        # head_block_size and run the existing query/kv-block loop per group.
+        # When head_block_size is None, num_head_blocks == 1 and this is
+        # identical to running the loop once over all heads (original behavior).
+        num_heads_total = q.shape[0]
+        head_block_size = self.head_block_size or num_heads_total
+        num_head_blocks = -(-num_heads_total // head_block_size)  # ceil division
 
-            running_max = torch.full(
-                (query_block.shape[0], query_block_length),
-                float(MIN_MASKED_ATTENTION_VALUE),
-                device=query_block.device,
-                dtype=query_block.dtype,
-            )
-            running_denominator = torch.zeros_like(running_max)
-            running_output = torch.zeros(
-                (query_block.shape[0], query_block_length, self.head_dim),
-                device=query_block.device,
-                dtype=query_block.dtype,
-            )
+        head_block_outputs = []
+        for head_block_index in range(num_head_blocks):
+            h_start = head_block_index * head_block_size
+            h_end = min(h_start + head_block_size, num_heads_total)
 
-            # Stream key/value blocks through an online Softmax so the complete
-            # [query_block, sequence_length] score tensor is never materialized.
-            for key_value_block_index in range(self.num_key_value_blocks):
-                key_value_start = key_value_block_starts[key_value_block_index]
-                key_value_end = (
+            q_h = q[h_start:h_end]
+            k_h = k[h_start:h_end]
+            v_h = v[h_start:h_end]
+
+            output_blocks = []
+
+            for query_block_index in range(self.num_query_blocks):
+                query_start = query_block_starts[query_block_index]
+                query_end = (
                     sequence_length
-                    if key_value_block_index == self.num_key_value_blocks - 1
-                    else key_value_block_starts[key_value_block_index + 1]
+                    if query_block_index == self.num_query_blocks - 1
+                    else query_block_starts[query_block_index + 1]
                 )
-                key_block = k[:, key_value_start:key_value_end, :]
-                value_block = v[:, key_value_start:key_value_end, :]
-                attention_scores = torch.matmul(query_block, key_block.transpose(1, 2)) / math.sqrt(self.head_dim)
-                if attention_mask.ndim > 0:
-                    attention_scores = (
-                        attention_scores + attention_mask[..., query_start:query_end, key_value_start:key_value_end]
+                query_block = q_h[:, query_start:query_end, :]
+                query_block_length = query_end - query_start
+
+                running_max = torch.full(
+                    (query_block.shape[0], query_block_length),
+                    float(MIN_MASKED_ATTENTION_VALUE),
+                    device=query_block.device,
+                    dtype=query_block.dtype,
+                )
+                running_denominator = torch.zeros_like(running_max)
+                running_output = torch.zeros(
+                    (query_block.shape[0], query_block_length, self.head_dim),
+                    device=query_block.device,
+                    dtype=query_block.dtype,
+                )
+
+                # Stream key/value blocks through an online Softmax so the complete
+                # [query_block, sequence_length] score tensor is never materialized.
+                for key_value_block_index in range(self.num_key_value_blocks):
+                    key_value_start = key_value_block_starts[key_value_block_index]
+                    key_value_end = (
+                        sequence_length
+                        if key_value_block_index == self.num_key_value_blocks - 1
+                        else key_value_block_starts[key_value_block_index + 1]
                     )
-                else:
-                    attention_scores = attention_scores + attention_mask
+                    key_block = k_h[:, key_value_start:key_value_end, :]
+                    value_block = v_h[:, key_value_start:key_value_end, :]
+                    attention_scores = torch.matmul(query_block, key_block.transpose(1, 2)) / math.sqrt(self.head_dim)
+                    if attention_mask.ndim > 0:
+                        attention_scores = (
+                            attention_scores + attention_mask[..., query_start:query_end, key_value_start:key_value_end]
+                        )
+                    else:
+                        attention_scores = attention_scores + attention_mask
 
-                block_maximum = attention_scores.max(dim=-1).values
-                updated_maximum = torch.maximum(running_max, block_maximum)
-                rescale = torch.exp(running_max - updated_maximum)
-                block_exponential = torch.exp(attention_scores - updated_maximum.unsqueeze(-1))
-                running_output = running_output * rescale.unsqueeze(-1) + torch.matmul(
-                    block_exponential.to(value_block.dtype), value_block
-                )
-                running_denominator = running_denominator * rescale + block_exponential.sum(dim=-1)
-                running_max = updated_maximum
+                    block_maximum = attention_scores.max(dim=-1).values
+                    updated_maximum = torch.maximum(running_max, block_maximum)
+                    rescale = torch.exp(running_max - updated_maximum)
+                    block_exponential = torch.exp(attention_scores - updated_maximum.unsqueeze(-1))
+                    running_output = running_output * rescale.unsqueeze(-1) + torch.matmul(
+                        block_exponential.to(value_block.dtype), value_block
+                    )
+                    running_denominator = running_denominator * rescale + block_exponential.sum(dim=-1)
+                    running_max = updated_maximum
 
-            output_blocks.append((running_output / running_denominator.unsqueeze(-1)).to(query_block.dtype))
+                output_blocks.append((running_output / running_denominator.unsqueeze(-1)).to(query_block.dtype))
 
-        attn_output = torch.cat(output_blocks, dim=-2).transpose(0, 1)
+            # Concatenate this head-group's query blocks back into one
+            # [head_block_size, sequence_length, head_dim] tensor.
+            head_block_outputs.append(torch.cat(output_blocks, dim=-2))
+
+        # Concatenate all head-groups back along the heads dimension (dim=0)
+        # to restore the original [num_heads, sequence_length, head_dim] shape.
+        attn_output = torch.cat(head_block_outputs, dim=0).transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
