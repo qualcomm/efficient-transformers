@@ -964,8 +964,25 @@ def blocked_kv_attention_forward_headpar_offline(
     position_bias: Optional[torch.Tensor] = None,
     sinks: Optional[torch.Tensor] = None,
     configured_split: Optional[int] = None,
+    attn_dp: int = 1,
+    attn_cp: int = 1,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if attn_dp > 1 or attn_cp > 1:
+        return blocked_kv_attention_forward_headpar_cpdp(
+            module=module,
+            query=query,
+            scaling=scaling,
+            num_kv_blocks=num_kv_blocks,
+            cache_kwargs=cache_kwargs,
+            layer_idx=layer_idx,
+            past_key_value=past_key_value,
+            ctx_len=ctx_len,
+            configured_split=configured_split,
+            attn_dp=attn_dp,
+            attn_cp=attn_cp,
+        )
+
     # Head-parallel block softmax: K is split into `split` chunks along the
     # ctx dimension, computed in parallel as a 5D matmul, then two-stage
     # merged (across kv-blocks, then across splits).
@@ -1127,6 +1144,136 @@ def blocked_kv_attention_forward_headpar_offline(
         batch_size, num_heads, seq_len, head_dim
     )
     return attn_output.transpose(1, 2).contiguous(), None
+
+
+def blocked_kv_attention_forward_headpar_cpdp(
+    module: nn.Module,
+    query: torch.Tensor,
+    scaling: float,
+    num_kv_blocks: int,
+    cache_kwargs: Dict[str, Any],
+    layer_idx: int,
+    past_key_value: Cache,
+    ctx_len: int,
+    configured_split: Optional[int],
+    attn_dp: int,
+    attn_cp: int,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Decode native GQA from a compact DP/CP KV cache with head-parallel softmax.
+
+    The retained cache uses ``[B_local, DP*CP*Hkv, ctx_len/CP, D]`` with rows
+    ordered ``[DP, CP, Hkv]``. Context partitioning is contiguous: CP row ``c``
+    owns absolute positions ``[c * local_ctx_len, (c + 1) * local_ctx_len)``.
+    ``headpar_split`` further partitions each local KV block; it is independent
+    from CP and the resulting statistics are merged in a separate reduction.
+    """
+    if past_key_value is None or not hasattr(past_key_value, "read_only_headpar_cpdp"):
+        raise TypeError("CP/DP kv_headpar requires a compact GQA cache.")
+    batch, num_heads, query_len, head_dim = query.shape
+    dp = int(attn_dp)
+    cp = int(attn_cp)
+    num_kv_groups = getattr(module, "num_key_value_groups", None)
+    if query_len != 1:
+        raise ValueError("CP/DP kv_headpar is decode-only and requires sequence length one.")
+    if dp < 1 or cp < 1 or batch % dp:
+        raise ValueError("CP/DP kv_headpar requires positive factors and a DP-divisible batch.")
+    if num_kv_groups is None or num_kv_groups < 1 or num_heads % num_kv_groups:
+        raise ValueError("CP/DP kv_headpar requires valid native GQA num_key_value_groups.")
+    if ctx_len is None or ctx_len < 1 or ctx_len % cp:
+        raise ValueError("CP/DP kv_headpar requires ctx_len divisible by attn_cp.")
+    split = int(configured_split or 1)
+    if split < 1:
+        raise ValueError("CP/DP kv_headpar requires a positive headpar_split.")
+
+    batch_local = batch // dp
+    hkv = num_heads // num_kv_groups
+    rows = dp * cp * hkv
+    local_ctx_len = ctx_len // cp
+    num_kv_blocks = max(1, int(num_kv_blocks or 1))
+    local_block_size = -(-local_ctx_len // num_kv_blocks)
+    position_ids = cache_kwargs.get("position_ids")
+    if position_ids is None or position_ids.shape != (batch, query_len):
+        raise ValueError("CP/DP kv_headpar requires position_ids shaped [batch, 1].")
+
+    # External batch order is DP-major. Fold native GQA query groups under their
+    # owning KV head and broadcast each group to every CP context partition.
+    query_dp = query.reshape(dp, batch_local, hkv, num_kv_groups, query_len, head_dim).permute(1, 0, 2, 3, 4, 5)
+    query_rows = (
+        query_dp.unsqueeze(2)
+        .expand(-1, -1, cp, -1, -1, -1, -1)
+        .reshape(batch_local, rows, num_kv_groups * query_len, head_dim)
+    )
+    position_dp = position_ids.reshape(dp, batch_local, query_len).permute(1, 0, 2)
+    row_dp = torch.arange(rows, device=query.device).div(cp * hkv, rounding_mode="floor")
+    row_cp = torch.arange(rows, device=query.device).remainder(cp * hkv).div(hkv, rounding_mode="floor")
+    query_position_rows = position_dp[:, row_dp, 0]
+
+    max_blocks = []
+    sum_blocks = []
+    out_blocks = []
+    for kv_block_idx in range(num_kv_blocks):
+        local_start = kv_block_idx * local_block_size
+        local_end = min(local_start + local_block_size, local_ctx_len)
+        if local_start >= local_end:
+            break
+        key_block, value_block = past_key_value.read_only_headpar_cpdp(local_start, local_end, layer_idx, cache_kwargs)
+        block_len = local_end - local_start
+        pad_len = (-block_len) % split
+        if pad_len:
+            key_block = nn.functional.pad(key_block, (0, 0, 0, pad_len))
+            value_block = nn.functional.pad(value_block, (0, 0, 0, pad_len))
+        split_block_len = (block_len + pad_len) // split
+
+        key_5d = key_block.reshape(batch_local, rows, split, split_block_len, head_dim)
+        value_5d = value_block.reshape(batch_local, rows, split, split_block_len, head_dim)
+        query_5d = query_rows.unsqueeze(2).expand(-1, -1, split, -1, -1)
+        scores = torch.matmul(query_5d, key_5d.transpose(-1, -2)) * scaling
+
+        split_index = torch.arange(split, dtype=position_ids.dtype, device=query.device).view(1, 1, split, 1, 1)
+        local_index = torch.arange(split_block_len, dtype=position_ids.dtype, device=query.device).view(1, 1, 1, 1, -1)
+        absolute_position = row_cp.view(1, rows, 1, 1, 1) * local_ctx_len
+        absolute_position = absolute_position + local_start + split_index * split_block_len + local_index
+        causal_mask = absolute_position > query_position_rows.view(batch_local, rows, 1, 1, 1)
+        if pad_len:
+            valid_local = split_index * split_block_len + local_index < block_len
+            causal_mask = causal_mask | ~valid_local
+
+        scores = torch.where(causal_mask, torch.full_like(scores, HEADPAR_MASKED_ATTENTION_VALUE), scores)
+        block_max = scores.max(dim=-1).values
+        block_exp = torch.exp(scores - block_max.unsqueeze(-1))
+        # A finite masking sentinel gives exp(0) for an entirely masked split.
+        # Remove those values explicitly before the denominator/value BMM.
+        block_exp = torch.where(causal_mask, torch.zeros_like(block_exp), block_exp)
+        block_sum = block_exp.sum(dim=-1)
+        block_out = torch.matmul(block_exp, value_5d)
+        max_blocks.append(block_max)
+        sum_blocks.append(block_sum)
+        out_blocks.append(block_out)
+
+    max_stacked = torch.stack(max_blocks)
+    sum_stacked = torch.stack(sum_blocks)
+    out_stacked = torch.stack(out_blocks)
+    block_max = max_stacked.max(dim=0).values
+    block_weight = torch.exp(max_stacked - block_max.unsqueeze(0))
+    block_sum = (block_weight * sum_stacked).sum(dim=0)
+    block_out = (block_weight.unsqueeze(-1) * out_stacked).sum(dim=0)
+
+    split_max = block_max.max(dim=2).values
+    split_weight = torch.exp(block_max - split_max.unsqueeze(2))
+    split_sum = (split_weight * block_sum).sum(dim=2)
+    split_out = (split_weight.unsqueeze(-1) * block_out).sum(dim=2)
+
+    cp_max = split_max.reshape(batch_local, dp, cp, hkv, num_kv_groups * query_len).max(dim=2).values
+    cp_weight = torch.exp(split_max.reshape(batch_local, dp, cp, hkv, num_kv_groups * query_len) - cp_max.unsqueeze(2))
+    cp_sum = (cp_weight * split_sum.reshape(batch_local, dp, cp, hkv, num_kv_groups * query_len)).sum(dim=2)
+    cp_out = (
+        cp_weight.unsqueeze(-1) * split_out.reshape(batch_local, dp, cp, hkv, num_kv_groups * query_len, head_dim)
+    ).sum(dim=2)
+    cp_sum = torch.where(cp_sum > 0, cp_sum, torch.ones_like(cp_sum))
+    output = cp_out / cp_sum.unsqueeze(-1)
+    output = output.reshape(batch_local, dp, hkv, num_kv_groups, query_len, head_dim)
+    output = output.permute(1, 0, 2, 3, 4, 5).reshape(batch, num_heads, query_len, head_dim)
+    return output.transpose(1, 2).contiguous(), None
 
 
 def blocked_qkv_attention_forward_prefill_headpar_offline(

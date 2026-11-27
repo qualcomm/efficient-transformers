@@ -35,7 +35,11 @@ from QEfficient.base.modeling_qeff import (
     reject_legacy_moe_prefill_packed_chunk_size,
 )
 from QEfficient.base.onnx_transforms import FP16ClipTransform, SplitTensorsTransform
-from QEfficient.blocking.attention_blocking import BlockingMode
+from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1, BlockingMode
+from QEfficient.blocking.blocking_configurator import (
+    get_compact_headpar_specialization_dims,
+    validate_headpar_cpdp_layout,
+)
 from QEfficient.exporter.weight_free.checkpoint_transforms import (
     DeepseekV4CheckpointTransform,
     DtypeConversionCheckpointTransform,
@@ -4288,6 +4292,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         max_seq_len_cached: int | None = None,
         layerwise: bool = False,
         weight_free: bool = False,
+        use_original_checkpoint: bool = False,
         *args,
         **kwargs,
     ):
@@ -4333,6 +4338,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             ``QEFF_CHECKPOINT_HOME`` environment variable if set, otherwise next
             to the source checkpoint under the Hugging Face cache.
 
+        use_original_checkpoint : bool, optional
+            If True, weight-free export references the source safetensors
+            directly and skips checkpoint preparation. This is an opt-in path
+            for model layouts that expose source checkpoint keys in the graph.
+            The source tensor dtype must be supported by the target compiler
+            and hardware. Default is False.
+
         *args :
             Positional arguments passed directly to `cls._hf_auto_class.from_pretrained`.
         **kwargs :
@@ -4353,6 +4365,10 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             )
         if weight_free:
             validate_dynamo_export_requirements("weight_free=True")
+        if use_original_checkpoint is None:
+            use_original_checkpoint = False
+        if use_original_checkpoint and not weight_free:
+            raise ValueError("use_original_checkpoint=True requires weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
         if kwargs.pop("full_batch_size", None):
@@ -4429,6 +4445,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             max_seq_len_cached=max_seq_len_cached,
             weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
             **kwargs,
         )
         if layerwise:
@@ -4637,6 +4654,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         )
         kwargs["enable_chunking"] = enable_chunking
         qaic_config = kwargs.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        validate_headpar_cpdp_layout(
+            qaic_config,
+            getattr(self.model, "headpar_cpdp_cache_layout", None),
+        )
+        if qaic_config is not None:
+            # Model hooks that determine cache shapes and dynamic axes read this
+            # state, matching the MiniMax distributed-cache lifecycle.
+            self.model.qaic_config = qaic_config
         # Weight-free export always uses the dynamo (torch.export) path.
         # Must be set here — @export_wrapper reads dynamo from kwargs before _export() body runs.
         dynamo = dynamo or self._weight_free
@@ -4763,6 +4788,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             blocking_kwargs = self.hash_params["blocking_kwargs"]
             num_kv_blocks = blocking_kwargs.num_kv_blocks
             supports_paged_attention = blocking_kwargs.paged_attention
+            uses_compact_headpar_cache = blocking_kwargs.mode == BlockingMode.KV_HEADPAR and (
+                int(blocking_kwargs.attn_dp or 1) > 1 or int(blocking_kwargs.attn_cp or 1) > 1
+            )
+            if uses_compact_headpar_cache:
+                # CP/DP kv_headpar is decode-only. Keep the exported query
+                # length at one and avoid generic blocking padding.
+                seq_len = 1
             if supports_paged_attention:
                 seq_len = kv_block_size = -(-blocking_kwargs.ctx_len // num_kv_blocks)
 
@@ -4829,7 +4861,12 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         blocking_config = self.hash_params.get("blocking_kwargs", None)
         for_loop_number_forced_by_expert_parallel = self.hash_params.get("moe_prefill_num_packed_chunks", None)
         query_axis_blocking_enabled = _blocking_requires_query_axis_export_padding(blocking_config)
-        if query_axis_blocking_enabled:
+        uses_compact_headpar_cache = bool(
+            blocking_config is not None
+            and blocking_config.mode == BlockingMode.KV_HEADPAR
+            and (int(blocking_config.attn_dp or 1) > 1 or int(blocking_config.attn_cp or 1) > 1)
+        )
+        if query_axis_blocking_enabled and not uses_compact_headpar_cache:
             max_blocks = -1
             for key, num_blocks in blocking_config.__dict__.items():
                 if isinstance(num_blocks, int) and key in ["num_kv_blocks", "num_q_blocks"]:
@@ -4841,7 +4878,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             seq_len = (for_loop_number_forced_by_expert_parallel * seq_len) // math.gcd(
                 for_loop_number_forced_by_expert_parallel, seq_len
             )
-        if query_axis_blocking_enabled:
+        if query_axis_blocking_enabled and not uses_compact_headpar_cache:
             seq_len = (for_loop_number_forced_by_blocking * seq_len) // math.gcd(
                 for_loop_number_forced_by_blocking, seq_len
             )
@@ -5385,6 +5422,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 spec["full_batch_exec_size"] = full_batch_size
             else:
                 spec["full_batch_exec_size"] = exec_batch_size
+        if getattr(self.model, "headpar_cpdp_cache_layout", None) == HEADPAR_CPDP_LAYOUT_GQA_V1:
+            spec.update(
+                get_compact_headpar_specialization_dims(
+                    self.model.qaic_config,
+                    batch_size=spec["batch_size"],
+                    ctx_len=spec["ctx_len"],
+                )
+            )
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
             or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
@@ -5466,6 +5511,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             spec["full_batch_size"] = kv_cache_batch_size
         else:
             spec["batch_size"] = kv_cache_batch_size
+        if getattr(self.model, "headpar_cpdp_cache_layout", None) == HEADPAR_CPDP_LAYOUT_GQA_V1:
+            spec.update(
+                get_compact_headpar_specialization_dims(
+                    self.model.qaic_config,
+                    batch_size=spec["batch_size"],
+                    ctx_len=spec["ctx_len"],
+                )
+            )
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
             or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
@@ -5597,6 +5650,14 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if artifacts:
             compiler_options["artifacts"] = True
         qaic_config = compiler_options.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        validate_headpar_cpdp_layout(
+            qaic_config,
+            getattr(self.model, "headpar_cpdp_cache_layout", None),
+        )
+        if qaic_config is not None:
+            # Keep compile-only overrides visible to cache-shape and
+            # specialization hooks before any export or specialization work.
+            self.model.qaic_config = qaic_config
         reject_legacy_moe_prefill_packed_chunk_size(compiler_options)
         _ignore_public_mdp_ts_num_devices(compiler_options)
         csa_prefill_position_offset = self._configure_csa_prefill_position_offset(

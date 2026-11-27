@@ -216,6 +216,42 @@ class TestQEffDynamicLayerCorrectness:
             assert torch.equal(layer.keys[batch_idx, :, position], keys[batch_idx, :, 0])
             assert torch.equal(layer.values[batch_idx, :, position], values[batch_idx, :, 0])
 
+    def test_headpar_cpdp_write_uses_dp_cp_hkv_row_order(self):
+        """Compact headpar cache must place each token in its owning CP row only."""
+        batch, dp, cp, heads, ctx_len, head_dim = 4, 2, 2, 2, 8, 3
+        batch_local = batch // dp
+        layer = QEffDynamicLayer()
+        keys = torch.arange(batch * heads * head_dim, dtype=torch.float32).reshape(batch, heads, 1, head_dim)
+        values = keys + 1000
+        positions = torch.tensor([[1], [5], [2], [6]])
+
+        layer.write_only_headpar_cpdp(
+            keys,
+            values,
+            cache_kwargs={"position_ids": positions, "attn_dp": dp, "attn_cp": cp, "ctx_len": ctx_len},
+        )
+
+        assert layer.keys.shape == (batch_local, dp * cp * heads, ctx_len // cp, head_dim)
+        assert layer.values.shape == (batch_local, dp * cp * heads, ctx_len // cp, head_dim)
+        for batch_idx, position in enumerate(positions.flatten().tolist()):
+            dp_idx, local_batch_idx = divmod(batch_idx, batch_local)
+            cp_idx, local_position = divmod(position, ctx_len // cp)
+            row_start = (dp_idx * cp + cp_idx) * heads
+            assert torch.equal(
+                layer.keys[local_batch_idx, row_start : row_start + heads, local_position], keys[batch_idx, :, 0]
+            )
+            assert torch.equal(
+                layer.values[local_batch_idx, row_start : row_start + heads, local_position], values[batch_idx, :, 0]
+            )
+
+            other_cp_idx = 1 - cp_idx
+            other_cp_start = (dp_idx * cp + other_cp_idx) * heads
+            assert torch.count_nonzero(layer.keys[local_batch_idx, other_cp_start : other_cp_start + heads]) == 0
+
+        read_keys, read_values = layer.read_only_headpar_cpdp(0, ctx_len // cp, cache_kwargs={})
+        assert torch.equal(read_keys, layer.keys)
+        assert torch.equal(read_values, layer.values)
+
     def test_batch_fold_write_honors_continuous_batching_batch_index(self):
         batch, heads, ctx_len, head_dim = 4, 2, 8, 4
         layer = QEffDynamicLayer.from_tensors(
@@ -306,6 +342,35 @@ class TestQEffDynamicLayerCorrectness:
 # ---------------------------------------------------------------------------
 # Tests: QEffDynamicCache
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.cache
+def test_qwen3_5_moe_cache_delegates_cpdp_headpar_cache_io():
+    """Qwen3.5-MoE must expose the CP/DP compact-cache APIs used by blocked attention."""
+    from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1
+    from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeDynamicCache
+
+    cache = object.__new__(QEffQwen3_5MoeDynamicCache)
+    cache.kv_layers = [QEffDynamicLayer()]
+    assert cache.headpar_cpdp_cache_layout == HEADPAR_CPDP_LAYOUT_GQA_V1
+    keys = torch.arange(4, dtype=torch.float32).reshape(1, 1, 1, 4)
+    values = keys + 10
+
+    cache.write_only_headpar_cpdp(
+        keys,
+        values,
+        layer_idx=0,
+        cache_kwargs={"position_ids": torch.tensor([[3]]), "attn_dp": 1, "attn_cp": 2, "ctx_len": 4},
+    )
+
+    layer = cache.kv_layers[0]
+    assert layer.keys.shape == (1, 2, 2, 4)
+    assert torch.equal(layer.keys[0, 1, 1], keys[0, 0, 0])
+    assert torch.equal(layer.values[0, 1, 1], values[0, 0, 0])
+
+    read_keys, read_values = cache.read_only_headpar_cpdp(0, 2, layer_idx=0, cache_kwargs={})
+    assert torch.equal(read_keys, layer.keys)
+    assert torch.equal(read_values, layer.values)
 
 
 @pytest.mark.cache

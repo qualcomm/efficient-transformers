@@ -29,12 +29,32 @@ from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
 from QEfficient.transformers.models.llama.modeling_llama import QEffLlamaDecoderLayer
 from QEfficient.transformers.models.modeling_auto import QEFFAutoModelForCausalLM
 from QEfficient.utils import export_subfunctions
+from QEfficient.utils.export_utils import _ordered_decoder_layer_classes
 from QEfficient.utils.torch_patches import (
     _same_export_region,
     preserve_mixed_export_subfunctions,
     preserve_subfunction_source_lines,
     temporarily_enable_nested_compile_regions,
 )
+
+
+def test_ordered_decoder_classes_follow_module_execution_order():
+    class LinearDecoder(torch.nn.Module):
+        pass
+
+    class FullAttentionDecoder(torch.nn.Module):
+        pass
+
+    class MixedDecoderModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList(
+                [LinearDecoder(), LinearDecoder(), LinearDecoder(), FullAttentionDecoder()]
+            )
+
+    ordered = _ordered_decoder_layer_classes(MixedDecoderModel(), {FullAttentionDecoder, LinearDecoder})
+
+    assert ordered == [LinearDecoder, FullAttentionDecoder]
 
 
 def _make_export_region(operation):

@@ -787,6 +787,95 @@ class QEffDynamicLayer(CacheLayerMixin):
                 self.keys = keys_folded.reshape(full_batch_size, Hkv, ctx_len, head_dim)
                 self.values = values_folded.reshape(full_batch_size, Hkv, ctx_len, head_dim)
 
+    def write_only_headpar_cpdp(self, key_states, value_states, cache_kwargs):
+        """Write native-GQA K/V into a compact ``[B_local, DP*CP*Hkv, T/CP, D]`` cache.
+
+        The external batch is DP-major. Each update is expanded across CP rows,
+        but only the row owning the token's contiguous context range is written.
+        Invalid rows use the paged-scatter sentinel so their retained state is
+        untouched without introducing a read-before-write dependency.
+        """
+        dp = int(cache_kwargs.get("attn_dp", 1) or 1)
+        cp = int(cache_kwargs.get("attn_cp", 1) or 1)
+        ctx_len = int(cache_kwargs.get("ctx_len", 0) or 0)
+        position_ids = cache_kwargs.get("position_ids")
+        if position_ids is None:
+            raise ValueError("Compact GQA cache writes require position_ids.")
+        if key_states.shape != value_states.shape or key_states.ndim != 4:
+            raise ValueError("Compact GQA cache updates require matching [B, Hkv, Q, D] K/V tensors.")
+
+        batch, hkv, query_len, head_dim = key_states.shape
+        if batch % dp:
+            raise ValueError(f"Batch size {batch} must be divisible by attn_dp={dp}.")
+        if ctx_len < 1 or ctx_len % cp:
+            raise ValueError("Compact GQA cache requires ctx_len divisible by attn_cp.")
+        batch_local = batch // dp
+        if self.keys is None or self.values is None:
+            local_ctx_len = ctx_len // cp
+            rows = dp * cp * hkv
+            self.keys = torch.zeros(
+                (batch_local, rows, local_ctx_len, head_dim), dtype=key_states.dtype, device=key_states.device
+            )
+            self.values = torch.zeros_like(self.keys)
+            self._mark_initialized(self.keys)
+
+        self._mark_initialized(self.keys)
+        if self.keys.shape != self.values.shape or self.keys.ndim != 4:
+            raise ValueError("Compact GQA key and value caches must be matching rank-4 tensors.")
+        local_batch, rows, local_ctx_len, cache_head_dim = self.keys.shape
+        expected_rows = dp * cp * hkv
+        if (local_batch, rows, cache_head_dim) != (batch_local, expected_rows, head_dim):
+            raise ValueError(
+                "Compact GQA cache shape must be "
+                f"[{batch_local}, {expected_rows}, local_ctx_len, {head_dim}], got {tuple(self.keys.shape)}."
+            )
+        if position_ids.shape != (batch, query_len):
+            raise ValueError(
+                f"Compact GQA position_ids must have shape {(batch, query_len)}, got {tuple(position_ids.shape)}."
+            )
+
+        key_dp = key_states.reshape(dp, batch_local, query_len, hkv, head_dim).permute(1, 0, 3, 2, 4)
+        value_dp = value_states.reshape(dp, batch_local, query_len, hkv, head_dim).permute(1, 0, 3, 2, 4)
+        key_updates = key_dp.unsqueeze(2).expand(-1, -1, cp, -1, -1, -1).reshape(batch_local, rows, query_len, head_dim)
+        value_updates = (
+            value_dp.unsqueeze(2).expand(-1, -1, cp, -1, -1, -1).reshape(batch_local, rows, query_len, head_dim)
+        )
+
+        positions_dp = position_ids.reshape(dp, batch_local, query_len).permute(1, 0, 2)
+        configured_local_ctx_len = ctx_len // cp
+        owner_cp = torch.div(positions_dp, configured_local_ctx_len, rounding_mode="floor")
+        valid_position = (positions_dp >= 0) & (owner_cp >= 0) & (owner_cp < cp)
+        local_position = torch.remainder(positions_dp, configured_local_ctx_len)
+        row_cp = torch.arange(rows, device=key_states.device).remainder(cp * hkv).div(hkv, rounding_mode="floor")
+        row_live = row_cp.view(1, dp, cp, hkv, 1) == owner_cp.view(batch_local, dp, 1, 1, query_len)
+        row_live = row_live & valid_position.view(batch_local, dp, 1, 1, query_len)
+        row_live = row_live.reshape(batch_local, rows, query_len)
+        scatter_positions = (
+            local_position.view(batch_local, dp, 1, 1, query_len)
+            .expand(batch_local, dp, cp, hkv, query_len)
+            .reshape(batch_local, rows, query_len)
+        )
+        invalid_block_id = torch.iinfo(torch.int32).max
+        block_id = torch.arange(batch_local, device=key_states.device, dtype=torch.int32).view(batch_local, 1, 1)
+        block_id = block_id.expand(batch_local, rows, query_len)
+        block_id = torch.where(row_live, block_id, invalid_block_id)
+        scatter_positions = scatter_positions.to(torch.int32)
+
+        self.keys = ctx_paged_scatter_dp(self.keys, block_id, scatter_positions, key_updates)
+        self.values = ctx_paged_scatter_dp(self.values, block_id, scatter_positions, value_updates)
+
+    def read_only_headpar_cpdp(self, start_index, end_index, cache_kwargs):
+        """Read one local-context block from a compact GQA cache."""
+        del cache_kwargs
+        if self.keys is None or self.values is None:
+            raise ValueError("Compact GQA cache has not been initialized.")
+        if start_index < 0 or start_index >= end_index:
+            raise ValueError(f"Invalid compact GQA cache range [{start_index}, {end_index}).")
+        batch, rows, _, _ = self.keys.shape
+        ctx_indices = torch.arange(start_index, end_index, dtype=torch.int32, device=self.keys.device).view(1, 1, -1)
+        ctx_indices = ctx_indices.expand(batch, rows, -1)
+        return ctx_gather_blocked_kv(self.keys, ctx_indices), ctx_gather_blocked_kv(self.values, ctx_indices)
+
     def update(
         self,
         key_states: torch.Tensor,

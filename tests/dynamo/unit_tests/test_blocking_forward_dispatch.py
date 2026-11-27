@@ -26,8 +26,12 @@ import torch
 from torch import nn
 
 from QEfficient.blocking import attention_blocking
-from QEfficient.blocking.attention_blocking import BlockingMode
-from QEfficient.blocking.blocking_configurator import build_transformer_blocking_config_for_transform
+from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1, BlockingMode
+from QEfficient.blocking.blocking_configurator import (
+    build_transformer_blocking_config_for_transform,
+    get_compact_headpar_specialization_dims,
+    validate_headpar_cpdp_layout,
+)
 from QEfficient.transformers.models.pytorch_transforms import (
     BlockingAttentionTransform,
     CustomOpsTransform,
@@ -581,3 +585,81 @@ def test_dynamo_blocking_auto_hqkv_reduction_is_explicit(attention_cfg, expected
         )
 
     assert blocking_config.mode == expected_mode
+
+
+@pytest.mark.dynamo
+@pytest.mark.parametrize(
+    ("qaic_config", "ctx_len", "batch_size", "error"),
+    [
+        ({"blocking_mode": "kv", "num_kv_blocks": 2, "attn_dp": 2}, CTX_LEN, 2, "only with blocking_mode"),
+        ({"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "attn_cp": 3}, CTX_LEN, 2, "ctx_len"),
+        ({"blocking_mode": "kv_headpar", "num_kv_blocks": 2, "attn_dp": 2}, CTX_LEN, 1, "batch size"),
+    ],
+)
+def test_cpdp_headpar_rejects_incompatible_blocking_config(qaic_config, ctx_len, batch_size, error):
+    with pytest.raises(ValueError, match=error):
+        build_transformer_blocking_config_for_transform(
+            _make_tiny_llama().config,
+            ctx_len=ctx_len,
+            seq_len=SEQ_LEN,
+            bs=batch_size,
+            num_devices=1,
+            qaic_config=qaic_config,
+            aic_num_cores=4,
+        )
+
+
+def test_compact_headpar_specialization_dims_are_local_cache_dimensions():
+    dims = get_compact_headpar_specialization_dims(
+        {"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4},
+        batch_size=2,
+        ctx_len=128,
+    )
+
+    assert dims == {"local_ctx_len": 32, "local_batch_size": 1}
+
+
+@pytest.mark.parametrize(
+    "qaic_config, batch_size, ctx_len, error",
+    [
+        ({"blocking_mode": "kv_headpar", "attn_cp": 3}, 1, 128, "ctx_len"),
+        ({"blocking_mode": "kv_headpar", "attn_dp": 2}, 1, 128, "batch_size"),
+    ],
+)
+def test_compact_headpar_specialization_dims_reject_invalid_local_shapes(qaic_config, batch_size, ctx_len, error):
+    with pytest.raises(ValueError, match=error):
+        get_compact_headpar_specialization_dims(qaic_config, batch_size=batch_size, ctx_len=ctx_len)
+
+
+@pytest.mark.parametrize(
+    "cache_layout, error",
+    [
+        pytest.param(HEADPAR_CPDP_LAYOUT_GQA_V1, None, id="compact-gqa"),
+        pytest.param(None, "gqa_v1", id="unsupported-cache-layout"),
+    ],
+)
+def test_cpdp_headpar_requires_compact_gqa_cache_layout(cache_layout, error):
+    """Only models that declare the compact GQA cache contract may use CP/DP headpar."""
+    qaic_config = {"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4}
+
+    if error is None:
+        validate_headpar_cpdp_layout(qaic_config, cache_layout)
+    else:
+        with pytest.raises(ValueError, match=error):
+            validate_headpar_cpdp_layout(qaic_config, cache_layout)
+
+
+@pytest.mark.dynamo
+def test_legacy_headpar_defaults_to_non_compact_cache_layout():
+    blocking_config = build_transformer_blocking_config_for_transform(
+        _make_tiny_llama().config,
+        ctx_len=CTX_LEN,
+        seq_len=SEQ_LEN,
+        bs=BATCH_SIZE,
+        num_devices=1,
+        qaic_config={"blocking_mode": "kv_headpar", "num_kv_blocks": NUM_KV_BLOCKS},
+        aic_num_cores=4,
+    )
+
+    assert blocking_config.attn_dp == 1
+    assert blocking_config.attn_cp == 1

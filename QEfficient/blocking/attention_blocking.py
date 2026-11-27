@@ -128,6 +128,9 @@ class BlockingMode(str, Enum):
                 raise ValueError(f"BlockingMode.{mode.name} requires {missing_mla} to be set in mla_kwargs")
 
 
+HEADPAR_CPDP_LAYOUT_GQA_V1 = "gqa_v1"
+
+
 @dataclass
 class AttentionBlockingConfig:
     mode: BlockingMode = BlockingMode.NONE
@@ -551,7 +554,30 @@ def generic_blocked_attention_interface(
                     query = query + cache_dependency.to(dtype=query.dtype) * 0
         elif past_key_value is not None:
             use_kv_blocked = _uses_blocked_kv_cache(mode) and supports_blocked_kv(past_key_value)
-            if mode == BlockingMode.KV_BATCH_FOLD:
+            requests_headpar_cpdp = mode == BlockingMode.KV_HEADPAR and (
+                int(blocking_config.attn_dp or 1) > 1 or int(blocking_config.attn_cp or 1) > 1
+            )
+            cache_layout = getattr(past_key_value, "headpar_cpdp_cache_layout", None)
+            if requests_headpar_cpdp and cache_layout != HEADPAR_CPDP_LAYOUT_GQA_V1:
+                raise ValueError(
+                    "CP/DP kv_headpar requires a cache that supports the "
+                    f"{HEADPAR_CPDP_LAYOUT_GQA_V1!r} compact GQA layout."
+                )
+            if requests_headpar_cpdp:
+                if not hasattr(past_key_value, "write_only_headpar_cpdp"):
+                    raise TypeError("CP/DP kv_headpar requires a cache with compact GQA KV support.")
+                past_key_value.write_only_headpar_cpdp(
+                    key,
+                    value,
+                    module.layer_idx,
+                    {
+                        **cache_kwargs,
+                        "attn_dp": int(blocking_config.attn_dp or 1),
+                        "attn_cp": int(blocking_config.attn_cp or 1),
+                        "ctx_len": int(blocking_config.ctx_len or 0),
+                    },
+                )
+            elif mode == BlockingMode.KV_BATCH_FOLD:
                 past_key_value.write_only_batch(key, value, module.layer_idx, cache_kwargs)
             elif use_kv_blocked and sliding_window is None:
                 past_key_value.write_only(key, value, module.layer_idx, cache_kwargs)
@@ -621,6 +647,8 @@ def generic_blocked_attention_interface(
         kv_block_unroll=blocking_config.kv_block_unroll,
         skip_kv=(blocking_config.skip_kv or False) if skip_kv is None else skip_kv,
         paged_attention=blocking_config.paged_attention,
+        attn_dp=blocking_config.attn_dp or 1,
+        attn_cp=blocking_config.attn_cp or 1,
         # prefill-specific — omit when None so function default (1) applies
         **({"n_rep_chunk": blocking_config.n_rep_chunk} if blocking_config.n_rep_chunk is not None else {}),
         num_cores_per_device=blocking_config.num_cores_per_device,

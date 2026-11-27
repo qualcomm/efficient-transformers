@@ -44,6 +44,7 @@ except ImportError:
     create_recurrent_attention_mask = None
 
 from QEfficient.blocking.attention_blocking import (
+    HEADPAR_CPDP_LAYOUT_GQA_V1,
     AttentionBlockingConfig,
     BlockingMode,
     blocked_gdn_decode_forward,
@@ -164,6 +165,8 @@ class QEffQwen3_5MoeDynamicCache(Cache):
     channel-last convolution state ``[batch, conv_kernel, conv_dim]`` and
     recurrent state ``[batch, value_heads, key_dim, value_dim]``.
     """
+
+    headpar_cpdp_cache_layout = HEADPAR_CPDP_LAYOUT_GQA_V1
 
     def __init__(self, config):
         super().__init__(layers=[])
@@ -331,6 +334,22 @@ class QEffQwen3_5MoeDynamicCache(Cache):
         if layer is None:
             raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
         return layer.write_only_batch(key_states, value_states, cache_kwargs)
+
+    def write_only_headpar_cpdp(
+        self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int, cache_kwargs: dict
+    ):
+        """Write CP/DP head-parallel GQA updates through the selected attention layer."""
+        layer = self.kv_layers[layer_idx]
+        if layer is None:
+            raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
+        return layer.write_only_headpar_cpdp(key_states, value_states, cache_kwargs)
+
+    def read_only_headpar_cpdp(self, start_index: int, end_index: int, layer_idx: int, cache_kwargs: dict):
+        """Read a local CP context block from the selected compact GQA cache layer."""
+        layer = self.kv_layers[layer_idx]
+        if layer is None:
+            raise ValueError(f"Layer {layer_idx} is not a full_attention layer")
+        return layer.read_only_headpar_cpdp(start_index, end_index, cache_kwargs)
 
     def has_previous_state(self, layer_idx=None) -> bool:
         if layer_idx is not None:
@@ -1725,6 +1744,8 @@ class QEffQwen3_5MoeTextModel(Qwen3_5MoeTextModel):
 
 
 class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
+    headpar_cpdp_cache_layout = HEADPAR_CPDP_LAYOUT_GQA_V1
+
     def get_submodules_for_export(self) -> Type[nn.Module]:
         specialized_classes = {
             QEffQwen3_5MoeLinearAttentionDecoderLayer,
@@ -1785,6 +1806,30 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
             return [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
         return [f"conv_state.{layer_idx}", f"recurrent_state.{layer_idx}"]
 
+    def _get_compact_headpar_factors(self) -> Tuple[int, int]:
+        """Return the shared CP/DP topology for full-attention retained states.
+
+        CP/DP head-parallel decode stores native-GQA KV state as
+        ``[B / DP, DP * CP * Hkv, T / CP, D]``. Validate that every
+        full-attention layer uses the same topology before exporting retained
+        states with the compact cache signature.
+        """
+        factors = None
+        layers = getattr(getattr(self, "model", None), "layers", ())
+        for layer_idx, layer_type in enumerate(self.config.layer_types):
+            if layer_type != "full_attention" or layer_idx >= len(layers):
+                continue
+            blocking_config = getattr(getattr(layers[layer_idx], "self_attn", None), "attn_blocking_config", None)
+            if blocking_config is None or BlockingMode.resolve(blocking_config.mode) != BlockingMode.KV_HEADPAR:
+                continue
+            layer_factors = (int(blocking_config.attn_dp or 1), int(blocking_config.attn_cp or 1))
+            if layer_factors == (1, 1):
+                continue
+            if factors is not None and factors != layer_factors:
+                raise ValueError("All full-attention layers must use the same CP/DP kv_headpar factors.")
+            factors = layer_factors
+        return factors or (1, 1)
+
     def _retained_state_dtypes(self) -> dict:
         kv_dtype = _qeff_resolve_torch_dtype(getattr(self.config, "torch_dtype", torch.float32))
         recurrent_dtype = _qeff_resolve_torch_dtype(getattr(self.config, "mamba_ssm_dtype", None))
@@ -1814,6 +1859,21 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
     ) -> dict:
         del seq_len, retain_full_kv
         batch_axis_name = "full_batch_size" if continuous_batching else "batch_size"
+        attn_dp, attn_cp = self._get_compact_headpar_factors()
+        uses_compact_headpar_cache = (attn_dp, attn_cp) != (1, 1)
+        if uses_compact_headpar_cache and continuous_batching:
+            raise ValueError("CP/DP kv_headpar does not support continuous batching.")
+        if uses_compact_headpar_cache:
+            if len(kv_cache_shape) != 4:
+                raise ValueError("CP/DP kv_headpar requires rank-4 KV retained-state tensors.")
+            if batch_size % attn_dp:
+                raise ValueError(f"batch_size ({batch_size}) must be divisible by attn_dp ({attn_dp}).")
+            compact_kv_cache_shape = (
+                batch_size // attn_dp,
+                kv_cache_shape[1] * attn_dp * attn_cp,
+                -(-kv_cache_shape[2] // attn_cp),
+                kv_cache_shape[3],
+            )
         specs = {
             "past_key_values": [],
             "input_names": [],
@@ -1826,13 +1886,16 @@ class QEffQwen3_5MoeForCausalLM(Qwen3_5MoeForCausalLM):
         for layer_idx, layer_type in enumerate(self.config.layer_types):
             if layer_type == "full_attention":
                 layer_names = [f"past_key.{layer_idx}", f"past_value.{layer_idx}"]
+                full_attention_cache_shape = compact_kv_cache_shape if uses_compact_headpar_cache else kv_cache_shape
                 layer_tensors = [
-                    torch.zeros(tuple(kv_cache_shape), dtype=state_dtypes[layer_names[0]]),
-                    torch.zeros(tuple(kv_cache_shape), dtype=state_dtypes[layer_names[1]]),
+                    torch.zeros(tuple(full_attention_cache_shape), dtype=state_dtypes[layer_names[0]]),
+                    torch.zeros(tuple(full_attention_cache_shape), dtype=state_dtypes[layer_names[1]]),
                 ]
+                full_attention_ctx_axis = "local_ctx_len" if uses_compact_headpar_cache else "ctx_len"
+                full_attention_batch_axis = "local_batch_size" if attn_dp > 1 else batch_axis_name
                 layer_axes = [
-                    {0: batch_axis_name, 2: "ctx_len"},
-                    {0: batch_axis_name, 2: "ctx_len"},
+                    {0: full_attention_batch_axis, 2: full_attention_ctx_axis},
+                    {0: full_attention_batch_axis, 2: full_attention_ctx_axis},
                 ]
             else:
                 layer = self.model.layers[layer_idx].linear_attn
@@ -2943,6 +3006,28 @@ class QEffQwen3_5MoeTopKRouter(Qwen3_5MoeTopKRouter):
         return router_logits, router_scores, router_indices
 
 
+class _QEffQwen3_5MoeOriginalWeights:
+    def __init__(self, gate, up, down):
+        self.gate = gate
+        self.up = up
+        self.down = down
+        self.gate_bias = None
+        self.up_bias = None
+        self.down_bias = None
+
+    @property
+    def num_experts(self) -> int:
+        return self.gate.shape[0]
+
+    @property
+    def hidden_size(self) -> int:
+        return self.gate.shape[1]
+
+    @property
+    def intermediate_size(self) -> int:
+        return self.gate.shape[2]
+
+
 class QEffQwen3_5MoeExperts(Qwen3_5MoeExperts):
     def __qeff_init__(self):
         self.weights_transformed = False
@@ -2950,6 +3035,11 @@ class QEffQwen3_5MoeExperts(Qwen3_5MoeExperts):
 
     def transform_weights(self) -> MoEWeights:
         if getattr(self, "weights_transformed", False):
+            return self.moe_weights
+        if getattr(self, "_qeff_use_original_checkpoint", False):
+            self._qeff_original_checkpoint_layout = True
+            self.weights_transformed = True
+            self.moe_weights = self.original_moe_weights()
             return self.moe_weights
         self.moe_weights = build_canonical_expert_weights(
             gate_up=self.gate_up_proj,
@@ -2963,6 +3053,14 @@ class QEffQwen3_5MoeExperts(Qwen3_5MoeExperts):
         delete_module_attrs(self, "gate_up_proj", "down_proj")
         self.weights_transformed = True
         return self.moe_weights
+
+    def original_moe_weights(self) -> _QEffQwen3_5MoeOriginalWeights:
+        expert_dim = getattr(self, "expert_dim", self.gate_up_proj.shape[-2] // 2)
+        return _QEffQwen3_5MoeOriginalWeights(
+            gate=self.gate_up_proj[:, :expert_dim].transpose(-1, -2),
+            up=self.gate_up_proj[:, expert_dim:].transpose(-1, -2),
+            down=self.down_proj.transpose(-1, -2),
+        )
 
 
 class QEffQwen3_5MoeSparseMoeBlock(QEffMoEBlockMixin, Qwen3_5MoeSparseMoeBlock):
@@ -2983,7 +3081,14 @@ class QEffQwen3_5MoeSparseMoeBlock(QEffMoEBlockMixin, Qwen3_5MoeSparseMoeBlock):
             return self.moe_weights
         weights = self.experts.transform_weights()
         self.moe_weights = weights
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            self._qeff_original_checkpoint_layout = True
         self.weights_transformed = True
+        return self.moe_weights
+
+    def _moe_weights_for_forward(self):
+        if getattr(self.experts, "_qeff_original_checkpoint_layout", False):
+            return self.experts.original_moe_weights()
         return self.moe_weights
 
     @property

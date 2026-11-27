@@ -18,7 +18,12 @@ import math
 import warnings
 from typing import Any, Dict, List, Optional
 
-from QEfficient.blocking.attention_blocking import BLOCKING_MODE_REQUIRED_PARAMS, AttentionBlockingConfig, BlockingMode
+from QEfficient.blocking.attention_blocking import (
+    BLOCKING_MODE_REQUIRED_PARAMS,
+    HEADPAR_CPDP_LAYOUT_GQA_V1,
+    AttentionBlockingConfig,
+    BlockingMode,
+)
 from QEfficient.utils import get_attr_or_key, require_value
 from QEfficient.utils.constants import (
     DEFAULT_AIC_NUM_CORES,
@@ -103,6 +108,60 @@ def _get_valid_num_blocks(config: Dict, requested_key: str) -> int:
     if config.get(requested_key) < 1:
         raise ValueError(f"Invalid value {requested_key} passed in qaic_config: {config.get(requested_key)}")
     return config.get(requested_key)
+
+
+def get_compact_headpar_specialization_dims(
+    qaic_config: Optional[dict], *, batch_size: int, ctx_len: int
+) -> Dict[str, int]:
+    """Return local cache dimensions for a CP/DP ``kv_headpar`` specialization.
+
+    Compact head-parallel GQA caches split the global context across CP lanes
+    and, when DP is enabled, split the global batch across DP lanes. Their
+    retained-state ONNX inputs therefore use ``local_ctx_len`` and optionally
+    ``local_batch_size`` rather than the global dimensions. The compiler must
+    specialize those symbols to the corresponding local values.
+
+    The input specialization owns the final batch and context values, so this
+    function intentionally returns a new dictionary instead of mutating it.
+    """
+    blocking_mode = qaic_config.get("blocking_mode") if qaic_config else None
+    if blocking_mode is None or BlockingMode.resolve(blocking_mode) != BlockingMode.KV_HEADPAR:
+        return {}
+
+    attn_dp = int(qaic_config.get("attn_dp", 1) or 1)
+    attn_cp = int(qaic_config.get("attn_cp", 1) or 1)
+    if attn_dp == 1 and attn_cp == 1:
+        return {}
+
+    if ctx_len % attn_cp:
+        raise ValueError(f"ctx_len ({ctx_len}) must be divisible by attn_cp ({attn_cp}).")
+
+    local_dims = {"local_ctx_len": ctx_len // attn_cp}
+    if attn_dp > 1:
+        if batch_size % attn_dp:
+            raise ValueError(f"batch_size ({batch_size}) must be divisible by attn_dp ({attn_dp}).")
+        local_dims["local_batch_size"] = batch_size // attn_dp
+    return local_dims
+
+
+def validate_headpar_cpdp_layout(qaic_config: Optional[dict], cache_layout: Optional[str]) -> None:
+    """Validate that a requested CP/DP headpar topology has a matching cache layout.
+
+    ``attn_dp`` and ``attn_cp`` are only meaningful for ``kv_headpar`` when the
+    model exports the compact native-GQA retained-state layout. Other attention
+    families can define a separate layout contract without being interpreted as
+    this GQA layout.
+    """
+    if not qaic_config or BlockingMode.resolve(qaic_config.get("blocking_mode")) != BlockingMode.KV_HEADPAR:
+        return
+
+    attn_dp = int(qaic_config.get("attn_dp", 1) or 1)
+    attn_cp = int(qaic_config.get("attn_cp", 1) or 1)
+    if (attn_dp > 1 or attn_cp > 1) and cache_layout != HEADPAR_CPDP_LAYOUT_GQA_V1:
+        raise ValueError(
+            "CP/DP kv_headpar requires a model that supports the "
+            f"{HEADPAR_CPDP_LAYOUT_GQA_V1!r} compact GQA KV-cache layout."
+        )
 
 
 def _is_minimax_m3_config(model_config: Any) -> bool:
@@ -568,6 +627,24 @@ def build_transformer_blocking_config_for_transform(
 
     if blocking_mode == BlockingMode.KV_BATCH_FOLD:
         blocking_config.batch_fold = True
+
+    attn_dp = int(qaic_config.get("attn_dp", 1) or 1)
+    attn_cp = int(qaic_config.get("attn_cp", 1) or 1)
+    if attn_dp < 1 or attn_cp < 1:
+        raise ValueError("attn_dp and attn_cp must be positive integers.")
+    supported_cpdp_modes = {BlockingMode.KV_HEADPAR, BlockingMode.KV_MINIMAX_DEDICATED}
+    if (attn_dp > 1 or attn_cp > 1) and blocking_mode not in supported_cpdp_modes:
+        raise ValueError(
+            "attn_dp and attn_cp are currently supported only with "
+            "blocking_mode='kv_headpar' or 'kv_minimax_dedicated'."
+        )
+    if blocking_mode == BlockingMode.KV_HEADPAR:
+        if ctx_len is not None and int(ctx_len) % attn_cp:
+            raise ValueError(f"ctx_len ({ctx_len}) must be divisible by attn_cp ({attn_cp}).")
+        if bs is not None and int(bs) % attn_dp:
+            raise ValueError(f"batch size ({bs}) must be divisible by attn_dp ({attn_dp}).")
+        blocking_config.attn_dp = attn_dp
+        blocking_config.attn_cp = attn_cp
 
     # optional blocking parameters to set if given in qaic_config
     for param in (

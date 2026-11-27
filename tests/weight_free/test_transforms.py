@@ -488,6 +488,26 @@ class TestWeightFreeCheckpointTransforms:
         assert tuple(weights.up.shape) == (2, 4, 6)
         assert tuple(weights.down.shape) == (2, 6, 4)
 
+    def test_qwen3_5_original_weights_keep_source_parameter_names(self):
+        from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import QEffQwen3_5MoeExperts
+
+        experts = object.__new__(QEffQwen3_5MoeExperts)
+        torch.nn.Module.__init__(experts)
+        gate_up = torch.arange(2 * 8 * 3, dtype=torch.float32).reshape(2, 8, 3)
+        down = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+        experts.gate_up_proj = torch.nn.Parameter(gate_up)
+        experts.down_proj = torch.nn.Parameter(down)
+        experts.expert_dim = 4
+        experts.weights_transformed = False
+        experts._qeff_use_original_checkpoint = True
+
+        weights = experts.transform_weights()
+
+        assert set(dict(experts.named_parameters())) == {"gate_up_proj", "down_proj"}
+        torch.testing.assert_close(weights.gate, gate_up[:, :4].transpose(-1, -2))
+        torch.testing.assert_close(weights.up, gate_up[:, 4:].transpose(-1, -2))
+        torch.testing.assert_close(weights.down, down.transpose(-1, -2))
+
     def test_gpt_oss_original_layout_splits_fused_source_weights_in_forward(self):
         from transformers import GptOssConfig
 
@@ -1051,10 +1071,10 @@ class TestWeightFreeCheckpointTransforms:
         assert _safetensors_shapes(str(tmp_path / "model.safetensors")) == {"a": [3, 5], "b": [7]}
 
     @staticmethod
-    def _weight_graph(source_dtype, target_dtype):
-        weight = ir.Value(name="weight", shape=[2, 2], type=ir.TensorType(target_dtype))
-        hidden = ir.Value(name="hidden", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
-        output = ir.Value(name="output", shape=[2, 2], type=ir.TensorType(ir.DataType.FLOAT))
+    def _weight_graph(source_dtype, target_dtype, target_shape=(2, 2), source_shape=None):
+        weight = ir.Value(name="weight", shape=target_shape, type=ir.TensorType(target_dtype))
+        hidden = ir.Value(name="hidden", shape=[target_shape[1], 2], type=ir.TensorType(ir.DataType.FLOAT))
+        output = ir.Value(name="output", shape=[target_shape[0], 2], type=ir.TensorType(ir.DataType.FLOAT))
         matmul = ir.Node(
             domain="",
             op_type="MatMul",
@@ -1072,7 +1092,7 @@ class TestWeightFreeCheckpointTransforms:
         )
         from QEfficient.exporter.weight_free.checkpoint_key_resolver import _promote_initializer
 
-        _promote_initializer(SimpleNamespace(graph=graph), "weight", weight, source_dtype)
+        _promote_initializer(SimpleNamespace(graph=graph), "weight", weight, source_dtype, source_shape)
         return graph
 
     def test_original_bfloat16_weight_casts_to_fp16_graph_dtype(self):
@@ -1098,6 +1118,23 @@ class TestWeightFreeCheckpointTransforms:
         assert [node.op_type for node in graph] == ["MatMul"]
         assert list(graph)[0].inputs[0].name == "weight"
         assert not graph.initializers
+
+    def test_original_weight_layout_inserts_transpose(self):
+        graph = self._weight_graph(
+            ir.DataType.FLOAT16,
+            ir.DataType.FLOAT16,
+            target_shape=(2, 3),
+            source_shape=[3, 2],
+        )
+
+        assert [(value.name, list(value.shape)) for value in graph.inputs] == [
+            ("hidden", [3, 2]),
+            ("weight", [3, 2]),
+        ]
+        assert [node.op_type for node in graph] == ["Transpose", "MatMul"]
+        transpose, matmul = list(graph)
+        assert list(transpose.attributes["perm"].value) == [1, 0]
+        assert matmul.inputs[0].name == transpose.outputs[0].name
 
     def test_scheduler_waits_for_staged_dependency(self, tmp_path):
         execution_order = []
@@ -1909,6 +1946,38 @@ class TestWeightFreeExportHash:
         assert regular_hash != weight_free_hash
         assert "weight_free" not in regular_params
         assert weight_free_params["weight_free"] is True
+
+    def test_original_checkpoint_export_hash_differs_from_converted_checkpoint(self):
+        config = SimpleNamespace(to_diff_dict=lambda: {"model_type": "qwen3_5_moe"})
+        common_model = {
+            "model": SimpleNamespace(config=config),
+            "hash_params": {"pretrained_model_name_or_path": "tiny"},
+            "_use_onnx_subfunctions": False,
+            "_weight_free": True,
+        }
+        common_kwargs = {
+            "example_inputs": {"input_ids": torch.ones(1, 2, dtype=torch.int64)},
+            "output_names": ["logits"],
+            "dynamic_axes": {"input_ids": {0: "batch_size"}},
+            "dynamo": True,
+        }
+
+        converted_hash, converted_params = _generate_export_hash(
+            SimpleNamespace(**common_model, _use_original_checkpoint=False),
+            (),
+            dict(common_kwargs),
+            _fake_export,
+        )
+        original_hash, original_params = _generate_export_hash(
+            SimpleNamespace(**common_model, _use_original_checkpoint=True),
+            (),
+            dict(common_kwargs),
+            _fake_export,
+        )
+
+        assert converted_hash != original_hash
+        assert "use_original_checkpoint" not in converted_params
+        assert original_params["use_original_checkpoint"] is True
 
     def test_minimax_capture_batch_changes_export_hash(self):
         config = SimpleNamespace(

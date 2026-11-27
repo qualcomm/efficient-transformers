@@ -45,7 +45,8 @@ from transformers import (
     WhisperForConditionalGeneration,
 )
 
-from QEfficient.blocking.attention_blocking import AttentionBlockingConfig, BlockingMode
+import QEfficient.transformers.models.modeling_auto as modeling_auto
+from QEfficient.blocking.attention_blocking import HEADPAR_CPDP_LAYOUT_GQA_V1, AttentionBlockingConfig, BlockingMode
 from QEfficient.transformers.models.modeling_auto import (
     MultimodalUtilityMixin,
     QEFFAutoModel,
@@ -280,7 +281,44 @@ class TestQEFFTransformersBase:
         qeff_model = QEFFAutoModelForCausalLM(make_tiny_llama()[0], weight_free=True)
 
         assert qeff_model._weight_free is True
+        assert qeff_model._use_original_checkpoint is False
         assert UNSUPPORTED_WEIGHT_FREE_WARNING not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("weight_free", "use_original_checkpoint", "expected"),
+        [
+            pytest.param(False, None, False, id="regular"),
+            pytest.param(True, None, False, id="weight-free-default"),
+            pytest.param(True, False, False, id="explicit-converted-checkpoint"),
+            pytest.param(True, True, True, id="explicit-original-checkpoint"),
+        ],
+    )
+    def test_causal_lm_weight_free_preserves_original_checkpoint_opt_in(
+        self, monkeypatch, weight_free, use_original_checkpoint, expected
+    ):
+        """Weight-free CausalLM export uses source safetensors only when requested."""
+
+        def fake_init(self, _model, **kwargs):
+            self._weight_free = kwargs["weight_free"]
+            self._use_original_checkpoint = kwargs["use_original_checkpoint"]
+
+        monkeypatch.setattr(modeling_auto, "validate_dynamo_export_requirements", lambda *_: None)
+        monkeypatch.setattr(modeling_auto, "_resolve_torch_dtype", lambda _kwargs: None)
+        monkeypatch.setattr(modeling_auto, "_build_meta_model", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(modeling_auto, "_peek_architectures", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(
+            QEFFAutoModelForCausalLM._hf_auto_class, "from_pretrained", lambda *_args, **_kwargs: object()
+        )
+        monkeypatch.setattr(QEFFAutoModelForCausalLM, "__init__", fake_init)
+
+        model = QEFFAutoModelForCausalLM.from_pretrained(
+            "dummy-model",
+            weight_free=weight_free,
+            use_original_checkpoint=use_original_checkpoint,
+        )
+
+        assert model._weight_free is weight_free
+        assert model._use_original_checkpoint is expected
 
     def test_embedding_direct_init_preserves_weight_free(self):
         """Embedding models retain weight-free mode for Dynamo export."""
@@ -427,6 +465,27 @@ class TestQEFFAutoModelForCausalLMLogic:
         assert decode["_graph_name"] == "Decode"
         assert prefill["_graph_name"] == "Prefill"
 
+    def test_build_prefill_specialization_adds_compact_headpar_dimensions(self):
+        """CP/DP headpar specs include the local dimensions used by compact KV cache inputs."""
+        qeff = object.__new__(QEFFAutoModelForCausalLM)
+        qeff.model = SimpleNamespace(
+            headpar_cpdp_cache_layout=HEADPAR_CPDP_LAYOUT_GQA_V1,
+            qaic_config={"blocking_mode": "kv_headpar", "attn_dp": 2, "attn_cp": 4},
+        )
+        qeff.continuous_batching = False
+        qeff.dflash_tlm = False
+        qeff.is_tlm = False
+
+        spec = qeff.build_prefill_specialization(
+            prefill_seq_len=1,
+            ctx_len=128,
+            batch_size=2,
+            kv_cache_batch_size=2,
+        )
+
+        assert spec["local_batch_size"] == 1
+        assert spec["local_ctx_len"] == 32
+
     # --- build_decode_specialization ---
 
     def test_build_decode_specialization_basic(self):
@@ -563,6 +622,63 @@ class TestQEFFAutoModelForCausalLMCompileValidation:
         qeff = QEFFAutoModelForCausalLM(model)
         with pytest.raises(TypeError, match="prefill_only"):
             qeff.compile(prefill_seq_len=32, ctx_len=128, prefill_only="yes")
+
+    def test_compile_syncs_qaic_config_before_compact_headpar_specialization(self, tmp_path, monkeypatch):
+        """Compile-only QAIC configuration drives compact CP/DP cache specializations."""
+        model, _ = make_tiny_gpt2()
+        model.headpar_cpdp_cache_layout = HEADPAR_CPDP_LAYOUT_GQA_V1
+        qeff = QEFFAutoModelForCausalLM(model)
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"fake")
+        captured_kwargs = {}
+        qaic_config = {
+            "blocking_mode": "kv_headpar",
+            "num_kv_blocks": 2,
+            "attn_dp": 2,
+            "attn_cp": 4,
+        }
+
+        def fake_compile(**kwargs):
+            captured_kwargs.update(kwargs)
+            return tmp_path / "qpc"
+
+        monkeypatch.setattr(qeff, "_compile", fake_compile)
+
+        qeff.compile(
+            onnx_path=str(onnx_path),
+            compile_dir=str(tmp_path),
+            prefill_seq_len=1,
+            ctx_len=128,
+            batch_size=2,
+            qaic_config=qaic_config,
+        )
+
+        assert qeff.model.qaic_config is qaic_config
+        specialization = captured_kwargs["specializations"][0]
+        assert specialization["local_batch_size"] == 1
+        assert specialization["local_ctx_len"] == 32
+
+    def test_compile_rejects_cpdp_headpar_without_compact_gqa_cache_layout(self, tmp_path):
+        """Generic caches must not be compiled with Qwen's compact CP/DP GQA specialization."""
+        model, _ = make_tiny_gpt2()
+        qeff = QEFFAutoModelForCausalLM(model)
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"fake")
+
+        with pytest.raises(ValueError, match="gqa_v1"):
+            qeff.compile(
+                onnx_path=str(onnx_path),
+                compile_dir=str(tmp_path),
+                prefill_seq_len=1,
+                ctx_len=128,
+                batch_size=2,
+                qaic_config={
+                    "blocking_mode": "kv_headpar",
+                    "num_kv_blocks": 2,
+                    "attn_dp": 2,
+                    "attn_cp": 4,
+                },
+            )
 
     @pytest.mark.parametrize(
         ("compile_kwargs", "expected_graph_names"),

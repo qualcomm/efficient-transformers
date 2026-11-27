@@ -581,7 +581,7 @@ class QEFFBaseModel(ABC):
         # Flag for checking if weights are offloaded
         self._is_weights_offloaded: bool = False
         self._weight_free: bool = kwargs.get("weight_free", False)
-        self._use_original_checkpoint: bool = kwargs.get("use_original_checkpoint", False)
+        self._use_original_checkpoint: bool = bool(kwargs.get("use_original_checkpoint", False))
         if self._use_original_checkpoint and not self._weight_free:
             raise ValueError("use_original_checkpoint=True requires weight_free=True")
         for module in self.model.modules():
@@ -1569,7 +1569,9 @@ class QEFFBaseModel(ABC):
         if qaic_config is not None:
             self.hash_params["qaic_config"] = qaic_config
         self.hash_params["num_replicate_kv_heads"] = effective_num_replicate_kv_heads
-        prefill_seq_len = compiler_options.get("prefill_seq_len", seq_len)
+        prefill_seq_len = compiler_options.get("prefill_seq_len")
+        if prefill_seq_len is None:
+            prefill_seq_len = seq_len
         mdp_num_partitions = compiler_options.get("mdp_num_partitions", 1)
         if mdp_num_partitions is None:
             mdp_num_partitions = 1

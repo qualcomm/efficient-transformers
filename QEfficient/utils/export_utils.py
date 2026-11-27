@@ -138,6 +138,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
     dynamic_axes: dict[str, dict[int, str]],
     model_config=None,
     example_inputs=None,
+    qaic_config: dict | None = None,
 ) -> dict[str, Any]:
     """
     Convert ONNX dynamic_axes format to torch.export dynamic_shapes format.
@@ -158,6 +159,10 @@ def convert_dynamic_axes_to_dynamic_shapes(
         Concrete export inputs used to identify dimensions that are statically
         specialized by the traced graph, such as singleton vision axes and
         one-token decode sequence length.
+    qaic_config : optional
+        QAIC topology settings. When retained-state axes include
+        ``local_batch_size``, ``attn_dp`` declares that the model batch is the
+        derived dimension ``attn_dp * local_batch_size``.
 
     Returns
     -------
@@ -182,6 +187,12 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 if axis_idx < sample.ndim:
                     observed_dim_values.setdefault(dim_name, set()).add(int(sample.shape[axis_idx]))
 
+    has_local_batch_size = any(
+        dim_name == "local_batch_size" for axes_map in dynamic_axes.values() for dim_name in axes_map.values()
+    )
+    attn_dp = int((qaic_config or {}).get("attn_dp", 1) or 1)
+    local_batch_factor = attn_dp if has_local_batch_size and attn_dp > 1 else 1
+
     dim_registry: dict[str, Any] = {}
 
     def resolve_dim(dim_name: str):
@@ -200,6 +211,12 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 }
             ):
                 dim_registry[dim_name] = Dim.STATIC
+            elif "local_ctx_len" in dim_name:
+                dim_registry[dim_name] = Dim("local_ctx_len", min=1, max=max_seq_len)
+            elif dim_name == "local_batch_size":
+                dim_registry[dim_name] = Dim(
+                    "local_batch_size", min=1, max=DYNAMO_DIM_MAX_BATCH_SIZE // local_batch_factor
+                )
             elif dim_name == "time" and observed_dim_values.get(dim_name) == {1}:
                 dim_registry[dim_name] = Dim("time")
             elif observed_dim_values.get(dim_name) == {1}:
@@ -208,6 +225,8 @@ def convert_dynamic_axes_to_dynamic_shapes(
                 # GLM DSA can fold batch across attention-DP lanes. Dynamo may
                 # specialize it to the export batch for a concrete DP layout.
                 dim_registry[dim_name] = Dim.STATIC
+            elif dim_name == "batch_size" and local_batch_factor > 1:
+                dim_registry[dim_name] = local_batch_factor * resolve_dim("local_batch_size")
             elif dim_name == "batch_size":
                 dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
             elif dim_name == "full_batch_size":
@@ -396,6 +415,24 @@ def get_decoder_layer_classes_for_export(model):
     return []
 
 
+def _ordered_decoder_layer_classes(model, decoder_layer_classes):
+    """Order decoder classes by first occurrence in model execution order.
+
+    Dynamo emits repeated regions in module order. Sorting heterogeneous
+    decoder classes can associate a generated function name with the wrong
+    function body; classes not reachable from the model keep a deterministic
+    fallback order.
+    """
+    remaining = {cls for cls in decoder_layer_classes if inspect.isclass(cls)}
+    ordered = []
+    for module in model.modules():
+        module_class = module.__class__
+        if module_class in remaining:
+            ordered.append(module_class)
+            remaining.remove(module_class)
+    return ordered + sorted(remaining, key=lambda cls: cls.__name__)
+
+
 def _function_proto_id(function_proto) -> tuple[str, str]:
     return function_proto.domain, function_proto.name
 
@@ -581,7 +618,10 @@ def export_wrapper(func):
                 model_config = getattr(self.model, "config", None)
                 example_inputs = bound_export_args.arguments.get("example_inputs")
                 kwargs["dynamic_shapes"] = convert_dynamic_axes_to_dynamic_shapes(
-                    dynamic_axes, model_config, example_inputs
+                    dynamic_axes,
+                    model_config,
+                    example_inputs,
+                    getattr(self.model, "qaic_config", None),
                 )
 
         # Cache probe flag (used for layerwise inspection runs)
@@ -756,6 +796,8 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
                 copy_of_hash_params["onnx_export_batch_size"] = int(input_ids.shape[0])
     if getattr(qeff_model, "_weight_free", False):
         copy_of_hash_params["weight_free"] = True
+    if getattr(qeff_model, "_use_original_checkpoint", False):
+        copy_of_hash_params["use_original_checkpoint"] = True
     if getattr(qeff_model, "_use_onnx_subfunctions", False):
         copy_of_hash_params["onnx_subfunction_version"] = 4
     # Generate hash from relevant parameters
@@ -862,13 +904,15 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
     decoder_layer_classes = get_decoder_layer_classes_for_export(qeff_model.model)
     if decoder_layer_classes:
         if dynamo:
-            # Dynamo needs ordered duplicate names; TorchScript only accepts unique module classes below.
-            resolved_classnames = [cls.__name__ for cls in decoder_layer_classes]
+            # Preserve the module execution order when associating heterogeneous
+            # decoder classes with generated Dynamo subfunctions.
+            ordered_decoder_classes = _ordered_decoder_layer_classes(qeff_model.model, decoder_layer_classes)
+            resolved_classnames = [cls.__name__ for cls in ordered_decoder_classes]
             qeff_model._subfunction_target_classnames = resolved_classnames
             onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
             onnx_transform_kwargs["target_classnames"] = resolved_classnames
             onnx_transform_kwargs["target_class_modules"] = {
-                cls.__name__: cls.__module__ for cls in decoder_layer_classes
+                cls.__name__: cls.__module__ for cls in ordered_decoder_classes
             }
             kwargs["onnx_transform_kwargs"] = onnx_transform_kwargs
         else:
