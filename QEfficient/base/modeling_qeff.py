@@ -562,13 +562,22 @@ class QEFFBaseModel(ABC):
         self.config = model.config
         self.hash_params = create_model_params(self, **kwargs)
         if getattr(self, "_enable_proxy", False):
-            language_config = self.config
-            for config_name in ("text_config", "llm_config", "language_config"):
-                if nested_config := getattr(self.config, config_name, None):
-                    language_config = nested_config
-                    break
-            if (proxy_num_hidden_layers := getattr(language_config, "num_hidden_layers", None)) is not None:
-                self.hash_params["proxy_num_hidden_layers"] = proxy_num_hidden_layers
+            proxy_component = getattr(self, "_proxy_component", "language")
+            self.hash_params["proxy_component"] = proxy_component
+            if proxy_component == "vision":
+                vision_config = getattr(self.config, "vision_config", None) or self.config
+                for attribute in ("depth", "num_hidden_layers", "vt_num_hidden_layers"):
+                    if (proxy_num_vision_layers := getattr(vision_config, attribute, None)) is not None:
+                        self.hash_params["proxy_num_vision_layers"] = proxy_num_vision_layers
+                        break
+            else:
+                language_config = self.config
+                for config_name in ("text_config", "llm_config", "language_config"):
+                    if nested_config := getattr(self.config, config_name, None):
+                        language_config = nested_config
+                        break
+                if (proxy_num_hidden_layers := getattr(language_config, "num_hidden_layers", None)) is not None:
+                    self.hash_params["proxy_num_hidden_layers"] = proxy_num_hidden_layers
         self.onnx_path: Optional[str] = None
         self.qpc_path: Optional[str] = None
         self.compile_artifacts_path: Optional[Path] = None

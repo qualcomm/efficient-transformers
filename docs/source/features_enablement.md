@@ -109,10 +109,12 @@ The supported configuration and current limitations are:
 - Weight-free VLM export requires dual-QPC mode. Passing `kv_offload=False`
   raises `NotImplementedError`. If `kv_offload` is omitted,
   `weight_free=True` selects `kv_offload=True`.
+- Weight-free VLM export can be combined with image-text proxy mode by passing
+  `enable_proxy=True` and, when needed, `proxy_component="vision"`.
 - Weight-free mode always uses the Dynamo (`torch.export`) ONNX export path
   and validates the required Dynamo environment before building the model.
 - `weight_free=True` and `layerwise=True` are mutually exclusive.
-- Single-QPC weight-free export are not yet supported.
+- Single-QPC weight-free export is not yet supported.
 - Gemma4 BF16 compilation currently fails with a QAIC compiler Glow error.
 
 
@@ -135,6 +137,13 @@ patterns, QEfficient also reduces the language stack to the smallest
 representative layer count that still includes repeated calls for each layer
 type. This is useful for compiler validation, artifact generation, and external
 harnesses that need a lightweight graph matching the model's runtime interface.
+
+Image-text models default to the same language proxy behavior. To reduce the
+vision stack instead, pass `proxy_component="vision"`; vision proxy mode keeps
+the language stack unchanged and does not replace language embeddings or the LM
+head. Homogeneous vision stacks use two representative layers by default, and
+`num_hidden_layers` can be used to request a specific reduced vision depth when
+that depth still preserves the model's required vision layer variants.
 
 ```Python
 from QEfficient import QEFFAutoModelForCausalLM
@@ -160,6 +169,35 @@ model = QEFFAutoModelForCausalLM.from_pretrained(
     "Qwen/Qwen2-1.5B-Instruct",
     enable_proxy=True,
     num_hidden_layers=2,
+    trust_remote_code=True,
+)
+```
+
+For image-text models, select the vision component explicitly when the reduced
+compile graph should exercise the vision encoder instead of the language stack:
+
+```Python
+from QEfficient import QEFFAutoModelForImageTextToText
+
+model = QEFFAutoModelForImageTextToText.from_pretrained(
+    "Qwen/Qwen2.5-VL-3B-Instruct",
+    enable_proxy=True,
+    proxy_component="vision",
+    trust_remote_code=True,
+)
+```
+
+Component-aware image-text proxy also works with supported dual-QPC weight-free
+VLM export. Keep `kv_offload=True` and add `weight_free=True` when the proxy graph
+should be constructed without materializing checkpoint weights:
+
+```Python
+model = QEFFAutoModelForImageTextToText.from_pretrained(
+    "Qwen/Qwen2.5-VL-3B-Instruct",
+    kv_offload=True,
+    weight_free=True,
+    enable_proxy=True,
+    proxy_component="vision",
     trust_remote_code=True,
 )
 ```

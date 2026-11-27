@@ -278,7 +278,7 @@ def _add_specialization_control_inputs(
 
 
 def _proxy_logits_width(model) -> Optional[int]:
-    if not getattr(model, "_enable_proxy", False):
+    if not getattr(model, "_enable_proxy", False) or getattr(model, "_proxy_component", "language") != "language":
         return None
 
     config = model.model.config

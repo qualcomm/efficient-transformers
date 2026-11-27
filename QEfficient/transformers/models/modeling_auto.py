@@ -61,7 +61,10 @@ from QEfficient.generation.text_generation_inference import (
 )
 from QEfficient.generation.vlm_generation import VisionLanguageGeneration
 from QEfficient.proxy.modeling_utils import (
-    apply_proxy_layer_config,
+    PROXY_COMPONENT_LANGUAGE,
+    PROXY_COMPONENT_VISION,
+    _require_vision_proxy_config,
+    normalize_proxy_component,
     prepare_proxy_config,
 )
 from QEfficient.transformers.modeling_utils import (
@@ -344,7 +347,17 @@ def _build_meta_model(hf_auto_class, pretrained_model_name_or_path, kwargs):
     config = kwargs.get("config", None)
     if config is None:
         config_kwargs = {
-            k: kwargs[k] for k in ("trust_remote_code", "revision", "token", "subfolder", "cache_dir") if k in kwargs
+            k: kwargs[k]
+            for k in (
+                "cache_dir",
+                "force_download",
+                "local_files_only",
+                "revision",
+                "subfolder",
+                "token",
+                "trust_remote_code",
+            )
+            if k in kwargs
         }
         config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **config_kwargs)
     torch_dtype = kwargs.get("torch_dtype", torch.float32)
@@ -358,6 +371,47 @@ def _build_meta_model(hf_auto_class, pretrained_model_name_or_path, kwargs):
     with init_empty_weights():
         model = hf_auto_class.from_config(config, torch_dtype=torch_dtype, attn_implementation=attn_implementation)
     return model
+
+
+def _apply_explicit_language_layer_count_override(
+    pretrained_model_name_or_path: str,
+    kwargs: dict,
+    explicit_num_hidden_layers: int | None,
+) -> None:
+    if explicit_num_hidden_layers is None:
+        return
+
+    from transformers import AutoConfig
+
+    kwargs.pop("num_hidden_layers", None)
+    config = kwargs.get("config")
+    if config is None:
+        config_kwargs = {
+            k: kwargs[k]
+            for k in (
+                "cache_dir",
+                "force_download",
+                "local_files_only",
+                "revision",
+                "subfolder",
+                "token",
+                "trust_remote_code",
+            )
+            if k in kwargs
+        }
+        config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **config_kwargs)
+
+    language_config = config
+    for config_name in ("text_config", "llm_config", "language_config"):
+        if nested_config := getattr(config, config_name, None):
+            language_config = nested_config
+            break
+    language_config.num_hidden_layers = int(explicit_num_hidden_layers)
+    if "layer_types" in kwargs:
+        language_config.layer_types = kwargs.pop("layer_types")
+    if "use_cache" in kwargs:
+        language_config.use_cache = kwargs.pop("use_cache")
+    kwargs["config"] = config
 
 
 def _compile_io_name(name: str, *, use_onnx_subfunctions: bool) -> str:
@@ -460,6 +514,16 @@ def _filter_custom_io_for_onnx(custom_io: dict, onnx_path: Optional[Union[str, P
     return filtered
 
 
+def _proxy_kwargs_for_component(kwargs: dict, component: str) -> dict:
+    component_kwargs = dict(kwargs)
+    enable_proxy = bool(component_kwargs.get("enable_proxy", False))
+    proxy_component = normalize_proxy_component(component_kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
+    component_kwargs["proxy_component"] = component
+    if enable_proxy and proxy_component != component:
+        component_kwargs.pop("enable_proxy", None)
+    return component_kwargs
+
+
 def _add_onnx_retained_state_custom_io(
     custom_io: dict,
     onnx_path: Optional[Union[str, Path]],
@@ -493,7 +557,15 @@ class QEFFTransformersBase(QEFFBaseModel):
     _hf_auto_class: type
 
     def __init__(self, model: nn.Module, **kwargs) -> None:
-        _configure_proxy_for_model(self, kwargs.pop("enable_proxy", False))
+        enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
+        if enable_proxy and proxy_component == PROXY_COMPONENT_VISION:
+            _require_vision_proxy_config(model.config)
+        _configure_proxy_for_model(
+            self,
+            enable_proxy,
+            proxy_component,
+        )
         if self.__class__ is not QEFFAutoModel:
             _disable_unsupported_weight_free(kwargs, self.__class__.__name__)
 
@@ -536,6 +608,7 @@ class QEFFTransformersBase(QEFFBaseModel):
         """
         _disable_unsupported_weight_free(kwargs, cls.__name__)
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
@@ -549,6 +622,7 @@ class QEFFTransformersBase(QEFFBaseModel):
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
 
         return cls(model, pretrained_model_name_or_path=pretrained_model_name_or_path, **kwargs)
 
@@ -711,6 +785,7 @@ class QEFFAutoModel(QEFFTransformersBase):
             An instance initialized with the pretrained weights.
         """
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
 
         if weight_free:
             validate_dynamo_export_requirements("weight_free=True")
@@ -736,6 +811,7 @@ class QEFFAutoModel(QEFFTransformersBase):
         kv_offload = kwargs.pop("kv_offload", None)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
 
         if model.__class__.__name__ in MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP:
             return MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP[model.__class__.__name__](
@@ -1107,6 +1183,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
         """
         _disable_unsupported_weight_free(kwargs, cls.__name__)
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
@@ -1119,6 +1196,7 @@ class QEFFAutoModelForSequenceClassification(QEFFTransformersBase):
         _resolve_torch_dtype(kwargs)
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
         return cls(model, pretrained_model_name_or_path=pretrained_model_name_or_path, **kwargs)
 
     @property
@@ -1336,7 +1414,11 @@ class QEffVisionEncoderForTextImageToTextModel(QEFFBaseModel):
         **kwargs :
             Additional keyword arguments passed to the base class constructor.
         """
-        _configure_proxy_for_model(self, kwargs.pop("enable_proxy", False))
+        _configure_proxy_for_model(
+            self,
+            kwargs.pop("enable_proxy", False),
+            normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE)),
+        )
         _configure_fp8_retention(self, kwargs)
         super().__init__(model, **kwargs)
         self.model = model.get_qeff_vision_encoder()
@@ -1488,7 +1570,11 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
         **kwargs :
             Additional keyword arguments passed to the base class constructor.
         """
-        _configure_proxy_for_model(self, kwargs.pop("enable_proxy", False))
+        _configure_proxy_for_model(
+            self,
+            kwargs.pop("enable_proxy", False),
+            normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE)),
+        )
         _configure_fp8_retention(self, kwargs)
         super().__init__(model, **kwargs)
         self.model = model.get_qeff_language_decoder()
@@ -1744,8 +1830,12 @@ class _QEffAutoModelForImageTextToTextDualQPC:
         self._weight_free = kwargs.get("weight_free", False)
         self._fp8_retain_weights = kwargs.get("fp8_retain_weights", False)
 
-        self.vision_model = QEffVisionEncoderForTextImageToTextModel(model, **kwargs)
-        self.lang_model = QEffCausalLMForTextImageToTextModel(model, qaic_config=qaic_config, **kwargs)
+        self.vision_model = QEffVisionEncoderForTextImageToTextModel(
+            model, **_proxy_kwargs_for_component(kwargs, PROXY_COMPONENT_VISION)
+        )
+        self.lang_model = QEffCausalLMForTextImageToTextModel(
+            model, qaic_config=qaic_config, **_proxy_kwargs_for_component(kwargs, PROXY_COMPONENT_LANGUAGE)
+        )
         self.continuous_batching = continuous_batching
         self.ccl_enabled = False
         if qaic_config:
@@ -1812,6 +1902,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             An instance initialized with the pretrained weights.
         """
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
@@ -1831,10 +1922,11 @@ class _QEffAutoModelForImageTextToTextDualQPC:
 
         _resolve_torch_dtype(kwargs)
         if enable_proxy:
-            prepare_proxy_config(pretrained_model_name_or_path, kwargs)
+            prepare_proxy_config(pretrained_model_name_or_path, kwargs, proxy_component=proxy_component)
         model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
         kwargs["fp8_retain_weights"] = fp8_retain_weights
 
         return cls(
@@ -3262,6 +3354,7 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
             An instance initialized with the pretrained weights.
         """
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
 
         if kwargs.get("attn_implementation", None) not in {None, "eager"}:
             logger.warning('Updating attn_implementation="eager"')
@@ -3273,20 +3366,21 @@ class _QEFFAutoModelForImageTextToTextSingleQPC(QEFFTransformersBase, Multimodal
 
         from transformers import AutoConfig
 
-        config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+        config = kwargs.get("config")
+        if config is None:
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+            kwargs["config"] = config
         if enable_proxy:
-            explicit_num_hidden_layers = kwargs.pop("num_hidden_layers", None)
-            if explicit_num_hidden_layers is None:
-                apply_proxy_layer_config(config)
-            else:
-                apply_proxy_layer_config(config, num_hidden_layers=explicit_num_hidden_layers)
+            prepare_proxy_config(pretrained_model_name_or_path, kwargs, proxy_component=proxy_component)
+            config = kwargs["config"]
         config._attn_implementation = "eager"
         config.vision_config.use_flash_attn = "false"
         _resolve_torch_dtype(kwargs)
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
-        model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, config, *args, **kwargs)
+        model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
         kwargs["fp8_retain_weights"] = fp8_retain_weights
 
         return cls(
@@ -3939,6 +4033,9 @@ class QEFFAutoModelForImageTextToText:
         weight_free : bool, optional
             Build the model with meta tensors and load checkpoint weights during
             compilation. Weight-free VLM export requires dual-QPC mode.
+        proxy_component : {"language", "vision"}, optional
+            Component to reduce when ``enable_proxy=True``. Defaults to
+            ``"language"`` to preserve existing image-text proxy behavior.
         **kwargs :
             Additional arguments passed to HuggingFace's ``from_pretrained``.
 
@@ -3968,6 +4065,7 @@ class QEFFAutoModelForImageTextToText:
             validate_dynamo_export_requirements("weight_free=True")
 
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
 
         # TODO: add a check to see if kv_offload is allowed for given model by loading the config and checking architecture or type of config here.
@@ -3990,7 +4088,7 @@ class QEFFAutoModelForImageTextToText:
 
         _resolve_torch_dtype(kwargs)
         if enable_proxy:
-            prepare_proxy_config(pretrained_model_name_or_path, kwargs)
+            prepare_proxy_config(pretrained_model_name_or_path, kwargs, proxy_component=proxy_component)
         if layerwise:
             # Layer-wise mode: build the outer model on the meta device so the
             # caller's ``from_pretrained`` does not pull the full checkpoint
@@ -4004,6 +4102,7 @@ class QEFFAutoModelForImageTextToText:
             model = cls._hf_auto_class.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
         kwargs["fp8_retain_weights"] = fp8_retain_weights
 
         instance = cls(
@@ -4187,7 +4286,15 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         model_class_name = model.__class__.__name__
         if not (model_class_name.endswith(("ForCausalLM", "LMHeadModel"))):
             raise TypeError(f"Required pytorch module for CausalLM or LMHeadModel, got {model_class_name}")
-        _configure_proxy_for_model(self, kwargs.pop("enable_proxy", False))
+        enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
+        if enable_proxy and proxy_component == PROXY_COMPONENT_VISION:
+            _require_vision_proxy_config(model.config)
+        _configure_proxy_for_model(
+            self,
+            enable_proxy,
+            proxy_component,
+        )
 
         # TODO: remove from version 1.20
         if kwargs.pop("full_batch_size", None):
@@ -4354,7 +4461,11 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         if weight_free:
             validate_dynamo_export_requirements("weight_free=True")
 
+        if kwargs.get("finite_adapters", False):
+            raise TypeError("finite_adapters is only supported through QEffAutoPeftModelForCausalLM")
+
         enable_proxy = kwargs.pop("enable_proxy", False)
+        proxy_component = normalize_proxy_component(kwargs.pop("proxy_component", PROXY_COMPONENT_LANGUAGE))
         if kwargs.pop("full_batch_size", None):
             continuous_batching = True
             warnings.warn(
@@ -4379,8 +4490,13 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         _resolve_torch_dtype(kwargs)
         fp8_retain_weights = kwargs.pop("fp8_retain_weights", False)
+        explicit_num_hidden_layers = kwargs.get("num_hidden_layers")
         if enable_proxy:
-            prepare_proxy_config(pretrained_model_name_or_path, kwargs)
+            prepare_proxy_config(pretrained_model_name_or_path, kwargs, proxy_component=proxy_component)
+        else:
+            _apply_explicit_language_layer_count_override(
+                pretrained_model_name_or_path, kwargs, explicit_num_hidden_layers
+            )
         if layerwise:
             warnings.warn(
                 "layerwise export is deprecated and will be removed in a future release. "
@@ -4412,6 +4528,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
 
         # This is support models that should be classified to in a different auto class but transformers load them via this class
         kwargs.update({"enable_proxy": enable_proxy} if enable_proxy else {})
+        kwargs["proxy_component"] = proxy_component
         kwargs["fp8_retain_weights"] = fp8_retain_weights
         if model.__class__.__name__ in MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP:
             return MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP[model.__class__.__name__](

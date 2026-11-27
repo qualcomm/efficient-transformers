@@ -1290,9 +1290,15 @@ def _assert_proxy_only_onnx_transform_policy(
         assert always_on_transforms.issubset(transform_names)
 
 
-def _assert_dual_qpc_vlm_proxy_transform_policy(qeff_model, enable_proxy: bool) -> None:
-    _assert_proxy_only_onnx_transform_policy(qeff_model.vision_model, enable_proxy=enable_proxy)
-    _assert_proxy_only_onnx_transform_policy(qeff_model.lang_model, enable_proxy=enable_proxy)
+def _assert_dual_qpc_vlm_proxy_transform_policy(
+    qeff_model, enable_proxy: bool, proxy_component: str = "language"
+) -> None:
+    _assert_proxy_only_onnx_transform_policy(
+        qeff_model.vision_model, enable_proxy=enable_proxy and proxy_component == "vision"
+    )
+    _assert_proxy_only_onnx_transform_policy(
+        qeff_model.lang_model, enable_proxy=enable_proxy and proxy_component == "language"
+    )
 
 
 def _skip_on_model_fetch_error(exc: Exception, model_id: str) -> None:
@@ -3519,6 +3525,57 @@ def test_proxy_subfunction_validation_rejects_variant_reused_across_logical_sign
         _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
 
 
+def test_proxy_subfunction_validation_allows_shared_vision_attention_function(tmp_path):
+    from onnx import TensorProto, helper
+
+    from QEfficient.utils.export_utils import _validate_proxy_subfunction_calls
+
+    class DummyLayer:
+        pass
+
+    class DummyVisionEncoder:
+        def get_submodules_for_export(self):
+            return {DummyLayer}
+
+    class DummyModel:
+        config = SimpleNamespace(vision_config=SimpleNamespace(depth=6, fullatt_block_indexes=(1, 2, 4, 5)))
+
+        def get_qeff_vision_encoder(self):
+            return DummyVisionEncoder()
+
+    class DummyQEffModel:
+        _enable_proxy = True
+        _proxy_component = "vision"
+        model = DummyModel()
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("DummyLayer", ["x"], ["mid_0"]),
+            helper.make_node("DummyLayer", ["mid_0"], ["mid_1"]),
+            helper.make_node("DummyLayer", ["mid_1"], ["mid_2"]),
+            helper.make_node("DummyLayer", ["mid_2"], ["mid_3"]),
+            helper.make_node("DummyLayer", ["mid_3"], ["mid_4"]),
+            helper.make_node("DummyLayer", ["mid_4"], ["y"]),
+        ],
+        "proxy_subfunction_shared_vision_attention_function",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+    )
+    function = helper.make_function(
+        "",
+        "DummyLayer",
+        ["x"],
+        ["y"],
+        [helper.make_node("Identity", ["x"], ["y"])],
+        [helper.make_operatorsetid("", 17)],
+    )
+    model = helper.make_model(graph, functions=[function], opset_imports=[helper.make_operatorsetid("", 17)])
+    onnx_path = tmp_path / "shared_vision_attention_function.onnx"
+    onnx.save(model, onnx_path)
+
+    _validate_proxy_subfunction_calls(DummyQEffModel(), onnx_path)
+
+
 def test_proxy_subfunction_validation_rejects_unused_function_variant(tmp_path):
     from onnx import TensorProto, helper
 
@@ -3873,6 +3930,41 @@ def test_proxy_layer_config_preserves_repeated_layer_types():
     mixed_qwen_moe_config = Qwen3MoeConfig(num_hidden_layers=16, decoder_sparse_step=2)
     assert apply_proxy_layer_config(mixed_qwen_moe_config) == 4
 
+    alternating_dense_moe_config = SimpleNamespace(
+        num_hidden_layers=16,
+        num_experts=8,
+        decoder_sparse_step=1,
+        mlp_only_layers=list(range(0, 16, 2)),
+        cross_attention_layers=[0, 15],
+        no_rope_layers=[0, 1] * 8,
+    )
+    assert apply_proxy_layer_config(alternating_dense_moe_config) == 4
+    assert alternating_dense_moe_config.num_hidden_layers == 4
+    assert alternating_dense_moe_config.mlp_only_layers == [0, 2]
+    assert alternating_dense_moe_config.cross_attention_layers == [0]
+    assert alternating_dense_moe_config.no_rope_layers == [0, 1] * 8
+
+    explicit_alternating_dense_moe_config = SimpleNamespace(
+        num_hidden_layers=16,
+        num_experts=8,
+        decoder_sparse_step=1,
+        mlp_only_layers=list(range(0, 16, 2)),
+        cross_attention_layers=[0, 15],
+        no_rope_layers=[1, 0] * 8,
+    )
+    assert apply_proxy_layer_config(explicit_alternating_dense_moe_config, num_hidden_layers=4) == 4
+    assert explicit_alternating_dense_moe_config.num_hidden_layers == 4
+    assert explicit_alternating_dense_moe_config.mlp_only_layers == [0, 2]
+    assert explicit_alternating_dense_moe_config.cross_attention_layers == [0]
+    assert explicit_alternating_dense_moe_config.no_rope_layers == [1, 0] * 8
+
+    mllama_style_cross_attention_config = SimpleNamespace(
+        num_hidden_layers=16,
+        cross_attention_layers=[3, 8, 13],
+    )
+    assert apply_proxy_layer_config(mllama_style_cross_attention_config, num_hidden_layers=12) == 12
+    assert mllama_style_cross_attention_config.cross_attention_layers == [3, 8]
+
     qwen3_5_moe_config = Qwen3_5MoeTextConfig(num_hidden_layers=16)
     qwen3_5_moe_config.num_hidden_layers = 2
     assert apply_proxy_layer_config(qwen3_5_moe_config) == 8
@@ -3966,7 +4058,7 @@ def test_proxy_compile_artifacts_generate_disagg_mdp_config_for_tiny_model(tmp_p
 def test_proxy_layer_config_only_reduces_vlm_language_layers():
     from QEfficient.proxy.modeling_utils import apply_proxy_layer_config
 
-    # Proxy layer reduction is language-only; vision layers must remain untouched.
+    # Default proxy layer reduction remains language-only; vision layers stay untouched.
     config = Qwen3VLMoeConfig(
         text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
         vision_config=Qwen3VLMoeVisionConfig(depth=8),
@@ -3983,6 +4075,355 @@ def test_proxy_layer_config_only_reduces_vlm_language_layers():
     assert explicit_config.text_config.num_hidden_layers == 3
     assert explicit_config.vision_config.depth == 16
     assert config.vision_config.depth == 8
+
+
+def test_vision_proxy_layer_config_normalizes_layer_indexed_metadata():
+    from QEfficient.proxy.modeling_utils import apply_vision_proxy_layer_config
+
+    config = SimpleNamespace(
+        vision_config=SimpleNamespace(
+            depth=8,
+            num_hidden_layers=8,
+            vt_num_hidden_layers=8,
+            deepstack_visual_indexes=(2, 5, 7),
+            fullatt_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7),
+            cross_attention_layers=[0, 3, 7],
+            intermediate_layers_indices=[1, 4, 7],
+            vision_feature_layer=-4,
+            num_global_layers=4,
+        )
+    )
+
+    assert apply_vision_proxy_layer_config(config) == 2
+    assert config.vision_config.depth == 2
+    assert config.vision_config.num_hidden_layers == 2
+    assert config.vision_config.vt_num_hidden_layers == 2
+    assert config.vision_config.deepstack_visual_indexes == (0, 1)
+    assert config.vision_config.fullatt_block_indexes == (0, 1)
+    assert config.vision_config.cross_attention_layers == [0, 1]
+    assert config.vision_config.intermediate_layers_indices == [0, 1, 1]
+    assert config.vision_config.vision_feature_layer == -2
+    assert config.vision_config.num_global_layers == 2
+
+    direct_vision_config = SimpleNamespace(depth=8, deepstack_visual_indexes=[2, 5, 7])
+    assert apply_vision_proxy_layer_config(direct_vision_config) == 2
+    assert direct_vision_config.deepstack_visual_indexes == [0, 1]
+
+    explicit_config = SimpleNamespace(
+        vision_config=SimpleNamespace(depth=8, deepstack_visual_indexes=[4, 7], vision_feature_layer=[-4, -2])
+    )
+    assert apply_vision_proxy_layer_config(explicit_config, num_hidden_layers=3) == 3
+    assert explicit_config.vision_config.depth == 3
+    assert explicit_config.vision_config.deepstack_visual_indexes == [1, 2]
+    assert explicit_config.vision_config.vision_feature_layer == [-2, -1]
+
+    mllama_style_config = SimpleNamespace(
+        vision_config=SimpleNamespace(depth=8, intermediate_layers_indices=[1, 3, 5, 7, 7])
+    )
+    assert apply_vision_proxy_layer_config(mllama_style_config) == 2
+    assert mllama_style_config.vision_config.intermediate_layers_indices == [0, 0, 1, 1, 1]
+
+    qwen25_style_config = SimpleNamespace(
+        vision_config=SimpleNamespace(depth=32, fullatt_block_indexes=(7, 15, 23, 31))
+    )
+    assert apply_vision_proxy_layer_config(qwen25_style_config) == 6
+    assert qwen25_style_config.vision_config.depth == 6
+    assert qwen25_style_config.vision_config.fullatt_block_indexes == (1, 2, 4, 5)
+
+
+def test_vision_proxy_subfunction_signatures_ignore_language_layer_policy():
+    from QEfficient.utils.export_utils import _logical_proxy_signature_info
+
+    node = SimpleNamespace(domain="", op_type="VisionLayer")
+    qeff_model = SimpleNamespace(
+        _proxy_component="vision",
+        model=SimpleNamespace(
+            config=SimpleNamespace(
+                text_config=SimpleNamespace(num_hidden_layers=8, num_experts=8, first_k_dense_replace=2),
+                vision_config=SimpleNamespace(depth=2),
+            )
+        ),
+    )
+
+    required_signatures, _, logical_signature_counts, _ = _logical_proxy_signature_info(qeff_model, [node, node])
+
+    assert required_signatures == {(("decoder", "default"),)}
+    assert logical_signature_counts[(("decoder", "default"),)] == 2
+
+    qwen25_style_model = SimpleNamespace(
+        _proxy_component="vision",
+        model=SimpleNamespace(
+            config=SimpleNamespace(vision_config=SimpleNamespace(depth=2, fullatt_block_indexes=(1,)))
+        ),
+    )
+
+    required_signatures, _, logical_signature_counts, _ = _logical_proxy_signature_info(
+        qwen25_style_model, [node, node]
+    )
+
+    assert required_signatures == {(("layer_type", "window_attention"),), (("layer_type", "full_attention"),)}
+    assert logical_signature_counts[(("layer_type", "window_attention"),)] == 1
+    assert logical_signature_counts[(("layer_type", "full_attention"),)] == 1
+
+
+def test_vision_proxy_subfunction_setup_targets_vision_classes():
+    from QEfficient.utils.export_utils import _subfunction_target_classes
+
+    class VisionLayer(nn.Module):
+        pass
+
+    class LanguageLayer(nn.Module):
+        pass
+
+    class AlternateLanguageLayer(nn.Module):
+        pass
+
+    class VisionEncoder(nn.Module):
+        def get_submodules_for_export(self):
+            return {VisionLayer}
+
+    class FullModel(nn.Module):
+        def get_qeff_vision_encoder(self):
+            return VisionEncoder()
+
+        def get_submodules_for_export(self):
+            return [LanguageLayer, LanguageLayer, AlternateLanguageLayer]
+
+    proxy_model = SimpleNamespace(_enable_proxy=True, _proxy_component="vision", model=FullModel())
+    default_model = SimpleNamespace(_enable_proxy=False, model=FullModel())
+
+    assert _subfunction_target_classes(proxy_model) == [VisionLayer]
+    assert _subfunction_target_classes(default_model) == [LanguageLayer, LanguageLayer, AlternateLanguageLayer]
+
+
+def test_prepare_proxy_config_uses_image_text_component_selector():
+    from QEfficient.proxy.modeling_utils import prepare_proxy_config
+
+    vision_kwargs = {
+        "config": Qwen3VLMoeConfig(
+            text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+            vision_config=Qwen3VLMoeVisionConfig(depth=8),
+        ),
+        "proxy_component": "vision",
+    }
+    prepare_proxy_config("unused-local-config", vision_kwargs)
+    assert vision_kwargs["config"].text_config.num_hidden_layers == 16
+    assert vision_kwargs["config"].vision_config.depth == 2
+    assert "proxy_component" not in vision_kwargs
+
+    language_kwargs = {
+        "config": Qwen3VLMoeConfig(
+            text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+            vision_config=Qwen3VLMoeVisionConfig(depth=8),
+        ),
+        "proxy_component": "language",
+    }
+    prepare_proxy_config("unused-local-config", language_kwargs)
+    assert language_kwargs["config"].text_config.num_hidden_layers == 2
+    assert language_kwargs["config"].vision_config.depth == 8
+
+    causal_kwargs = {
+        "config": LlamaConfig(num_hidden_layers=16),
+        "proxy_component": "vision",
+    }
+    with pytest.raises(ValueError, match="vision_config"):
+        prepare_proxy_config("unused-local-config", causal_kwargs)
+
+
+def test_weight_free_causal_lm_applies_explicit_layer_count_without_proxy(monkeypatch):
+    from QEfficient.transformers.models import modeling_auto
+
+    captured = {}
+
+    class FakeConfig:
+        model_type = "fake"
+        architectures = ["FakeForCausalLM"]
+        quantization_config = None
+        hidden_size = 16
+        vocab_size = 32
+
+        def __init__(self, num_hidden_layers=8):
+            self.num_hidden_layers = num_hidden_layers
+            self.dtype = torch.float32
+            self.torch_dtype = torch.float32
+
+        def to_diff_dict(self):
+            return {
+                "hidden_size": self.hidden_size,
+                "num_hidden_layers": self.num_hidden_layers,
+                "vocab_size": self.vocab_size,
+            }
+
+    class FakeForCausalLM(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+    class FakeAutoClass:
+        @staticmethod
+        def from_config(config, **kwargs):
+            captured["config"] = config
+            captured["from_config_kwargs"] = kwargs
+            return FakeForCausalLM(config)
+
+    monkeypatch.setattr(modeling_auto.QEFFAutoModelForCausalLM, "_hf_auto_class", FakeAutoClass)
+    monkeypatch.setattr(modeling_auto, "validate_dynamo_export_requirements", lambda _: None)
+
+    qeff_model = modeling_auto.QEFFAutoModelForCausalLM.from_pretrained(
+        "unused-local-model",
+        config=FakeConfig(num_hidden_layers=8),
+        num_hidden_layers=4,
+        weight_free=True,
+        enable_proxy=False,
+    )
+
+    assert captured["config"].num_hidden_layers == 4
+    assert qeff_model.model.config.num_hidden_layers == 4
+    assert "num_hidden_layers" not in captured["from_config_kwargs"]
+
+
+def test_explicit_layer_count_override_updates_nested_language_config_without_proxy():
+    from QEfficient.transformers.models.modeling_auto import _apply_explicit_language_layer_count_override
+
+    config = SimpleNamespace(text_config=SimpleNamespace(num_hidden_layers=8), vision_config=SimpleNamespace(depth=8))
+    kwargs = {"config": config, "num_hidden_layers": 4}
+
+    _apply_explicit_language_layer_count_override("unused-local-model", kwargs, 4)
+
+    assert kwargs["config"].text_config.num_hidden_layers == 4
+    assert kwargs["config"].vision_config.depth == 8
+    assert "num_hidden_layers" not in kwargs
+
+
+def test_dual_qpc_proxy_kwargs_are_component_aware():
+    from QEfficient.transformers.models.modeling_auto import _proxy_kwargs_for_component
+
+    language_kwargs = _proxy_kwargs_for_component({"enable_proxy": True}, "language")
+    vision_kwargs = _proxy_kwargs_for_component({"enable_proxy": True}, "vision")
+    assert language_kwargs["enable_proxy"] is True
+    assert language_kwargs["proxy_component"] == "language"
+    assert "enable_proxy" not in vision_kwargs
+    assert vision_kwargs["proxy_component"] == "vision"
+
+    language_kwargs = _proxy_kwargs_for_component({"enable_proxy": True, "proxy_component": "vision"}, "language")
+    vision_kwargs = _proxy_kwargs_for_component({"enable_proxy": True, "proxy_component": "vision"}, "vision")
+    assert "enable_proxy" not in language_kwargs
+    assert vision_kwargs["enable_proxy"] is True
+
+
+def test_causal_lm_direct_constructor_rejects_invalid_vision_proxy_component():
+    from transformers import LlamaForCausalLM
+
+    config = LlamaConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=2,
+        num_hidden_layers=2,
+        num_key_value_heads=2,
+        vocab_size=32,
+    )
+    with pytest.raises(ValueError, match="vision_config"):
+        QEFFAutoModelForCausalLM(
+            LlamaForCausalLM(config).eval(),
+            enable_proxy=True,
+            proxy_component="vision",
+        )
+
+
+def test_base_direct_constructor_rejects_invalid_vision_proxy_component():
+    from transformers import BertConfig, BertModel
+
+    config = BertConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=2,
+        num_hidden_layers=2,
+        vocab_size=32,
+    )
+    with pytest.raises(ValueError, match="vision_config"):
+        QEFFAutoModel(
+            BertModel(config).eval(),
+            enable_proxy=True,
+            proxy_component="vision",
+        )
+
+
+def test_causal_misclassified_vlm_preserves_proxy_component(monkeypatch):
+    from QEfficient.transformers.models import modeling_auto
+
+    config = Qwen3VLMoeConfig(
+        architectures=["FakeMisclassifiedVLM"],
+        text_config=Qwen3VLMoeTextConfig(num_hidden_layers=16),
+        vision_config=Qwen3VLMoeVisionConfig(depth=8),
+    )
+    captured = {}
+
+    class FakeMisclassifiedVLM(nn.Module):
+        def __init__(self, model_config):
+            super().__init__()
+            self.config = model_config
+
+    class FakeAutoClass:
+        @staticmethod
+        def from_pretrained(model_id, *args, **kwargs):
+            captured["hf_kwargs"] = kwargs
+            return FakeMisclassifiedVLM(kwargs["config"])
+
+    def fake_image_text_wrapper(model, **kwargs):
+        captured["wrapper_model"] = model
+        captured["wrapper_kwargs"] = kwargs
+        return SimpleNamespace(model=model, init_kwargs=kwargs)
+
+    monkeypatch.setattr(modeling_auto.QEFFAutoModelForCausalLM, "_hf_auto_class", FakeAutoClass)
+    monkeypatch.setitem(
+        modeling_auto.MISCLASSIFIED_CAUSAL_LM_TO_QEFF_AUTO_CLASS_MAP,
+        "FakeMisclassifiedVLM",
+        fake_image_text_wrapper,
+    )
+
+    model = modeling_auto.QEFFAutoModelForCausalLM.from_pretrained(
+        "local-model",
+        config=config,
+        enable_proxy=True,
+        proxy_component="vision",
+        kv_offload=True,
+    )
+
+    assert captured["hf_kwargs"]["config"].text_config.num_hidden_layers == 16
+    assert captured["hf_kwargs"]["config"].vision_config.depth == 2
+    assert model.init_kwargs["enable_proxy"] is True
+    assert model.init_kwargs["proxy_component"] == "vision"
+
+
+def test_single_qpc_from_pretrained_preserves_config_without_duplicate_positional_arg(monkeypatch):
+    from QEfficient.transformers.models.modeling_auto import _QEFFAutoModelForImageTextToTextSingleQPC
+
+    config = SimpleNamespace(vision_config=SimpleNamespace())
+    captured = {}
+
+    class FakeAutoClass:
+        @staticmethod
+        def from_pretrained(model_id, *args, **kwargs):
+            captured["model_id"] = model_id
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(config=config)
+
+    def fake_init(self, model, **kwargs):
+        self.model = model
+        self.init_kwargs = kwargs
+
+    monkeypatch.setattr(_QEFFAutoModelForImageTextToTextSingleQPC, "_hf_auto_class", FakeAutoClass)
+    monkeypatch.setattr(_QEFFAutoModelForImageTextToTextSingleQPC, "__init__", fake_init)
+
+    model = _QEFFAutoModelForImageTextToTextSingleQPC.from_pretrained("local-model", config=config)
+
+    assert captured["model_id"] == "local-model"
+    assert captured["args"] == ()
+    assert captured["kwargs"]["config"] is config
+    assert config._attn_implementation == "eager"
+    assert config.vision_config.use_flash_attn == "false"
+    assert model.init_kwargs["config"] is config
 
 
 def test_proxy_module_transform_leaves_vision_embedding_unchanged():
