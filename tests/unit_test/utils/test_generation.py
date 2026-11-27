@@ -2240,6 +2240,59 @@ def test_causal_lm_runner_bundle_matches_compiled_batch_size(tmp_path):
 
 
 @pytest.mark.cpu_only
+def test_causal_lm_runner_bundle_supports_decode_only_specialization(tmp_path):
+    from types import SimpleNamespace
+
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_causal_lm_runner_bundle
+
+    class FakeTokenizer:
+        padding_side = "right"
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def __call__(self, prompt, return_tensors, padding, max_length=None):
+            del prompt, return_tensors
+            input_ids = np.array([[7]], dtype=np.int64)
+            attention_mask = np.ones_like(input_ids)
+            if padding == "max_length":
+                assert max_length == 1
+            return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+    input_ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, 1])
+    position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [1, 1])
+    logits = helper.make_tensor_value_info("logits", TensorProto.FLOAT, [1, 1, 10])
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "causal_decode", [input_ids, position_ids], [logits])), onnx_path)
+    compile_dir = tmp_path / "qpc-hash"
+    compile_dir.mkdir()
+    (compile_dir / "specializations.json").write_text(
+        json.dumps(
+            {
+                "specializations": [
+                    {"name": "Decode", "symbols": {"batch_size": 1, "seq_len": 1, "ctx_len": 8}},
+                ]
+            }
+        )
+    )
+    qeff_model = SimpleNamespace(
+        qpc_path=None,
+        compile_artifacts_path=compile_dir,
+        onnx_path=onnx_path,
+        model=SimpleNamespace(config=SimpleNamespace(n_head=2, n_embd=8)),
+    )
+
+    io_dir = write_causal_lm_runner_bundle(model=qeff_model, tokenizer=FakeTokenizer(), prompts=["hello"])
+
+    entries = json.loads((io_dir / "aic_batch_io.json").read_text())["IO-files"][0]
+    input_dims = {entry["map-to"]: entry["dims"] for entry in entries if entry["io-direction"] == "in"}
+    assert input_dims == {"input_ids": [1, 1], "position_ids": [1, 1]}
+    assert np.fromfile(io_dir / "data/input_ids.raw", dtype=np.int64).tolist() == [7]
+
+
+@pytest.mark.cpu_only
 def test_single_qpc_vlm_runner_bundle_matches_compiled_batch_size(tmp_path):
     from types import SimpleNamespace
 
@@ -2485,6 +2538,39 @@ def test_specialization_selectors_use_named_and_graph_derived_symbols(tmp_path):
         == 64
     )
     assert select_decode_specialization(tmp_path)["seq_len"] == 2
+
+
+@pytest.mark.cpu_only
+def test_causal_artifact_specialization_prefers_prefill_and_supports_decode_only(tmp_path):
+    from QEfficient.generation.generation_helpers import select_causal_artifact_specialization
+
+    specializations_path = tmp_path / "specializations.json"
+    specializations_path.write_text(
+        json.dumps(
+            {
+                "specializations": [
+                    {"name": "Decode", "symbols": {"batch_size": 1, "seq_len": 1, "ctx_len": 32}},
+                    {"name": "Prefill", "symbols": {"batch_size": 1, "seq_len": 8, "ctx_len": 32}},
+                ]
+            }
+        )
+    )
+    assert select_causal_artifact_specialization(tmp_path)["seq_len"] == 8
+
+    specializations_path.write_text(
+        json.dumps(
+            {
+                "specializations": [
+                    {"name": "Decode", "symbols": {"batch_size": 2, "seq_len": 1, "ctx_len": 64}},
+                ]
+            }
+        )
+    )
+    assert select_causal_artifact_specialization(tmp_path) == {"batch_size": 2, "seq_len": 1, "ctx_len": 64}
+
+    specializations_path.write_text(json.dumps({"specializations": [{"batch_size": 1, "seq_len": 0}]}))
+    with pytest.raises(ValueError, match="No decode specialization found"):
+        select_causal_artifact_specialization(tmp_path)
 
 
 @pytest.mark.cpu_only

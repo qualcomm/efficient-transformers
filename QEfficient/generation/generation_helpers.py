@@ -210,6 +210,16 @@ def select_decode_specialization(
     return _select_specialization(compile_dir, "decode", runner_metadata=runner_metadata, inputs=inputs)
 
 
+def select_causal_artifact_specialization(compile_dir: Union[str, Path]) -> Dict[str, int]:
+    """Select causal artifact inputs, preferring prefill and supporting decode-only QPCs."""
+    try:
+        return select_prefill_specialization(compile_dir)
+    except ValueError as prefill_error:
+        if not str(prefill_error).startswith("No prefill specialization found"):
+            raise
+    return select_decode_specialization(compile_dir)
+
+
 def select_vision_specialization(
     compile_dir: Union[str, Path], runner_metadata: "RunnerMetadata", inputs: Mapping[str, np.ndarray]
 ) -> Dict[str, int]:

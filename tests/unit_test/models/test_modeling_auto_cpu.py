@@ -1478,13 +1478,15 @@ class TestArtifactsGenerationAPIs:
         qeff = QEFFAutoModelForCausalLM(model)
         qeff.qpc_path = tmp_path / "qpc"
         expected = tmp_path / "io"
+        tokenizer = MagicMock()
+        prompts = ["hello"]
         with patch(
             "QEfficient.transformers.models.modeling_auto.write_causal_lm_runner_bundle",
             return_value=expected,
         ) as writer:
-            result = qeff.generate(tokenizer=MagicMock(), prompts=["hello"], artifacts=True)
+            result = qeff.generate(tokenizer=tokenizer, prompts=prompts, artifacts=True)
         assert result == expected
-        writer.assert_called_once()
+        writer.assert_called_once_with(model=qeff, tokenizer=tokenizer, prompts=prompts, sampling_params=None)
 
     def test_single_qpc_vlm_artifacts_delegates_without_runtime(self, tmp_path):
         model = SimpleNamespace()

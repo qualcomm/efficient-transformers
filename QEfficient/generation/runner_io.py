@@ -41,6 +41,7 @@ from QEfficient.generation.generation_helpers import (
     cross_qpc_tensors,
     load_prefill_specialization,
     prepare_tokenizer,
+    select_causal_artifact_specialization,
     select_prefill_specialization,
     select_vision_specialization,
     slice_prefill_inputs,
@@ -269,13 +270,13 @@ def write_causal_lm_runner_bundle(
     prompts: List[str],
     sampling_params: Optional[Mapping[str, np.ndarray]] = None,
 ) -> Path:
-    """Prepare and write the first CausalLM prefill invocation."""
+    """Prepare and write the selected CausalLM artifact invocation."""
     if not prompts:
         raise ValueError("`prompts` must contain at least one prompt.")
 
     compile_dir = _get_compile_dir(model)
     runner_metadata = RunnerMetadata.from_paths(model.onnx_path, compile_dir)
-    specialization = load_prefill_specialization(compile_dir)
+    specialization = select_causal_artifact_specialization(compile_dir)
     prefill_seq_len = int(specialization["seq_len"])
     batch_prompts = _first_execution_batch(prompts, _execution_batch_size(specialization), "prompts")
     prepare_tokenizer(tokenizer)
