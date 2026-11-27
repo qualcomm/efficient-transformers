@@ -530,11 +530,11 @@ class QEFFLogger:
                 now = datetime.now().timestamp()
                 milestone = fields.get("milestone")
                 if event == "milestone" and milestone:
-                    record_timing_milestone(state, milestone, now)
+                    record_timing_milestone(state, milestone, now, namespace)
                 if event == "api_failure":
                     failed_stage = {"export": "export_failed", "compile": "compile_failed"}.get(fields.get("api"))
                     if failed_stage:
-                        record_timing_milestone(state, failed_stage, now)
+                        record_timing_milestone(state, failed_stage, now, namespace)
             extra = {"namespace": namespace, "event": event, **fields}
             logging.LoggerAdapter(cls._instance, extra).info(message, stacklevel=2)
 
