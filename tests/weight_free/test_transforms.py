@@ -295,6 +295,16 @@ class TestWeightFreeCheckpointTransforms:
         pipeline = CheckpointTransformPipeline([DeepseekV4CheckpointTransform, DtypeConversionCheckpointTransform])
         config = SimpleNamespace(model_type="deepseek_v4", num_hidden_layers=1)
         decode_plan, decode_group = pipeline.build_plan(src, torch.float32, config=config)
+        from QEfficient.utils import checkpoint_utils
+
+        original_atomic_save = checkpoint_utils.atomic_save
+
+        def assert_contiguous_expert_save(tensors, dst):
+            if dst.name.startswith("experts-layer-"):
+                assert all(tensor.is_contiguous() for tensor in tensors.values())
+            original_atomic_save(tensors, dst)
+
+        monkeypatch.setattr(checkpoint_utils, "atomic_save", assert_contiguous_expert_save)
         pipeline.apply(src, out, target_dtype=torch.float32, config=config, plan=decode_plan)
 
         assert decode_group == DeepseekV4CheckpointTransform.TRANSFORM_ID
@@ -339,6 +349,9 @@ class TestWeightFreeCheckpointTransforms:
         torch.testing.assert_close(tensors["model.layers.0.mlp.experts.gate_proj"], expected)
         torch.testing.assert_close(tensors["model.layers.0.mlp.experts.up_proj"], expected)
         torch.testing.assert_close(tensors["model.layers.0.mlp.experts.down_proj"], expected)
+        expert_task = next(task for task in decode_plan.tasks if ":experts:" in task.task_id)
+        assert expert_task.parallelism_group == DeepseekV4CheckpointTransform.EXPERT_PARALLELISM_GROUP
+        assert expert_task.parallelism_limit == 28
 
         prefill_out = tmp_path / "prefill-out"
         prefill_hash_params = {
@@ -1239,6 +1252,85 @@ class TestWeightFreeCheckpointTransforms:
         )
 
         assert max_active == 1
+
+    def test_scheduler_limits_named_parallelism_group(self, tmp_path):
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def make_runner(name):
+            def runner(src, out, dtype):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+                return {name: f"{name}.safetensors"}
+
+            return runner
+
+        tasks = [
+            CheckpointTask(
+                task_id=name,
+                input_refs=(TensorRef(name, "raw"),),
+                output_refs=(TensorRef(name, "final"),),
+                source_files=(f"{name}.safetensors",),
+                output_file=f"{name}.safetensors",
+                estimated_peak_bytes=1,
+                params=TaskParams("test"),
+                runner=make_runner(name),
+                parallelism_group="large-expert-writes",
+                parallelism_limit=2,
+            )
+            for name in ("a", "b", "c", "d")
+        ]
+        plan = CheckpointPlan(
+            tasks=tasks,
+            raw_refs={TensorRef(name, "raw") for name in ("a", "b", "c", "d")},
+            target_dtype=torch.float32,
+            source_fingerprint=[],
+            transform_ids=("test",),
+        )
+
+        execute_checkpoint_plan(
+            plan,
+            tmp_path,
+            tmp_path,
+            torch.float32,
+            max_ram_bytes=10,
+            max_workers=4,
+        )
+
+        assert max_active == 2
+
+    def test_scheduler_rejects_conflicting_parallelism_group_limits(self, tmp_path):
+        tasks = [
+            CheckpointTask(
+                task_id=name,
+                input_refs=(TensorRef(name, "raw"),),
+                output_refs=(TensorRef(name, "final"),),
+                source_files=(),
+                output_file=f"{name}.safetensors",
+                estimated_peak_bytes=1,
+                params=TaskParams("test"),
+                runner=lambda src, out, dtype: {},
+                parallelism_group="experts",
+                parallelism_limit=limit,
+            )
+            for name, limit in (("a", 1), ("b", 2))
+        ]
+        plan = CheckpointPlan(
+            tasks=tasks,
+            raw_refs={TensorRef("a", "raw"), TensorRef("b", "raw")},
+            target_dtype=torch.float32,
+            source_fingerprint=[],
+            transform_ids=("test",),
+        )
+
+        with pytest.raises(ValueError, match="conflicting limits"):
+            execute_checkpoint_plan(plan, tmp_path, tmp_path, torch.float32)
 
     def test_scheduler_rejects_task_above_memory_cap(self, tmp_path):
         task = CheckpointTask(

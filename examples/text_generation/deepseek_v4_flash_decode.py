@@ -10,251 +10,226 @@
 import argparse
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 import onnx
 import torch
+import yaml
+from onnx import TensorProto, helper
 from transformers import AutoConfig, AutoTokenizer
 
 DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_HF_CACHE = "/home/huggingface_hub"
 DEFAULT_ARTIFACT_ROOT = "/home/abhishek/.cache/qeff_artifacts"
 PREFILL_PROMPT = "Hello, how are you?"
-GATE_PREFIX_OUTPUTS = (
-    "mlp/gate/MatMul_output_0",
-    "mlp/gate/score_fn/Softplus_output_0",
-    "mlp/gate/score_fn/Sqrt_output_0",
-    "mlp/gate/Add_output_0",
-)
-GATE_SUFFIX_OUTPUTS = (
-    "mlp/gate/Reshape_output_0",
-    "mlp/gate/GatherElements_output_0",
-    "mlp/gate/Einsum_output_0",
-    "mlp/gate/Unsqueeze_output_0",
-    "mlp/gate/Div_output_0",
-    "mlp/gate/Mul_output_0",
-)
-TARGETED_LAYER_OUTPUTS = ("attn_hc/MatMul_output_0",)
-TARGETED_ROUTED_EXPERT_OUTPUT = "mlp/experts/MatMul_2_output_0"
-TARGETED_SHARED_EXPERT_OUTPUT = "mlp/shared_experts/down_proj/MatMul_output_0"
-TARGETED_ATTENTION_OUTPUTS = (
-    "self_attn/kv_proj_1/MatMul_output_0",
-    "self_attn/gate_proj/MatMul_output_0",
-    "self_attn/kv_proj_2/MatMul_output_0",
-    "self_attn/gate_proj_1/MatMul_output_0",
-    "self_attn/q_b_proj_1/MatMul_output_0",
-    "self_attn/scorer/weights_proj/MatMul_output_0",
-)
-TARGETED_HEAD_OUTPUTS = (
-    "/model/hc_head/MatMul_output_0",
-    "/lm_head/MatMul_output_0",
+DEEPSEEK_V4_CHAT_TEMPLATE = (
+    "{{ bos_token }}"
+    "{% for message in messages %}"
+    "{% if message['role'] == 'user' %}<｜User｜>{{ message['content'] }}"
+    "{% elif message['role'] == 'assistant' %}<｜Assistant｜>{{ message['content'] }}<｜end▁of▁sentence｜>"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}<｜Assistant｜><think>{% endif %}"
 )
 HW_CORES_PER_DEVICE = {"ai100": 16, "ai200": 4}
 MODEL_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+DECODER_FUNCTION_DOMAIN = "pkg.torch.__subgraph__"
+DECODER_FUNCTION_PREFIX = "QEffDeepseekV4DecoderLayer"
+Container = onnx.GraphProto | onnx.FunctionProto
 
 
 def parse_device_group(value: str) -> list[int]:
     return [int(device_id) for device_id in value.strip("[]").split(",") if device_id.strip()]
 
 
-def generate_npi_file(onnx_path: Path, artifact_root: Path, num_hidden_layers: int) -> Path:
-    """Generate the DeepSeek-V4-Flash FP32 node list from the exported graph.
-
-    Reduced parity models can promote the large expert down projections and LM head. Extending those promotions to
-    the 43-layer model exceeds AI100's 3.625 GiB per-core VA limit, so full-model NPI keeps the attention projections
-    and HC head that fit alongside the existing router, ffn_hc, and layernorm promotions.
-    """
-    model = onnx.load(onnx_path, load_external_data=False)
-    graph_outputs = [output for node in model.graph.node for output in node.output]
-    graph_output_set = set(graph_outputs)
-
-    if not any(output.startswith("/model/layers.") for output in graph_outputs):
-        return generate_dynamo_npi_file(model, onnx_path, artifact_root, num_hidden_layers)
-
-    fp32_outputs = []
-
-    for layer_idx in range(num_hidden_layers):
-        layer_prefix = f"/model/layers.{layer_idx}/"
-        required_outputs = [layer_prefix + output for output in GATE_PREFIX_OUTPUTS]
-        optional_topk = layer_prefix + "mlp/gate/TopK_output_0"
-        if optional_topk in graph_output_set:
-            required_outputs.append(optional_topk)
-
-        ffn_prefix = layer_prefix + "ffn_hc/"
-        ffn_outputs = [output for output in graph_outputs if output.startswith(ffn_prefix)]
-        if not ffn_outputs:
-            raise ValueError(f"No ffn_hc outputs found for layer {layer_idx} in {onnx_path}.")
-        required_outputs.extend(ffn_outputs)
-
-        required_outputs.append(layer_prefix + "Cast_4_output_0")
-        post_layernorm_prefix = layer_prefix + "post_attention_layernorm/"
-        post_layernorm_outputs = [output for output in graph_outputs if output.startswith(post_layernorm_prefix)]
-        if not post_layernorm_outputs:
-            raise ValueError(f"No post-attention layernorm outputs found for layer {layer_idx} in {onnx_path}.")
-        required_outputs.extend(post_layernorm_outputs)
-        required_outputs.append(layer_prefix + "Cast_5_output_0")
-        required_outputs.extend(layer_prefix + output for output in GATE_SUFFIX_OUTPUTS)
-
-        optional_gate_add = layer_prefix + "mlp/gate/Add_1_output_0"
-        if optional_gate_add in graph_output_set:
-            required_outputs.append(optional_gate_add)
-
-        required_outputs.extend(layer_prefix + output for output in TARGETED_LAYER_OUTPUTS)
-        if num_hidden_layers <= 4:
-            required_outputs.extend(
-                layer_prefix + output for output in (TARGETED_ROUTED_EXPERT_OUTPUT, TARGETED_SHARED_EXPERT_OUTPUT)
-            )
-        required_outputs.extend(
-            layer_prefix + output for output in TARGETED_ATTENTION_OUTPUTS if layer_prefix + output in graph_output_set
-        )
-
-        missing_outputs = [output for output in required_outputs if output not in graph_output_set]
-        if missing_outputs:
-            raise ValueError(f"Cannot generate NPI for layer {layer_idx}; missing ONNX outputs: {missing_outputs}")
-        fp32_outputs.extend(required_outputs)
-
-    targeted_heads = TARGETED_HEAD_OUTPUTS if num_hidden_layers <= 4 else TARGETED_HEAD_OUTPUTS[:1]
-    missing_heads = [output for output in targeted_heads if output not in graph_output_set]
-    if missing_heads:
-        raise ValueError(f"Cannot generate NPI; missing ONNX head outputs: {missing_heads}")
-    fp32_outputs.extend(targeted_heads)
-
-    npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
-    npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
-    npi_path.write_text(npi_contents, encoding="utf-8")
-    return npi_path
+def tensor_types(container: Container) -> dict[str, int]:
+    values = list(container.value_info)
+    if isinstance(container, onnx.GraphProto):
+        values.extend(container.input)
+        values.extend(container.output)
+    types = {
+        value_info.name: value_info.type.tensor_type.elem_type
+        for value_info in values
+        if value_info.type.tensor_type.HasField("elem_type")
+    }
+    if isinstance(container, onnx.GraphProto):
+        types.update({initializer.name: initializer.data_type for initializer in container.initializer})
+    return types
 
 
-def generate_dynamo_npi_outputs(model: onnx.ModelProto, num_hidden_layers: int) -> list[str]:
-    """Rename and return outputs on the hyper-connection-to-router dependency path."""
-    fp32_outputs = []
-    output_aliases = {}
-    alias_sources = {}
-    graph_nodes = model.graph.node
-    producers = {output: node for node in graph_nodes for output in node.output}
-    consumers = {}
-    for node in graph_nodes:
-        for input_name in node.input:
-            consumers.setdefault(input_name, []).append(node)
+def is_matrix_operation(node: onnx.NodeProto) -> bool:
+    """Return whether retaining this operation in FP32 would make matrix math expensive."""
+    if node.op_type in {"MatMul", "Gemm"}:
+        return True
+    if node.op_type != "Einsum":
+        return False
+    attributes = {attribute.name: helper.get_attribute_value(attribute) for attribute in node.attribute}
+    equation = attributes.get("equation", b"")
+    if isinstance(equation, bytes):
+        equation = equation.decode()
+    return "," in equation.partition("->")[0]
 
-    for layer_idx in range(num_hidden_layers):
-        layer_prefix = f"/model/layers.{layer_idx}/"
-        ffn_prefix = f"{layer_prefix}ffn_hc/"
-        gate_prefix = f"{layer_prefix}mlp/gate/"
-        gate_weight = f"model.layers.{layer_idx}.mlp.gate.weight"
-        router_projections = [
-            node
-            for node in graph_nodes
-            if node.name.startswith(gate_prefix) and gate_weight in node.input and node.op_type in {"Gemm", "MatMul"}
-        ]
-        if len(router_projections) != 1:
-            raise ValueError(
-                f"Cannot generate Dynamo NPI; expected one router projection for layer {layer_idx}, "
-                f"found {len(router_projections)}."
-            )
 
-        hc_projections = [node for node in graph_nodes if node.name.startswith(ffn_prefix) and node.op_type == "MatMul"]
-        if len(hc_projections) != 1:
-            raise ValueError(
-                f"Cannot generate Dynamo NPI; expected one ffn_hc MatMul for layer {layer_idx}, "
-                f"found {len(hc_projections)}."
-            )
+def selected_npi_nodes(container: Container) -> list[onnx.NodeProto]:
+    types = tensor_types(container)
+    return [
+        node
+        for node in container.node
+        if node.output and not is_matrix_operation(node) and types.get(node.output[0]) == TensorProto.FLOAT
+    ]
 
-        router_projection = router_projections[0]
-        expert_prefix = f"{layer_prefix}mlp/experts/"
-        routed_outputs = [
-            output
-            for node in graph_nodes
-            if node.name.startswith(gate_prefix)
-            for output in node.output
-            if any(consumer.name.startswith(expert_prefix) for consumer in consumers.get(output, ()))
-        ]
-        if not routed_outputs:
-            raise ValueError(f"Cannot generate Dynamo NPI; no router outputs feed experts for layer {layer_idx}.")
 
-        region_nodes = []
-        visited = set()
-        pending_values = routed_outputs
-        while pending_values:
-            value_name = pending_values.pop()
-            node = producers.get(value_name)
-            if node is None or node.name in visited:
-                continue
-            if not node.name.startswith((ffn_prefix, f"{layer_prefix}post_attention_layernorm/", gate_prefix)):
-                continue
-            visited.add(node.name)
-            region_nodes.append(node)
-            pending_values.extend(node.input)
+def canonical_output_name(node: onnx.NodeProto) -> str:
+    if "__node_" not in node.name:
+        return f"{node.name}_output_0"
+    module_path, fx_name = node.name.split("__node_", 1)
+    module_path = module_path.rstrip("_")
+    module_leaf = module_path.rsplit("/", 1)[-1]
+    if fx_name == module_leaf:
+        node_path = module_path
+    elif fx_name.startswith(f"{module_leaf}__"):
+        node_path = f"{module_path}/{fx_name[len(module_leaf) + 2 :]}"
+    else:
+        node_path = f"{module_path}/{fx_name}"
+    return f"{node_path}_output_0"
 
-        if not any(node.name.startswith(ffn_prefix) for node in region_nodes):
-            raise ValueError(f"Cannot generate Dynamo NPI; router input has no ffn_hc path for layer {layer_idx}.")
-        if not any(node.name == hc_projections[0].name for node in region_nodes):
-            raise ValueError(
-                f"Cannot generate Dynamo NPI; ffn_hc MatMul is not on the router path for layer {layer_idx}."
-            )
-        if not any(node.name == router_projection.name for node in region_nodes):
-            raise ValueError(
-                f"Cannot generate Dynamo NPI; router projection is not on the expert path for layer {layer_idx}."
-            )
-        if not any(node.op_type in {"TopK", "GatherND", "GatherElements"} for node in region_nodes):
-            raise ValueError(f"Cannot generate Dynamo NPI; no router selection nodes found for layer {layer_idx}.")
 
-        for node in region_nodes:
-            if "__node_" not in node.name:
-                raise ValueError(f"Cannot generate Dynamo NPI; no FX node name in {node.name}.")
-            fx_name = node.name.rsplit("__node_", 1)[1]
-            if node.name == hc_projections[0].name:
-                node_name = f"{ffn_prefix}MatMul"
-            elif node.name == router_projection.name:
-                node_name = f"{gate_prefix}MatMul"
-            elif node.op_type == "aten_softplus" and "/mlp/gate/score_fn/" in node.name:
-                node_name = f"{gate_prefix}score_fn/Softplus"
-            elif node.op_type == "Sqrt" and "/mlp/gate/score_fn/" in node.name:
-                node_name = f"{gate_prefix}score_fn/Sqrt"
-            else:
-                module_path = node.name.split("__node_", 1)[0]
-                module_leaf = module_path.rsplit("/", 1)[-1]
-                if fx_name == module_leaf:
-                    node_name = module_path
-                elif fx_name.startswith(f"{module_leaf}__"):
-                    node_name = f"{module_path}/{fx_name[len(module_leaf) + 2 :]}"
-                else:
-                    node_name = f"{module_path}/{fx_name}"
-            for output_idx, output_name in enumerate(node.output):
-                full_name = f"{node_name}_output_{output_idx}"
-                previous_source = alias_sources.get(full_name)
-                if previous_source is not None and previous_source != output_name:
-                    raise ValueError(f"Cannot generate Dynamo NPI; full-name collision for {full_name}.")
-                alias_sources[full_name] = output_name
-                output_aliases[output_name] = full_name
-                fp32_outputs.append(full_name)
-
-    all_outputs = {output for node in graph_nodes for output in node.output}
-    reserved_outputs = all_outputs - set(output_aliases)
-    collisions = sorted(set(output_aliases.values()) & reserved_outputs)
+def build_output_aliases(
+    container: Container, selected: list[onnx.NodeProto], public_outputs: set[str]
+) -> dict[str, str]:
+    aliases = {
+        node.output[0]: node.output[0] if node.output[0] in public_outputs else canonical_output_name(node)
+        for node in selected
+    }
+    if len(set(aliases.values())) != len(aliases):
+        collisions = [name for name, count in Counter(aliases.values()).items() if count > 1]
+        raise ValueError(f"NPI output aliases collide: {collisions[:10]}")
+    reserved_outputs = {output for node in container.node for output in node.output} - set(aliases)
+    collisions = sorted(set(aliases.values()) & reserved_outputs)
     if collisions:
-        raise ValueError(f"Cannot generate Dynamo NPI; full names already exist in ONNX: {collisions[:5]}.")
-
-    for node in graph_nodes:
-        for input_idx, input_name in enumerate(node.input):
-            node.input[input_idx] = output_aliases.get(input_name, input_name)
-        for output_idx, output_name in enumerate(node.output):
-            node.output[output_idx] = output_aliases.get(output_name, output_name)
-    for value_info in (*model.graph.input, *model.graph.output, *model.graph.value_info):
-        value_info.name = output_aliases.get(value_info.name, value_info.name)
-
-    return list(dict.fromkeys(fp32_outputs))
+        raise ValueError(f"NPI aliases collide with existing values: {collisions[:10]}")
+    return aliases
 
 
-def generate_dynamo_npi_file(
-    model: onnx.ModelProto, onnx_path: Path, artifact_root: Path, num_hidden_layers: int
-) -> Path:
-    fp32_outputs = generate_dynamo_npi_outputs(model, num_hidden_layers)
-    onnx.save_model(model, onnx_path)
-    npi_path = artifact_root / f"router_ffn_hc_cache_final_heads_fp32_{num_hidden_layers}layer.yaml"
-    npi_contents = "FP32NodeInstanceNames:\n" + "".join(f"  - {output}\n" for output in fp32_outputs)
-    npi_path.write_text(npi_contents, encoding="utf-8")
-    return npi_path
+def rename_values(container: Container, aliases: dict[str, str]) -> None:
+    for node in container.node:
+        for index, input_name in enumerate(node.input):
+            node.input[index] = aliases.get(input_name, input_name)
+        for index, output_name in enumerate(node.output):
+            node.output[index] = aliases.get(output_name, output_name)
+    for value_info in container.value_info:
+        value_info.name = aliases.get(value_info.name, value_info.name)
+    if isinstance(container, onnx.FunctionProto):
+        for index, output_name in enumerate(container.output):
+            container.output[index] = aliases.get(output_name, output_name)
+
+
+def decoder_layer_instances(model: onnx.ModelProto) -> dict[str, list[int]]:
+    instances: dict[str, list[int]] = {}
+    for node in model.graph.node:
+        if node.domain != DECODER_FUNCTION_DOMAIN or not node.op_type.startswith(DECODER_FUNCTION_PREFIX):
+            continue
+        if "/model/layers." not in node.name:
+            raise ValueError(f"Cannot determine the decoder layer index from ONNX node {node.name!r}.")
+        layer_text = node.name.split("/model/layers.", 1)[1].split("/", 1)[0]
+        instances.setdefault(node.op_type, []).append(int(layer_text))
+    return instances
+
+
+def npi_category(node: onnx.NodeProto) -> str:
+    name = node.name
+    if "/attn_hc/" in name:
+        return "attention hyperconnection"
+    if "/ffn_hc/" in name:
+        return "FFN hyperconnection"
+    if "/hc_head/" in name:
+        return "final hyperconnection head"
+    if "/self_attn/compressor/indexer/" in name:
+        return "CSA indexer/scorer"
+    if "/self_attn/compressor/" in name:
+        return "attention compressor"
+    if "/self_attn/" in name:
+        return "attention/rotary/softmax"
+    if "/mlp/gate/" in name:
+        return "MoE router"
+    if "/mlp/experts/" in name:
+        return "routed experts"
+    if "/mlp/shared_experts/" in name:
+        return "shared experts"
+    if "norm" in name:
+        return "normalization"
+    if "/lm_head/" in name or "logits" in node.output:
+        return "LM head/logits"
+    return "other FP32 chain"
+
+
+def summarize_npi_container(
+    name: str,
+    selected: list[onnx.NodeProto],
+    aliases: dict[str, str],
+    layers: list[int],
+) -> dict[str, object]:
+    multiplier = max(len(layers), 1)
+    return {
+        "container": name,
+        "layers": layers,
+        "unique_npi_entries": len(selected),
+        "instantiated_node_count": len(selected) * multiplier,
+        "category_counts": dict(Counter(npi_category(node) for node in selected)),
+        "operation_counts": dict(Counter(node.op_type for node in selected)),
+        "entries": [aliases[node.output[0]] for node in selected],
+    }
+
+
+def generate_npi_artifacts(onnx_path: Path) -> tuple[Path, Path, Path]:
+    """Create an exhaustive non-matrix FP32 NPI and a name-compatible ONNX copy."""
+    model = onnx.load(onnx_path, load_external_data=False)
+    function_instances = decoder_layer_instances(model)
+    container_summaries = []
+    npi_names = []
+
+    graph_selected = selected_npi_nodes(model.graph)
+    graph_aliases = build_output_aliases(model.graph, graph_selected, {output.name for output in model.graph.output})
+    container_summaries.append(summarize_npi_container("main graph", graph_selected, graph_aliases, []))
+    npi_names.extend(graph_aliases[node.output[0]] for node in graph_selected)
+    rename_values(model.graph, graph_aliases)
+
+    for function in model.functions:
+        if function.domain != DECODER_FUNCTION_DOMAIN or not function.name.startswith(DECODER_FUNCTION_PREFIX):
+            continue
+        selected = selected_npi_nodes(function)
+        aliases = build_output_aliases(function, selected, set())
+        container_summaries.append(
+            summarize_npi_container(function.name, selected, aliases, function_instances.get(function.name, []))
+        )
+        npi_names.extend(aliases[node.output[0]] for node in selected)
+        rename_values(function, aliases)
+
+    npi_names = list(dict.fromkeys(npi_names))
+    if not npi_names:
+        raise RuntimeError("No FP32 non-matrix nodes were found for NPI generation.")
+
+    output_onnx_path = onnx_path.with_name(f"{onnx_path.stem}.exhaustive-npi{onnx_path.suffix}")
+    npi_path = onnx_path.with_name(f"{onnx_path.stem}.exhaustive-npi.yaml")
+    summary_path = onnx_path.with_name(f"{onnx_path.stem}.exhaustive-npi.summary.json")
+    onnx.checker.check_model(model)
+    onnx.save_model(model, output_onnx_path)
+    npi_path.write_text(yaml.safe_dump({"FP32NodeInstanceNames": npi_names}, sort_keys=False), encoding="utf-8")
+
+    summary = {
+        "source_onnx": str(onnx_path),
+        "npi_compatible_onnx": str(output_onnx_path),
+        "npi": str(npi_path),
+        "scope": "All ONNX FP32-output chains; matrix operations excluded",
+        "excluded_operations": ["MatMul", "Gemm", "multi-input Einsum contractions"],
+        "retained_einsum_kind": "single-input reductions only",
+        "unique_npi_entries": len(npi_names),
+        "instantiated_node_count": sum(item["instantiated_node_count"] for item in container_summaries),
+        "containers": container_summaries,
+    }
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return output_onnx_path, npi_path, summary_path
 
 
 def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
@@ -359,7 +334,19 @@ def parse_args(defaults: dict[str, object] | None = None) -> argparse.Namespace:
     parser.add_argument("--prefill-prompt", default=PREFILL_PROMPT)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--automation", action="store_true")
-    parser.add_argument("--generate-npi", action="store_true")
+    parser.add_argument(
+        "-enable-npi",
+        "--enable-npi",
+        "--generate-npi",
+        dest="enable_npi",
+        action="store_true",
+        help="Generate an exhaustive non-matrix FP32 NPI from the exported ONNX and compile with it.",
+    )
+    parser.add_argument(
+        "--mxfp6-matmul",
+        action="store_true",
+        help="Enable MXFP6 MatMul compilation. Disabled by default and independent of NPI generation.",
+    )
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--compile-only", action="store_true")
     if defaults:
@@ -562,9 +549,12 @@ def main(defaults: dict[str, object] | None = None) -> None:
     print(f"ONNX_PATH={onnx_path}")
 
     npi_path = None
-    if args.generate_npi:
-        npi_path = generate_npi_file(onnx_path, args.artifact_root, args.num_hidden_layers)
+    npi_summary_path = None
+    if args.enable_npi:
+        onnx_path, npi_path, npi_summary_path = generate_npi_artifacts(onnx_path)
+        print(f"NPI_ONNX_PATH={onnx_path}")
         print(f"NPI_PATH={npi_path}")
+        print(f"NPI_SUMMARY_PATH={npi_summary_path}")
 
     if args.export_only:
         return
@@ -584,7 +574,7 @@ def main(defaults: dict[str, object] | None = None) -> None:
         "prefill_only": args.prefill_only,
         "use_onnx_subfunctions": args.use_onnx_subfunctions,
         "mxint8_kv_cache": False,
-        "mxfp6_matmul": True,
+        "mxfp6_matmul": args.mxfp6_matmul,
         "user_tiled": True,
         "qaic_config": qaic_config,
         "dynamo": True,
@@ -612,10 +602,17 @@ def main(defaults: dict[str, object] | None = None) -> None:
     if args.compile_only or args.prefill_only:
         return
 
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": args.prefill_prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+        chat_template=tokenizer.chat_template or DEEPSEEK_V4_CHAT_TEMPLATE,
+        thinking_mode="thinking",
+    )
     print("Running qeff_model.generate()")
     exec_info = qeff_model.generate(
         tokenizer=tokenizer,
-        prompts=[args.prefill_prompt] * batch_size,
+        prompts=[prompt] * batch_size,
         device_ids=args.device_group,
         generation_len=args.generation_len,
         automation=args.automation,
@@ -625,9 +622,10 @@ def main(defaults: dict[str, object] | None = None) -> None:
     result_path = args.artifact_root / "generation_result.json"
     result = {
         "model_id": args.model_id,
-        "prefill_prompt": args.prefill_prompt,
+        "prefill_prompt": prompt,
         "onnx_path": str(onnx_path),
         "npi_path": str(npi_path) if npi_path is not None else None,
+        "npi_summary_path": str(npi_summary_path) if npi_summary_path is not None else None,
         "qpc_path": str(qpc_path),
         "generated_texts": exec_info.generated_texts,
         "generated_ids": [ids.tolist() if hasattr(ids, "tolist") else ids for ids in exec_info.generated_ids],

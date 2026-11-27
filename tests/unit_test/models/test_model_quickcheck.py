@@ -319,6 +319,38 @@ def test_deepseek_v4_csa_dp_cp_indexer_cache_layout_decodes():
     assert cache[2][6].shape == (2, 2, 4, 2 * config.index_head_dim)
 
 
+def test_deepseek_v4_example_npi_helpers_support_arbitrary_layer_counts(monkeypatch):
+    from examples.text_generation.deepseek_v4_flash_decode import (
+        DECODER_FUNCTION_DOMAIN,
+        decoder_layer_instances,
+        parse_args,
+    )
+
+    function_name = "QEffDeepseekV4DecoderLayer"
+    nodes = [
+        onnx.helper.make_node(
+            function_name,
+            [f"input_{layer_index}"],
+            [f"output_{layer_index}"],
+            name=f"/model/layers.{layer_index}/{function_name}__{function_name}.{layer_index}",
+            domain=DECODER_FUNCTION_DOMAIN,
+        )
+        for layer_index in range(7)
+    ]
+    graph = onnx.helper.make_graph(nodes, "arbitrary_layers", [], [])
+    model = onnx.helper.make_model(graph)
+
+    assert decoder_layer_instances(model) == {function_name: list(range(7))}
+
+    monkeypatch.setattr("sys.argv", ["deepseek_v4_flash_decode.py", "--enable-npi"])
+    args = parse_args()
+    assert args.enable_npi is True
+    assert args.mxfp6_matmul is False
+
+    monkeypatch.setattr("sys.argv", ["deepseek_v4_flash_decode.py", "--mxfp6-matmul"])
+    assert parse_args().mxfp6_matmul is True
+
+
 def test_deepseek_v4_example_parallel_layout_controls():
     from examples.text_generation.deepseek_v4_flash_decode import (
         build_ffn_blocking_config,

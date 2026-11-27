@@ -435,6 +435,8 @@ class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
     """
 
     TRANSFORM_ID = "deepseek_v4_native_v1"
+    EXPERT_PARALLELISM_GROUP = "deepseek_v4_expert_materialization"
+    EXPERT_PARALLELISM_LIMIT = 28
     EXPERT_RE = re.compile(r"^layers\.(\d+)\.ffn\.experts\.(\d+)\.(w1|w2|w3)\.(weight|scale)$")
 
     @staticmethod
@@ -662,19 +664,35 @@ class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
                 from transformers.integrations.finegrained_fp8 import Fp8Dequantize
 
                 dequantizer = Fp8Dequantize(None)
-                dequantized = {"w1": [], "w2": [], "w3": []}
-                for _, projection, weight_key, scale_key in ordered_entries:
-                    dequantized[projection].append(
-                        dequantizer._dequantize_one(
+                projection_entries = {
+                    projection: [
+                        (weight_key, scale_key)
+                        for _, entry_projection, weight_key, scale_key in ordered_entries
+                        if entry_projection == projection
+                    ]
+                    for projection in ("w1", "w2", "w3")
+                }
+
+                def materialize_projection(projection):
+                    output = None
+                    for expert_idx, (weight_key, scale_key) in enumerate(projection_entries[projection]):
+                        expert = dequantizer._dequantize_one(
                             get_tensor(TensorRef(weight_key)),
                             get_tensor(TensorRef(scale_key)),
                             target_dtype,
-                        )
-                    )
+                        ).transpose(0, 1)
+                        if output is None:
+                            output = torch.empty(
+                                (len(projection_entries[projection]), *expert.shape),
+                                dtype=expert.dtype,
+                                device=expert.device,
+                            )
+                        output[expert_idx].copy_(expert)
+                    return output
 
-                gate = torch.stack(dequantized["w1"]).transpose(1, 2)
-                up = torch.stack(dequantized["w3"]).transpose(1, 2)
-                down = torch.stack(dequantized["w2"]).transpose(1, 2)
+                gate = materialize_projection("w1")
+                up = materialize_projection("w3")
+                down = materialize_projection("w2")
                 tensors = (gate, up, down)
                 if layout == "expert_parallel":
                     tensors = tuple(
@@ -698,6 +716,7 @@ class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
                     context.weight_map,
                     input_keys,
                     context.target_dtype,
+                    output_copies=2,
                 ),
                 params=TaskParams(
                     cls.TRANSFORM_ID,
@@ -710,6 +729,8 @@ class DeepseekV4CheckpointTransform(BaseCheckpointTransform):
                         output_file=output_file,
                     ),
                 ),
+                parallelism_group=cls.EXPERT_PARALLELISM_GROUP,
+                parallelism_limit=cls.EXPERT_PARALLELISM_LIMIT,
             )
             task_plan.append_stage(
                 CheckpointStage(

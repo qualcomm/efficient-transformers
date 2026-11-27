@@ -98,6 +98,8 @@ class CheckpointTask:
     estimated_peak_bytes: int
     params: TaskParams
     runner: Callable[[Path, Path, torch.dtype], dict[str, str]] = field(repr=False, compare=False)
+    parallelism_group: str | None = None
+    parallelism_limit: int | None = None
     stages: tuple[CheckpointStage, ...] = ()
 
     def run(self, src: Path, out: Path, target_dtype: torch.dtype) -> dict[str, str]:
@@ -141,6 +143,8 @@ class CheckpointTaskPlan:
     output_file: str
     estimated_peak_bytes: int
     params: TaskParams
+    parallelism_group: str | None = None
+    parallelism_limit: int | None = None
     stages: list[CheckpointStage] = field(default_factory=list)
 
     @property
@@ -317,6 +321,8 @@ def _materialize_staged_task(task_plan: CheckpointTaskPlan, weight_map: dict[str
         estimated_peak_bytes=task_plan.estimated_peak_bytes,
         params=task_params,
         runner=runner,
+        parallelism_group=task_plan.parallelism_group,
+        parallelism_limit=task_plan.parallelism_limit,
         stages=stages,
     )
 
@@ -364,7 +370,16 @@ def execute_checkpoint_plan(
     if max_workers is None:
         max_workers = max(1, min(len(plan.tasks), cpu_count())) if plan.tasks else 1
 
+    parallelism_limits: dict[str, int] = {}
     for task in plan.tasks:
+        if (task.parallelism_group is None) != (task.parallelism_limit is None):
+            raise ValueError(f"Checkpoint task {task.task_id} must set both parallelism_group and parallelism_limit.")
+        if task.parallelism_limit is not None and task.parallelism_limit < 1:
+            raise ValueError(f"Checkpoint task {task.task_id} has an invalid parallelism limit.")
+        if task.parallelism_group is not None:
+            group_limit = parallelism_limits.setdefault(task.parallelism_group, task.parallelism_limit)
+            if group_limit != task.parallelism_limit:
+                raise ValueError(f"Checkpoint parallelism group {task.parallelism_group} has conflicting limits.")
         if task.estimated_peak_bytes > max_ram_bytes:
             required_gb = task.estimated_peak_bytes / 1024**3
             limit_gb = max_ram_bytes / 1024**3
@@ -391,6 +406,13 @@ def execute_checkpoint_plan(
                 for task in list(pending):
                     if not set(task.input_refs).issubset(available_refs):
                         continue
+                    if task.parallelism_group is not None:
+                        active_in_group = sum(
+                            running_task.parallelism_group == task.parallelism_group
+                            for running_task in running.values()
+                        )
+                        if active_in_group >= task.parallelism_limit:
+                            continue
                     if active_bytes + task.estimated_peak_bytes > max_ram_bytes:
                         continue
                     future = executor.submit(task.run, src, out, target_dtype)
