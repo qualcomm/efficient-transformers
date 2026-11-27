@@ -76,6 +76,7 @@ from QEfficient.utils.config_utils import calculate_num_replicate_kv_heads
 from QEfficient.utils.export_utils import export_from_compile, export_wrapper
 from QEfficient.utils.logging_utils import (
     QEFFLogger,
+    _log_mdp_generation_milestone,
     log_api_arguments,
     log_from_pretrained_call,
     log_generate_call,
@@ -601,12 +602,7 @@ class QEFFBaseModel(ABC):
         if not any_transformed:
             warnings.warn(f"No transforms applied to model: {self.model_name}. It may be an unsupported model!")
         else:
-            QEFFLogger.log_event(
-                "milestone",
-                "INFRA",
-                f"Applied PyTorch transforms to model: {self.model_name}.",
-                milestone=QEFFLogger.MILESTONE_LOAD_COMPLETE,
-            )
+            logger.info(f"Applied PyTorch transforms to model: {self.model_name}.")
 
     def _normalize_torch_dtype(self):
         """
@@ -1856,6 +1852,10 @@ class QEFFBaseModel(ABC):
             mdp_ts_json = load_json(str(mdp_ts_json_path))
         elif mdp_num_partitions > 1:
             # Disaggregated (pipeline-parallel) MDP — delegate to focused helper.
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_START,
+                "MDP generation started.",
+            )
             compile_dir.mkdir(parents=True, exist_ok=True)
             num_cores = compiler_options.get("aic_num_cores", constants.DEFAULT_AIC_NUM_CORES)
             num_layers = getattr(self, "num_layers", None)
@@ -1890,12 +1890,24 @@ class QEFFBaseModel(ABC):
                 num_layers=num_layers,
                 qaic_config=getattr(self.model, "qaic_config", None),
             )
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_COMPLETE,
+                "MDP generation completed.",
+            )
             command.append(f"-mdp-load-partition-config={mdp_ts_json_path}")
         elif mdp_ts_num_devices > 1 and not compiler_options.get("mdp_dump_partition_config", None):
             # Template (tensor-slice) MDP: single partition, empty nodeList; compiler fills it.
             # File write and command flag are deferred to after compile_dir is finalised (post-hash).
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_START,
+                "MDP generation started.",
+            )
             mdp_ts_json = generate_mdp_partition_config(
                 mdp_ts_num_devices, compiler_options.get("aic_num_cores", constants.DEFAULT_AIC_NUM_CORES)
+            )
+            _log_mdp_generation_milestone(
+                QEFFLogger.MILESTONE_MDP_GENERATION_COMPLETE,
+                "MDP generation completed.",
             )
 
         compile_hash_params = {
