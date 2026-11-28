@@ -123,7 +123,7 @@ def _normalize_runner_input(runner_metadata: RunnerMetadata, name: str, value) -
     elif precision in {"int8", "mxint8"}:
         converted = _as_int8_storage(value, name, precision)
     else:
-        if value.dtype.kind not in "fiu":
+        if value.dtype.kind not in "fiub":
             raise ValueError(f"Input {name!r} has incompatible processor dtype {value.dtype}.")
         try:
             converted = np.ascontiguousarray(value.astype(expected_dtype, casting="same_kind", copy=False))
@@ -250,7 +250,13 @@ def write_compile_runner_bundle(
     """
     runner_metadata = RunnerMetadata.from_paths(onnx_path, compile_dir)
     host_inputs = {
-        name: value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+        name: (
+            value.detach().float().cpu().numpy()
+            if isinstance(value, torch.Tensor) and value.dtype == torch.bfloat16
+            else value.detach().cpu().numpy()
+            if isinstance(value, torch.Tensor)
+            else np.asarray(value)
+        )
         for name, value in dummy_inputs.items()
         if name in runner_metadata.input_names
     }

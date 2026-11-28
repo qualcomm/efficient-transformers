@@ -1874,6 +1874,32 @@ def test_compile_runner_bundle_uses_dummy_inputs_without_runtime_dependencies(tm
 
 
 @pytest.mark.cpu_only
+def test_compile_runner_bundle_encodes_bfloat16_dummy_inputs(tmp_path):
+    import onnx
+    import torch
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_compile_runner_bundle
+
+    pixel_values = helper.make_tensor_value_info("pixel_values", TensorProto.BFLOAT16, [2])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])
+    onnx_path = tmp_path / "vision.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "compile_runner", [pixel_values], [output])), onnx_path)
+
+    io_dir = write_compile_runner_bundle(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path,
+        dummy_inputs={"pixel_values": torch.tensor([1.0, -2.5], dtype=torch.bfloat16)},
+        specialization={"batch_size": 1},
+        bundle_name="vision-0",
+    )
+
+    raw = np.fromfile(io_dir / "data/pixel_values.raw", dtype=np.uint16)
+    expected = torch.tensor([1.0, -2.5], dtype=torch.bfloat16).view(torch.int16).numpy().view(np.uint16)
+    np.testing.assert_array_equal(raw, expected)
+
+
+@pytest.mark.cpu_only
 def test_dual_qpc_compile_artifacts_write_vision_prefill_and_decode_bundles(tmp_path):
     from types import SimpleNamespace
 
@@ -2116,6 +2142,36 @@ def test_cross_qpc_output_shapes_follow_language_input_contract(tmp_path):
     assert _cross_qpc_output_shapes(
         model, {"batch_size": 1, "vision_size": 187}, vision_metadata, language_metadata
     ) == {"bridge_features": [1, 187, 8]}
+
+
+@pytest.mark.cpu_only
+def test_cross_qpc_output_shapes_use_language_contract_for_opaque_vision_axes(tmp_path):
+    from types import SimpleNamespace
+
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.generation_helpers import RunnerMetadata, _cross_qpc_output_shapes
+
+    vision_output = helper.make_tensor_value_info("bridge_features", TensorProto.FLOAT, ["opaque_axis", 8])
+    vision_path = tmp_path / "vision.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "vision", [], [vision_output])), vision_path)
+    language_input = helper.make_tensor_value_info("bridge_features", TensorProto.FLOAT, ["vision_size", 8])
+    language_path = tmp_path / "language.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "language", [language_input], [language_input])), language_path)
+
+    vision_dir = tmp_path / "vision-qpc"
+    language_dir = tmp_path / "language-qpc"
+    vision_dir.mkdir()
+    language_dir.mkdir()
+    model = SimpleNamespace(lang_model=SimpleNamespace(compile_artifacts_path=language_dir))
+
+    assert _cross_qpc_output_shapes(
+        model,
+        {"batch_size": 1, "vision_size": 187},
+        RunnerMetadata.from_paths(vision_path, vision_dir),
+        RunnerMetadata.from_paths(language_path, language_dir),
+    ) == {"bridge_features": [187, 8]}
 
 
 @pytest.mark.cpu_only
@@ -2849,7 +2905,6 @@ def test_runner_bundle_falls_back_to_onnx_dtype_and_rejects_incompatible_process
             specialization={"batch_size": 1, "seq_len": 1},
             host_inputs={"processor_input": np.array([1.5, 2.0], dtype=np.float32)},
         )
-
     io_dir = write_runner_io_bundle(
         onnx_path=onnx_path,
         compile_dir=tmp_path,
@@ -2859,4 +2914,28 @@ def test_runner_bundle_falls_back_to_onnx_dtype_and_rejects_incompatible_process
     np.testing.assert_array_equal(
         np.fromfile(io_dir / "data/processor_input.raw", dtype=np.int8),
         np.array([1, -2], dtype=np.int8),
+    )
+
+
+@pytest.mark.cpu_only
+def test_runner_bundle_accepts_boolean_onnx_inputs(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    from QEfficient.generation.runner_io import write_runner_io_bundle
+
+    token_bitmasks = helper.make_tensor_value_info("token_bitmasks", TensorProto.BOOL, [1, 4])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])
+    onnx_path = tmp_path / "model.onnx"
+    onnx.save(helper.make_model(helper.make_graph([], "bool_runner", [token_bitmasks], [output])), onnx_path)
+
+    io_dir = write_runner_io_bundle(
+        onnx_path=onnx_path,
+        compile_dir=tmp_path,
+        specialization={"batch_size": 1},
+        host_inputs={"token_bitmasks": np.array([[True, False, True, False]])},
+    )
+
+    np.testing.assert_array_equal(
+        np.fromfile(io_dir / "data/token_bitmasks.raw", dtype=np.bool_), np.array([True, False, True, False])
     )

@@ -620,12 +620,34 @@ def _cross_qpc_output_shapes(
     symbols = _cross_qpc_symbols(model, specialization)
     output_shapes = {}
     for name, contract in cross_qpc_tensors(vision_metadata, language_metadata).items():
-        vision_shape = _resolve_tensor_shape(contract.vision_output, symbols)
-        language_shape = _resolve_tensor_shape(contract.language_input, symbols)
-        if vision_shape != language_shape:
+        vision_dimensions = contract.vision_output.type.tensor_type.shape.dim
+        language_dimensions = contract.language_input.type.tensor_type.shape.dim
+        if len(vision_dimensions) != len(language_dimensions):
             raise ValueError(
-                f"Cross-QPC tensor {name!r} has incompatible vision output shape {vision_shape} "
-                f"and language input shape {language_shape}."
+                f"Cross-QPC tensor {name!r} has incompatible vision output rank {len(vision_dimensions)} "
+                f"and language input rank {len(language_dimensions)}."
             )
-        output_shapes[name] = vision_shape
+
+        output_shape = []
+        for vision_dimension, language_dimension in zip(vision_dimensions, language_dimensions):
+            vision_value = (
+                int(vision_dimension.dim_value)
+                if vision_dimension.HasField("dim_value") and vision_dimension.dim_value > 0
+                else symbols.get(vision_dimension.dim_param)
+            )
+            language_value = (
+                int(language_dimension.dim_value)
+                if language_dimension.HasField("dim_value") and language_dimension.dim_value > 0
+                else symbols.get(language_dimension.dim_param)
+            )
+            if vision_value is not None and language_value is not None and vision_value != language_value:
+                raise ValueError(
+                    f"Cross-QPC tensor {name!r} has incompatible vision output dimension {vision_value} "
+                    f"and language input dimension {language_value}."
+                )
+            resolved_value = vision_value if vision_value is not None else language_value
+            if resolved_value is None:
+                raise RuntimeError(f"Cannot resolve cross-QPC dimension {vision_dimension.dim_param!r} for {name!r}.")
+            output_shape.append(int(resolved_value))
+        output_shapes[name] = output_shape
     return output_shapes
