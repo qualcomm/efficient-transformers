@@ -1242,6 +1242,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 conv_position_ids = torch.arange(
                     conv_state_all.shape[1], dtype=torch.int64, device=conv_state_all.device
                 )[None, :]
+                conv_position_ids = torch.where(
+                    state_batch_index.reshape(-1, 1) < 0, torch.iinfo(torch.int32).max, conv_position_ids
+                )
                 if dflash_commit_final is not None:
                     conv_position_ids = torch.where(commit_rows, conv_position_ids, torch.iinfo(torch.int32).max)
                 updated_conv_state = ctx_scatter_cb_3d(
@@ -1344,6 +1347,9 @@ class QEffQwen3_5MoeGatedDeltaNet(Qwen3_5MoeGatedDeltaNet):
                 recurrent_position_ids = torch.arange(
                     recurrent_state_all.shape[2], dtype=torch.int64, device=recurrent_state_all.device
                 )[None, :].expand(recurrent_batch_index.shape[0], -1)
+                recurrent_position_ids = torch.where(
+                    state_batch_index.reshape(-1, 1) < 0, torch.iinfo(torch.int32).max, recurrent_position_ids
+                )
                 if dflash_commit_final is not None:
                     recurrent_position_ids = torch.where(
                         commit_rows, recurrent_position_ids, torch.iinfo(torch.int32).max
