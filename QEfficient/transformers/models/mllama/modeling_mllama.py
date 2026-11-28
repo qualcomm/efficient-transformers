@@ -1036,6 +1036,7 @@ class QEffMllamaForConditionalGeneration(MllamaForConditionalGeneration):
         comp_ctx_lengths_prefill: Optional[List[int]] = None,
         comp_ctx_lengths_decode: Optional[List[int]] = None,
         kv_offload: bool = False,
+        vision_batch_size: Optional[int] = None,
         **compiler_options,
     ):
         vis_cfg = self.config.vision_config
