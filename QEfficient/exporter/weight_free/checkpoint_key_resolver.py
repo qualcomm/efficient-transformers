@@ -306,6 +306,13 @@ def find_checkpoint_key(
         candidates.append(unprefixed)
         candidates.append(f"{prefix}.language_model.{unprefixed}")
 
+    parametrized_weight_suffixes = {
+        ".parametrizations.weight.original0": ".weight_g",
+        ".parametrizations.weight.original1": ".weight_v",
+    }
+    for suffix, checkpoint_suffix in parametrized_weight_suffixes.items():
+        if stripped.endswith(suffix):
+            candidates.append(stripped[: -len(suffix)] + checkpoint_suffix)
     if stripped.endswith(".block_sparse_moe.router.weight"):
         candidates.append(stripped[: -len(".router.weight")] + ".router.layer.weight")
 

@@ -18,11 +18,16 @@ fully ONNX-traceable.
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
+from torch.nn.utils import parametrize, remove_weight_norm
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Encoder,
     Wav2Vec2EncoderStableLayerNorm,
+    Wav2Vec2GroupNormConvLayer,
+    Wav2Vec2Model,
+    Wav2Vec2PositionalConvEmbedding,
 )
 
 
@@ -138,3 +143,44 @@ class QEffWav2Vec2EncoderStableLayerNorm(Wav2Vec2EncoderStableLayerNorm):
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
         )
+
+
+class QEffWav2Vec2Model(Wav2Vec2Model):
+    """Wav2Vec2 base model with training-only SpecAugment disabled."""
+
+    def _mask_hidden_states(
+        self,
+        hidden_states: torch.FloatTensor,
+        mask_time_indices: torch.FloatTensor | None = None,
+        attention_mask: torch.LongTensor | None = None,
+    ):
+        return hidden_states
+
+
+class QEffWav2Vec2PositionalConvEmbedding(Wav2Vec2PositionalConvEmbedding):
+    """Materialize weight-normalized convolution weights for QAIC export."""
+
+    def __qeff_init__(self):
+        if hasattr(self.conv, "parametrizations") and "weight" in self.conv.parametrizations:
+            parametrize.remove_parametrizations(self.conv, "weight", leave_parametrized=True)
+        elif hasattr(self.conv, "weight_g"):
+            remove_weight_norm(self.conv)
+
+
+class QEffWav2Vec2GroupNormConvLayer(Wav2Vec2GroupNormConvLayer):
+    """GroupNorm implementation that avoids Dynamo's dynamic InstanceNorm lowering.
+    the dynamo ONNX translator lowers aten.group_norm to InstanceNormalization and
+    reconstructs the weight/bias via Expand ops rather than emitting them as static
+    initializers. QAIC compiler cannot constant-fold those Expand nodes ('could not
+    find constant val_22'). Using primitive ops avoids aten.group_norm entirely so
+    the weight/bias appear as plain initializer tensors in the ONNX graph."""
+
+    def forward(self, hidden_states):
+        hidden_states = self.conv(hidden_states)
+        hidden_states = F.instance_norm(
+            hidden_states,
+            weight=self.layer_norm.weight,
+            bias=self.layer_norm.bias,
+            eps=self.layer_norm.eps,  # preserves the owning GroupNorm layer’s configured epsilon
+        )
+        return self.activation(hidden_states)
