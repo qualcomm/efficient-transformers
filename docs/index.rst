@@ -40,6 +40,7 @@ Welcome to Efficient-Transformers Documentation!
 
    source/qeff_autoclasses
    source/diffuser_classes
+   source/tts_classes
    source/cli_api
 
 .. toctree::

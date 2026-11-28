@@ -17,6 +17,7 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # ----------------------------------------------------------------------------- #
 # Placeholder for all non-transformer models registered in QEfficient
 import warnings  # noqa: I001
+import importlib.util
 import transformers
 import transformers.utils as transformers_utils
 from transformers.utils import import_utils as hf_import_utils
@@ -68,6 +69,15 @@ except Exception:
     QEffWanImageToVideoPipeline = None
 
 try:
+    from QEfficient.tts.pipelines.chatterbox.pipeline_chatterbox import QEffChatterboxMultilingualTTS
+except Exception as error:  # optional: needs Resemble AI's chatterbox package
+    QEffChatterboxMultilingualTTS = None
+    if importlib.util.find_spec("chatterbox") is None:
+        logger.debug(f"QEffChatterboxMultilingualTTS unavailable: {error}")
+    else:  # installed but broken, e.g. a missing runtime dependency: say why
+        warnings.warn(f"QEffChatterboxMultilingualTTS is unavailable: {error.__cause__ or error}", stacklevel=2)
+
+try:
     from QEfficient.peft import QEffAutoPeftModelForCausalLM
 except Exception:
     QEffAutoPeftModelForCausalLM = None
@@ -95,6 +105,8 @@ __all__ = [
 
 if QEffFluxPipeline is not None:
     __all__.append("QEffFluxPipeline")
+if QEffChatterboxMultilingualTTS is not None:
+    __all__.append("QEffChatterboxMultilingualTTS")
 if QEffWanPipeline is not None:
     __all__.append("QEffWanPipeline")
 if QEffWanImageToVideoPipeline is not None:

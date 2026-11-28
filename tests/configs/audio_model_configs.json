@@ -4,5 +4,8 @@
     ],
     "audio_embedding_models": [
         "facebook/wav2vec2-base-960h"
+    ],
+    "text_to_speech_models": [
+        "ResembleAI/chatterbox"
     ]
 }

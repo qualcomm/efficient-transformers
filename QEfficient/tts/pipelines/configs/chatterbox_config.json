@@ -1,0 +1,59 @@
+{
+  "description": "Default configuration for the Chatterbox Multilingual text-to-speech pipeline. T3 uses 16 cores; the four S3Gen graphs use 16 cores together (4 + 8 + 1 + 3), so the pipeline needs two SoCs' worth of cores. device_ids null lets the runtime pick free devices; set execute.device_ids to pin a module. S3Gen specializations are length buckets: tokens (prompt + speech) for the flow, mel frames for HiFT.",
+  "modules":
+  {
+    "t3":
+      {
+        "specializations": [
+          {"batch_size": 2, "seq_len": 128, "ctx_len": 2048, "_graph_name": "Prefill"},
+          {"batch_size": 2, "seq_len": 1, "ctx_len": 2048, "_graph_name": "Decode"}
+        ],
+        "compilation": {"onnx_path": null, "compile_dir": null, "mdp_ts_num_devices": 1, "mxfp6_matmul": false, "mxint8_kv_cache": false, "aic_num_cores": 16},
+        "execute": {"device_ids": null, "qpc_path": null}
+      },
+    "flow_encoder":
+      {
+        "specializations": [
+          {"n_tok": 256, "n_frames": 512, "_graph_name": "flow_encoder_tok256"},
+          {"n_tok": 512, "n_frames": 1024, "_graph_name": "flow_encoder_tok512"},
+          {"n_tok": 1024, "n_frames": 2048, "_graph_name": "flow_encoder_tok1024"},
+          {"n_tok": 1280, "n_frames": 2560, "_graph_name": "flow_encoder_tok1280"}
+        ],
+        "compilation": {"onnx_path": null, "compile_dir": null, "mdp_ts_num_devices": 1, "mxfp6_matmul": false, "convert_to_fp16": true, "aic_num_cores": 4},
+        "execute": {"device_ids": null, "qpc_path": null}
+      },
+    "flow_estimator":
+      {
+        "specializations": [
+          {"n_frames": 512, "_graph_name": "flow_estimator_frames512"},
+          {"n_frames": 1024, "_graph_name": "flow_estimator_frames1024"},
+          {"n_frames": 2048, "_graph_name": "flow_estimator_frames2048"},
+          {"n_frames": 2560, "_graph_name": "flow_estimator_frames2560"}
+        ],
+        "compilation": {"onnx_path": null, "compile_dir": null, "mdp_ts_num_devices": 1, "mxfp6_matmul": false, "convert_to_fp16": true, "aic_num_cores": 8},
+        "execute": {"device_ids": null, "qpc_path": null}
+      },
+    "hift_f0":
+      {
+        "specializations": [
+          {"n_mel": 256, "_graph_name": "hift_f0_mel256"},
+          {"n_mel": 512, "_graph_name": "hift_f0_mel512"},
+          {"n_mel": 1024, "_graph_name": "hift_f0_mel1024"},
+          {"n_mel": 2048, "_graph_name": "hift_f0_mel2048"}
+        ],
+        "compilation": {"onnx_path": null, "compile_dir": null, "mdp_ts_num_devices": 1, "mxfp6_matmul": false, "convert_to_fp16": true, "aic_num_cores": 1},
+        "execute": {"device_ids": null, "qpc_path": null}
+      },
+    "hift_decoder":
+      {
+        "specializations": [
+          {"n_mel": 256, "n_samples": 122880, "_graph_name": "hift_decoder_mel256"},
+          {"n_mel": 512, "n_samples": 245760, "_graph_name": "hift_decoder_mel512"},
+          {"n_mel": 1024, "n_samples": 491520, "_graph_name": "hift_decoder_mel1024"},
+          {"n_mel": 2048, "n_samples": 983040, "_graph_name": "hift_decoder_mel2048"}
+        ],
+        "compilation": {"onnx_path": null, "compile_dir": null, "mdp_ts_num_devices": 1, "mxfp6_matmul": false, "convert_to_fp16": true, "aic_num_cores": 3},
+        "execute": {"device_ids": null, "qpc_path": null}
+      }
+  }
+}
